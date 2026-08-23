@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>注文管理システム</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #eef2f6; color: #1f2937; font-family: "Hiragino Sans", "Yu Gothic", sans-serif; }
+    .topbar { height: 66px; padding: 0 34px; background: #123b63; color: white; display: flex; align-items: center; justify-content: space-between; }
+    .brand { font-size: 23px; font-weight: 700; letter-spacing: .04em; }
+    .user { font-size: 13px; color: #d7e4ef; }
+    .shell { display: grid; grid-template-columns: 190px 1fr; min-height: 694px; }
+    .sidebar { background: #1d4f7a; color: #d9e8f5; padding: 24px 18px; }
+    .nav-title { font-size: 11px; color: #9fc0db; letter-spacing: .1em; margin-bottom: 10px; }
+    .nav-item { padding: 11px 12px; margin: 4px 0; border-radius: 5px; font-size: 14px; }
+    .nav-item.active { background: #2f6b9d; color: white; font-weight: 700; }
+    main { padding: 26px 32px 32px; }
+    .breadcrumb { font-size: 11px; color: #7c8997; margin-bottom: 9px; }
+    h1 { margin: 0 0 18px; font-size: 24px; color: #173a59; }
+    .card { background: white; border: 1px solid #d7dde4; border-radius: 7px; box-shadow: 0 2px 8px rgba(25,45,65,.07); margin-bottom: 17px; }
+    .card-head { padding: 13px 18px; border-bottom: 1px solid #e1e6eb; display: flex; align-items: center; justify-content: space-between; font-weight: 700; }
+    .badge { padding: 5px 10px; border-radius: 12px; background: #fff1cc; color: #8a5d00; font-size: 12px; }
+    .details { display: grid; grid-template-columns: 150px 1fr 150px 1fr; }
+    .label, .value { min-height: 43px; padding: 12px 14px; border-bottom: 1px solid #edf0f3; }
+    .label { background: #f7f9fb; color: #586879; font-size: 12px; }
+    .value { font-size: 14px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; }
+    th { background: #eaf1f7; color: #31516d; text-align: left; padding: 10px 13px; font-size: 12px; border-bottom: 1px solid #cfd9e2; }
+    td { padding: 11px 13px; font-size: 13px; border-bottom: 1px solid #e7ebef; }
+    td.num, th.num { text-align: right; }
+    .total { display: flex; justify-content: flex-end; align-items: baseline; gap: 18px; padding: 15px 18px; }
+    .total strong { color: #123b63; font-size: 22px; }
+    .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 16px; }
+    button { border-radius: 5px; padding: 10px 19px; font-weight: 700; font-size: 13px; }
+    .secondary { border: 1px solid #aeb8c2; background: white; color: #425466; }
+    .primary { border: 1px solid #175c8e; background: #17699f; color: white; }
+    .footnote { margin-top: 13px; font-size: 10px; color: #a2aab2; text-align: right; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">注文管理システム</div>
+    <div class="user">営業部　山田 太郎　｜　ログアウト</div>
+  </header>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="nav-title">MAIN MENU</div>
+      <div class="nav-item">ダッシュボード</div>
+      <div class="nav-item active">注文検索</div>
+      <div class="nav-item">在庫照会</div>
+      <div class="nav-item">出荷管理</div>
+      <div class="nav-item">マスタ管理</div>
+    </aside>
+    <main>
+      <div class="breadcrumb">ホーム ＞ 注文検索 ＞ 注文詳細</div>
+      <h1>注文詳細</h1>
+      <section class="card">
+        <div class="card-head"><span>基本情報</span><span class="badge">出荷準備中</span></div>
+        <div class="details">
+          <div class="label">注文番号</div><div class="value">ORD-2026-00128</div>
+          <div class="label">注文日</div><div class="value">2026年8月22日</div>
+          <div class="label">顧客名</div><div class="value">株式会社サンプル商事</div>
+          <div class="label">担当者</div><div class="value">佐藤 花子</div>
+          <div class="label">配送先</div><div class="value">東京都千代田区丸の内1-2-3</div>
+          <div class="label">支払方法</div><div class="value">請求書払い（月末締め）</div>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-head">注文明細</div>
+        <table>
+          <thead><tr><th>商品コード</th><th>商品名</th><th class="num">数量</th><th class="num">単価</th><th class="num">金額</th></tr></thead>
+          <tbody>
+            <tr><td>PC-AX104</td><td>業務用ノートPC 14型</td><td class="num">2</td><td class="num">48,000円</td><td class="num">96,000円</td></tr>
+            <tr><td>AC-DK210</td><td>USB-Cドッキングステーション</td><td class="num">2</td><td class="num">12,000円</td><td class="num">24,000円</td></tr>
+            <tr><td>SV-SET01</td><td>初期設定サービス</td><td class="num">2</td><td class="num">4,200円</td><td class="num">8,400円</td></tr>
+          </tbody>
+        </table>
+        <div class="total"><span>合計金額（税込）</span><strong>128,400円</strong></div>
+      </section>
+      <div class="actions"><button class="secondary">キャンセル</button><button class="primary">注文を確定</button></div>
+      <div class="footnote">最終更新: 2026/08/22 14:35　画面ID: ORD-DTL-01</div>
+    </main>
+  </div>
+</body>
+</html>

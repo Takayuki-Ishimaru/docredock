@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+.vscode/
+.idea/
+TestResults/
+*.user
+*.suo
+*.rtmd/
+*.rtmdpkg
+artifacts/
+output/playwright/
+.DS_Store
+.codex-work/
+.playwright-cli/
+.tmp/
+node_modules
