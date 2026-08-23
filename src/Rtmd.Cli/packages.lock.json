@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "rtmd.api": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Formats.OpenXml": "[1.0.0, )",
+          "Rtmd.Formats.Pdf": "[1.0.0, )",
+          "Rtmd.Markdown": "[1.0.0, )",
+          "Rtmd.Ocr.Tesseract": "[1.0.0, )",
+          "Rtmd.Providers.Abstractions": "[1.0.0, )",
+          "Rtmd.Render": "[1.0.0, )",
+          "Rtmd.RoundTrip": "[1.0.0, )"
+        }
+      },
+      "rtmd.core": {
+        "type": "Project"
+      },
+      "rtmd.formats.openxml": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Providers.Abstractions": "[1.0.0, )"
+        }
+      },
+      "rtmd.formats.pdf": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Providers.Abstractions": "[1.0.0, )"
+        }
+      },
+      "rtmd.markdown": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Providers.Abstractions": "[1.0.0, )"
+        }
+      },
+      "rtmd.ocr.tesseract": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Providers.Abstractions": "[1.0.0, )"
+        }
+      },
+      "rtmd.providers.abstractions": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )"
+        }
+      },
+      "rtmd.render": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )",
+          "Rtmd.Markdown": "[1.0.0, )"
+        }
+      },
+      "rtmd.roundtrip": {
+        "type": "Project",
+        "dependencies": {
+          "Rtmd.Core": "[1.0.0, )"
+        }
+      }
+    }
+  }
+}
