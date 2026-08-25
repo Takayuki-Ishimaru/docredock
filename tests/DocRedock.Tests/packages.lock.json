@@ -291,6 +291,7 @@
           "Avalonia.Themes.Fluent": "[12.1.1, )",
           "DocRedock.Api": "[1.0.0, )",
           "DocRedock.Core": "[1.0.0, )",
+          "DocRedock.Formats.Pdf": "[1.0.0, )",
           "DocRedock.Ocr.Tesseract": "[1.0.0, )",
           "DocRedock.RoundTrip": "[1.0.0, )"
         }
