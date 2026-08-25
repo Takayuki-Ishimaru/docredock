@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docredock.local/schemas/graph-node.schema.json",
+  "title": "DRMD DocumentGraph node 1.1",
+  "type": "object",
+  "required": ["id", "kind", "order", "layer", "content", "editability", "provenance", "extensions"],
+  "properties": {
+    "id": { "type": "string" },
+    "kind": { "type": "string" },
+    "parent_id": { "type": ["string", "null"] },
+    "order": { "type": "integer", "minimum": 0 },
+    "layer": { "enum": ["body", "furniture", "derived", "hidden", "metadata"] },
+    "content": { "type": "object" },
+    "editability": { "type": "string" },
+    "provenance": { "type": "array" },
+    "extensions": { "type": "object" }
+  }
+}

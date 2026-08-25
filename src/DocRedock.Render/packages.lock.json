@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net10.0": {
+      "docredock.core": {
+        "type": "Project"
+      },
+      "docredock.markdown": {
+        "type": "Project",
+        "dependencies": {
+          "DocRedock.Core": "[1.0.0, )",
+          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+        }
+      },
+      "docredock.providers.abstractions": {
+        "type": "Project",
+        "dependencies": {
+          "DocRedock.Core": "[1.0.0, )"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocRedock.Api\DocRedock.Api.csproj" />
+    <ProjectReference Include="..\DocRedock.Core\DocRedock.Core.csproj" />
+    <ProjectReference Include="..\DocRedock.Formats.Pdf\DocRedock.Formats.Pdf.csproj" />
+    <ProjectReference Include="..\DocRedock.Ocr.Tesseract\DocRedock.Ocr.Tesseract.csproj" />
+    <ProjectReference Include="..\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <AssemblyName>DocRedock</AssemblyName>
+    <AssemblyTitle>DocRedock</AssemblyTitle>
+    <Product>DocRedock</Product>
+    <Description>A local-first document to Markdown round-trip workspace.</Description>
+    <ApplicationIcon>Assets/DocRedock.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets/**" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to publish
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: Package ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+            family: windows
+          - rid: win-arm64
+            os: windows-latest
+            family: windows
+          - rid: osx-x64
+            os: macos-14
+            family: macos
+          - rid: osx-arm64
+            os: macos-14
+            family: macos
+          - rid: linux-x64
+            os: ubuntu-latest
+            family: linux
+          - rid: linux-arm64
+            os: ubuntu-latest
+            family: linux
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Publish self-contained GUI and CLI
+        shell: bash
+        run: |
+          sh tools/publish-gui.sh "${{ matrix.rid }}"
+          sh tools/publish-cli.sh "${{ matrix.rid }}"
+
+      - name: Package Windows application
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          $name = "DocRedock-$tag-${{ matrix.rid }}"
+          $staging = Join-Path "artifacts/package" $name
+          New-Item -ItemType Directory -Force -Path $staging, "release" | Out-Null
+          Copy-Item "artifacts/gui/${{ matrix.rid }}/DocRedock.exe" "$staging/DocRedock.exe"
+          Copy-Item "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli.exe" "$staging/DocRedock.Cli.exe"
+          Copy-Item "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/DocRedock-icon.png"
+          Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt" $staging
+          Copy-Item "release-docs/USER_GUIDE.md" "$staging/QUICKSTART.ja.md"
+          Copy-Item "release-docs/USER_GUIDE.en.md" "$staging/QUICKSTART.en.md"
+          Copy-Item "release-docs/RELEASE_NOTES_v0.1.0.md", "release-docs/RELEASE_NOTES_v0.1.0.en.md" $staging
+          Compress-Archive -Path "$staging/*" -DestinationPath "release/$name.zip" -CompressionLevel Optimal
+
+      - name: Package macOS application bundle
+        if: matrix.family == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          name="DocRedock-$tag-${{ matrix.rid }}"
+          staging="artifacts/package/$name"
+          app="$staging/DocRedock.app"
+          iconset="artifacts/package/DocRedock.iconset"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset" release
+          cp "artifacts/gui/${{ matrix.rid }}/DocRedock" "$app/Contents/MacOS/DocRedock"
+          chmod 755 "$app/Contents/MacOS/DocRedock"
+          for row in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x" "128 icon_128x128" "256 icon_128x128@2x" "256 icon_256x256" "512 icon_256x256@2x" "512 icon_512x512" "1024 icon_512x512@2x"; do
+            set -- $row
+            sips -z "$1" "$1" "assets/brand/docredock/app-icons/png/DocRedock-appicon-1024x1024.png" --out "$iconset/$2.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/DocRedock.icns"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>CFBundleDisplayName</key><string>DocRedock</string>
+            <key>CFBundleExecutable</key><string>DocRedock</string>
+            <key>CFBundleIconFile</key><string>DocRedock</string>
+            <key>CFBundleIdentifier</key><string>app.docredock.desktop</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>DocRedock</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.1.0</string>
+            <key>CFBundleVersion</key><string>1</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict></plist>
+          PLIST
+          cp "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
+          chmod 755 "$staging/DocRedock.Cli"
+          cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
+          cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
+          cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
+          cp release-docs/RELEASE_NOTES_v0.1.0.md release-docs/RELEASE_NOTES_v0.1.0.en.md "$staging/"
+          ditto -c -k --sequesterRsrc --keepParent "$staging" "release/$name.zip"
+
+      - name: Package Linux application
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          name="DocRedock-$tag-${{ matrix.rid }}"
+          staging="artifacts/package/$name"
+          mkdir -p "$staging" "$staging/share/applications" "$staging/share/icons/hicolor/256x256/apps" release
+          install -m 755 "artifacts/gui/${{ matrix.rid }}/DocRedock" "$staging/DocRedock"
+          install -m 755 "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
+          install -m 644 "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/share/icons/hicolor/256x256/apps/docredock.png"
+          cat > "$staging/share/applications/docredock.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=DocRedock
+          Comment=Local-first Office and PDF Markdown workspace
+          Exec=DocRedock
+          Icon=docredock
+          Terminal=false
+          Categories=Office;Utility;
+          DESKTOP
+          cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
+          cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
+          cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
+          cp release-docs/RELEASE_NOTES_v0.1.0.md release-docs/RELEASE_NOTES_v0.1.0.en.md "$staging/"
+          tar -czf "release/$name.tar.gz" -C artifacts/package "$name"
+
+      - name: Upload packaged application
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: package-${{ matrix.rid }}
+          path: release/*
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish Public Beta
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Download packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: package-*
+          path: release-files
+          merge-multiple: true
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Generate SBOM and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output release-files
+          (
+            cd release-files
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
+              sort -z |
+              xargs -0 sha256sum |
+              sed 's#  \./#  #' > SHA256SUMS
+          )
+
+      - name: Build bilingual release body
+        shell: bash
+        run: |
+          {
+            cat release-docs/RELEASE_NOTES_v0.1.0.md
+            printf '\n---\n\n'
+            cat release-docs/RELEASE_NOTES_v0.1.0.en.md
+          } > release-body.md
+
+      - name: Create or update GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" release-files/* --clobber
+            gh release edit "$RELEASE_TAG" --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease
+          else
+            gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease
+          fi

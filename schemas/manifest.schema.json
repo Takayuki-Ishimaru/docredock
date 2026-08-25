@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docredock.local/schemas/manifest.schema.json",
+  "title": "DRMD Manifest 1.1",
+  "type": "object",
+  "required": ["schema_version", "document_id", "generator", "source", "projection", "integrity"],
+  "properties": {
+    "schema_version": { "const": "1.1" },
+    "document_id": { "type": "string", "pattern": "^doc_[a-z0-9]+$" },
+    "generator": { "type": "object" },
+    "source": {
+      "type": "object",
+      "required": ["file_name", "format", "sha256", "source_revision_id", "size"],
+      "properties": {
+        "file_name": { "type": "string" },
+        "format": { "type": "string" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "source_revision_id": { "type": "string", "pattern": "^rev_[a-z0-9]+$" },
+        "size": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "projection": { "type": "object" },
+    "integrity": { "type": "object" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

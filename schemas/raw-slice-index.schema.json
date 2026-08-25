@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docredock.local/schemas/raw-slice-index.schema.json",
+  "title": "DRMD raw XML slice index line",
+  "type": "object",
+  "required": ["part_uri", "start_offset", "end_offset", "sha256", "kind"],
+  "properties": {
+    "node_id": { "type": "string", "minLength": 1 },
+    "part_uri": { "type": "string", "pattern": "^/" },
+    "start_offset": { "type": "integer", "minimum": 0 },
+    "end_offset": { "type": "integer", "minimum": 0 },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "kind": { "enum": ["xml_element", "xml_fragment", "zip_entry_payload", "binary_asset"] }
+  },
+  "additionalProperties": true
+}

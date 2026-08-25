@@ -1,0 +1,315 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="DocRedock.Gui.MainWindow"
+        Title="DocRedock"
+        Icon="/Assets/DocRedock.ico"
+        Width="1180"
+        MinWidth="760"
+        Height="820"
+        MinHeight="620"
+        ExtendClientAreaToDecorationsHint="True"
+        ExtendClientAreaTitleBarHeightHint="58"
+        SizeChanged="OnWindowSizeChanged">
+  <Window.Resources>
+    <StreamGeometry x:Key="IconUpload">M12,3 L12,15 M7,8 L12,3 17,8 M4,14 L4,19 20,19 20,14</StreamGeometry>
+    <StreamGeometry x:Key="IconShield">M12,2 L20,5.5 L20,11 C20,16.2 16.6,20.5 12,22 C7.4,20.5 4,16.2 4,11 L4,5.5 Z M8.5,12 L11,14.5 16,9.5</StreamGeometry>
+    <StreamGeometry x:Key="IconClose">M6,6 L18,18 M18,6 L6,18</StreamGeometry>
+    <StreamGeometry x:Key="IconFolder">M3,6 L10,6 12,8 21,8 21,19 3,19 Z</StreamGeometry>
+  </Window.Resources>
+
+  <DockPanel LastChildFill="True">
+    <!-- A compact workspace toolbar replaces the former landing-page hero. -->
+    <Border DockPanel.Dock="Top" Classes="titlebar" Height="58">
+      <Grid Margin="84,0,20,0" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+        <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+          <Border Classes="brand-mark" Width="32" Height="32" CornerRadius="9" Padding="3">
+            <Image Source="/Assets/DocRedock-appicon-64x64.png" Stretch="Uniform" />
+          </Border>
+          <TextBlock Text="DocRedock" FontSize="16" FontWeight="Bold" VerticalAlignment="Center" />
+        </StackPanel>
+
+        <Border Grid.Column="1" Classes="segment-track" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="2">
+            <RadioButton x:Name="ExportModeRadio" Classes="segment" GroupName="WorkflowMode" IsChecked="True"
+                         Content="書き出す" IsCheckedChanged="OnModeChanged" />
+            <RadioButton x:Name="RestoreModeRadio" Classes="segment" GroupName="WorkflowMode"
+                         Content="復元する" IsCheckedChanged="OnModeChanged" />
+          </StackPanel>
+        </Border>
+
+        <Border Grid.Column="2" Classes="local-pill" VerticalAlignment="Center">
+          <StackPanel Orientation="Horizontal" Spacing="7">
+            <PathIcon Data="{StaticResource IconShield}" Width="15" Height="15" />
+            <TextBlock Text="ローカル処理" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
+
+    <!-- The primary action stays visible without scrolling. -->
+    <Border DockPanel.Dock="Bottom" x:Name="ExportActionBar" Classes="actionbar">
+      <Grid Margin="20,0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
+        <StackPanel VerticalAlignment="Center" Spacing="2">
+          <TextBlock x:Name="ExportActionSummaryText" Text="文書を選択してください" FontWeight="SemiBold" />
+          <TextBlock Text="選択した文書を現在の設定でMarkdownへ書き出します" Classes="muted caption" />
+        </StackPanel>
+        <Button x:Name="ExportButton" Grid.Column="1" Classes="accent primary-action" Click="OnExport" IsEnabled="False">
+          <StackPanel Orientation="Horizontal" Spacing="10">
+            <TextBlock Text="書き出す" FontWeight="Bold" />
+            <TextBlock Text="⌘↩" Classes="shortcut" />
+          </StackPanel>
+        </Button>
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Bottom" x:Name="RestoreActionBar" Classes="actionbar" IsVisible="False">
+      <Grid Margin="20,0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
+        <StackPanel VerticalAlignment="Center" Spacing="2">
+          <TextBlock x:Name="RestoreActionSummaryText" Text="Markdownと復元ファイルを選択してください" FontWeight="SemiBold" />
+          <TextBlock Text="安全性を検証して元の文書形式へ復元します" Classes="muted caption" />
+        </StackPanel>
+        <Button x:Name="RestoreButton" Grid.Column="1" Classes="accent primary-action" Click="OnRestore" IsEnabled="False">復元する</Button>
+      </Grid>
+    </Border>
+
+    <!-- Progress, completion, and errors remain immediately above the action bar. -->
+    <Border DockPanel.Dock="Bottom" x:Name="ResultPanel" Classes="result-panel notice" IsVisible="False">
+      <Grid Margin="20,0" ColumnDefinitions="4,Auto,*,Auto" ColumnSpacing="14">
+        <Border Classes="status-stripe" CornerRadius="2" />
+        <Border Grid.Column="1" x:Name="ResultSymbol" Classes="result-symbol" Width="36" Height="36" CornerRadius="18">
+          <TextBlock x:Name="ResultSymbolText" Text="✓" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="18" FontWeight="Bold" />
+        </Border>
+        <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
+          <TextBlock x:Name="ResultKickerText" Text="完了" Classes="primary caption" />
+          <TextBlock x:Name="ResultTitleText" Text="処理が完了しました" FontSize="14" FontWeight="SemiBold" />
+          <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
+          <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5" />
+          <TextBlock x:Name="ResultFidelityText" Classes="fidelity" IsVisible="False" />
+          <TextBox x:Name="DiagnosticsTextBox" Classes="diagnostics" IsReadOnly="True" TextWrapping="Wrap"
+                   AcceptsReturn="True" IsVisible="False" MinHeight="64" MaxHeight="120" />
+        </StackPanel>
+        <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Button x:Name="OpenOutputFolderButton" Classes="secondary compact" Click="OnOpenOutputFolder" IsVisible="False">フォルダーを開く</Button>
+          <Button x:Name="OpenMarkdownButton" Classes="secondary compact" Click="OnOpenMarkdown" IsVisible="False">Markdownを開く</Button>
+          <Button x:Name="CancelOperationButton" Classes="flat compact" Click="OnCancelOperation" IsVisible="False">キャンセル</Button>
+          <Button Classes="icon-button" Click="OnCloseResult" ToolTip.Tip="結果を閉じる" AutomationProperties.Name="結果を閉じる">
+            <PathIcon Data="{StaticResource IconClose}" Width="16" Height="16" />
+          </Button>
+        </StackPanel>
+      </Grid>
+    </Border>
+
+    <ScrollViewer HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+      <Grid Margin="20,18,20,22" MaxWidth="1060" HorizontalAlignment="Center">
+        <!-- Export mode -->
+        <Grid x:Name="ExportWorkspace" ColumnDefinitions="1.15*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16">
+          <StackPanel Spacing="14">
+            <Button x:Name="ExportDropZone" Classes="drop-zone" MinHeight="230"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Click="OnPickExportFile" DragDrop.AllowDrop="True" DragDrop.DragOver="OnExportDragOver"
+                    DragDrop.DragLeave="OnExportDragLeave" DragDrop.Drop="OnExportDrop"
+                    AutomationProperties.Name="変換する文書を選択">
+              <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" MaxWidth="430">
+                <Border Classes="drop-icon" Width="48" Height="48" CornerRadius="24" HorizontalAlignment="Center">
+                  <PathIcon Data="{StaticResource IconUpload}" Width="24" Height="24" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="文書をここにドロップ" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" />
+                <TextBlock Text="またはクリックしてファイルを選択" Classes="muted" TextAlignment="Center" TextWrapping="Wrap" />
+                <WrapPanel HorizontalAlignment="Center" Margin="0,8,0,0">
+                  <Border Classes="chip"><TextBlock Text="DOCX" /></Border>
+                  <Border Classes="chip"><TextBlock Text="XLSX" /></Border>
+                  <Border Classes="chip"><TextBlock Text="PPTX" /></Border>
+                  <Border Classes="chip"><TextBlock Text="PDF" /></Border>
+                </WrapPanel>
+                <TextBlock Text="1件あたり最大 200 MB" Classes="muted caption" HorizontalAlignment="Center" />
+              </StackPanel>
+            </Button>
+
+            <Border x:Name="ExportFilePanel" Classes="workspace-card file-list" IsVisible="False">
+              <StackPanel>
+                <Grid ColumnDefinitions="*,Auto" Margin="14,10">
+                  <TextBlock Text="選択中のファイル" Classes="section-label" />
+                  <Button Grid.Column="1" Classes="flat compact" Click="OnClearExportFile">すべて解除</Button>
+                </Grid>
+                <Border Classes="hairline" Height="1" />
+                <Grid Margin="14,10" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="12">
+                  <Border Classes="file-type" MinWidth="44" Height="30" CornerRadius="6">
+                    <TextBlock x:Name="ExportFileTypeText" Text="DOCX" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" FontWeight="Bold" />
+                  </Border>
+                  <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="ExportFileNameText" Text="ファイル" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="ExportFileDetailText" Text="選択済み" Classes="muted caption" TextTrimming="CharacterEllipsis" />
+                  </StackPanel>
+                  <Button Grid.Column="3" Classes="icon-button" Click="OnClearExportFile" ToolTip.Tip="選択を解除" AutomationProperties.Name="選択を解除">
+                    <PathIcon Data="{StaticResource IconClose}" Width="14" Height="14" />
+                  </Button>
+                </Grid>
+              </StackPanel>
+            </Border>
+
+            <Button Classes="secondary" HorizontalAlignment="Left" Click="OnPickExportSourceFolder"
+                    ToolTip.Tip="選択したフォルダー直下の対応文書をまとめて追加します">
+              <StackPanel Orientation="Horizontal" Spacing="8">
+                <PathIcon Data="{StaticResource IconFolder}" Width="17" Height="17" />
+                <TextBlock Text="フォルダーごと追加" />
+              </StackPanel>
+            </Button>
+            <TextBlock x:Name="ExportErrorText" Classes="error" IsVisible="False" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel x:Name="ExportSettingsColumn" Grid.Column="1" Spacing="14">
+            <StackPanel Spacing="8">
+              <TextBlock Text="出力形式" Classes="section-label" />
+              <RadioButton x:Name="ReadableExportToggle" Classes="radio-card" GroupName="ExportFormat" IsChecked="True"
+                           IsCheckedChanged="OnReadableChanged">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="読みやすい Markdown" FontWeight="Bold" />
+                  <TextBlock Text=".mdだけを書き出します。見出し・段落・表に再構成するため、元の形式へは戻せません。"
+                             Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+              </RadioButton>
+              <RadioButton x:Name="RoundTripExportRadio" Classes="radio-card" GroupName="ExportFormat"
+                           IsCheckedChanged="OnReadableChanged">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="DocRedock（復元可能）" FontWeight="Bold" />
+                  <TextBlock Text=".mdと.drmdサイドカーを書き出します。編集後に元の文書形式へ復元できます。"
+                             Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+              </RadioButton>
+            </StackPanel>
+
+            <Border Classes="workspace-card">
+              <StackPanel Spacing="8">
+                <TextBlock Text="出力先" Classes="section-label" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                  <TextBlock x:Name="ExportFolderText" Text="出力先: 元ファイルと同じフォルダー" Classes="path"
+                             VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                  <Button x:Name="ExportFolderButton" Grid.Column="1" Classes="secondary compact" Click="OnPickExportFolder">変更…</Button>
+                </Grid>
+                <TextBlock Text="同名ファイルがある場合は上書きせず、別名で安全に保存します。" Classes="muted caption" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+
+            <Expander Classes="details" Header="詳細設定">
+              <StackPanel Spacing="12" Margin="0,10,0,0">
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="画像の文字をOCR" FontWeight="SemiBold" />
+                    <TextBlock Text="macOSはApple Vision、Windowsは標準OCRを優先します。" Classes="muted caption" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <ToggleSwitch x:Name="OcrToggle" Grid.Column="1" OffContent="オフ" OnContent="オン"
+                                IsChecked="False" VerticalAlignment="Center" IsCheckedChanged="OnOcrChanged" />
+                </Grid>
+                <Grid x:Name="OcrLanguagesPanel" ColumnDefinitions="Auto,*" ColumnSpacing="12" IsVisible="False">
+                  <TextBlock Text="OCR言語" Classes="muted" VerticalAlignment="Center" />
+                  <TextBox x:Name="OcrLanguagesTextBox" Grid.Column="1" Text="jpn+eng" IsEnabled="False" PlaceholderText="例: jpn+eng" MaxLength="80" />
+                </Grid>
+                <StackPanel x:Name="ReadableOptionsPanel" Spacing="5">
+                  <TextBlock Text="Markdownに含める内容" Classes="muted caption" />
+                  <WrapPanel>
+                    <CheckBox x:Name="IncludeDiagramsCheckBox" Content="図" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
+                    <CheckBox x:Name="ShowFormulasCheckBox" Content="数式" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
+                    <CheckBox x:Name="IncludeSvgCheckBox" Content="SVGプレビュー" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
+                    <CheckBox x:Name="EmbedReadableImagesCheckBox" Content="画像を埋め込む"
+                              ToolTip.Tip="既定では.assetsフォルダーを参照します。" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
+                  </WrapPanel>
+                </StackPanel>
+                <Grid x:Name="SidecarOptionsPanel" ColumnDefinitions="*,Auto" ColumnSpacing="12" IsVisible="False">
+                  <StackPanel Spacing="2">
+                    <TextBlock Text="サイドカーをzip形式にする" FontWeight="SemiBold" />
+                    <TextBlock Text="持ち運び用です。通常は画像を表示しやすいディレクトリ形式を使います。" Classes="muted caption" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <CheckBox x:Name="ZipSidecarCheckBox" Grid.Column="1" Content="zip" VerticalAlignment="Center" IsCheckedChanged="OnSettingsChanged" />
+                </Grid>
+              </StackPanel>
+            </Expander>
+          </StackPanel>
+        </Grid>
+
+        <!-- Restore mode uses the same quiet tool layout. -->
+        <Grid x:Name="RestoreWorkspace" ColumnDefinitions="1.15*,*" RowDefinitions="Auto,Auto" ColumnSpacing="16" RowSpacing="16" IsVisible="False">
+          <StackPanel Spacing="14">
+            <Button x:Name="RestoreDropZone" Classes="drop-zone" MinHeight="230"
+                    HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Click="OnPickRestoreFiles" DragDrop.AllowDrop="True" DragDrop.DragOver="OnRestoreDragOver"
+                    DragDrop.DragLeave="OnRestoreDragLeave" DragDrop.Drop="OnRestoreDrop"
+                    AutomationProperties.Name="復元するMarkdownとDocRedock復元ファイルを選択">
+              <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="8" MaxWidth="430">
+                <Border Classes="drop-icon" Width="48" Height="48" CornerRadius="24" HorizontalAlignment="Center">
+                  <PathIcon Data="{StaticResource IconUpload}" Width="24" Height="24" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="復元ファイルをここにドロップ" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" />
+                <TextBlock Text="編集済みMarkdownと.drmd（または.drmdpkg）を選択します" Classes="muted" TextAlignment="Center" TextWrapping="Wrap" />
+                <WrapPanel HorizontalAlignment="Center" Margin="0,8,0,0">
+                  <Border Classes="chip"><TextBlock Text="MD" /></Border>
+                  <Border Classes="chip"><TextBlock Text="DRMD" /></Border>
+                  <Border Classes="chip"><TextBlock Text="DRMDPKG" /></Border>
+                </WrapPanel>
+              </StackPanel>
+            </Button>
+
+            <Border Classes="workspace-card file-list">
+              <StackPanel>
+                <TextBlock Text="選択中のファイル" Classes="section-label" Margin="14,10" />
+                <Border Classes="hairline" Height="1" />
+                <Grid x:Name="RestoreMarkdownPanel" Margin="14,10" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12" IsVisible="False">
+                  <Border Classes="file-type" MinWidth="44" Height="30" CornerRadius="6"><TextBlock Text="MD" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11" FontWeight="Bold" /></Border>
+                  <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="MarkdownFileNameText" Text="編集済みMarkdown" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="MarkdownFileDetailText" Text="未選択" Classes="muted caption" />
+                  </StackPanel>
+                  <TextBlock x:Name="MarkdownStatusText" Grid.Column="2" Text="✓" Classes="primary" FontWeight="Bold" VerticalAlignment="Center" />
+                </Grid>
+                <Grid x:Name="RestoreSidecarPanel" Margin="14,10" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="12" IsVisible="False">
+                  <Border Classes="file-type secondary-file" MinWidth="44" Height="30" CornerRadius="6"><TextBlock Text="DRMD" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="10" FontWeight="Bold" /></Border>
+                  <StackPanel Grid.Column="1" Spacing="1" VerticalAlignment="Center">
+                    <TextBlock x:Name="PackageFileNameText" Text="DocRedock復元ファイル" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock x:Name="PackageFileDetailText" Text="未選択" Classes="muted caption" />
+                  </StackPanel>
+                  <TextBlock x:Name="PackageStatusText" Grid.Column="2" Text="✓" Classes="primary" FontWeight="Bold" VerticalAlignment="Center" />
+                </Grid>
+                <Button Classes="flat compact" HorizontalAlignment="Left" Margin="8,4,8,8" Click="OnPickSidecarFolder">サイドカーフォルダーを選択…</Button>
+              </StackPanel>
+            </Border>
+            <TextBlock x:Name="RestoreErrorText" Classes="error" IsVisible="False" TextWrapping="Wrap" />
+          </StackPanel>
+
+          <StackPanel x:Name="RestoreSettingsColumn" Grid.Column="1" Spacing="14">
+            <Border Classes="workspace-card">
+              <StackPanel Spacing="8">
+                <TextBlock Text="復元先" Classes="section-label" />
+                <Grid ColumnDefinitions="*,Auto" ColumnSpacing="10">
+                  <TextBlock x:Name="RestoreFolderText" Text="出力先: Markdownと同じフォルダー" Classes="path"
+                             VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                  <Button x:Name="RestoreFolderButton" Grid.Column="1" Classes="secondary compact" Click="OnPickRestoreFolder">変更…</Button>
+                </Grid>
+                <TextBlock Text="同名ファイルがある場合は上書きせず、別名で安全に保存します。" Classes="muted caption" TextWrapping="Wrap" />
+              </StackPanel>
+            </Border>
+
+            <Border Classes="workspace-card">
+              <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="編集済みPDFを再描画" FontWeight="SemiBold" />
+                  <TextBlock Text="元PDFと同一レイアウトではないF3出力を許可します。" Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+                <ToggleSwitch x:Name="PdfFallbackToggle" Grid.Column="1" OffContent="オフ" OnContent="オン"
+                              VerticalAlignment="Center" IsCheckedChanged="OnSettingsChanged" />
+              </Grid>
+            </Border>
+
+            <Border Classes="notice compact-notice">
+              <Grid ColumnDefinitions="4,*" ColumnSpacing="12">
+                <Border Classes="status-stripe" CornerRadius="2" />
+                <StackPanel Grid.Column="1" Spacing="2">
+                  <TextBlock Text="安全に復元します" FontWeight="SemiBold" />
+                  <TextBlock Text="検証に失敗した変更は適用せず、元の文書も上書きしません。" Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+              </Grid>
+            </Border>
+          </StackPanel>
+        </Grid>
+      </Grid>
+    </ScrollViewer>
+  </DockPanel>
+</Window>

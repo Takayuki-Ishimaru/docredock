@@ -1,0 +1,110 @@
+# Pre-release Checklist
+
+[日本語](RELEASE_CHECKLIST.md) | English
+
+Run this checklist before creating the public commit/tag and every OS-specific distribution. Do not make a general release while any mandatory item remains incomplete.
+
+## Repository audit snapshot (2026-08-26)
+
+- The project license has been set to the MIT License.
+- DocRedock.sln built successfully in Release with a locally available .NET 10.0.400 SDK: zero warnings and zero errors.
+- The DocRedock rename is complete in the working tree. Review the path moves and identifier migration as one consistent commit before release.
+- output/ and outputs/ contain conversions, visual-regression data, past output, and Office source material. Some items are currently tracked, so .gitignore alone cannot prevent publication.
+- .codex/, .mcp.json, .tokenlighten/, AGENTS.md, CLAUDE.md, and .github/copilot-instructions.md are product-unrelated local or AI-tool settings. Some contain machine-specific absolute paths.
+- DOCX/PPTX fixture README files contain local absolute paths. Replace them with reproducible relative instructions if publishing the fixtures; otherwise exclude them together.
+- CI executes tools/conversion-qa/run.py. If the QA harness or its required fixtures remain private, remove that step from public CI or convert it to use only publishable synthetic fixtures.
+- An Office temporary lock file and a validation workbook exist at repository root and must not enter a public artifact.
+
+## P0: Finalize the public branch
+
+- [ ] Product name, namespaces, assemblies, solution, project directories, and documentation links consistently use DocRedock
+- [ ] No obsolete product, project, or format identifier remains unintentionally
+- [ ] The complete rename has been reviewed and each deletion maps to the intended addition
+- [ ] README images and documentation links work in a clean clone
+- [ ] The empty test file, Office ~$ temporary files, and root validation workbook are excluded
+- [ ] output/, outputs/, artifacts/, tmp/, and .tmp/ are no longer tracked by the public branch
+- [ ] .codex/, .mcp.json, .tokenlighten/, AGENTS.md, CLAUDE.md, and local AI instructions are excluded
+- [ ] The published inventory matches PUBLICATION_SCOPE.en.md
+
+## P0: Tests and fixtures
+
+- [ ] Confirm that test source under tests/DocRedock.Tests will be public
+- [ ] Confirm that every binary fixture is entirely synthetic
+- [ ] Confirm that fixtures contain no personal, customer, internal, credential, or unique document-property data
+- [ ] Confirm redistribution rights for every fixture image, font, and template
+- [ ] Record origin, license, generation steps, and SHA-256 for each fixture
+- [ ] Exclude large visual-validation corpora and generated results
+- [ ] Decide whether tools/conversion-qa is public and align CI with that decision
+- [ ] Remove personal absolute paths from README files and generators
+
+## P0: Security and privacy
+
+- [ ] Scan tracked files, untracked files, and final release archives for secrets
+- [ ] Confirm that no API key, token, private key, connection string, personal path, or internal URL is present
+- [ ] Confirm that no unintended .drmd/.drmdpkg, source document, or export/restore report is present
+- [ ] Enable Private vulnerability reporting on the Git host
+- [ ] Add a root SECURITY.md with supported versions, a private contact method, and an initial-response target
+- [ ] Confirm that SECURITY_AND_PRIVACY.en.md matches the current implementation
+
+## P0: Licensing and provenance
+
+- [x] Select the MIT License for the DocRedock project
+- [ ] Have the rights holder or legal reviewer confirm the copyright holder text in LICENSE
+- [ ] Confirm that THIRD-PARTY-NOTICES.txt matches the current lock files
+- [ ] Revalidate all dependencies against licenses/allowlist.json
+- [ ] Verify the Noto Sans JP OFL text, upstream source, and hash
+- [ ] Verify redistribution rights for brand assets and test fixtures
+- [ ] Confirm that provenance/ matches all adopted code and techniques
+- [ ] Generate an SBOM from the same dependency graph used in the distributions
+
+## Build and test
+
+Run the following from a clean clone with the pinned SDK, using final paths after the rename:
+
+```sh
+dotnet restore DocRedock.sln --locked-mode
+dotnet build DocRedock.sln --configuration Release --no-restore
+dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj --configuration Release --no-build --no-restore
+dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output artifacts
+```
+
+- [ ] Restore succeeds without changing a lock file
+- [ ] Release build succeeds with zero warnings and zero errors
+- [ ] Every test succeeds and every skip reason has been reviewed
+- [ ] If conversion-qa remains in public CI, it succeeds using only synthetic fixtures
+- [ ] LicenseAudit succeeds and emits the SBOM
+- [ ] git status is clean except for explicitly expected build output
+
+## Distributions
+
+- [ ] Publish win-x64, win-arm64, osx-x64, osx-arm64, linux-x64, and linux-arm64
+- [ ] Start each artifact on its target OS/CPU or a trusted equivalent CI runner
+- [ ] Exercise GUI readable and roundtrip workflows, including verify, diff, and restore
+- [ ] Exercise CLI export, verify, diff, restore, render, pack, and unpack
+- [ ] Finalize the macOS .app bundle/notarization policy and Windows signing/installer policy
+- [ ] Embed enough version and commit information to trace every executable
+- [ ] Include LICENSE, THIRD-PARTY-NOTICES, README/QUICKSTART, and the SBOM
+- [ ] Confirm that no tests, fixtures, source documents, debug symbols, generated output, or local settings are included
+- [ ] Generate SHA-256 for every archive
+- [ ] Extract every archive to a fresh directory and smoke-test that copy
+
+## Documentation and release page
+
+- [ ] README overview, commands, supported platforms, and filenames match the final artifacts
+- [ ] Re-run USER_GUIDE.en.md as a first-time user
+- [ ] Confirm that Japanese and English release documents cover the same requirements
+- [ ] Confirm that FORMAT_CAPABILITY_MATRIX.md matches the implementation and tests
+- [ ] State clearly that Readable Markdown cannot be restored
+- [ ] State clearly that .drmd/.drmdpkg can contain the source document
+- [ ] State whether OCR, Tesseract, Mermaid, and the PDF rasterizer are bundled
+- [ ] Describe known limitations and breaking changes in the release notes
+- [ ] Finalize publication of CONTRIBUTING.md, CODE_OF_CONDUCT.md, and SECURITY.md
+
+## Release approval
+
+- [ ] The public commit/tag is protected and CI is green
+- [ ] Compare the complete source-archive inventory with PUBLICATION_SCOPE.en.md
+- [ ] Compare the complete binary-archive inventory with PUBLICATION_SCOPE.en.md
+- [ ] Attach SHA256SUMS, the SBOM, and release notes to the release page
+- [ ] No known P0/P1 issue remains, and all remaining limitations are documented for users
+- [ ] The release owner approves the hashes of the final artifacts

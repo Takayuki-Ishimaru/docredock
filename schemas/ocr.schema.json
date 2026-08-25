@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docredock.local/schemas/ocr.schema.json",
+  "title": "DRMD OCR result",
+  "type": "object",
+  "required": ["asset_id", "status", "languages", "diagnostics"],
+  "properties": {
+    "asset_id": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": ["completed", "not_required", "skipped_by_policy", "skipped_by_budget", "unavailable", "failed"]
+    },
+    "languages": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "text": { "type": ["string", "null"] },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": { "type": "string" },
+          "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+          "bounding_box": { "type": ["object", "null"] }
+        }
+      }
+    },
+    "diagnostics": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": true
+}

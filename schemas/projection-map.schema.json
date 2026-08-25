@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://docredock.local/schemas/projection-map.schema.json",
+  "title": "DRMD Projection Contribution 1.0",
+  "type": "object",
+  "required": ["projection_id", "projection_block_id", "markdown_range", "node_id", "role", "evidence"],
+  "properties": {
+    "projection_id": { "type": "string" },
+    "projection_block_id": { "type": "string" },
+    "markdown_range": { "$ref": "#/$defs/range" },
+    "node_id": { "type": "string" },
+    "role": { "type": "string" },
+    "evidence": { "type": "string" }
+  },
+  "$defs": {
+    "range": {
+      "type": "object",
+      "required": ["start", "length"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
