@@ -3,7 +3,7 @@ set -eu
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repository_root=$(CDPATH= cd -- "$script_directory/.." && pwd)
-project="$repository_root/src/Rtmd.Gui/Rtmd.Gui.csproj"
+project="$repository_root/src/DocRedock.Gui/DocRedock.Gui.csproj"
 output_root="$repository_root/artifacts/gui"
 
 if [ "$#" -gt 0 ]; then
@@ -22,26 +22,35 @@ for runtime_id in $runtime_ids; do
       ;;
   esac
 
-  echo "Publishing RoundHound GUI for $runtime_id"
+  echo "Publishing DocRedock GUI for $runtime_id"
   output_directory="$output_root/$runtime_id"
   case "$output_directory" in
     "$output_root"/*) rm -rf -- "$output_directory" ;;
     *) echo "Refusing to clear an unexpected output path." >&2; exit 2 ;;
   esac
+  runtime_lock_path="obj/runtime-locks/packages.$runtime_id.lock.json"
+  dotnet restore "$project" --runtime "$runtime_id" --force-evaluate --use-lock-file --lock-file-path "$runtime_lock_path"
+  dotnet restore "$project" --runtime "$runtime_id" --locked-mode --use-lock-file --lock-file-path "$runtime_lock_path"
   dotnet publish "$project" \
     --configuration Release \
     --runtime "$runtime_id" \
     --self-contained true \
+    --no-restore \
     --output "$output_directory" \
     -p:PublishSingleFile=true \
     -p:UseAppHost=true \
     -p:IncludeNativeLibrariesForSelfExtract=true \
-    -p:EnableCompressionInSingleFile=true \
+    -p:EnableCompressionInSingleFile=false \
     -p:PublishTrimmed=false \
-    -p:DebugType=None \
-    "-p:NuGetLockFilePath=obj/publish-locks/$runtime_id/packages.lock.json" \
-    -p:RestoreForceEvaluate=true \
-    -p:RestoreLockedMode=false
+    -p:DebugType=None
+
+  runtime_lock_output="$output_directory/runtime-locks"
+  mkdir -p "$runtime_lock_output"
+  find "$repository_root/src" -path "*/obj/runtime-locks/packages.$runtime_id.lock.json" -type f | while IFS= read -r lock_file; do
+    project_directory=$(dirname "$(dirname "$(dirname "$lock_file")")")
+    project_name=$(basename "$project_directory")
+    cp "$lock_file" "$runtime_lock_output/$project_name.packages.lock.json"
+  done
 done
 
 echo "Published GUI builds: $output_root"

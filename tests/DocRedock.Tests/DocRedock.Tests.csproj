@@ -1,0 +1,36 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DocRedock.Core\DocRedock.Core.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Providers.Abstractions\DocRedock.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Markdown\DocRedock.Markdown.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Cli\DocRedock.Cli.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Formats.OpenXml\DocRedock.Formats.OpenXml.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Ocr.Tesseract\DocRedock.Ocr.Tesseract.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Formats.Pdf\DocRedock.Formats.Pdf.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Render\DocRedock.Render.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Api\DocRedock.Api.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Worker\DocRedock.Worker.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.Gui\DocRedock.Gui.csproj" />
+  </ItemGroup>
+
+</Project>

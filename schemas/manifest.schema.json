@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rtmd.local/schemas/manifest.schema.json",
-  "title": "RTMD Manifest 1.1",
+  "$id": "https://docredock.local/schemas/manifest.schema.json",
+  "title": "DRMD Manifest 1.1",
   "type": "object",
   "required": ["schema_version", "document_id", "generator", "source", "projection", "integrity"],
   "properties": {

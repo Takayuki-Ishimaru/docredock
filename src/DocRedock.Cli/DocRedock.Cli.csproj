@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocRedock.Core\DocRedock.Core.csproj" />
+    <ProjectReference Include="..\DocRedock.Providers.Abstractions\DocRedock.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\DocRedock.Markdown\DocRedock.Markdown.csproj" />
+    <ProjectReference Include="..\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
+    <ProjectReference Include="..\DocRedock.Api\DocRedock.Api.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\docs\DRMD_AI_EDITING_RULES.md"
+                      LogicalName="DocRedock.DRMD_AI_EDITING_RULES.md" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>DocRedock.Cli</AssemblyName>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyTitle>DocRedock</AssemblyTitle>
+    <Product>DocRedock</Product>
+    <Description>DocRedock command-line document round-tripping tool.</Description>
+  </PropertyGroup>
+
+</Project>

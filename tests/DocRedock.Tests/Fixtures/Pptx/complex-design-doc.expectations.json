@@ -1,0 +1,422 @@
+{
+  "target": "complex-design-doc.pptx",
+  "profile": "readable",
+  "items": [
+    {
+      "id": "P01-1",
+      "desc": "タイトルスライドが見出し1になる",
+      "severity": "guard",
+      "type": "contains",
+      "value": "# 経費精算システム　基本・詳細設計書"
+    },
+    {
+      "id": "P01-2",
+      "desc": "セクション区切りスライドの見出しが残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "第1部　システム概要とインターフェース設計"
+    },
+    {
+      "id": "P02-1",
+      "desc": "buCharネスト箇条書きが階層0で保持される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "- 認証・認可"
+    },
+    {
+      "id": "P02-2",
+      "desc": "buCharネスト箇条書きが4階層目(6スペース)まで保持される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "      - 承認 API は承認者ロールのみ実行可（NFR-SEC-01）"
+    },
+    {
+      "id": "P03-1",
+      "desc": "buAutoNumの本文テキストは残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "BF-00 開始"
+    },
+    {
+      "id": "P03-2",
+      "desc": "buAutoNumが番号付きリストとして変換される（現状は `- ` に化ける）",
+      "severity": "guard",
+      "type": "regex",
+      "value": "(?m)^1\\. BF-00 開始"
+    },
+    {
+      "id": "P04-1",
+      "desc": "buNone段落がイタリック単独パラグラフとして残る（箇条書き化されない）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "_IPA非機能要求グレードを参考に、目標値・測定方法・実現手段・合意状態を管理する。_"
+    },
+    {
+      "id": "P04-2",
+      "desc": "隣接するbuChar箇条書きは通常どおりリスト化される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "- NFR-AVL-01（可用性）"
+    },
+    {
+      "id": "P05-1",
+      "desc": "master/layout継承のプレースホルダーの本文は残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "対象システム: 経費精算システム／利用者: 申請者、課長・部長承認者、経理担当者／認証: OIDC・JWT"
+    },
+    {
+      "id": "P05-2",
+      "desc": "master/layout既定の箇条書きが解決されて箇条書き化される（現状は素のパラグラフ）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "- IF-05: 送信元 Outbox Worker"
+    },
+    {
+      "id": "P06-1",
+      "desc": "チャートの周辺テキスト（キャプション）は残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "総件数9 / 合格0 / 不合格0 / 未実施9"
+    },
+    {
+      "id": "P06-2",
+      "desc": "棒グラフのタイトル/データがテキストとして変換される（現状は完全に失われる）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "テスト実施サマリー（07_テストシナリオ 7.2）"
+    },
+    {
+      "id": "P06-3",
+      "desc": "円グラフのタイトル/データがテキストとして変換される（現状は完全に失われる）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "経費区分内訳（例示、F-05税区分ベース）"
+    },
+    {
+      "id": "P07-1",
+      "desc": "通常図形側の代替テキストは残る（SmartArt自体の有無に関係なく）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "課長承認(≤10万円)"
+    },
+    {
+      "id": "P07-2",
+      "desc": "SmartArtのdgm:データモデルからもテキストが抽出される（現状は通常図形の1件のみ＝dgm:側は失われる）",
+      "severity": "guard",
+      "type": "count",
+      "value": "課長承認(≤10万円)",
+      "min": 2
+    },
+    {
+      "id": "P08-1",
+      "desc": "グループ内の状態シェイプのテキストは残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "PAYMENT_PENDING"
+    },
+    {
+      "id": "P08-2",
+      "desc": "TR-09詳細テーブル（グループ/コネクタが失われても事実は残る保険）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+    },
+    {
+      "id": "P08-3",
+      "desc": "コネクタの論理接続（stCxn/endCxn）が遷移として復元される（現状はシェイプが独立テキストとして並ぶだけ）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "DRAFT → SUBMITTED"
+    },
+    {
+      "id": "P09-1",
+      "desc": "縦結合表で列がずれない（Idempotency-Key行が正しい列に載る）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| Idempotency-Key | uuid | ○ | 同一利用者で24時間一意 |"
+    },
+    {
+      "id": "P09-2",
+      "desc": "結合された「区分」ラベルが結合範囲の各行に複製される（現状は先頭行のみ）",
+      "severity": "guard",
+      "type": "count",
+      "value": "Body",
+      "min": 6
+    },
+    {
+      "id": "P10-1",
+      "desc": "ノート本文のテキスト自体は残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "状態遷移とAPI契約の整合性を重点確認"
+    },
+    {
+      "id": "P10-2",
+      "desc": "ノート内の太字/箇条書き装飾が保持される（現状はプレーンテキスト化）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "**レビュー進行メモ**"
+    },
+    {
+      "id": "P11-1",
+      "desc": "IMG-01/IMG-02が画像参照として変換される",
+      "severity": "guard",
+      "type": "count",
+      "value": "](complex-design-doc.assets/img-",
+      "min": 2
+    },
+    {
+      "id": "P12-1",
+      "desc": "左右コンテンツの本文は残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "差戻し理由は1〜500文字（BR-02）"
+    },
+    {
+      "id": "P12-2",
+      "desc": "左カラム→右カラムの順で読める（読み順）",
+      "severity": "guard",
+      "type": "regex",
+      "value": "(?s)申請者・承認者向け.*運用・データ"
+    },
+    {
+      "id": "P13-1",
+      "desc": "フッター文言が本文に混入しない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "DRMD PPTX変換検証"
+    },
+    {
+      "id": "P14-1",
+      "desc": "太字/斜体/下線の装飾がMarkdown記法として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "**EXP-E006**"
+    },
+    {
+      "id": "P14-2",
+      "desc": "下線がHTML/Markdownの何らかの形で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "<u>領収書直下</u>"
+    },
+    {
+      "id": "P14-3",
+      "desc": "取消線が取消線記法として変換される(ラン境界に忠実: 「旧仕様: 」は同一ランの一部)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "~~旧仕様: 5,000円以上は必須~~"
+    },
+    {
+      "id": "P15-1",
+      "desc": "回転シェイプ/矢印のテキスト自体は残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "要確認"
+    },
+    {
+      "id": "P15-2",
+      "desc": "45°回転の情報が何らかの形でテキストに残る（現状はrot未読み取りで消失）",
+      "severity": "guard",
+      "type": "regex",
+      "value": "45\\s*°|回転\\s*45"
+    },
+    {
+      "id": "QA1",
+      "desc": "表紙: 文書番号EXPS-DES-001/版1.2/状態レビュー中（検証用）",
+      "severity": "guard",
+      "type": "contains",
+      "value": "文書番号: EXPS-DES-001　版: 1.2　状態: レビュー中（検証用）"
+    },
+    {
+      "id": "QA2",
+      "desc": "IF-05: 送信元/送信先/Timeout/Retry/失敗時処理",
+      "severity": "guard",
+      "type": "contains",
+      "value": "IF-05: 送信元 Outbox Worker → 送信先 Event Bus（AMQP）。Timeout 5秒、Retry 最大5回。失敗時はDLQへ登録しOPS-ALM-02を発報する。"
+    },
+    {
+      "id": "QA3",
+      "desc": "TR-09: 遷移元/イベント/ガード/遷移先/副作用",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+    },
+    {
+      "id": "QA4a",
+      "desc": "TX-01: 書き込み対象(expense_claim/outbox_event)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "書き込み対象: expense_claim（status=SUBMITTED）と outbox_event を同一トランザクションで確定する。"
+    },
+    {
+      "id": "QA4b",
+      "desc": "TX-01: HTTP応答後のイベント配送は非同期",
+      "severity": "guard",
+      "type": "contains",
+      "value": "HTTP応答後のイベント配送は非同期。Event Bus障害時はNFR-OPS-04の間隔で最大5回再送し、承認サービスはevent_idで冪等に処理する。"
+    },
+    {
+      "id": "QA5",
+      "desc": "BR-01: 金額閾値と承認経路",
+      "severity": "guard",
+      "type": "contains",
+      "value": "金額閾値: 100,000円以下は課長承認、100,000円超は部長承認（BR-01）"
+    },
+    {
+      "id": "QA6a",
+      "desc": "F-06: 必須条件(10,000円以上)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "10,000円以上は必須"
+    },
+    {
+      "id": "QA6b",
+      "desc": "F-06: 最大サイズ(10MB)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "10MB"
+    },
+    {
+      "id": "QA6c",
+      "desc": "F-06: エラーコード(EXP-E006)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "EXP-E006"
+    },
+    {
+      "id": "QA6d",
+      "desc": "F-06: メッセージ",
+      "severity": "guard",
+      "type": "contains",
+      "value": "10,000円以上の申請には領収書が必要です。"
+    },
+    {
+      "id": "QA6e",
+      "desc": "F-06: 表示位置(領収書直下)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "領収書直下"
+    },
+    {
+      "id": "QA7a",
+      "desc": "API-01: Method(POST)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Method: POST"
+    },
+    {
+      "id": "QA7b",
+      "desc": "API-01: Path(/v1/expense-claims)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Path: /v1/expense-claims"
+    },
+    {
+      "id": "QA7c",
+      "desc": "API-01: 主な応答(201/400/401/409)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "主な応答: 201 / 400 / 401 / 409"
+    },
+    {
+      "id": "QA7d",
+      "desc": "API-01: Idempotency-Key制約",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Idempotency-Key: 同一利用者で24時間一意（uuid、必須）"
+    },
+    {
+      "id": "QA8",
+      "desc": "TC-009: 入力/経路/HTTP/最終状態/関連設計",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| TC-009 | 会計I/Fが5回連続失敗 | DLQ→ERROR→手動再送 | 200 | ERROR | TR-09/10, BR-03, OPS-ALM-02 |"
+    },
+    {
+      "id": "QA9a",
+      "desc": "NFR-AVL-02: RTO/RPO",
+      "severity": "guard",
+      "type": "contains",
+      "value": "RTO 4時間／RPO 15分"
+    },
+    {
+      "id": "QA9b",
+      "desc": "NFR-AVL-02: 測定方法",
+      "severity": "guard",
+      "type": "contains",
+      "value": "年1回の復旧訓練で実測"
+    },
+    {
+      "id": "QA9c",
+      "desc": "NFR-AVL-02: 実現手段",
+      "severity": "guard",
+      "type": "contains",
+      "value": "日次バックアップ＋WAL 15分転送"
+    },
+    {
+      "id": "QA9d",
+      "desc": "NFR-AVL-02: 合意状態(要確認)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "合意状態: 要確認"
+    },
+    {
+      "id": "QA10a",
+      "desc": "ISSUE-03: 論点(会計停止時間帯)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "会計停止時間帯"
+    },
+    {
+      "id": "QA10b",
+      "desc": "ISSUE-03: 作業内容",
+      "severity": "guard",
+      "type": "contains",
+      "value": "IF-06再送窓を会計主管と調整"
+    },
+    {
+      "id": "QA10c",
+      "desc": "ISSUE-03: Owner(経理担当)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Owner: 経理担当"
+    },
+    {
+      "id": "QA10d",
+      "desc": "ISSUE-03: 期限(2026-08-27)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "期限: 2026-08-27"
+    },
+    {
+      "id": "QA10e",
+      "desc": "ISSUE-03: Status(対応中)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Status: 対応中"
+    },
+    {
+      "id": "QA11a",
+      "desc": "outbox_event.status候補",
+      "severity": "guard",
+      "type": "contains",
+      "value": "outbox_event.status: NEW/SENDING/SENT/FAILED"
+    },
+    {
+      "id": "QA11b",
+      "desc": "retry_count上限5",
+      "severity": "guard",
+      "type": "contains",
+      "value": "retry_count: 初期値0、上限5"
+    },
+    {
+      "id": "QA12",
+      "desc": "IMG-02画像内限定文字列は本文に一切出現しない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "OCR-JP-20260823-017"
+    }
+  ]
+}

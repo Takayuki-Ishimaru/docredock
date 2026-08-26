@@ -1,0 +1,487 @@
+{
+  "target": "complex-design-doc.docx",
+  "profile": "readable",
+  "items": [
+    {
+      "id": "D01-1",
+      "desc": "見出し1: 第1章タイトルがH1として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "# 第1章　概要"
+    },
+    {
+      "id": "D01-2",
+      "desc": "見出し2: 1.1節見出しがH2として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "## 1.1 文書の目的と設計前提"
+    },
+    {
+      "id": "D01-3",
+      "desc": "見出し3: 2.3.1がH3として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "### 2.3.1 不変条件"
+    },
+    {
+      "id": "D01-4",
+      "desc": "見出し4: 6.1.1.1がH4として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "#### 6.1.1.1 Idempotency-Key の扱い"
+    },
+    {
+      "id": "D02-1",
+      "desc": "Heading7段落のテキスト自体は失われない",
+      "severity": "guard",
+      "type": "contains",
+      "value": "付録A.1　図形凡例の補足"
+    },
+    {
+      "id": "D02-2",
+      "desc": "Heading7が見出し記法(#)として復元される",
+      "severity": "guard",
+      "type": "regex",
+      "value": "^#{1,6}\\s+付録A\\.1　図形凡例の補足"
+    },
+    {
+      "id": "D03-1",
+      "desc": "TOCフィールド命令コード(' TOC \\o ')が本文に漏れない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "TOC \\o"
+    },
+    {
+      "id": "D03-2",
+      "desc": "TOCキャッシュ済みエントリのタブが生のHTML実体(&#9;)に化けない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "&#9;"
+    },
+    {
+      "id": "D04-1",
+      "desc": "ヘッダー文書名テキストが失われない",
+      "severity": "guard",
+      "type": "contains",
+      "value": "経費精算システム 基本・詳細設計書"
+    },
+    {
+      "id": "D04-2",
+      "desc": "フッターPAGEフィールドのプレフィクステキストが失われない",
+      "severity": "guard",
+      "type": "contains",
+      "value": "ページ 1"
+    },
+    {
+      "id": "D04-3",
+      "desc": "ヘッダーテキストが本文に重複混入しない(1回のみ)",
+      "severity": "guard",
+      "type": "count",
+      "value": "経費精算システム 基本・詳細設計書",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "id": "D05-1",
+      "desc": "横向きセクションの別ヘッダーテキストが失われない",
+      "severity": "guard",
+      "type": "contains",
+      "value": "経費精算システム 基本・詳細設計書（8.1 非機能要求一覧・横向き）"
+    },
+    {
+      "id": "D05-2",
+      "desc": "セクションの向き(landscape)が機械可読な形で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "<!-- section:landscape -->"
+    },
+    {
+      "id": "D06-1",
+      "desc": "外部I/F一覧の表ヘッダー行が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| I/F ID | 送信元 | 送信先 | 方式 | Timeout | Retry | 失敗時の扱い |"
+    },
+    {
+      "id": "D06-2",
+      "desc": "IF-01行が完全な形で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| IF-01 | Browser | Web UI | HTTPS/TLS1.2+ | 30秒 | なし | 画面に再操作案内 |"
+    },
+    {
+      "id": "D07-1",
+      "desc": "vMerge開始セル(PAID行)の終端列が単一の○で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| PAID | 支払済 | ○ | 参照 |"
+    },
+    {
+      "id": "D07-2",
+      "desc": "vMerge継続セル(CANCELLED行)が終端値○を引き継ぐ",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| CANCELLED | 取消 | ○ | 参照 |"
+    },
+    {
+      "id": "D07-3",
+      "desc": "gridSpan結合行が空セル3つに分裂したテーブル行として出力されない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "|  |  |  |"
+    },
+    {
+      "id": "D08-1",
+      "desc": "ネスト表のラベル値(税込金額)がセル内容として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "税込金額"
+    },
+    {
+      "id": "D08-2",
+      "desc": "ネスト表の値(11,637円)がセル内容として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "11,637円"
+    },
+    {
+      "id": "D08-3",
+      "desc": "ネスト表が独立したMarkdown表として復元される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| 税込金額 | 12,800円 |"
+    },
+    {
+      "id": "D09-1",
+      "desc": "3階層ネスト箇条書き(PAID配下)のレベルがインデントで保持される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "- 終端状態\n  - PAID\n    - 他状態への遷移不可"
+    },
+    {
+      "id": "D09-2",
+      "desc": "3階層ネスト箇条書き(CANCELLED配下)のレベルがインデントで保持される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "  - CANCELLED\n    - 再利用不可（DRAFTからの取消のみが遷移元）"
+    },
+    {
+      "id": "D10-1",
+      "desc": "番号付きリストの項目テキスト自体は失われない(マーカーは問わない)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "領収書・明細を入力する（BF-01）。"
+    },
+    {
+      "id": "D10-2",
+      "desc": "番号付きリストが実際の番号(1.)として復元される",
+      "severity": "guard",
+      "type": "regex",
+      "value": "^1\\.\\s+領収書・明細を入力する（BF-01）。"
+    },
+    {
+      "id": "D11-1",
+      "desc": "Source CodeスタイルのHTTP/JSONブロックがコードフェンスで残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "```\nHTTP/1.1 400 Bad Request"
+    },
+    {
+      "id": "D11-2",
+      "desc": "インラインcode run(outbox_event.status)がバッククォートで残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "`outbox_event.status`"
+    },
+    {
+      "id": "D11-3",
+      "desc": "コードブロック内の改行が実改行として復元される(現状は<br>に化ける)",
+      "severity": "guard",
+      "type": "regex",
+      "value": "\\{\\n\\s*\\\"type\\\""
+    },
+    {
+      "id": "D12-1",
+      "desc": "外部ハイパーリンクのURLが [text](url) で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "[経費精算API仕様書](https://example.invalid/spec/expense-api)"
+    },
+    {
+      "id": "D12-2",
+      "desc": "文書内ブックマーク相互参照のテキストは外部リンクと違って重複出力されない",
+      "severity": "guard",
+      "type": "unique",
+      "value": "未決事項ISSUE-03"
+    },
+    {
+      "id": "D13-1",
+      "desc": "インライン画像(IMG-01)がMarkdown画像参照で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "![Picture 1](complex-design-doc.assets/img-0001.png)"
+    },
+    {
+      "id": "D13-2",
+      "desc": "浮動配置(anchor)画像(IMG-02)もMarkdown画像参照として抽出される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "![Picture 2](complex-design-doc.assets/img-0002.png)"
+    },
+    {
+      "id": "D13-3",
+      "desc": "インライン画像のキャプション段落が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "図 5-1　経費申請入力画面（イメージ、文字なしPNG）"
+    },
+    {
+      "id": "D13-4",
+      "desc": "anchor画像のOCR抽出結果が画像/キャプションの近傍に出力される(文末転記されない)。OCR付き第2エクスポートで評価",
+      "severity": "guard",
+      "ocr": true,
+      "type": "regex",
+      "value": "!\\[Picture 2\\]\\([^)]*\\)\n\n(?:[^\n]{0,160}\n\n)?<details class=\"ocr-extraction\">"
+    },
+    {
+      "id": "D14-1",
+      "desc": "テキストボックス(コールアウト)の本文テキストは失われない",
+      "severity": "guard",
+      "type": "contains",
+      "value": "注記: 本書はDRMD DOCX変換検証用のフィクスチャであり、Word設計書の一般的な要素を意図的に組み合わせている。"
+    },
+    {
+      "id": "D14-2",
+      "desc": "テキストボックス本文が二重出力されない(1回のみ)",
+      "severity": "guard",
+      "type": "count",
+      "value": "注記: 本書はDRMD DOCX変換検証用のフィクスチャであり",
+      "min": 0,
+      "max": 1
+    },
+    {
+      "id": "D15-1",
+      "desc": "太字runが**で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "**太字**"
+    },
+    {
+      "id": "D15-2",
+      "desc": "斜体runが_で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "_斜体_"
+    },
+    {
+      "id": "D15-3",
+      "desc": "下線runが<u>で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "<u>下線</u>"
+    },
+    {
+      "id": "D15-4",
+      "desc": "取消線runが~~で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "~~取消線~~"
+    },
+    {
+      "id": "D15-5",
+      "desc": "文字色runが色情報付きで復元される",
+      "severity": "guard",
+      "type": "regex",
+      "value": "(?i)color:\\s*#?B42318[^>]*>強調色"
+    },
+    {
+      "id": "D15-6",
+      "desc": "ハイライトrunが<mark>等で復元される",
+      "severity": "guard",
+      "type": "contains",
+      "value": "<mark>ハイライト</mark>"
+    },
+    {
+      "id": "D16-1",
+      "desc": "脚注本文のテキストは失われない(現状は無番号で本文に混入)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "実在のシステム・組織・金額を示すものではなく、RTMD変換検証のために作成した架空の設計内容である。"
+    },
+    {
+      "id": "D16-2",
+      "desc": "文末脚注(endnote)の本文が出力に含まれる(現状は完全消失)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "参照URLはいずれも2026-08-23時点の調査結果であり、実アクセス確認は行っていない（検証用ダミー記載を含む）。"
+    },
+    {
+      "id": "D17-1",
+      "desc": "未承認の削除(w:del)テキストは正しく除外される",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "承認者は課長のみとする方針であったが"
+    },
+    {
+      "id": "D17-2",
+      "desc": "未承認の挿入(w:ins)テキストは失われない(現状は無区別に本文混入)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "金額に応じて課長または部長が承認する方式（BR-01）に見直した。"
+    },
+    {
+      "id": "D17-3",
+      "desc": "コメント本文が出力に含まれる(現状は完全消失)",
+      "severity": "guard",
+      "type": "contains",
+      "value": "経理主管との調整完了予定日を明記してください。"
+    },
+    {
+      "id": "D18-1",
+      "desc": "明示的な改ページが区切り(---)として残り、孤立した<br>行を残さない",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "\n<br>\n"
+    },
+    {
+      "id": "D18-2",
+      "desc": "改ページが行区切り(<br>)ではなく章区切りとして復元される",
+      "severity": "guard",
+      "type": "regex",
+      "value": "^(---|\\*\\*\\*)\\s*$"
+    },
+    {
+      "id": "Q01-1",
+      "desc": "Q1: 文書番号(EXPS-DES-001)が一意に残る",
+      "severity": "guard",
+      "type": "unique",
+      "value": "EXPS-DES-001"
+    },
+    {
+      "id": "Q01-2",
+      "desc": "Q1: 版(1.2)が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| 版 | 1.2 |"
+    },
+    {
+      "id": "Q01-3",
+      "desc": "Q1: 状態(レビュー中)が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| 状態 | レビュー中（検証用） |"
+    },
+    {
+      "id": "Q02-1",
+      "desc": "Q2: IF-05の送信元/送信先/Timeout/Retry/失敗時処理が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| IF-05 | Outbox Worker | Event Bus | AMQP | 5秒 | 最大5回 | DLQ、OPS-ALM-02発報 |"
+    },
+    {
+      "id": "Q03-1",
+      "desc": "Q3: TR-09の遷移元/イベント/ガード/遷移先/副作用が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+    },
+    {
+      "id": "Q04-1",
+      "desc": "Q4: TX-01の書き込み対象(同一トランザクション)が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "TX-01 は expense_claim テーブルへの INSERT と outbox_event テーブルへの INSERT を同一トランザクションで確定する。"
+    },
+    {
+      "id": "Q04-2",
+      "desc": "Q4: HTTP応答後のイベント配送が非同期である旨が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "HTTP 応答後のイベント配送は非同期であり"
+    },
+    {
+      "id": "Q05-1",
+      "desc": "Q5: BR-01の金額閾値と承認経路が表として残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| BR-01 | 10万円以下は課長、超過は部長承認 | 業務主管 | approval_task.route_code |"
+    },
+    {
+      "id": "Q05-2",
+      "desc": "Q5: BR-01の金額閾値が地の文でも残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "100,000円以下は課長承認、100,000円超は部長承認とする。"
+    },
+    {
+      "id": "Q06-1",
+      "desc": "Q6: F-06の必須条件・最大サイズ・エラーコードが一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| F-06 | 領収書 | file | 条件付 | 10,000円以上は必須、最大10MB | EXP-E006 |"
+    },
+    {
+      "id": "Q06-2",
+      "desc": "Q6: EXP-E006のメッセージ・表示位置が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| EXP-E006 | 10,000円以上の申請には領収書が必要です。 | 領収書直下 |"
+    },
+    {
+      "id": "Q07-1",
+      "desc": "Q7: API-01のMethod/Path/応答が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| API-01 | POST | /v1/expense-claims | 申請を提出 | 201 / 400 / 401 / 409 |"
+    },
+    {
+      "id": "Q07-2",
+      "desc": "Q7: Idempotency-Keyの24時間一意制約が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Idempotency-Key は同一利用者について24時間一意として扱う。"
+    },
+    {
+      "id": "Q08-1",
+      "desc": "Q8: TC-009の入力/経路/HTTP/最終状態/関連設計が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| TC-009 | 会計I/Fが5回連続失敗 | DLQ→ERROR→手動再送 | 200 | ERROR | TR-09/10, BR-03, OPS-ALM-02 |"
+    },
+    {
+      "id": "Q09-1",
+      "desc": "Q9: NFR-AVL-02のRTO/RPO/測定方法/実現手段/合意状態が一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| NFR-AVL-02 | 回復性 | RTO 4時間／RPO 15分 | 年1回の復旧訓練で実測 | 日次バックアップ＋WAL 15分転送 | 要確認 |"
+    },
+    {
+      "id": "Q10-1",
+      "desc": "Q10: ISSUE-03の論点/作業/Owner/期限/Statusが一行で残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "| ISSUE-03 | 会計停止時間帯 | IF-06再送窓を会計主管と調整 | 経理担当 | 2026-08-27 | 対応中 |"
+    },
+    {
+      "id": "Q11-1",
+      "desc": "Q11: outbox_event.statusの候補値が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "NEW / SENDING / SENT / FAILED"
+    },
+    {
+      "id": "Q11-2",
+      "desc": "Q11: retry_countの上限(5)が残る",
+      "severity": "guard",
+      "type": "contains",
+      "value": "retry\\_count の上限は5である。"
+    },
+    {
+      "id": "Q12-1",
+      "desc": "Q12: 画像内限定文字列は本文テキストに書かれていない(fixtureの禁止事項)",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "OCR-JP-20260823-017"
+    }
+  ]
+}

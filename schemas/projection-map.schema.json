@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rtmd.local/schemas/projection-map.schema.json",
-  "title": "RTMD Projection Contribution 1.0",
+  "$id": "https://docredock.local/schemas/projection-map.schema.json",
+  "title": "DRMD Projection Contribution 1.0",
   "type": "object",
   "required": ["projection_id", "projection_block_id", "markdown_range", "node_id", "role", "evidence"],
   "properties": {

@@ -81,7 +81,7 @@ overview.getRange("K1:K22").format.columnWidthPx = 90;
 overview.getRange("L1:L22").format.columnWidthPx = 76;
 overview.getRange("M1:N22").format.columnWidthPx = 24;
 overview.freezePanes.freezeRows(4);
-title(overview, "A1:N2", "受注管理システム　基本設計書", "Excel方眼紙・シーケンス・業務フロー・貼付画面・OCRを含むRTMD変換確認用サンプル");
+title(overview, "A1:N2", "受注管理システム　基本設計書", "Excel方眼紙・シーケンス・業務フロー・貼付画面・OCRを含むDRMD変換確認用サンプル");
 overview.getRange("A5:N5").values = [["文書ID", "DOC-ORD-BD-001", null, null, "版数", "1.2", null, "作成日", new Date("2026-08-22T00:00:00+09:00"), null, "作成者", "開発1課", null, null]];
 overview.getRange("A5:N5").format = { fill: gray, font: { name: "Yu Gothic", size: 9, bold: true, color: navy }, borders: { preset: "all", style: "thin", color: "#CBD5E1" } };
 overview.getRange("I5").format.numberFormat = "yyyy-mm-dd";
@@ -117,7 +117,7 @@ overview.getRange("B12:C12").format = { fill: paleGreen, font: { name: "Yu Gothi
 overview.getRange("E12").format = { fill: paleGreen, font: { name: "Yu Gothic", size: 10, color: "#008000" }, numberFormat: "#,##0", horizontalAlignment: "right" };
 overview.getRange("A12:G12").format.borders = { preset: "doubleBottom", style: "double", color: navy };
 
-mergeWrite(overview, "I8:N8", "RTMD確認ポイント", { fill: paleYellow, font: { name: "Yu Gothic", size: 11, bold: true, color: "#7A5200" } });
+mergeWrite(overview, "I8:N8", "DRMD確認ポイント", { fill: paleYellow, font: { name: "Yu Gothic", size: 11, bold: true, color: "#7A5200" } });
 overview.getRange("I9:J14").values = [
   ["数式セル数", null],
   ["総予定件数", null],
@@ -137,7 +137,7 @@ overview.getRange("I9:J14").format.fill = "#FFF9E6";
 overview.getRange("K9:K14").format = { fill: paleGreen, font: { name: "Yu Gothic", size: 10, color: "#008000" }, horizontalAlignment: "right" };
 overview.getRange("K12").format.numberFormat = "0.0%";
 overview.getRange("K13").format.numberFormat = "#,##0";
-mergeWrite(overview, "A16:N18", "凡例：青字＝入力値／緑字＝数式。RTMDのMarkdownでは数式セルを `=式` → 計算結果 の形式で投影し、計算結果側は参照専用です。", {
+mergeWrite(overview, "A16:N18", "凡例：青字＝入力値／緑字＝数式。DRMDのMarkdownでは数式セルを `=式` → 計算結果 の形式で投影し、計算結果側は参照専用です。", {
   fill: "#F8FAFC",
   font: { name: "Yu Gothic", size: 10, color: "#475569" },
   borders: { preset: "outside", style: "thin", color: "#CBD5E1" },
@@ -279,7 +279,7 @@ ocrExpected.getRange("F6").format = { fill: paleGreen, font: { name: "Yu Gothic"
 // 5. 貼付スクリーンショットを含む画面設計
 baseSheet(screen, "A1:Z42", 31, 20);
 screen.freezePanes.freezeRows(5);
-title(screen, "A1:Z2", "画面基本設計　注文詳細（ORD-DTL-01）", "Excelセル方眼紙の上に画面キャプチャを貼り付けた実務風レイアウト。貼付画像はRTMDのアセット抽出・OCR対象");
+title(screen, "A1:Z2", "画面基本設計　注文詳細（ORD-DTL-01）", "Excelセル方眼紙の上に画面キャプチャを貼り付けた実務風レイアウト。貼付画像はDRMDのアセット抽出・OCR対象");
 screen.getRange("A4:Z4").values = [["画面ID", "ORD-DTL-01", null, null, "機能名", "注文詳細表示・確定", null, null, null, "権限", "営業担当", null, null, "更新方式", "同期", null, "備考", "在庫再検証あり", null, null, null, null, null, null, null, null]];
 screen.getRange("A4:Z4").format = { fill: gray, font: { name: "Yu Gothic", size: 8, bold: true, color: navy }, borders: { preset: "all", style: "thin", color: "#CBD5E1" } };
 mergeWrite(screen, "A5:Z5", "貼付画面（OCR対象）", { fill: paleBlue, font: { name: "Yu Gothic", size: 10, bold: true, color: navy }, horizontalAlignment: "left" });

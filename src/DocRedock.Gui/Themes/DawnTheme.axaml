@@ -1,0 +1,661 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <!-- Layout and type tokens are intentionally theme-independent. Palette
+       brushes live in App.axaml ThemeDictionaries so Fluent templates and
+       custom controls switch together with the OS theme. -->
+  <Styles.Resources>
+    <CornerRadius x:Key="DawnControlCornerRadius">8</CornerRadius>
+    <CornerRadius x:Key="DawnCardCornerRadius">12</CornerRadius>
+    <x:Double x:Key="FontSizeCaption">12</x:Double>
+    <x:Double x:Key="FontSizeLabel">13</x:Double>
+    <x:Double x:Key="FontSizeBody">14</x:Double>
+    <x:Double x:Key="FontSizeTitle">16</x:Double>
+    <x:Double x:Key="FontSizeHeading">20</x:Double>
+    <x:Double x:Key="FontSizeDisplay">24</x:Double>
+    <x:Double x:Key="Space1">4</x:Double>
+    <x:Double x:Key="Space2">8</x:Double>
+    <x:Double x:Key="Space3">12</x:Double>
+    <x:Double x:Key="Space4">16</x:Double>
+    <x:Double x:Key="Space6">24</x:Double>
+    <x:Double x:Key="Space8">32</x:Double>
+  </Styles.Resources>
+
+  <!-- Typography and common surfaces. -->
+  <Style Selector="Window">
+    <Setter Property="Background" Value="{DynamicResource BrandMistBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontFamily" Value="$Default" />
+  </Style>
+
+  <Style Selector="TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+  </Style>
+
+  <Style Selector="TextBlock.title">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeDisplay}" />
+    <Setter Property="FontWeight" Value="Bold" />
+    <Setter Property="Margin" Value="0,0,0,8" />
+  </Style>
+
+  <Style Selector="TextBlock.heading">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeHeading}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Margin" Value="0,0,0,4" />
+  </Style>
+
+  <Style Selector="TextBlock.subtitle">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.primary">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.fidelity">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.status">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.status-success">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.status-info">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.subtitle">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeBody}" />
+  </Style>
+
+  <Style Selector="TextBlock.muted">
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeLabel}" />
+  </Style>
+
+  <Style Selector="TextBlock.caption">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+  </Style>
+
+  <Style Selector="TextBlock.overline">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+  </Style>
+
+  <Style Selector="TextBlock.overline">
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.on-dark">
+    <Setter Property="Foreground" Value="{DynamicResource SurfaceAltBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.on-accent">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.error">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.status-warning">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.status-error">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- Existing visual contracts. -->
+  <Style Selector="Border.brand-mark">
+    <Setter Property="Background" Value="{DynamicResource BrandBlackBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="Border.platform-badge">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="Border.local-badge">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="Border.primary">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.secondary">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+  </Style>
+
+  <Style Selector="Border.accent-line">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.file-selection">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="ContentControl.card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.panel">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.section">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="16" />
+  </Style>
+
+  <Style Selector="Border.result-panel">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="Border.result-panel.error">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-warning">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.notice.warning">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-stripe.warning">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.result-symbol.error">
+    <Setter Property="Background" Value="{DynamicResource BrandOrangeBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-warning-icon">
+    <Setter Property="Background" Value="{DynamicResource BrandOrangeBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <!-- Fluent state resources in App.axaml govern pointer/pressed/disabled
+       rendering. These static rules define the non-state shape and semantics. -->
+  <Style Selector="Button">
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="Padding" Value="14,9" />
+    <Setter Property="MinHeight" Value="38" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeLabel}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="Button.primary">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Button.accent">
+    <Setter Property="Background" Value="{DynamicResource BrandOrangeBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlackBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Button.secondary">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+  </Style>
+
+  <Style Selector="Button.ghost">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+  </Style>
+
+  <Style Selector="Button.flat">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Padding" Value="8" />
+    <Setter Property="MinHeight" Value="32" />
+  </Style>
+
+  <Style Selector="Button.icon-button">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="Padding" Value="8" />
+    <Setter Property="MinHeight" Value="32" />
+  </Style>
+
+  <Style Selector="Button.icon-button">
+    <Setter Property="Width" Value="32" />
+    <Setter Property="Height" Value="32" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <Style Selector="Button.compact">
+    <Setter Property="MinHeight" Value="32" />
+    <Setter Property="Padding" Value="10,6" />
+  </Style>
+
+  <Style Selector="Button.primary-action">
+    <Setter Property="MinHeight" Value="42" />
+    <Setter Property="Padding" Value="18,10" />
+  </Style>
+
+  <Style Selector="Button.secondary:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Button.flat:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Button.icon-button:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <!-- Text input and selection controls. -->
+  <Style Selector="TextBox">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="MinHeight" Value="38" />
+  </Style>
+
+  <Style Selector="ComboBox">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="MinHeight" Value="38" />
+  </Style>
+
+  <Style Selector="ListBox">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="MinHeight" Value="38" />
+  </Style>
+
+  <Style Selector="TextBox.diagnostics">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+  </Style>
+
+  <Style Selector="ListBoxItem">
+    <Setter Property="Padding" Value="12,8" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+  </Style>
+
+  <Style Selector="ListBoxItem:pointerover">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+  </Style>
+
+  <Style Selector="ListBoxItem:selected">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+  </Style>
+
+  <Style Selector="CheckBox">
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="Padding" Value="8,5" />
+    <Setter Property="MinHeight" Value="32" />
+  </Style>
+
+  <Style Selector="ProgressBar">
+    <Setter Property="Background" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="MinHeight" Value="6" />
+  </Style>
+
+  <!-- Drag-and-drop: a quiet white surface, blue affordance, and lavender
+       tint only while the user is actively dragging a file. -->
+  <Style Selector="Border.drop-zone">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="28" />
+    <Setter Property="MinHeight" Value="124" />
+  </Style>
+
+  <Style Selector="Button.drop-zone">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="28" />
+    <Setter Property="MinHeight" Value="124" />
+  </Style>
+
+  <Style Selector="Button.drop-zone:pointerover /template/ ContentPresenter#PART_ContentPresenter">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.drop-zone.drag-over">
+    <Setter Property="Background" Value="{DynamicResource DragOverBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Button.drop-zone.drag-over">
+    <Setter Property="Background" Value="{DynamicResource DragOverBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.drop-zone-title">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeTitle}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <!-- Contracts for the mode-based workspace introduced by the next layout
+       pass. They are intentionally reusable with Border/Button/RadioButton. -->
+  <Style Selector="Border.titlebar">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="0,0,0,1" />
+  </Style>
+
+  <Style Selector="Border.segment-track">
+    <Setter Property="Background" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="CornerRadius" Value="9" />
+    <Setter Property="Padding" Value="3" />
+  </Style>
+
+  <Style Selector="Border.local-pill">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Padding" Value="9,5" />
+  </Style>
+
+  <Style Selector="Border.local-pill PathIcon">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.drop-icon">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+  </Style>
+
+  <Style Selector="Border.drop-icon PathIcon">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.hairline">
+    <Setter Property="Background" Value="{DynamicResource HairlineBrush}" />
+  </Style>
+
+  <Style Selector="Border.workspace-card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="14" />
+  </Style>
+
+  <Style Selector="Border.file-list">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="0" />
+  </Style>
+
+  <Style Selector="Border.file-type">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.file-type TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource SurfaceAltBrush}" />
+  </Style>
+
+  <Style Selector="Border.file-type.secondary-file">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+
+  <Style Selector="Border.file-type.secondary-file TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.radio-card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="Padding" Value="12" />
+  </Style>
+
+  <Style Selector="Border.radio-card.selected">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+  </Style>
+
+  <Style Selector="RadioButton.radio-card">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="Padding" Value="13,12" />
+    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  </Style>
+
+  <Style Selector="RadioButton.radio-card:checked">
+    <Setter Property="Background" Value="{DynamicResource SelectionBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+    <Setter Property="BorderThickness" Value="2" />
+  </Style>
+
+  <Style Selector="ToggleButton.segment">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="7,14" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="RadioButton.segment">
+    <Setter Property="Background" Value="Transparent" />
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="14,7" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="HorizontalContentAlignment" Value="Center" />
+    <Setter Property="VerticalContentAlignment" Value="Center" />
+    <Setter Property="Template">
+      <ControlTemplate>
+        <ContentPresenter x:Name="PART_ContentPresenter"
+                          Content="{TemplateBinding Content}"
+                          ContentTemplate="{TemplateBinding ContentTemplate}"
+                          Background="{TemplateBinding Background}"
+                          Foreground="{TemplateBinding Foreground}"
+                          BorderBrush="{TemplateBinding BorderBrush}"
+                          BorderThickness="{TemplateBinding BorderThickness}"
+                          CornerRadius="{TemplateBinding CornerRadius}"
+                          Padding="{TemplateBinding Padding}"
+                          HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                          VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}" />
+      </ControlTemplate>
+    </Setter>
+  </Style>
+
+  <Style Selector="ToggleButton.segment:checked">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="RadioButton.segment:checked">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.actionbar">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1,0,0,0" />
+    <Setter Property="Padding" Value="10,0" />
+    <Setter Property="MinHeight" Value="64" />
+  </Style>
+
+  <Style Selector="Border.notice">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="3,1,1,1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnControlCornerRadius}" />
+    <Setter Property="Padding" Value="12" />
+  </Style>
+
+  <Style Selector="Border.result-panel">
+    <Setter Property="CornerRadius" Value="0" />
+    <Setter Property="Padding" Value="10,0" />
+    <Setter Property="MinHeight" Value="72" />
+    <Setter Property="BorderThickness" Value="0,1,0,0" />
+  </Style>
+
+  <Style Selector="Border.compact-notice">
+    <Setter Property="Padding" Value="12" />
+  </Style>
+
+  <Style Selector="Border.status-stripe">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.result-panel.error Border.status-stripe">
+    <Setter Property="Background" Value="{DynamicResource BrandOrangeBrush}" />
+  </Style>
+
+  <Style Selector="Border.result-symbol">
+    <Setter Property="Background" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.notice.info">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.notice.success">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.notice.busy">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-stripe.info">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-stripe.success">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.status-stripe.busy">
+    <Setter Property="BorderBrush" Value="{DynamicResource BrandBlueBrush}" />
+  </Style>
+
+  <Style Selector="Border.chip">
+    <Setter Property="Background" Value="{DynamicResource SurfaceAltBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="999" />
+    <Setter Property="Padding" Value="8,2" />
+    <Setter Property="Margin" Value="0,0,6,4" />
+  </Style>
+
+  <Style Selector="Border.chip TextBlock">
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+  </Style>
+
+  <Style Selector="TextBlock.section-label">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeLabel}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{DynamicResource MutedInkBrush}" />
+  </Style>
+
+  <Style Selector="TextBlock.path">
+    <Setter Property="FontFamily" Value="monospace" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+  </Style>
+
+  <Style Selector="TextBlock.shortcut">
+    <Setter Property="FontFamily" Value="monospace" />
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+  </Style>
+
+  <Style Selector="Expander.details">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource HairlineBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="{StaticResource DawnCardCornerRadius}" />
+    <Setter Property="Padding" Value="8,4" />
+  </Style>
+
+  <Style Selector="Expander.details /template/ ToggleButton#ExpanderHeader">
+    <Setter Property="Background" Value="{DynamicResource SurfaceBrush}" />
+    <Setter Property="Foreground" Value="{DynamicResource InkBrush}" />
+    <Setter Property="BorderBrush" Value="Transparent" />
+  </Style>
+</Styles>

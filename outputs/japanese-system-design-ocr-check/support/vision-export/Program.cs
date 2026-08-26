@@ -3,16 +3,16 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Rtmd.Api;
-using Rtmd.Core.Documents;
-using Rtmd.Core.Reporting;
-using Rtmd.Markdown;
-using Rtmd.Providers.Abstractions.Providers;
+using DocRedock.Api;
+using DocRedock.Core.Documents;
+using DocRedock.Core.Reporting;
+using DocRedock.Markdown;
+using DocRedock.Providers.Abstractions.Providers;
 
 var root = "/Users/takayuki/git/RTMD/outputs/japanese-system-design-ocr-check";
 var source = Path.Combine(root, "japanese-system-design-ocr-sample.xlsx");
 var markdown = Path.Combine(root, "japanese-system-design-ocr-sample.md");
-var workspace = Path.Combine(root, "japanese-system-design-ocr-sample.rtmd");
+var workspace = Path.Combine(root, "japanese-system-design-ocr-sample.drmd");
 var report = Path.Combine(root, "ocr-accuracy-report.md");
 var visionExecutable = Path.Combine(root, "support", "vision-ocr");
 
@@ -74,7 +74,7 @@ var sequenceDiagramCount = mermaidDiagrams.Count(node => node.Extensions!["diagr
 var flowchartCount = mermaidDiagrams.Count(node => node.Extensions!["diagram_type"].GetString() == "flowchart");
 
 var reportText = new StringBuilder()
-    .AppendLine("# OCR精度・RTMD変換確認レポート")
+    .AppendLine("# OCR精度・DRMD変換確認レポート")
     .AppendLine()
     .AppendLine("## 実行条件")
     .AppendLine()
@@ -90,7 +90,7 @@ var reportText = new StringBuilder()
     .AppendLine($"- 文字精度: {Math.Max(0, 1 - cer):P2}")
     .AppendLine($"- OCR平均信頼度: {averageConfidence:P1}")
     .AppendLine($"- OCR検出行数: {engine.LastRegions.Count}")
-    .AppendLine($"- RTMDワークスペース整合性: {(verification.IsValid ? "OK" : "NG")}")
+    .AppendLine($"- DRMDワークスペース整合性: {(verification.IsValid ? "OK" : "NG")}")
     .AppendLine($"- Markdown内の数式投影: {formulaProjectionCount}件（うち計算結果併記 {formulaResultCount}件）")
     .AppendLine($"- Mermaid図投影: {mermaidDiagrams.Length}件（`sequenceDiagram` {sequenceDiagramCount}件、`flowchart TD` {flowchartCount}件）")
     .AppendLine()
@@ -199,7 +199,7 @@ sealed record VisionLine(string Text, double Confidence, double X, double Y, dou
 sealed class VisionOcrEngine(string executable) : IOcrEngine
 {
     public ProviderDescriptor Descriptor { get; } = new(
-        "rtmd.ocr.apple-vision.demo",
+        "docredock.ocr.apple-vision.demo",
         new Version(1, 0, 0),
         1,
         new HashSet<string>(StringComparer.Ordinal) { "ocr.text", "ocr.jpn", "ocr.eng" },
@@ -212,7 +212,7 @@ sealed class VisionOcrEngine(string executable) : IOcrEngine
 
     public async ValueTask<OcrAttemptResult> RecognizeAsync(OcrInput input, OcrOptions options, CancellationToken cancellationToken)
     {
-        var temporary = Path.Combine(Path.GetTempPath(), $"rtmd-vision-{Guid.NewGuid():N}.png");
+        var temporary = Path.Combine(Path.GetTempPath(), $"docredock-vision-{Guid.NewGuid():N}.png");
         try
         {
             await using (var output = File.Create(temporary)) await input.Image.CopyToAsync(output, cancellationToken);

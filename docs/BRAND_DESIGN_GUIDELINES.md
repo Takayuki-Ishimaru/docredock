@@ -1,16 +1,16 @@
-# RoundHound ブランド／デザインガイドライン
+# DocRedock ブランド／デザインガイドライン
 
-Version: 1.0  
-Status: Active  
-Scope: RoundHound のアプリ UI、ドキュメント、Web、GitHub、配布物、宣伝素材
+Version: 1.0
+Status: Active
+Scope: DocRedock のアプリ UI、ドキュメント、Web、GitHub、配布物、宣伝素材
 
-この文書は RoundHound の名前、色、画像資産、UI の判断基準をまとめた実装向けのリファレンスです。色の出典はリポジトリ内の [`assets/brand/roundhound/source/BRAND_PALETTE_DAWN.md`](../assets/brand/roundhound/source/BRAND_PALETTE_DAWN.md) です。
+この文書は DocRedock の名前、色、画像資産、UI の判断基準をまとめた実装向けのリファレンスです。色の出典はリポジトリ内の [`assets/brand/docredock/source/BRAND_PALETTE_DAWN.md`](../assets/brand/docredock/source/BRAND_PALETTE_DAWN.md) です。
 
 ## 1. ブランドの核 / Brand
 
-正式表記は **RoundHound**（大文字の `R` と `H`）です。製品名を `Roundhound`、`ROUNDHOUND`、`Round Hound` と表記しないでください。
+正式表記は **DocRedock**（大文字の `D` と `R`）です。製品名を `Docredock`、`DOCREDOCK`、`Doc Redock` と表記しないでください。
 
-RoundHound は、周回する矢印と犬のシルエットを組み合わせた「見つける・追跡する・もう一度つなぐ」印象を持つ製品マークです。製品の個性はシンボルの形で表し、ブランドファミリーとしての一貫性は Dawn（夜明け）パレット、落ち着いたフラット表現、強い暗色構造で保ちます。
+DocRedock は、周回する矢印と犬のシルエットを組み合わせた「見つける・追跡する・もう一度つなぐ」印象を持つ製品マークです。製品の個性はシンボルの形で表し、ブランドファミリーとしての一貫性は Dawn（夜明け）パレット、落ち着いたフラット表現、強い暗色構造で保ちます。
 
 短い原則は **Same dawn, different silhouettes. / 同じ夜明け、異なるシルエット** です。
 
@@ -83,7 +83,7 @@ RoundHound は、周回する矢印と犬のシルエットを組み合わせた
 - 本文と背景のコントラストは WCAG 2.2 AA（通常文字 4.5:1、太字・大きな文字 3:1）を目標にする。ブランド色を優先して読みにくくしない。
 - Orange や Lavender を本文色に使う前に実測する。迷ったら Black または Blue の文字を使う。
 - キーボード操作では `focus-visible` を隠さず、操作対象には 44×44px 程度のタッチ領域を確保する。
-- 画像には用途に応じた代替テキストを付ける。装飾だけなら空の alt とし、意味を持つロゴは `RoundHound` と説明する。スクリーンリーダーで重複するロゴ名を読み上げない。
+- 画像には用途に応じた代替テキストを付ける。装飾だけなら空の alt とし、意味を持つロゴは `DocRedock` と説明する。スクリーンリーダーで重複するロゴ名を読み上げない。
 - アニメーションやグラデーションは控えめにし、`prefers-reduced-motion` を尊重する。
 
 ## 6. アイコンとロゴ / Icon usage
@@ -96,30 +96,30 @@ RoundHound は、周回する矢印と犬のシルエットを組み合わせた
 
 ## 7. 資産インベントリとパス規約 / Asset inventory & paths
 
-すべての配布元ファイルは `assets/brand/roundhound/` に保管します。元パックの分類を保ちつつ、Git では目的別の小文字ディレクトリに整理しています。
+すべての配布元ファイルは `assets/brand/docredock/` に保管します。元パックの分類を保ちつつ、Git では目的別の小文字ディレクトリに整理しています。
 
 | パス | 内容 | 主な用途 |
 | --- | --- | --- |
 | `source/` | マスター PNG 3点、`BRAND_PALETTE_DAWN.md` | 原本・色の参照 |
-| `app-icons/png/` | `RoundHound-appicon-*` 16–1024px | アプリ／デスクトップの各サイズ |
-| `app-icons/ico/` | `RoundHound-appicon.ico` | アプリ用 Windows ICO |
+| `app-icons/png/` | `DocRedock-appicon-*` 16–1024px | アプリ／デスクトップの各サイズ |
+| `app-icons/ico/` | `DocRedock-appicon.ico` | アプリ用 Windows ICO |
 | `logo/png/` | 透明ロゴ 32–2048px と master | 再利用可能なマーク |
 | `web/` | favicon、Apple touch、Android Chrome、PWA manifest、Windows XML | Web/PWA |
 | `banners/dark/`, `banners/light/` | 各 1200×400–2400×800 と master | ヒーロー・ヘッダー |
 | `social/dark/`, `social/light/` | GitHub、OG、X、LinkedIn 比率 | SNS・共有カード |
-| `windows/` | PNG 16–256px と `RoundHound.ico` | Windows 配布物 |
+| `windows/` | PNG 16–256px と `DocRedock.ico` | Windows 配布物 |
 | `meta/README.txt` | パック内容・用途の原文メタデータ | 由来の確認 |
 
-画像は元の PNG/ICO 形式とファイル名を維持します。新規派生物は用途とピクセル寸法を名前に含め、既存マスターを上書きしません。`.DS_Store` やビルド生成物は保管しません。アプリ実行時に必要なコピーは [`src/Rtmd.Gui/Assets/`](../src/Rtmd.Gui/Assets/) の `RoundHound-appicon-64x64.png` と `RoundHound.ico` に限ります。
+画像は元の PNG/ICO 形式とファイル名を維持します。新規派生物は用途とピクセル寸法を名前に含め、既存マスターを上書きしません。`.DS_Store` やビルド生成物は保管しません。アプリ実行時に必要なコピーは [`src/DocRedock.Gui/Assets/`](../src/DocRedock.Gui/Assets/) の `DocRedock-appicon-64x64.png` と `DocRedock.ico` に限ります。
 
 ## 8. Do / Don't
 
 ### Do
 
-- `RoundHound` の綴りと大文字を守る。
+- `DocRedock` の綴りと大文字を守る。
 - 構造に Black、技術的な情報に Blue、重要な操作に限定して Orange、補助面に Lavender、背景に Mist を使う。
 - ライト／ダークの既成バナーを背景に合わせて選び、スクリーンショット自体は過度に色付けしない。
-- 変更や追加の画像は目的、サイズ、背景（light/dark）、ライセンス／出典を確認して `assets/brand/roundhound/` に置く。
+- 変更や追加の画像は目的、サイズ、背景（light/dark）、ライセンス／出典を確認して `assets/brand/docredock/` に置く。
 
 ### Don't
 
@@ -130,4 +130,4 @@ RoundHound は、周回する矢印と犬のシルエットを組み合わせた
 
 ## 9. 変更管理
 
-色の変更は既存資産、UI、コントラスト、配布物への影響が大きいため、まず canonical palette とこの文書を同時に更新し、派生画像を再生成します。製品固有の追加色や新しいロゴ案は、RoundHound の Dawn ファミリーから外れる理由と適用範囲を記録してから採用してください。
+色の変更は既存資産、UI、コントラスト、配布物への影響が大きいため、まず canonical palette とこの文書を同時に更新し、派生画像を再生成します。製品固有の追加色や新しいロゴ案は、DocRedock の Dawn ファミリーから外れる理由と適用範囲を記録してから採用してください。

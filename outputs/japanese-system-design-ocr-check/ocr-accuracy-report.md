@@ -1,4 +1,4 @@
-# OCR精度・RTMD変換確認レポート
+# OCR精度・DRMD変換確認レポート
 
 ## 実行条件
 
@@ -14,7 +14,7 @@
 - 文字精度: 98.76%
 - OCR平均信頼度: 83.6%
 - OCR検出行数: 50
-- RTMDワークスペース整合性: OK
+- DRMDワークスペース整合性: OK
 - Markdown内の数式投影: 18件（うち計算結果併記 18件）
 - Mermaid図投影: 2件（`sequenceDiagram` 1件、`flowchart TD` 1件）
 - 未編集Markdownの差分: 0件

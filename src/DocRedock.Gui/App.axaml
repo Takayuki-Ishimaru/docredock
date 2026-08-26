@@ -1,0 +1,130 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="DocRedock.Gui.App"
+             RequestedThemeVariant="Default">
+  <Application.Styles>
+    <FluentTheme />
+    <StyleInclude Source="avares://DocRedock/Themes/DawnTheme.axaml" />
+  </Application.Styles>
+  <!--
+    Fluent templates resolve their state colors from resources rather than
+    from a control's Background setter. Keep these keys here, after
+    FluentTheme, so light and dark variants consistently reach the template.
+  -->
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="BrandOrangeBrush" Color="#FF6B1A" />
+          <SolidColorBrush x:Key="BrandLavenderBrush" Color="#C6A7E8" />
+          <SolidColorBrush x:Key="BrandBlueBrush" Color="#4057D6" />
+          <SolidColorBrush x:Key="BrandBlackBrush" Color="#191827" />
+          <SolidColorBrush x:Key="BrandMistBrush" Color="#F2EEF5" />
+          <SolidColorBrush x:Key="SurfaceBrush" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="SurfaceAltBrush" Color="#F7F5FA" />
+          <SolidColorBrush x:Key="HairlineBrush" Color="#191827" Opacity="0.10" />
+          <SolidColorBrush x:Key="InkBrush" Color="#191827" />
+          <SolidColorBrush x:Key="MutedInkBrush" Color="#55536B" />
+          <SolidColorBrush x:Key="DisabledBrush" Color="#E4DEEC" />
+          <SolidColorBrush x:Key="DisabledInkBrush" Color="#8C89A3" />
+          <SolidColorBrush x:Key="SelectionBrush" Color="#4057D6" Opacity="0.10" />
+          <SolidColorBrush x:Key="DragOverBrush" Color="#C6A7E8" Opacity="0.30" />
+
+          <SolidColorBrush x:Key="ButtonBackground" Color="#4057D6" />
+          <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#3448B8" />
+          <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#2A3A99" />
+          <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#E4DEEC" />
+          <SolidColorBrush x:Key="ButtonForeground" Color="#F2EEF5" />
+          <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#F2EEF5" />
+          <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#F2EEF5" />
+          <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#8C89A3" />
+          <SolidColorBrush x:Key="ButtonBorderBrush" Color="#4057D6" />
+          <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#3448B8" />
+          <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#2A3A99" />
+          <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="#E4DEEC" />
+
+          <SolidColorBrush x:Key="AccentButtonBackground" Color="#FF6B1A" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#E85F12" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#CC520D" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#E4DEEC" />
+          <SolidColorBrush x:Key="AccentButtonForeground" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#8C89A3" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#FF6B1A" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#E85F12" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#CC520D" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#E4DEEC" />
+
+          <SolidColorBrush x:Key="TextControlBackground" Color="#FFFFFF" />
+          <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="#F7F5FA" />
+          <SolidColorBrush x:Key="TextControlForeground" Color="#191827" />
+          <SolidColorBrush x:Key="TextControlForegroundDisabled" Color="#8C89A3" />
+          <SolidColorBrush x:Key="TextControlBorderBrush" Color="#E4E0EC" />
+          <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#CFC9DC" />
+          <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#4057D6" />
+          <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="#E4DEEC" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#4057D6" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#3448B8" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="#4057D6" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="#4057D6" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="BrandOrangeBrush" Color="#FF7A33" />
+          <SolidColorBrush x:Key="BrandLavenderBrush" Color="#C6A7E8" />
+          <SolidColorBrush x:Key="BrandBlueBrush" Color="#93A3FF" />
+          <SolidColorBrush x:Key="BrandBlackBrush" Color="#191827" />
+          <SolidColorBrush x:Key="BrandMistBrush" Color="#1F1D33" />
+          <SolidColorBrush x:Key="SurfaceBrush" Color="#24213A" />
+          <SolidColorBrush x:Key="SurfaceAltBrush" Color="#1C1A30" />
+          <SolidColorBrush x:Key="HairlineBrush" Color="#F2EEF5" Opacity="0.12" />
+          <SolidColorBrush x:Key="InkBrush" Color="#ECE8F3" />
+          <SolidColorBrush x:Key="MutedInkBrush" Color="#B5B1C9" />
+          <SolidColorBrush x:Key="DisabledBrush" Color="#302D47" />
+          <SolidColorBrush x:Key="DisabledInkBrush" Color="#85819E" />
+          <SolidColorBrush x:Key="SelectionBrush" Color="#93A3FF" Opacity="0.14" />
+          <SolidColorBrush x:Key="DragOverBrush" Color="#C6A7E8" Opacity="0.16" />
+
+          <SolidColorBrush x:Key="ButtonBackground" Color="#93A3FF" />
+          <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="#A9B6FF" />
+          <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="#7F90ED" />
+          <SolidColorBrush x:Key="ButtonBackgroundDisabled" Color="#302D47" />
+          <SolidColorBrush x:Key="ButtonForeground" Color="#191827" />
+          <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="#191827" />
+          <SolidColorBrush x:Key="ButtonForegroundPressed" Color="#191827" />
+          <SolidColorBrush x:Key="ButtonForegroundDisabled" Color="#85819E" />
+          <SolidColorBrush x:Key="ButtonBorderBrush" Color="#93A3FF" />
+          <SolidColorBrush x:Key="ButtonBorderBrushPointerOver" Color="#A9B6FF" />
+          <SolidColorBrush x:Key="ButtonBorderBrushPressed" Color="#7F90ED" />
+          <SolidColorBrush x:Key="ButtonBorderBrushDisabled" Color="#302D47" />
+
+          <SolidColorBrush x:Key="AccentButtonBackground" Color="#FF7A33" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#FF8D52" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#E86620" />
+          <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#302D47" />
+          <SolidColorBrush x:Key="AccentButtonForeground" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#191827" />
+          <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#85819E" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#FF7A33" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#FF8D52" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#E86620" />
+          <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#302D47" />
+
+          <SolidColorBrush x:Key="TextControlBackground" Color="#24213A" />
+          <SolidColorBrush x:Key="TextControlBackgroundDisabled" Color="#1C1A30" />
+          <SolidColorBrush x:Key="TextControlForeground" Color="#ECE8F3" />
+          <SolidColorBrush x:Key="TextControlForegroundDisabled" Color="#85819E" />
+          <SolidColorBrush x:Key="TextControlBorderBrush" Color="#434060" />
+          <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#5A5678" />
+          <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#93A3FF" />
+          <SolidColorBrush x:Key="TextControlBorderBrushDisabled" Color="#302D47" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#93A3FF" />
+          <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#A9B6FF" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundFillChecked" Color="#93A3FF" />
+          <SolidColorBrush x:Key="CheckBoxCheckBackgroundStrokeChecked" Color="#93A3FF" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>
