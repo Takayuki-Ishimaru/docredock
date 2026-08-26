@@ -317,7 +317,7 @@ jobs:
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
           $root = "artifacts/smoke"
-          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe"
+          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
         shell: bash
@@ -327,7 +327,7 @@ jobs:
           mkdir -p artifacts/smoke
           ditto -x -k "release/$name.zip" artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
         shell: bash
@@ -339,7 +339,7 @@ jobs:
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup
       - name: Upload packaged application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -391,7 +391,7 @@ jobs:
           - [x] Extracted CLI passed DOCX/XLSX/PPTX F0 SHA-256 equality
           - [x] Extracted CLI passed DOCX/XLSX/PPTX F1 edits
           - [x] Pack/unpack and tamper rejection passed
-          - [x] Extracted GUI startup passed on the target OS/CPU runner
+          - [x] Extracted GUI binary format and CPU architecture passed on every target runner; Linux GUI startup also passed under Xvfb
           - [x] Signing status is recorded inside every archive; unsigned beta packages remain allowed
           - [x] Artifact-linked CycloneDX SBOM, RID-specific runtime locks, hashes, RID, and commit provenance were generated
           - [ ] PDF conversion and all source-format restore workflows are approved (intentionally pending; do not use)
