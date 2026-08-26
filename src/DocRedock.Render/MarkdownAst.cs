@@ -5,7 +5,10 @@ namespace DocRedock.Render;
 public abstract record MarkdownBlock;
 public sealed record MarkdownHeading(int Level, string Text) : MarkdownBlock;
 public sealed record MarkdownParagraph(string Text) : MarkdownBlock;
-public sealed record MarkdownList(IReadOnlyList<string> Items) : MarkdownBlock;
+public sealed record MarkdownList(
+    IReadOnlyList<string> Items,
+    IReadOnlyList<int>? Levels = null,
+    IReadOnlyList<bool>? Ordered = null) : MarkdownBlock;
 public sealed record MarkdownCodeBlock(string Language, string Text) : MarkdownBlock;
 public sealed record MarkdownTable(IReadOnlyList<string> Headers, IReadOnlyList<IReadOnlyList<string>> Rows) : MarkdownBlock;
 public sealed record MarkdownDocument(IReadOnlyList<MarkdownBlock> Blocks);
@@ -14,7 +17,7 @@ internal sealed record MarkdownDiagram(string Source, string AltText, PngRasterI
 public static class MarkdownAstParser
 {
     private static readonly Regex Heading = new(@"^(?<marks>#{1,6})\s+(?<text>.*)$", RegexOptions.Compiled);
-    private static readonly Regex ListItem = new(@"^(?:[-*+]\s+|\d+[.)]\s+)(?<text>.*)$", RegexOptions.Compiled);
+    private static readonly Regex ListItem = new(@"^(?<indent>\s*)(?<marker>[-*+]|\d+[.)])\s+(?<text>.*)$", RegexOptions.Compiled);
 
     public static MarkdownDocument Parse(string markdown)
     {
@@ -38,8 +41,18 @@ public static class MarkdownAstParser
             if (ListItem.IsMatch(lines[i]))
             {
                 var items = new List<string>();
-                while (i < lines.Length && ListItem.IsMatch(lines[i])) { items.Add(ListItem.Match(lines[i]).Groups["text"].Value.Trim()); i++; }
-                blocks.Add(new MarkdownList(items));
+                var levels = new List<int>();
+                var ordered = new List<bool>();
+                while (i < lines.Length && ListItem.IsMatch(lines[i]))
+                {
+                    var match = ListItem.Match(lines[i]);
+                    items.Add(match.Groups["text"].Value.Trim());
+                    var indent = match.Groups["indent"].Value.Replace("\t", "  ", StringComparison.Ordinal).Length;
+                    levels.Add(indent / 2);
+                    ordered.Add(char.IsDigit(match.Groups["marker"].Value[0]));
+                    i++;
+                }
+                blocks.Add(new MarkdownList(items, levels, ordered));
                 continue;
             }
             if (IsTableHeader(lines, i))
@@ -53,7 +66,7 @@ public static class MarkdownAstParser
             }
             var paragraph = new List<string> { lines[i++] };
             while (i < lines.Length && !string.IsNullOrWhiteSpace(lines[i]) && !Heading.IsMatch(lines[i]) && !ListItem.IsMatch(lines[i]) && !lines[i].StartsWith("```", StringComparison.Ordinal)) paragraph.Add(lines[i++]);
-            blocks.Add(new MarkdownParagraph(string.Join(" ", paragraph).Trim()));
+            blocks.Add(new MarkdownParagraph(string.Join("\n", paragraph).Trim()));
         }
         return new MarkdownDocument(blocks);
     }

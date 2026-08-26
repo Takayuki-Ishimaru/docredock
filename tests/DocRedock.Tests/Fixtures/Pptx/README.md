@@ -90,10 +90,7 @@ before being committed, not just against the spec's a-priori gap
 descriptions; a couple of elements turned out to already convert better than
 the spec assumed, so they became guards instead of goals (see below).
 
-Result from the harness's own throwaway scorer (see task notes) against
-`dotnet run --project src/DocRedock.Cli -c Release -- export
-complex-design-doc.pptx --profile readable ...` on the machine this fixture
-was built on: **47/48 guards pass, 1/11 goals already passes**. Details:
+Run `tools/conversion-qa/run.py` against the current implementation for the authoritative score. Native charts are now extracted as readable summaries, so the original P06 "chart vanishes" expectation is historical rather than a current gap. Remaining observations below describe the fixture and unresolved areas:
 
 - The only failing guard is **QA12** (`OCR-JP-20260823-017` not_contains),
   and only because this machine has an OCR engine wired up and
@@ -112,13 +109,7 @@ was built on: **47/48 guards pass, 1/11 goals already passes**. Details:
   れる" assumption suggested: columns stay correctly aligned around the
   blank continuation cells (P09-1, guard). Only the finer "repeat the merged
   label on every row" enhancement is still a goal (P09-2).
-- The remaining 9 goals (P03, P05, P06 x2, P07-2, P08-3, P10-2, P14-3,
-  P15-2) fail exactly as the spec's gap descriptions predict: buAutoNum
-  degrades to `- `, the inherited placeholder's bullet stays unresolved,
-  both native charts vanish without even an empty placeholder, the
-  SmartArt-only text is dropped, connector/group relationships are not
-  reconstructed, notes flatten to an unformatted single paragraph, and
-  strikethrough/45° rotation leave no trace in the readable output.
+- The remaining historical gap areas include P03, P05, P07-2, P08-3, P10-2, P14-3, and P15-2: buAutoNum and inherited bullets can degrade, SmartArt-only text can be dropped, connector/group relationships are not fully reconstructed, notes flatten to a plain readable form, and strikethrough/45° rotation may leave no trace. P06 native charts are now covered by extraction regressions.
 
 Smoke test: `dotnet run --project src/DocRedock.Cli -c Release -- export
 complex-design-doc.pptx --profile readable --output <out>.md --force --quiet`

@@ -64,7 +64,8 @@ public sealed class MarkdownGraphEditor
             if (!SupportsMarkdownAddition(baseline.Format, addition.Kind))
                 diagnostics.Add(new Diagnostic("UnsupportedMarkdownAddition", $"DRMD Markdown cannot safely add kind '{addition.Kind}' to {baseline.Format.ToString().ToLowerInvariant()} with the built-in restore path.", DiagnosticSeverity.Error));
         }
-        var sheetGrids = ReadSheetGrids(baseline, parsed, diagnostics);
+        var contentPolicy = DocumentContentPolicyRules.Parse(parsed.ContentPolicy);
+        var sheetGrids = ReadSheetGrids(baseline, parsed, contentPolicy, diagnostics);
         if (diagnostics.Any(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error))
             return new GraphEditResult(parsed, baseline, new DocumentGraphDiffEngine().Compare(baseline, baseline), diagnostics);
 
@@ -73,8 +74,7 @@ public sealed class MarkdownGraphEditor
             .Select(block => block.NodeId!).ToHashSet(StringComparer.Ordinal);
         var sheetCoveredIds = sheetGrids.Values.SelectMany(grid => grid.CellNodeIds).ToHashSet(StringComparer.Ordinal);
         diagnostics.AddRange(DocRedockMarkdownParser.FindMissingNodes(parsed, baseline.Nodes
-            .Where(node => node.Layer is not (ContentLayer.Hidden or ContentLayer.Metadata) &&
-                node.Kind is not (NodeKind.Comment or NodeKind.Revision) && !sheetCoveredIds.Contains(node.Id))
+            .Where(node => DocumentContentPolicyRules.Includes(node, contentPolicy) && !sheetCoveredIds.Contains(node.Id))
             .Select(node => node.Id)).Select(ToCoreDiagnostic));
         var partitions = new List<DocumentPartition>(baseline.Partitions.Count);
         foreach (var partition in baseline.Partitions.OrderBy(partition => partition.Order))
@@ -486,6 +486,7 @@ public sealed class MarkdownGraphEditor
     private static IReadOnlyDictionary<string, SheetGrid> ReadSheetGrids(
         DocumentGraph baseline,
         TypedMarkdownDocument parsed,
+        DocumentContentPolicy contentPolicy,
         ICollection<Diagnostic> diagnostics)
     {
         var result = new Dictionary<string, SheetGrid>(StringComparer.Ordinal);
@@ -500,7 +501,8 @@ public sealed class MarkdownGraphEditor
                 diagnostics.Add(new Diagnostic("UnknownSpreadsheetPartition", $"Sheet table targets unknown partition '{group.Key}'.", DiagnosticSeverity.Error));
                 continue;
             }
-            var cellNodes = partition.Nodes.Where(node => node.Kind == NodeKind.Cell).ToArray();
+            var cellNodes = partition.Nodes.Where(node =>
+                node.Kind == NodeKind.Cell && DocumentContentPolicyRules.Includes(node, contentPolicy)).ToArray();
             var addresses = new Dictionary<string, DocumentNode>(StringComparer.OrdinalIgnoreCase);
             foreach (var node in cellNodes)
             {

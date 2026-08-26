@@ -453,18 +453,107 @@ public sealed class XlsxAdapterTests
         Assert.Equal("line", node.Extensions["chart_type"].GetString());
     }
 
-    private static byte[] CreateChartPackage()
+    [Fact]
+    public void Native_xlsx_chart_is_hidden_when_workbook_contains_hidden_sources()
     {
+        const string cellSecret = "DOCREDOCK_SECRET_HIDDEN_CHART";
+        const string cacheSecret = "DOCREDOCK_SECRET_HIDDEN_CHART_CACHE";
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(hideValueColumn: true, chartCacheOnly: true)));
+        var node = Assert.Single(result.Graph.Nodes, item => item.Kind == DocRedock.Core.Documents.NodeKind.Chart);
+        Assert.Equal(DocRedock.Core.Documents.ContentLayer.Hidden, node.Layer);
+        Assert.Contains(result.Warnings, warning => warning.Contains("native chart marked hidden", StringComparison.Ordinal));
+        var visible = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "visible")).Serialize(result.Graph);
+        var sanitized = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "sanitized")).Serialize(result.Graph);
+        var complete = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(result.Graph);
+        Assert.DoesNotContain(cellSecret, visible, StringComparison.Ordinal);
+        Assert.DoesNotContain(cacheSecret, visible, StringComparison.Ordinal);
+        Assert.DoesNotContain(cellSecret, sanitized, StringComparison.Ordinal);
+        Assert.DoesNotContain(cacheSecret, sanitized, StringComparison.Ordinal);
+        Assert.Contains(cellSecret, complete, StringComparison.Ordinal);
+        Assert.Contains(cacheSecret, complete, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Out_of_bounds_hidden_column_range_is_ignored_without_iteration()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(oversizedHiddenColumn: true)));
+
+        Assert.Empty(Assert.Single(result.Worksheets).HiddenColumns!);
+    }
+
+    [Fact]
+    public void Repeated_hidden_column_ranges_have_a_bounded_processing_budget()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(repeatedHiddenColumns: true)));
+
+        Assert.Equal(16_384, Assert.Single(result.Worksheets).HiddenColumns!.Count);
+    }
+
+    [Fact]
+    public void Out_of_range_cell_reference_is_skipped()
+    {
+        const string secret = "DOCREDOCK_INVALID_CELL_SECRET";
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(invalidCellReference: true)));
+
+        Assert.DoesNotContain(Assert.Single(result.Worksheets).Cells, cell => cell.Value?.Contains(secret, StringComparison.Ordinal) == true);
+        Assert.DoesNotContain(result.Graph.Nodes, node => node.Content is DocRedock.Core.Documents.TextNodeContent text && text.Text.Contains(secret, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Out_of_range_chart_cache_point_index_is_ignored_without_aborting_extraction()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(
+            chartCacheOnly: true,
+            chartPointIndexOverflow: true)));
+
+        Assert.Empty(Assert.Single(Assert.Single(result.Worksheets).Charts!).Series[0].Values);
+    }
+
+    [Fact]
+    public void Oversized_chart_formula_range_falls_back_to_bounded_cached_values()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(oversizedChartRange: true)));
+
+        Assert.Equal(["12", "18"], Assert.Single(Assert.Single(result.Worksheets).Charts!).Series[0].Values);
+    }
+
+    private static byte[] CreateChartPackage(
+        bool hideValueColumn = false,
+        bool oversizedHiddenColumn = false,
+        bool oversizedChartRange = false,
+        bool repeatedHiddenColumns = false,
+        bool invalidCellReference = false,
+        bool chartCacheOnly = false,
+        bool chartPointIndexOverflow = false)
+    {
+        var hiddenColumns = hideValueColumn
+            ? "<cols><col min=\"2\" max=\"2\" hidden=\"1\"/></cols>"
+            : oversizedHiddenColumn
+                ? "<cols><col min=\"1\" max=\"2147483647\" hidden=\"1\"/></cols>"
+                : repeatedHiddenColumns
+                    ? $"<cols>{string.Concat(Enumerable.Repeat("<col min=\"1\" max=\"16384\" hidden=\"1\"/>", 128))}</cols>"
+                    : string.Empty;
+        var secondValue = hideValueColumn ? "DOCREDOCK_SECRET_HIDDEN_CHART" : "18";
+        var invalidCell = invalidCellReference
+            ? "<c r=\"XFE1\" t=\"inlineStr\"><is><t>DOCREDOCK_INVALID_CELL_SECRET</t></is></c>"
+            : string.Empty;
+        var valueFormula = chartCacheOnly
+            ? "MissingSheet!$B$1:$B$2"
+            : oversizedChartRange
+                ? "Sheet1!$A$1:$XFD$1048576"
+                : "Sheet1!$B$1:$B$2";
+        var cachedSecondValue = chartCacheOnly ? "DOCREDOCK_SECRET_HIDDEN_CHART_CACHE" : "18";
+        var cacheFirstIndex = chartPointIndexOverflow ? "2147483647" : "0";
         var parts = new Dictionary<string, string>
         {
             ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
             ["xl/workbook.xml"] = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\" /></sheets></workbook>",
             ["xl/_rels/workbook.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"worksheet\" Target=\"worksheets/sheet1.xml\" /></Relationships>",
-            ["xl/worksheets/sheet1.xml"] = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>4月</t></is></c><c r=\"B1\" t=\"n\"><v>12</v></c></row><row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>5月</t></is></c><c r=\"B2\" t=\"n\"><v>18</v></c></row></sheetData><drawing r:id=\"rDrawing\" /></worksheet>",
+            ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{hiddenColumns}<sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>4月</t></is></c><c r=\"B1\" t=\"n\"><v>12</v></c>{invalidCell}</row><row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>5月</t></is></c><c r=\"B2\" t=\"inlineStr\"><is><t>{secondValue}</t></is></c></row></sheetData><drawing r:id=\"rDrawing\" /></worksheet>",
             ["xl/worksheets/_rels/sheet1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rDrawing\" Type=\"drawing\" Target=\"../drawings/drawing1.xml\" /></Relationships>",
             ["xl/drawings/_rels/drawing1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdChart\" Type=\"chart\" Target=\"../charts/chart1.xml\" /></Relationships>",
             ["xl/drawings/drawing1.xml"] = "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>4</xdr:row></xdr:from><xdr:ext cx=\"1\" cy=\"1\"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id=\"7\" name=\"Sales chart\"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData><c:chart r:id=\"rIdChart\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>",
-            ["xl/charts/chart1.xml"] = "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>売上推移</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:lineChart><c:ser><c:tx><c:v>売上</c:v></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$1:$A$2</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!$B$1:$B$2</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>",
+            ["xl/charts/chart1.xml"] = $"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>売上推移</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:lineChart><c:ser><c:tx><c:v>売上</c:v></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$1:$A$2</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>{valueFormula}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"2\"/><c:pt idx=\"{cacheFirstIndex}\"><c:v>12</c:v></c:pt><c:pt idx=\"1\"><c:v>{cachedSecondValue}</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>",
         };
         using var output = new MemoryStream();
         using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))

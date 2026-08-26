@@ -8,8 +8,14 @@ using DocRedock.RoundTrip;
 
 namespace DocRedock.Tests.Gui;
 
-public sealed class GuiWorkflowServiceTests
+[Collection("Environment variables")]
+public sealed class GuiWorkflowServiceTests : IDisposable
 {
+    private readonly string? previousExperimental = Environment.GetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL");
+
+    public GuiWorkflowServiceTests() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+
+    public void Dispose() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previousExperimental);
     [Fact]
     public async Task Readable_export_creates_only_markdown_without_a_restore_package()
     {
@@ -49,6 +55,25 @@ public sealed class GuiWorkflowServiceTests
         Assert.DoesNotContain(".assets/", markdown, StringComparison.Ordinal);
         Assert.False(Directory.Exists(Path.Combine(fixture.Root, "readable", "images.assets")));
         Assert.Equal([exported.MarkdownPath], Directory.EnumerateFileSystemEntries(Path.GetDirectoryName(exported.MarkdownPath)!));
+    }
+
+    [Fact]
+    public async Task Round_trip_export_requires_explicit_environment_opt_in()
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Root, "proposal.docx");
+        await new MarkdownRenderer().RenderAsync("# Title", RenderFormat.Docx, source);
+        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        try
+        {
+            var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
+                new GuiWorkflowService().ExportAsync(source, Path.Combine(fixture.Root, "export"), enableOcr: false));
+            Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+        }
     }
 
     [Fact]
