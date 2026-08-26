@@ -292,12 +292,13 @@ public sealed class DocRedockMarkdownSerializer
             AddContribution(contributions, options.ProjectionId, node.Id, new TextRange(start, length),
                 node.Id, RoleFor(node), EvidenceFor(node));
 
-        void AppendNodeBlock(DocumentNode node)
+        void AppendNodeBlock(DocumentNode node, bool suppressVisibleContent = false)
         {
             AppendNodeMarker(node, terminateLine: true);
             var start = output.Length;
             AddImageDiagnostic(node);
-            AppendCoreNode(output, node, reference => assetReferences.TryGetValue(reference, out var path) ? path : ImageReference(reference, options.RoundTripStore));
+            if (!suppressVisibleContent)
+                AppendCoreNode(output, node, reference => assetReferences.TryGetValue(reference, out var path) ? path : ImageReference(reference, options.RoundTripStore));
             var length = output.Length - start;
             if (length == 0 || output[^1] != '\n') output.AppendLine();
             output.AppendLine();
@@ -330,6 +331,9 @@ public sealed class DocRedockMarkdownSerializer
                 ? parsedCells
                 : Array.Empty<SpreadsheetCell>();
             var standaloneNodes = nodes.Where(node => sheetCells.All(cell => !StringComparer.Ordinal.Equals(cell.Node.Id, node.Id))).ToArray();
+            var nodesById = nodes.ToDictionary(node => node.Id, StringComparer.Ordinal);
+            var inlineLinkNodeIds = standaloneNodes.Where(node => IsInlineLinkProjection(node, nodesById))
+                .Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
             var positionedImageRows = graph.Format == DocumentFormatKind.Xlsx
                 ? standaloneNodes.Where(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent && ExtensionLong(node, "row") is > 0)
                     .GroupBy(node => ExtensionLong(node, "row")!.Value)
@@ -374,7 +378,7 @@ public sealed class DocRedockMarkdownSerializer
                 }
             foreach (var node in standaloneNodes.Where(node => !IsMermaidDiagram(node) &&
                          !positionedImageIds.Contains(node.Id) && !positionedChildIds.Contains(node.Id)))
-                AppendNodeBlock(node);
+                AppendNodeBlock(node, inlineLinkNodeIds.Contains(node.Id));
             output.Append("<!--drmd:partition-end id=").Append(EscapeAttribute(partition.Id)).Append(" baseline_nodes=")
                 .Append(nodes.Length.ToString(CultureInfo.InvariantCulture)).AppendLine("-->");
 
@@ -432,7 +436,10 @@ public sealed class DocRedockMarkdownSerializer
                 output.Append(new string('#', HeadingLevel(node.StyleId))).Append(' ').AppendLine(text);
                 break;
             case NodeKind.ListItem:
-                output.Append("- ").AppendLine(text);
+                var listMarker = StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "list_format"), "ordered")
+                    ? (ExtensionLong(node, "list_number") ?? 1).ToString(CultureInfo.InvariantCulture) + ". "
+                    : "- ";
+                output.Append(listMarker).AppendLine(text);
                 break;
             case NodeKind.Table when node.Content is TableNodeContent table:
                 AppendTable(output, table.Rows);
@@ -453,7 +460,10 @@ public sealed class DocRedockMarkdownSerializer
                 foreach (var line in text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')) output.Append("> ").AppendLine(line);
                 break;
             case NodeKind.CodeBlock:
-                output.AppendLine(new string((char)96, 3)).AppendLine(text).AppendLine(new string((char)96, 3));
+                var code = NodeText(node) ?? string.Empty;
+                output.AppendLine(new string((char)96, 3)).Append(code);
+                if (code.Length == 0 || code[^1] != '\n') output.AppendLine();
+                output.AppendLine(new string((char)96, 3));
                 break;
             case NodeKind.Diagram when IsMermaidDiagram(node):
                 output.AppendLine("```mermaid").AppendLine(text).AppendLine("```");
@@ -541,6 +551,15 @@ public sealed class DocRedockMarkdownSerializer
     private static bool IsMermaidDiagram(DocumentNode node) => node.Kind == NodeKind.Diagram &&
         StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "diagram_language"), "mermaid");
 
+    private static bool IsInlineLinkProjection(DocumentNode node, IReadOnlyDictionary<string, DocumentNode> nodesById)
+    {
+        if (node.Kind != NodeKind.Link || node.Content is not ReferenceNodeContent link ||
+            node.ParentId is null || !nodesById.TryGetValue(node.ParentId, out var parent) ||
+            parent.Content is not RichTextNodeContent rich)
+            return false;
+        return rich.Runs.Any(run => StringComparer.Ordinal.Equals(run.LinkTarget, link.Reference));
+    }
+
     private static bool TryReadSheetCells(IReadOnlyList<DocumentNode> nodes, out SpreadsheetCell[] cells)
     {
         var parsed = new List<SpreadsheetCell>();
@@ -586,21 +605,102 @@ public sealed class DocRedockMarkdownSerializer
     private static IReadOnlyList<IReadOnlyList<SpreadsheetCell>> SplitSheetSections(IReadOnlyList<SpreadsheetCell> cells)
     {
         const int maximumRowGapWithinSection = 4;
-        var sections = new List<IReadOnlyList<SpreadsheetCell>>();
-        var current = new List<SpreadsheetCell>();
-        var previousRow = 0;
+        const int maximumColumnDistanceFromSection = 2;
+        var recurringGaps = cells.GroupBy(cell => cell.Row)
+            .SelectMany(row =>
+            {
+                var ordered = row.OrderBy(cell => cell.Column).ToArray();
+                return Enumerable.Range(1, Math.Max(0, ordered.Length - 1))
+                    .Where(index => ordered[index].Column - ordered[index - 1].Column >= 2)
+                    .Select(index => (Row: row.Key, Right: ordered[index].Column,
+                        HasWideSide: index >= 2 || ordered.Length - index >= 2));
+            })
+            .GroupBy(item => item.Right)
+            .Where(group => group.Select(item => item.Row).Distinct().Count() >= 2 && group.Any(item => item.HasWideSide))
+            .Select(group => group.Key)
+            .ToHashSet();
+        var sections = new List<List<SpreadsheetCell>>();
+
         foreach (var row in cells.GroupBy(cell => cell.Row).OrderBy(group => group.Key))
         {
-            if (current.Count > 0 && row.Key - previousRow > maximumRowGapWithinSection)
+            var ordered = row.OrderBy(cell => cell.Column).ToArray();
+            var fragments = new List<List<SpreadsheetCell>>();
+            var fragment = new List<SpreadsheetCell>();
+
+            bool MatchesNearbySection(List<SpreadsheetCell> section, int rangeMinColumn, int rangeMaxColumn) =>
+                row.Key - section.Max(item => item.Row) <= maximumRowGapWithinSection &&
+                row.Key >= section.Min(item => item.Row) &&
+                rangeMinColumn <= section.Max(item => item.Column) + maximumColumnDistanceFromSection &&
+                rangeMaxColumn >= section.Min(item => item.Column) - maximumColumnDistanceFromSection;
+
+            bool MatchesAdjacentSection(List<SpreadsheetCell> section, int rangeMinColumn, int rangeMaxColumn) =>
+                row.Key - section.Max(item => item.Row) <= 1 &&
+                row.Key >= section.Min(item => item.Row) &&
+                rangeMinColumn <= section.Max(item => item.Column) + maximumColumnDistanceFromSection &&
+                rangeMaxColumn >= section.Min(item => item.Column) - maximumColumnDistanceFromSection;
+
+            for (var index = 0; index < ordered.Length; index++)
             {
-                sections.Add(current);
-                current = [];
+                var cell = ordered[index];
+                var columnGap = fragment.Count == 0 ? 0 : cell.Column - fragment[^1].Column;
+                var hasTwoCellsOnEachSide = fragment.Count >= 2 && ordered.Length - index >= 2;
+                var followsRecurringGap = fragment.Count > 0 && recurringGaps.Contains(cell.Column);
+                var separatesNearbySections = false;
+                if (fragment.Count > 0 && columnGap >= 2)
+                {
+                    var fragmentMinColumn = fragment.Min(item => item.Column);
+                    var fragmentMaxColumn = fragment.Max(item => item.Column);
+                    var fragmentMatches = sections
+                        .Where(section => MatchesAdjacentSection(section, fragmentMinColumn, fragmentMaxColumn))
+                        .ToArray();
+                    var cellMatches = sections
+                        .Where(section => MatchesAdjacentSection(section, cell.Column, cell.Column))
+                        .ToArray();
+                    separatesNearbySections = (fragmentMatches.Length > 0 || cellMatches.Length > 0) &&
+                        !fragmentMatches.Intersect(cellMatches).Any();
+                }
+                if ((hasTwoCellsOnEachSide || followsRecurringGap || separatesNearbySections) && columnGap >= 2)
+                {
+                    fragments.Add(fragment);
+                    fragment = [];
+                }
+                fragment.Add(cell);
             }
-            current.AddRange(row.OrderBy(cell => cell.Column));
-            previousRow = row.Key;
+            if (fragment.Count > 0) fragments.Add(fragment);
+
+            var sectionsUsedInCurrentRow = new HashSet<List<SpreadsheetCell>>();
+            foreach (var rowFragment in fragments)
+            {
+                var minColumn = rowFragment.Min(cell => cell.Column);
+                var maxColumn = rowFragment.Max(cell => cell.Column);
+                var isExplicitRecurringGap = rowFragment.Count == 1 && recurringGaps.Contains(minColumn);
+                var matching = isExplicitRecurringGap
+                    ? null
+                    : sections
+                        .Where(section => !sectionsUsedInCurrentRow.Contains(section) &&
+                            MatchesNearbySection(section, minColumn, maxColumn))
+                        .OrderByDescending(section => section.Max(cell => cell.Row))
+                        .ThenBy(section => Math.Abs(section.Min(cell => cell.Column) - minColumn))
+                        .FirstOrDefault();
+
+                if (matching is null)
+                {
+                    matching = [];
+                    sections.Add(matching);
+                }
+                sectionsUsedInCurrentRow.Add(matching);
+                matching.AddRange(rowFragment);
+            }
         }
-        if (current.Count > 0) sections.Add(current);
-        return sections;
+
+        return sections
+            .OrderBy(section => section.Min(cell => cell.Row))
+            .ThenBy(section => section.Min(cell => cell.Column))
+            .Select(section => (IReadOnlyList<SpreadsheetCell>)section
+                .OrderBy(cell => cell.Row)
+                .ThenBy(cell => cell.Column)
+                .ToArray())
+            .ToArray();
     }
 
     private static string SheetRange(IReadOnlyList<SpreadsheetCell> cells) =>
@@ -636,12 +736,18 @@ public sealed class DocRedockMarkdownSerializer
         {
             var expression = "=" + formula.GetString();
             var calculatedValue = node.Content is TextNodeContent text ? text.Text : string.Empty;
-            return calculatedValue.Length == 0
+            var calculatedDisplayValue = ExtensionString(node, "display_value");
+            var renderedValue = !string.IsNullOrWhiteSpace(calculatedDisplayValue) ? calculatedDisplayValue : calculatedValue;
+            return renderedValue.Length == 0
                 ? $"`{expression}`"
-                : $"`{expression}` → {calculatedValue}";
+                : $"`{expression}` → {renderedValue}";
         }
 
         var value = NodeText(node) ?? string.Empty;
+        var displayValue = ExtensionString(node, "display_value");
+        if (!string.IsNullOrWhiteSpace(displayValue) &&
+            !string.Equals(displayValue, value, StringComparison.Ordinal))
+            return $"`{value}` → {displayValue}";
         return value.StartsWith('=') && value.Length > 1 ? $"`{value}`" : value;
     }
 

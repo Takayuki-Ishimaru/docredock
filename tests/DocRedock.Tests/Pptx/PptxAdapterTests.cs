@@ -159,7 +159,9 @@ public sealed class PptxAdapterTests
         var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
 
         // P06: a native chart's c:title + c:ser category/value pairs survive as a bold title and a GFM table.
-        Assert.Contains("**Adoption by quarter**", markdown, StringComparison.Ordinal);
+        Assert.Contains("**Adoption by quarter**（棒グラフ）", markdown, StringComparison.Ordinal);
+        Assert.Contains("要約: 1 系列のグラフです。", markdown, StringComparison.Ordinal);
+        Assert.Contains("Q1 の 12 から Q2 の 30 へ 増加", markdown, StringComparison.Ordinal);
         Assert.Contains("| Q1 | 12 |", markdown, StringComparison.Ordinal);
         Assert.Contains("| Q2 | 30 |", markdown, StringComparison.Ordinal);
 
@@ -271,6 +273,60 @@ public sealed class PptxAdapterTests
     {
         using var input = new MemoryStream(bytes); using var zip = new ZipArchive(input); var result = new Dictionary<string, byte[]>(); foreach (var entry in zip.Entries) using (var source = entry.Open()) using (var output = new MemoryStream()) { source.CopyTo(output); result[entry.FullName] = output.ToArray(); }
         return result;
+    }
+
+    [Fact]
+    public void ResolvesNestedGroupTransformsIntoAbsoluteBounds()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string groups =
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"40\" name=\"Outer\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"100\" y=\"200\" /><a:ext cx=\"400\" cy=\"300\" /><a:chOff x=\"10\" y=\"20\" /><a:chExt cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"50\" name=\"Direct\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"10\" y=\"20\" /><a:ext cx=\"20\" cy=\"10\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Direct</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"41\" name=\"Inner\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"30\" y=\"40\" /><a:ext cx=\"50\" cy=\"50\" /><a:chOff x=\"0\" y=\"0\" /><a:chExt cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"51\" name=\"Nested\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"20\" y=\"20\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Nested</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "</p:grpSp></p:grpSp>" +
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"42\" name=\"Degenerate\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"0\" cy=\"0\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"52\" name=\"Degenerate child\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1\" y=\"2\" /><a:ext cx=\"3\" cy=\"4\" /></a:xfrm></p:spPr></p:sp></p:grpSp>" +
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"43\" name=\"RotatedFlip\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm rot=\"1800000\" flipH=\"1\"><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /><a:chOff x=\"0\" y=\"0\" /><a:chExt cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"53\" name=\"Rotated child\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"10\" y=\"20\" /><a:ext cx=\"20\" cy=\"10\" /></a:xfrm></p:spPr></p:sp></p:grpSp>";
+        xml = xml.Replace("</p:spTree>", groups + "</p:spTree>", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+
+        var shapes = Assert.Single(new PptxAdapter().Extract(new MemoryStream(Repack(entries))).Slides).Shapes;
+        var direct = Assert.Single(shapes, shape => shape.ShapeId == "50");
+        Assert.Equal(100, direct.Geometry!.X);
+        Assert.Equal(200, direct.Geometry.Y);
+        Assert.Equal(80, direct.Geometry.Width);
+        Assert.Equal(30, direct.Geometry.Height);
+
+        var nested = Assert.Single(shapes, shape => shape.ShapeId == "51");
+        Assert.Equal(220, nested.Geometry!.X);
+        Assert.Equal(290, nested.Geometry.Y);
+        Assert.Equal(40, nested.Geometry.Width);
+        Assert.Equal(30, nested.Geometry.Height);
+
+        var degenerate = Assert.Single(shapes, shape => shape.ShapeId == "52");
+        Assert.True(double.IsFinite(degenerate.Geometry!.X));
+        Assert.True(double.IsFinite(degenerate.Geometry.Y));
+        var rotated = Assert.Single(shapes, shape => shape.ShapeId == "53");
+        Assert.Equal(77.3205, rotated.Geometry!.X, precision: 4);
+        Assert.Equal(34.0192, rotated.Geometry.Y, precision: 4);
+        Assert.Equal(22.3205, rotated.Geometry.Width, precision: 4);
+        Assert.Equal(18.6603, rotated.Geometry.Height, precision: 4);
+        Assert.Equal(-150, rotated.Geometry.RotationDegrees, precision: 4);
+    }
+
+    private static byte[] Repack(Dictionary<string, byte[]> parts)
+    {
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var part in parts)
+            {
+                using var target = zip.CreateEntry(part.Key).Open();
+                target.Write(part.Value);
+            }
+        return output.ToArray();
     }
 
     private static int Count(string value, string needle)

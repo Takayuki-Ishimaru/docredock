@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml;
 using DocRedock.Core.Documents;
+using DocRedock.Formats.OpenXml;
 
 namespace DocRedock.Formats.OpenXml.Xlsx;
 
@@ -75,6 +76,19 @@ public sealed record XlsxPictureRecord(
     long HeightEmu,
     string DrawingPartUri);
 
+/// <summary>A native chart anchored in an XLSX DrawingML part.</summary>
+public sealed record XlsxChartRecord(
+    string Id,
+    string Name,
+    string? Title,
+    string? Type,
+    IReadOnlyList<OpenXmlChartSeries> Series,
+    string RelationshipId,
+    string ChartPartUri,
+    int? Column,
+    int? Row,
+    string DrawingPartUri);
+
 /// <summary>Worksheet projection metadata used by the Markdown table projector.</summary>
 public sealed record XlsxWorksheetRecord(
     string Name,
@@ -87,7 +101,8 @@ public sealed record XlsxWorksheetRecord(
     int MaxColumn = 0,
     IReadOnlyList<string>? MergedRanges = null,
     IReadOnlyList<XlsxDrawingShapeRecord>? DrawingShapes = null,
-    IReadOnlyList<XlsxPictureRecord>? Pictures = null)
+    IReadOnlyList<XlsxPictureRecord>? Pictures = null,
+    IReadOnlyList<XlsxChartRecord>? Charts = null)
 {
     public int RowCount => MinRow == 0 || MaxRow < MinRow ? 0 : MaxRow - MinRow + 1;
     public int ColumnCount => MinColumn == 0 || MaxColumn < MinColumn ? 0 : MaxColumn - MinColumn + 1;
@@ -117,6 +132,9 @@ public sealed record XlsxRestoreResult(byte[] Bytes, bool IsByteIdentical, XlsxP
 /// <summary>BCL-only XLSX extractor and minimal cell patcher. Formulas are classified, never evaluated.</summary>
 public sealed class XlsxAdapter
 {
+    private static readonly Regex ChartCellReference = new(
+        @"^(?:(?:'(?<quoted>(?:[^']|'')+)'|(?<plain>[^!]+))!)?\$?(?<startColumn>[A-Za-z]{1,3})\$?(?<startRow>\d+)(?::\$?(?<endColumn>[A-Za-z]{1,3})\$?(?<endRow>\d+))?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly XmlReaderSettings SafeXml = new()
     {
         DtdProcessing = DtdProcessing.Prohibit,
@@ -139,15 +157,16 @@ public sealed class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
-        foreach (var sheet in workbook)
+        foreach (var sheet in workbook.Sheets)
         {
             if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
             var mergedRanges = ReadMergedRanges(xml);
-            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics), mergedRanges);
+            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, workbook.Uses1904DateSystem), mergedRanges);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
-            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures);
+            var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells);
+            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts);
             worksheets.Add(worksheet);
             var nodes = cells
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
@@ -158,6 +177,8 @@ public sealed class XlsxAdapter
                 warnings.Add($"{sheet.Name}: {drawingShapes.Count} DrawingML shape(s) were retained but not projected as a diagram.");
             foreach (var picture in pictures)
                 nodes.Add(ToPictureNode(sheet, picture, nodes.Count));
+            foreach (var chart in charts)
+                nodes.Add(ToChartNode(sheet, chart, nodes.Count));
             partitions.Add(new DocumentPartition("sheet-" + sheet.Name, partitions.Count, nodes, sheet.PartUri));
         }
         var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Xlsx, partitions);
@@ -226,7 +247,7 @@ public sealed class XlsxAdapter
         foreach (var editGroup in plan.Edits.GroupBy(x => x.SheetName, StringComparer.Ordinal))
         {
             var partUri = editGroup.Select(x => x.WorksheetPartUri).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.TrimStart('/');
-            var sheet = partUri is null ? workbook.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.Name, editGroup.Key)) : workbook.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.PartUri, partUri));
+            var sheet = partUri is null ? workbook.Sheets.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.Name, editGroup.Key)) : workbook.Sheets.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.PartUri, partUri));
             if (sheet is null) throw new InvalidDataException($"Worksheet not found: {editGroup.Key}");
             var xml = package[sheet.PartUri];
             package[sheet.PartUri] = PatchWorksheet(xml, editGroup);
@@ -347,6 +368,31 @@ public sealed class XlsxAdapter
             Extensions: extension);
     }
 
+    private static DocumentNode ToChartNode(SheetInfo sheet, XlsxChartRecord chart, int order)
+    {
+        var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["sheet_name"] = JsonSerializer.SerializeToElement(sheet.Name),
+            ["drawing_part"] = JsonSerializer.SerializeToElement(chart.DrawingPartUri),
+            ["chart_relationship"] = JsonSerializer.SerializeToElement(chart.RelationshipId),
+            ["chart_part"] = JsonSerializer.SerializeToElement(chart.ChartPartUri),
+            ["chart_name"] = JsonSerializer.SerializeToElement(chart.Name),
+        };
+        if (!string.IsNullOrWhiteSpace(chart.Title)) extension["chart_title"] = JsonSerializer.SerializeToElement(chart.Title);
+        if (!string.IsNullOrWhiteSpace(chart.Type)) extension["chart_type"] = JsonSerializer.SerializeToElement(chart.Type);
+        if (chart.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chart.Series);
+        if (chart.Row is { } row) extension["row"] = JsonSerializer.SerializeToElement(row);
+        if (chart.Column is { } column) extension["column"] = JsonSerializer.SerializeToElement(column);
+        if (chart.Row is { } addressRow && chart.Column is { } addressColumn)
+            extension["address"] = JsonSerializer.SerializeToElement(ColumnName(addressColumn) + addressRow.ToString(CultureInfo.InvariantCulture));
+        var locators = new List<AnchorLocator> { new("drawing_part", chart.DrawingPartUri), new("chart_relationship", chart.RelationshipId) };
+        if (chart.Row is { } locatorRow && chart.Column is { } locatorColumn)
+            locators.Add(new("cell_address", ColumnName(locatorColumn) + locatorRow.ToString(CultureInfo.InvariantCulture)));
+        return new("n_" + Hash($"{sheet.Name}!chart:{chart.DrawingPartUri}:{chart.Id}:{chart.RelationshipId}")[..16], NodeKind.Chart, null, order,
+            ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
+            Editability: NodeEditability.Protected, Provenance: [new ProvenanceItem(EvidenceKind.Native)], Extensions: extension);
+    }
+
     private static bool IsNumericCell(XlsxCellRecord cell) =>
         (cell.CellType is null or "n") && double.TryParse(cell.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
 
@@ -406,18 +452,29 @@ public sealed class XlsxAdapter
         return result;
     }
     private sealed record SheetInfo(string Name, string PartUri);
-    private static List<SheetInfo> ReadWorkbook(Dictionary<string, byte[]> package, Dictionary<string, string> relationships)
+    private sealed record WorkbookInfo(IReadOnlyList<SheetInfo> Sheets, bool Uses1904DateSystem);
+    private static WorkbookInfo ReadWorkbook(Dictionary<string, byte[]> package, Dictionary<string, string> relationships)
     {
         var result = new List<SheetInfo>();
         if (!package.TryGetValue("xl/workbook.xml", out var bytes)) throw new InvalidDataException("Workbook part missing.");
+        var uses1904DateSystem = false;
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "sheet")
+        while (reader.Read())
         {
-            var name = reader.GetAttribute("name") ?? "Sheet" + (result.Count + 1);
-            var rid = reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") ?? reader.GetAttribute("r:id") ?? "";
-            if (relationships.TryGetValue(rid, out var target)) result.Add(new(name, target));
+            if (reader.NodeType != XmlNodeType.Element) continue;
+            if (reader.LocalName == "workbookPr")
+            {
+                var value = reader.GetAttribute("date1904");
+                uses1904DateSystem = value is "1" || bool.TryParse(value, out var parsed) && parsed;
+            }
+            else if (reader.LocalName == "sheet")
+            {
+                var name = reader.GetAttribute("name") ?? "Sheet" + (result.Count + 1);
+                var rid = reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") ?? reader.GetAttribute("r:id") ?? "";
+                if (relationships.TryGetValue(rid, out var target)) result.Add(new(name, target));
+            }
         }
-        return result;
+        return new(result, uses1904DateSystem);
     }
     private static Dictionary<string, string> ReadRelationships(Dictionary<string, byte[]> package, string relsPath)
     {
@@ -447,7 +504,7 @@ public sealed class XlsxAdapter
         }
         return string.Join('/', stack);
     }
-    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics)
+    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, bool uses1904DateSystem)
     {
         var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
@@ -474,7 +531,7 @@ public sealed class XlsxAdapter
             var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
                 ? styles[styleIndex]
                 : null;
-            var displayValue = FormatDisplayValue(value, type, displayStyle);
+            var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
             result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle));
         }
         return result;
@@ -534,28 +591,143 @@ public sealed class XlsxAdapter
             _ => null
         };
 
-    private static string? FormatDisplayValue(string? raw, string? cellType, XlsxCellStyle? style)
+    private sealed record NumberFormatAnalysis(bool HasDate, bool HasTime, bool IsElapsed, bool HasSeconds, bool HasAmPm, bool HasPercent, bool HasGrouping, int DecimalPlaces, string? Suffix);
+
+    private static string? FormatDisplayValue(string? raw, string? cellType, XlsxCellStyle? style, bool uses1904DateSystem)
     {
         if (raw is null || cellType is "s" or "str" or "inlineStr" or "b" || style?.NumberFormat is not { Length: > 0 } format) return raw;
         if (!double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)) return raw;
-        if (LooksLikeDateFormat(format))
+
+        var analysis = AnalyzeNumberFormat(format, number);
+        if (analysis.IsElapsed) return FormatElapsed(number, analysis);
+        if (analysis.HasDate || analysis.HasTime)
         {
-            try { return DateTime.FromOADate(number).ToString(format.Contains('h') || format.Contains('H') ? "yyyy-MM-dd HH:mm:ss" : "yyyy-MM-dd", CultureInfo.InvariantCulture); }
+            try
+            {
+                if (analysis.HasDate)
+                {
+                    var date = uses1904DateSystem
+                        ? new DateTime(1904, 1, 1).AddDays(number)
+                        : DateTime.FromOADate(number);
+                    return date.ToString(analysis.HasTime ? "yyyy-MM-dd HH:mm:ss" : "yyyy-MM-dd", CultureInfo.InvariantCulture);
+                }
+                return FormatClock(number, analysis);
+            }
             catch (ArgumentException) { return raw; }
         }
-        if (format.Contains('%'))
+        if (analysis.HasPercent)
+            return (number * 100).ToString("F" + analysis.DecimalPlaces, CultureInfo.InvariantCulture) + "%";
+        if (analysis.HasGrouping || analysis.DecimalPlaces > 0)
         {
-            var decimals = DecimalPlaces(format);
-            return (number * 100).ToString("F" + decimals, CultureInfo.InvariantCulture) + "%";
-        }
-        if (format.Contains(','))
-        {
-            var decimals = DecimalPlaces(format);
-            var rendered = number.ToString("N" + decimals, CultureInfo.InvariantCulture);
-            var suffix = ExtractFormatSuffix(format);
-            return string.IsNullOrEmpty(suffix) ? rendered : rendered + " " + suffix;
+            var rendered = number.ToString((analysis.HasGrouping ? "N" : "F") + analysis.DecimalPlaces, CultureInfo.InvariantCulture);
+            return string.IsNullOrEmpty(analysis.Suffix) ? rendered : rendered + " " + analysis.Suffix;
         }
         return raw;
+    }
+
+    private static NumberFormatAnalysis AnalyzeNumberFormat(string format, double number)
+    {
+        var active = (number < 0 && format.Split(';').Length > 1 ? format.Split(';')[1] : format.Split(';')[0]);
+        var hasDate = false;
+        var hasTime = false;
+        var hasMinuteToken = false;
+        var isElapsed = false;
+        var hasSeconds = false;
+        var hasAmPm = false;
+        var hasPercent = false;
+        var hasGrouping = false;
+        var decimalPlaces = 0;
+        var inQuote = false;
+        var hasDecimal = false;
+        var suffix = new StringBuilder();
+        for (var index = 0; index < active.Length; index++)
+        {
+            var character = active[index];
+            if (character == '"') { inQuote = !inQuote; continue; }
+            if (inQuote) { suffix.Append(character); continue; }
+            if (character == '\\' && index + 1 < active.Length)
+            {
+                // A backslash before comma is common in OOXML custom formats;
+                // retain comma grouping semantics while ignoring other escapes.
+                if (active[index + 1] == ',') { hasGrouping = true; index++; continue; }
+                if (active[index + 1] == '"')
+                {
+                    var closingSlash = active.IndexOf('\\', index + 2);
+                    if (closingSlash >= 0 && closingSlash + 1 < active.Length && active[closingSlash + 1] == '"')
+                    {
+                        suffix.Append(active[(index + 2)..closingSlash]);
+                        index = closingSlash + 1;
+                        continue;
+                    }
+                }
+                suffix.Append(active[++index]); continue;
+            }
+            if (character is '_' or '*') { if (index + 1 < active.Length) index++; continue; }
+            if (character == '[')
+            {
+                var end = active.IndexOf(']', index + 1);
+                if (end >= 0)
+                {
+                    var bracket = active[(index + 1)..end];
+                    if (bracket.Equals("h", StringComparison.OrdinalIgnoreCase) || bracket.Equals("m", StringComparison.OrdinalIgnoreCase) || bracket.Equals("s", StringComparison.OrdinalIgnoreCase))
+                    {
+                        isElapsed = true; hasTime = true; hasSeconds |= bracket.Equals("s", StringComparison.OrdinalIgnoreCase);
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            if (character == '%') { hasPercent = true; continue; }
+            if (character is 'y' or 'Y' or 'd' or 'D') hasDate = true;
+            else if (character is 'h' or 'H') hasTime = true;
+            else if (character is 's' or 'S') { hasTime = true; hasSeconds = true; }
+            else if (character is 'm' or 'M')
+            {
+                // Excel uses m for either month or minute. Resolve it after scanning
+                // unquoted tokens so quoted/escaped literals cannot affect the result.
+                hasMinuteToken = true;
+            }
+            else if (character == ',') hasGrouping = true;
+            else if (character == '.' && !hasDecimal)
+            {
+                hasDecimal = true;
+                decimalPlaces = active[(index + 1)..].TakeWhile(c => c is '0' or '#' or '?').Count();
+            }
+            if ((character is 'A' or 'a') && active[index..].StartsWith("AM/PM", StringComparison.OrdinalIgnoreCase))
+            {
+                hasAmPm = true; hasTime = true;
+            }
+        }
+        if (hasMinuteToken) hasDate |= !hasTime;
+        var literalSuffix = suffix.ToString().Trim();
+        return new(hasDate, hasTime, isElapsed, hasSeconds, hasAmPm, hasPercent, hasGrouping, decimalPlaces, literalSuffix.Length == 0 ? null : literalSuffix);
+    }
+
+    private static string FormatClock(double number, NumberFormatAnalysis analysis)
+    {
+        var fraction = number - Math.Floor(number);
+        if (fraction < 0) fraction += 1;
+        var totalSeconds = (int)Math.Floor(fraction * 24 * 60 * 60 + 0.5);
+        if (totalSeconds >= 24 * 60 * 60) totalSeconds = 0;
+        var hours = totalSeconds / 3600;
+        var minutes = totalSeconds / 60 % 60;
+        var seconds = totalSeconds % 60;
+        if (analysis.HasAmPm)
+        {
+            var date = new DateTime(2000, 1, 1).AddHours(hours).AddMinutes(minutes).AddSeconds(seconds);
+            return date.ToString(analysis.HasSeconds ? "h:mm:ss tt" : "h:mm tt", CultureInfo.InvariantCulture);
+        }
+        return hours.ToString(CultureInfo.InvariantCulture) + ":" + minutes.ToString("D2", CultureInfo.InvariantCulture) + (analysis.HasSeconds ? ":" + seconds.ToString("D2", CultureInfo.InvariantCulture) : string.Empty);
+    }
+
+    private static string FormatElapsed(double number, NumberFormatAnalysis analysis)
+    {
+        var totalSeconds = (long)Math.Floor(Math.Abs(number) * 24 * 60 * 60 + 0.5);
+        var hours = totalSeconds / 3600;
+        var minutes = totalSeconds / 60 % 60;
+        var seconds = totalSeconds % 60;
+        var sign = number < 0 ? "-" : string.Empty;
+        return sign + hours.ToString(CultureInfo.InvariantCulture) + ":" + minutes.ToString("D2", CultureInfo.InvariantCulture) + (analysis.HasSeconds ? ":" + seconds.ToString("D2", CultureInfo.InvariantCulture) : string.Empty);
     }
 
     private static string? ExtractFormatSuffix(string format)
@@ -612,6 +784,73 @@ public sealed class XlsxAdapter
                 if (!string.IsNullOrWhiteSpace(range)) result.Add(range);
             }
         return result;
+    }
+
+    private static IReadOnlyList<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells)
+    {
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
+        var result = new List<XlsxChartRecord>();
+        foreach (var drawingPart in relationships.Values
+                     .Where(path => path.StartsWith("xl/drawings/", StringComparison.Ordinal) && path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                     .Distinct(StringComparer.Ordinal))
+        {
+            if (!package.TryGetValue(drawingPart, out var bytes)) continue;
+            var drawingRelationships = ReadRelationships(package, drawingPart[..drawingPart.LastIndexOf("/", StringComparison.Ordinal)] + "/_rels/" + Path.GetFileName(drawingPart) + ".rels");
+            var document = new XmlDocument { PreserveWhitespace = false };
+            using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+            document.Load(reader);
+            foreach (var anchor in document.DocumentElement?.ChildNodes.OfType<XmlElement>()
+                         .Where(element => element.LocalName is "twoCellAnchor" or "oneCellAnchor" or "absoluteAnchor") ?? [])
+            {
+                var from = DirectChild(anchor, "from");
+                var column = from is null ? (int?)null : ChildIntNullable(from, "col") + 1;
+                var row = from is null ? (int?)null : ChildIntNullable(from, "row") + 1;
+                if (column <= 0) column = null;
+                if (row <= 0) row = null;
+                var properties = anchor.SelectNodes(".//*[local-name()='cNvPr']")?.OfType<XmlElement>().FirstOrDefault();
+                var chartElements = anchor.SelectNodes(".//*[local-name()='chart']")?.OfType<XmlElement>() ?? [];
+                foreach (var chartElement in chartElements)
+                {
+                    var relationshipId = chartElement.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships");
+                    if (string.IsNullOrWhiteSpace(relationshipId)) relationshipId = chartElement.GetAttribute("r:id");
+                    if (string.IsNullOrWhiteSpace(relationshipId) || !drawingRelationships.TryGetValue(relationshipId, out var chartPart) || !package.TryGetValue(chartPart, out var chartBytes)) continue;
+                    var data = OpenXmlChartReader.Read(chartBytes, reference => ResolveChartReference(reference, sheetName, cells));
+                    var id = properties?.GetAttribute("id");
+                    if (string.IsNullOrWhiteSpace(id)) id = $"chart-{result.Count + 1}";
+                    var name = properties?.GetAttribute("name");
+                    if (string.IsNullOrWhiteSpace(name)) name = data?.Title ?? id;
+                    result.Add(new XlsxChartRecord(id, name!, data?.Title, data?.Type, data?.Series ?? [], relationshipId, chartPart, column, row, drawingPart));
+                }
+            }
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<string> ResolveChartReference(string formula, string sheetName, IReadOnlyList<XlsxCellRecord> cells)
+    {
+        var normalized = formula.Trim().TrimStart('=');
+        if (normalized.Contains('[', StringComparison.Ordinal) || normalized.Contains(']', StringComparison.Ordinal)) return [];
+        var match = ChartCellReference.Match(normalized);
+        if (!match.Success) return [];
+        var referencedSheet = match.Groups["quoted"].Success
+            ? match.Groups["quoted"].Value.Replace("''", "'", StringComparison.Ordinal)
+            : match.Groups["plain"].Success ? match.Groups["plain"].Value : sheetName;
+        if (!StringComparer.Ordinal.Equals(referencedSheet, sheetName)) return [];
+
+        var start = ParseCellReference(match.Groups["startColumn"].Value + match.Groups["startRow"].Value);
+        var end = match.Groups["endColumn"].Success
+            ? ParseCellReference(match.Groups["endColumn"].Value + match.Groups["endRow"].Value)
+            : start;
+        if (start.Row <= 0 || start.Column <= 0 || end.Row <= 0 || end.Column <= 0) return [];
+        var byCoordinate = cells.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex));
+        var values = new List<string>();
+        for (var row = Math.Min(start.Row, end.Row); row <= Math.Max(start.Row, end.Row); row++)
+            for (var column = Math.Min(start.Column, end.Column); column <= Math.Max(start.Column, end.Column); column++)
+                values.Add(byCoordinate.TryGetValue((row, column), out var cell)
+                    ? cell.DisplayValue ?? cell.Value ?? string.Empty
+                    : string.Empty);
+        return values;
     }
 
     private sealed record PictureRelationship(string Target, bool IsExternal);

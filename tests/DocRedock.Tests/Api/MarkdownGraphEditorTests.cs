@@ -85,6 +85,59 @@ public sealed class MarkdownGraphEditorTests
     }
 
     [Fact]
+    public void Inline_link_projection_is_f0_equivalent_and_protected_content_stays_rejected()
+    {
+        const string target = "https://example.test/docs";
+        var rich = new DocumentNode("rich", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+            new RichTextNodeContent([
+                new TextRun("See "),
+                new TextRun("Reference", Underline: true, LinkTarget: target)
+            ]));
+        var link = new DocumentNode("link", NodeKind.Link, "rich", 0, ContentLayer.Body,
+            new ReferenceNodeContent(target, "Reference"), Editability: NodeEditability.Passthrough);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_link", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [rich, link])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+        var protectedMarker = "<!--drmd:block id=link kind=link editability=protected operations=none constraints=preserve-marker,preserve-content-->";
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+        var tampered = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace(protectedMarker + Environment.NewLine + Environment.NewLine,
+                protectedMarker + Environment.NewLine + "changed" + Environment.NewLine + Environment.NewLine,
+                StringComparison.Ordinal));
+
+        Assert.Contains("[<u>Reference</u>](https://example.test/docs)", projection, StringComparison.Ordinal);
+        Assert.Equal(1, projection.Split("Reference", StringSplitOptions.None).Length - 1);
+        Assert.True(unchanged.IsValid);
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.False(tampered.IsValid);
+        Assert.Contains(tampered.Diagnostics,
+            diagnostic => diagnostic.Code == "ProtectedNodeEdit" && diagnostic.NodeId == "link");
+    }
+
+    [Fact]
+    public void Unchanged_rich_code_block_is_projection_equivalent()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_code", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0,
+            [
+                new DocumentNode("code", NodeKind.CodeBlock, null, 0, ContentLayer.Body,
+                    new RichTextNodeContent([
+                        new TextRun("{", Code: true),
+                        new TextRun("\n", Kind: TextRunKind.LineBreak),
+                        new TextRun("  \"ok\": true", Code: true),
+                        new TextRun("\n", Kind: TextRunKind.LineBreak),
+                        new TextRun("}", Code: true)
+                    ]))
+            ])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        var result = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(result.IsValid);
+        Assert.Empty(result.Diff.PatchSet.Operations);
+    }
+
+    [Fact]
     public void Unchanged_list_item_is_projection_equivalent()
     {
         var graph = new DocumentGraph("1.1", "doc_1", DocumentFormatKind.Docx,
@@ -318,7 +371,7 @@ public sealed class MarkdownGraphEditorTests
             [
                 SpreadsheetCell("a1", "A1", "Title", 0),
                 SpreadsheetCell("c2", "C2", "Near", 1),
-                SpreadsheetCell("z20", "Z20", "Far", 2),
+                SpreadsheetCell("z2", "Z2", "Far", 2),
             ])
         ]);
         var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
@@ -327,9 +380,9 @@ public sealed class MarkdownGraphEditorTests
             projection.Replace("| Far |", "| Updated |", StringComparison.Ordinal));
 
         Assert.True(result.IsValid);
-        Assert.Equal("Updated", Assert.IsType<TextNodeContent>(result.EditedGraph.FindNode("z20")!.Content).Text);
+        Assert.Equal("Updated", Assert.IsType<TextNodeContent>(result.EditedGraph.FindNode("z2")!.Content).Text);
         Assert.Contains("range=A1:C2 source-columns=A,C source-rows=1,2 baseline_nodes=2", projection);
-        Assert.Contains("range=Z20:Z20 source-columns=Z source-rows=20 baseline_nodes=1", projection);
+        Assert.Contains("range=Z2:Z2 source-columns=Z source-rows=2 baseline_nodes=1", projection);
     }
 
     [Fact]
@@ -375,6 +428,31 @@ public sealed class MarkdownGraphEditorTests
         Assert.True(unchanged.IsValid);
         Assert.Equal("利用者\n（営業担当）", Assert.IsType<TextNodeContent>(unchanged.EditedGraph.FindNode("b4")!.Content).Text);
         Assert.Empty(unchanged.Diff.PatchSet.Operations);
+    }
+
+    [Fact]
+    public void PreservesFormattedXlsxRawCellWhenOnlyDisplayValueChanges()
+    {
+        var cell = SpreadsheetCell("a1", "A1", "45292", 0) with
+        {
+            Extensions = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal)
+            {
+                ["display_value"] = System.Text.Json.JsonSerializer.SerializeToElement("2024-01-01")
+            }
+        };
+        var graph = new DocumentGraph("1.1", "doc_display", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [cell])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("`45292` → 2024-01-01", projection, StringComparison.Ordinal);
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+        var displayOnlyEdit = new MarkdownGraphEditor().Apply(
+            graph, projection.Replace("2024-01-01", "2025-01-01", StringComparison.Ordinal));
+
+        Assert.True(unchanged.IsValid);
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.True(displayOnlyEdit.IsValid);
+        Assert.Empty(displayOnlyEdit.Diff.PatchSet.Operations);
     }
 
     [Fact]

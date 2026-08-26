@@ -436,6 +436,43 @@ public sealed class XlsxAdapterTests
         Assert.DoesNotContain(result.Warnings, warning => warning.Contains("5 DrawingML shape(s)", StringComparison.Ordinal));
     }
 
+    [Fact]
+    public void Native_xlsx_chart_is_extracted_with_anchor_type_and_formula_resolved_series()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage()));
+        var chart = Assert.Single(Assert.Single(result.Worksheets).Charts!);
+        var node = Assert.Single(result.Graph.Nodes, item => item.Kind == DocRedock.Core.Documents.NodeKind.Chart);
+
+        Assert.Equal("売上推移", chart.Title);
+        Assert.Equal("line", chart.Type);
+        Assert.Equal(2, chart.Column);
+        Assert.Equal(5, chart.Row);
+        Assert.Equal(["4月", "5月"], Assert.Single(chart.Series).Categories);
+        Assert.Equal(["12", "18"], Assert.Single(chart.Series).Values);
+        Assert.Equal("B5", node.Extensions!["address"].GetString());
+        Assert.Equal("line", node.Extensions["chart_type"].GetString());
+    }
+
+    private static byte[] CreateChartPackage()
+    {
+        var parts = new Dictionary<string, string>
+        {
+            ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
+            ["xl/workbook.xml"] = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\" /></sheets></workbook>",
+            ["xl/_rels/workbook.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"worksheet\" Target=\"worksheets/sheet1.xml\" /></Relationships>",
+            ["xl/worksheets/sheet1.xml"] = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>4月</t></is></c><c r=\"B1\" t=\"n\"><v>12</v></c></row><row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>5月</t></is></c><c r=\"B2\" t=\"n\"><v>18</v></c></row></sheetData><drawing r:id=\"rDrawing\" /></worksheet>",
+            ["xl/worksheets/_rels/sheet1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rDrawing\" Type=\"drawing\" Target=\"../drawings/drawing1.xml\" /></Relationships>",
+            ["xl/drawings/_rels/drawing1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdChart\" Type=\"chart\" Target=\"../charts/chart1.xml\" /></Relationships>",
+            ["xl/drawings/drawing1.xml"] = "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>4</xdr:row></xdr:from><xdr:ext cx=\"1\" cy=\"1\"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id=\"7\" name=\"Sales chart\"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData><c:chart r:id=\"rIdChart\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>",
+            ["xl/charts/chart1.xml"] = "<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>売上推移</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:lineChart><c:ser><c:tx><c:v>売上</c:v></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$1:$A$2</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!$B$1:$B$2</c:f></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>",
+        };
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var part in parts)
+            { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
+        return output.ToArray();
+    }
+
     private static byte[] CreatePackage(bool absoluteWorksheetTarget = false, bool withMerge = false, bool withPhoneticRun = false)
     {
         var parts = new Dictionary<string, string>

@@ -82,8 +82,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         {
             var embedImages = args.HasFlag("embed-images");
             var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
-            var readableTargets = embedImages ? new[] { markdown } : new[] { markdown, readableAssets };
-            using var stagedOutputs = new StagedOutputTransaction(readableTargets, force);
+            using var stagedOutputs = embedImages
+                ? new StagedOutputTransaction([markdown], force)
+                : new StagedOutputTransaction([markdown], force, [readableAssets]);
             var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var sheets = args.Option("sheets")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var readable = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
@@ -160,7 +161,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private async Task<int> RenderAsync(Arguments args, CancellationToken token)
     {
         var input = RequireExistingFile(args);
-        var value = args.Option("format") ?? throw new IOException("render requires --format docx|pptx|xlsx|pdf.");
+        var value = args.Option("format") ?? throw new IOException("render requires --format docx|pptx|xlsx|pdf|html.");
         if (!Enum.TryParse<RenderFormat>(value, true, out var format)) return Unsupported($"Unsupported render format '{value}'.");
         var destination = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(input, "." + value.ToLowerInvariant()));
         using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
@@ -423,7 +424,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock export <source> [--output file.md] [--profile roundtrip|readable|audit] [--sidecar dir|zip] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--allow-render-fallback]
-          docredock render <file.md> --format docx|pptx|xlsx|pdf [--template file] [--mermaid-cli mmdc] [--output file]
+          docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--mermaid-cli mmdc] [--output file]
           docredock inspect <source-or-file.md>
           docredock diff <file.md> [--json]
           docredock verify <file.md|file.drmd|file.drmdpkg>

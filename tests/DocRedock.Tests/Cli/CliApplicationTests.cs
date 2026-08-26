@@ -224,6 +224,110 @@ public sealed class CliApplicationTests
         Assert.Equal((int)ExitCode.InvalidInput, await app.RunAsync(["pack", fixture.MarkdownPath, "--sidecar"]));
     }
 
+    [Fact]
+    public async Task Staged_commit_requires_every_output_before_replacing_existing_targets()
+    {
+        using var fixture = new Fixture();
+        var target = Path.Combine(fixture.Root, "projection.md");
+        await File.WriteAllTextAsync(target, "previous-good-output");
+        string stagingRoot;
+
+        using (var transaction = new StagedOutputTransaction([target], force: true))
+        {
+            stagingRoot = transaction.StagingRoot;
+            var exception = Assert.Throws<InvalidOperationException>(() => transaction.Commit());
+
+            Assert.Contains("projection.md", exception.Message, StringComparison.Ordinal);
+            Assert.Equal("previous-good-output", await File.ReadAllTextAsync(target));
+            Assert.True(Directory.Exists(stagingRoot));
+        }
+
+        Assert.False(Directory.Exists(stagingRoot));
+        Assert.Equal("previous-good-output", await File.ReadAllTextAsync(target));
+    }
+
+    [Fact]
+    public async Task Staged_commit_allows_a_missing_optional_output_and_removes_a_stale_target()
+    {
+        using var fixture = new Fixture();
+        var markdown = Path.Combine(fixture.Root, "projection.md");
+        var assets = Path.Combine(fixture.Root, "projection.assets");
+        await File.WriteAllTextAsync(markdown, "previous-markdown");
+        Directory.CreateDirectory(assets);
+        await File.WriteAllTextAsync(Path.Combine(assets, "stale.png"), "stale");
+
+        using (var transaction = new StagedOutputTransaction([markdown], force: true, optionalDestinations: [assets]))
+        {
+            await File.WriteAllTextAsync(transaction.PathFor(markdown), "new-markdown");
+            transaction.Commit();
+        }
+
+        Assert.Equal("new-markdown", await File.ReadAllTextAsync(markdown));
+        Assert.False(Directory.Exists(assets));
+    }
+
+    [Fact]
+    public async Task Staged_commit_installs_all_outputs_and_removes_staging_artifacts()
+    {
+        using var fixture = new Fixture();
+        var markdown = Path.Combine(fixture.Root, "projection.md");
+        var sidecar = Path.Combine(fixture.Root, "projection.drmd");
+        await File.WriteAllTextAsync(markdown, "previous-good-output");
+        string stagingRoot;
+
+        using (var transaction = new StagedOutputTransaction([markdown, sidecar], force: true))
+        {
+            stagingRoot = transaction.StagingRoot;
+            await File.WriteAllTextAsync(transaction.PathFor(markdown), "new-markdown");
+            await File.WriteAllTextAsync(transaction.PathFor(sidecar), "new-sidecar");
+            transaction.Commit();
+
+            Assert.Equal("new-markdown", await File.ReadAllTextAsync(markdown));
+            Assert.Equal("new-sidecar", await File.ReadAllTextAsync(sidecar));
+            Assert.False(Directory.Exists(stagingRoot));
+        }
+
+        Assert.False(Directory.Exists(stagingRoot));
+        Assert.Empty(Directory.EnumerateFiles(fixture.Root, ".*.backup"));
+    }
+
+    [Fact]
+    public async Task Staged_commit_keeps_all_new_outputs_when_backup_cleanup_fails()
+    {
+        using var fixture = new Fixture();
+        var markdown = Path.Combine(fixture.Root, "projection.md");
+        var sidecar = Path.Combine(fixture.Root, "projection.drmd");
+        await File.WriteAllTextAsync(markdown, "previous-markdown");
+        await File.WriteAllTextAsync(sidecar, "previous-sidecar");
+
+        using (var transaction = new StagedOutputTransaction(
+            [markdown, sidecar], force: true, fileSystem: new FailingBackupCleanupFileSystem()))
+        {
+            await File.WriteAllTextAsync(transaction.PathFor(markdown), "new-markdown");
+            await File.WriteAllTextAsync(transaction.PathFor(sidecar), "new-sidecar");
+            transaction.Commit();
+        }
+
+        Assert.Equal("new-markdown", await File.ReadAllTextAsync(markdown));
+        Assert.Equal("new-sidecar", await File.ReadAllTextAsync(sidecar));
+    }
+
+    private sealed class FailingBackupCleanupFileSystem : IStagedOutputFileSystem
+    {
+        public bool FileExists(string path) => File.Exists(path);
+        public bool DirectoryExists(string path) => Directory.Exists(path);
+        public void CreateDirectory(string path) => Directory.CreateDirectory(path);
+        public void MoveFile(string source, string destination) => File.Move(source, destination);
+        public void MoveDirectory(string source, string destination) => Directory.Move(source, destination);
+        public void DeleteFile(string path)
+        {
+            if (path.EndsWith(".backup", StringComparison.Ordinal))
+                throw new IOException("Simulated backup cleanup failure.");
+            File.Delete(path);
+        }
+        public void DeleteDirectory(string path, bool recursive) => Directory.Delete(path, recursive);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "docredock-cli-tests", Guid.NewGuid().ToString("N"));

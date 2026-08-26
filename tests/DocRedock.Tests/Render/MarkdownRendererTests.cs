@@ -250,6 +250,80 @@ public sealed class MarkdownRendererTests
     }
 
     [Fact]
+    public async Task DocRedock_projection_renders_as_sanitized_responsive_html_preview()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "roundtrip-preview.html");
+        const string projection = """
+            ---
+            drmd_schema: 1.0
+            document_id: doc_1
+            source_format: xlsx
+            roundtrip_store: source.drmd
+            content_policy: visible
+            preserve_drmd_comments: true
+            ---
+            <!--drmd:partition-begin id=part-0001 baseline_nodes=4-->
+            <!--drmd:block id=n_1 kind=heading-->
+            # 月次レビュー
+
+            <!--drmd:sheet-table range=A1:B2 source-columns=A,B source-rows=1,2 baseline_nodes=2 editability=cell-grid operations=replace-cell constraints=preserve-range,preserve-addresses,no-insert-delete,safe-formula-->
+            | 月 | 達成率 |
+            | --- | --- |
+            | 8月 | 42.0% |
+
+            <!--drmd:block id=n_3 kind=paragraph-->
+            **判断:** 継続
+            <!--drmd:partition-end id=part-0001 baseline_nodes=4-->
+            <!--drmd:document-end id=doc_1 partitions=1-->
+            """;
+
+        var result = await new MarkdownRenderer().RenderAsync(projection, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Equal(RenderFormat.Html, result.Format);
+        Assert.Contains("ROUNDTRIP PREVIEW", html, StringComparison.Ordinal);
+        Assert.Contains("月次レビュー", html, StringComparison.Ordinal);
+        Assert.Contains("<div class=\"table-scroll\">", html, StringComparison.Ordinal);
+        Assert.Contains("42.0%", html, StringComparison.Ordinal);
+        Assert.Contains("<strong>判断:</strong>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("drmd_schema", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("drmd:block", html, StringComparison.Ordinal);
+        Assert.Contains(result.Warnings, warning => warning.Contains("control metadata", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Html_preview_renders_known_readable_markup_and_hides_inference_comments()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "readable-preview.html");
+        const string markdown = """
+            # **変換品質**<br>**構造から測る**
+
+            <!-- inferred: セル配置から文書情報セクションを推定 -->
+            <details class="speaker-notes">
+            <summary>スピーカーノート（クリックで展開）</summary>
+
+            検証メモ
+
+            </details>
+
+            ---
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<title>変換品質 構造から測る</title>", html, StringComparison.Ordinal);
+        Assert.Contains("<strong>変換品質</strong><br><strong>構造から測る</strong>", html, StringComparison.Ordinal);
+        Assert.Contains("<details class=\"speaker-notes\">", html, StringComparison.Ordinal);
+        Assert.Contains("<summary>スピーカーノート（クリックで展開）</summary>", html, StringComparison.Ordinal);
+        Assert.Contains("<hr>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("&lt;details", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("inferred:", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Incomplete_docredock_projection_is_rejected_by_render()
     {
         using var fixture = new Fixture();

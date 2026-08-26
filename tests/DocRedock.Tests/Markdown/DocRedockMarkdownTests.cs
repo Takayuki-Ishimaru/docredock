@@ -213,6 +213,55 @@ public sealed class DocRedockMarkdownTests
     }
 
     [Fact]
+    public void CoreGraphProjectionPreservesOrderedListsCodeBlocksAndInlineLinks()
+    {
+        const string target = "https://example.test/docs";
+        var listExtensions = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["list_format"] = System.Text.Json.JsonSerializer.SerializeToElement("ordered"),
+            ["list_number"] = System.Text.Json.JsonSerializer.SerializeToElement(3)
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_visual", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("ordered", NodeKind.ListItem, null, 0, ContentLayer.Body,
+                    new TextNodeContent("Third item"), Extensions: listExtensions),
+                new DocumentNode("code", NodeKind.CodeBlock, null, 1, ContentLayer.Body,
+                    new RichTextNodeContent([
+                        new TextRun("{", Code: true),
+                        new TextRun("\n", Kind: TextRunKind.LineBreak),
+                        new TextRun("  \"profile\": \"roundtrip\"", Code: true),
+                        new TextRun("\n", Kind: TextRunKind.LineBreak),
+                        new TextRun("}", Code: true)
+                    ])),
+                new DocumentNode("rich", NodeKind.Paragraph, null, 2, ContentLayer.Body,
+                    new RichTextNodeContent([
+                        new TextRun("See "),
+                        new TextRun("Project", Underline: true, LinkTarget: target)
+                    ])),
+                new DocumentNode("link", NodeKind.Link, "rich", 2, ContentLayer.Body,
+                    new ReferenceNodeContent(target, "Project"), Editability: NodeEditability.Passthrough)
+            ])
+        ]);
+
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph);
+        var normalized = projection.Markdown.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var parsed = new DocRedockMarkdownParser().Parse(projection.Markdown);
+        var inline = DocRedockInlineMarkdown.Parse("See [<u>Project</u>](https://example.test/docs)",
+            ((RichTextNodeContent)graph.Partitions[0].Nodes[2].Content).Runs);
+
+        Assert.Contains("3. Third item", normalized);
+        Assert.Contains("```\n{\n  \"profile\": \"roundtrip\"\n}\n```", normalized);
+        Assert.DoesNotContain("`{`<br>", normalized);
+        Assert.Contains("[<u>Project</u>](https://example.test/docs)", normalized);
+        Assert.Equal(1, normalized.Split("Project", StringSplitOptions.None).Length - 1);
+        Assert.Contains("<!--drmd:block id=link kind=link", normalized);
+        Assert.Contains(inline.Runs, run => run.Text == "Project" && run.Underline && run.LinkTarget == target);
+        Assert.True(parsed.IsComplete);
+    }
+
+    [Fact]
     public void CoreGraphProjectionLabelsSheetsSlidesAndCells()
     {
         var sheet = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_sheet", DocumentFormatKind.Xlsx,
@@ -463,6 +512,74 @@ public sealed class DocRedockMarkdownTests
         var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
 
         Assert.Contains("| `=SUM(B1:B2)` → 240 |", projection);
+    }
+
+    [Fact]
+    public void SplitsDisconnectedHorizontalXlsxRegionsIntoIndependentTables()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_regions", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-Summary", 0,
+            [
+                Cell("a1", "A1", "左項目", 0), Cell("b1", "B1", "左値", 1),
+                Cell("a2", "A2", "A", 2), Cell("b2", "B2", "10", 3),
+                Cell("d1", "D1", "右項目", 4), Cell("e1", "E1", "右値", 5),
+                Cell("d2", "D2", "B", 6), Cell("e2", "E2", "20", 7),
+            ])
+        ]);
+
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Equal(2, projection.Split("<!--drmd:sheet-table ", StringSplitOptions.None).Length - 1);
+        Assert.Contains("range=A1:B2", projection, StringComparison.Ordinal);
+        Assert.Contains("range=D1:E2", projection, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RepeatedHorizontalGapSplitsAHeadingRowWithOneCellOnTheLeft()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_recurring_gap", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-Monthly", 0,
+            [
+                Cell("a3", "A3", "月", 0), Cell("b3", "B3", "予算", 1), Cell("c3", "C3", "実績", 2), Cell("d3", "D3", "件数", 3), Cell("e3", "E3", "進捗", 4),
+                Cell("h3", "H3", "カテゴリ別", 5),
+                Cell("m3", "M3", "月", 6), Cell("n3", "N3", "予算", 7), Cell("o3", "O3", "実績", 8),
+                Cell("a4", "A4", "4月", 9), Cell("b4", "B4", "100", 10), Cell("c4", "C4", "80", 11), Cell("d4", "D4", "2", 12), Cell("e4", "E4", "80%", 13),
+                Cell("h4", "H4", "カテゴリ", 14), Cell("i4", "I4", "予算", 15), Cell("j4", "J4", "実績", 16), Cell("k4", "K4", "消化率", 17),
+                Cell("m4", "M4", "4月", 18), Cell("n4", "N4", "100", 19), Cell("o4", "O4", "80", 20),
+                Cell("a5", "A5", "5月", 21), Cell("b5", "B5", "120", 22), Cell("c5", "C5", "90", 23), Cell("d5", "D5", "3", 24), Cell("e5", "E5", "75%", 25),
+                Cell("h5", "H5", "製品", 26), Cell("i5", "I5", "100", 27), Cell("j5", "J5", "80", 28), Cell("k5", "K5", "80%", 29),
+                Cell("m5", "M5", "5月", 30), Cell("n5", "N5", "120", 31), Cell("o5", "O5", "90", 32),
+            ])
+        ]);
+
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Equal(3, projection.Split("<!--drmd:sheet-table ", StringSplitOptions.None).Length - 1);
+        Assert.Contains("range=A3:E5", projection, StringComparison.Ordinal);
+        Assert.Contains("range=H3:K5", projection, StringComparison.Ordinal);
+        Assert.Contains("range=M3:O5", projection, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectsXlsxDisplayValueAlongsideRawCellValue()
+    {
+        var dateCell = Cell("a1", "A1", "45292", 0) with
+        {
+            Extensions = new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal)
+            {
+                ["row"] = System.Text.Json.JsonSerializer.SerializeToElement(1),
+                ["column"] = System.Text.Json.JsonSerializer.SerializeToElement(1),
+                ["display_value"] = System.Text.Json.JsonSerializer.SerializeToElement("2024-01-01")
+            }
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_display", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [dateCell])]);
+
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("| `45292` → 2024-01-01 |", projection, StringComparison.Ordinal);
     }
 
     private static DocumentNode Cell(string id, string address, string text, int order) => new(

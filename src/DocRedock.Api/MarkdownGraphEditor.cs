@@ -160,6 +160,9 @@ public sealed class MarkdownGraphEditor
 
     private static DocumentNode ApplyBlock(DocumentNode node, TypedMarkdownBlock block)
     {
+        if (node.Kind == NodeKind.CodeBlock &&
+            StringComparer.Ordinal.Equals(ProjectNodeText(node), DecodeBlockText(block)))
+            return node;
         if (node.Content is RichTextNodeContent rich)
         {
             var inline = DecodeInlineBlockMarkdown(block);
@@ -198,6 +201,11 @@ public sealed class MarkdownGraphEditor
     {
         if (node.Content is RichTextNodeContent rich)
             return StringComparer.Ordinal.Equals(DocRedockInlineMarkdown.Serialize(rich.Runs), DecodeInlineBlockMarkdown(block));
+        if (node.Kind == NodeKind.Link && string.IsNullOrWhiteSpace(block.Text) &&
+            node.Content is ReferenceNodeContent link && node.ParentId is { } parentId &&
+            baseline.FindNode(parentId)?.Content is RichTextNodeContent parentRich &&
+            parentRich.Runs.Any(run => StringComparer.Ordinal.Equals(run.LinkTarget, link.Reference)))
+            return true;
         if (node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent image &&
             TryReadHtmlImage(block.Text, out var attributes))
         {
@@ -704,9 +712,9 @@ public sealed class MarkdownGraphEditor
         if (closing < 0) return value;
         var code = value[opening..closing];
         var suffix = value[(closing + opening)..];
-        if (code.StartsWith('=') && (suffix.Length == 0 || suffix.StartsWith(" → ", StringComparison.Ordinal)))
+        if (suffix.Length == 0 || suffix.StartsWith(" → ", StringComparison.Ordinal))
             return code;
-        return suffix.Length == 0 ? code : value;
+        return value;
     }
 
     private static string? CellAddress(DocumentNode node) =>
