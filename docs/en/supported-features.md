@@ -1,10 +1,10 @@
-# v0.1.3 Supported Features
+# v0.1.4 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.1.3 Public Beta supports local DOCX, XLSX, and PPTX conversion to **Readable Markdown**.
+DocRedock v0.1.4 Public Beta supports local DOCX, XLSX, and PPTX conversion to **Readable Markdown**.
 
-| Feature | v0.1.3 status |
+| Feature | v0.1.4 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta |
 | `visible`, `complete`, `sanitized` content policies | Supported |

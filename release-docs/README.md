@@ -4,7 +4,7 @@
 
 このディレクトリには、バージョン別リリースノートと保守者向けの公開手順を置いています。利用者向けの入口はルートの[README.ja.md](../README.ja.md)です。
 
-## v0.1.3 Public Beta
+## v0.1.4 Public Beta
 
 - サポート: DOCX／XLSX／PPTXから閲覧用Markdownへのローカル変換。
 - 安全な既定値: `visible`。`complete`は非表示情報を警告付きで含み、`sanitized`はより強く除外。
@@ -13,10 +13,10 @@
 ## 利用者向け
 
 - [利用ガイド](../docs/ja/user-guide.md)
-- [v0.1.3の対応状況](../docs/ja/supported-features.md)
+- [v0.1.4の対応状況](../docs/ja/supported-features.md)
 - [実験機能](../docs/ja/experimental-features.md)
 - [セキュリティとプライバシー](../docs/ja/security-and-privacy.md)
-- [v0.1.3リリースノート](RELEASE_NOTES_v0.1.3.md)
+- [v0.1.4リリースノート](RELEASE_NOTES_v0.1.4.md)
 
 ## 保守者向け
 

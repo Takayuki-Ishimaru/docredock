@@ -181,6 +181,7 @@ public sealed class ReadableMarkdownTests
             new { Text = "通常段落", Level = 0, IsBullet = false, Runs = new[] { new { Text = "通常段落", Bold = false, Italic = false, Underline = false } } },
             new { Text = "重要", Level = 0, IsBullet = true, Runs = new[] { new { Text = "重要", Bold = true, Italic = false, Underline = false } } },
             new { Text = "補足", Level = 1, IsBullet = true, Runs = new[] { new { Text = "補足", Bold = false, Italic = true, Underline = false } } },
+            new { Text = "• リテラル箇条書き", Level = 0, IsBullet = false, Runs = new[] { new { Text = "• リテラル箇条書き", Bold = false, Italic = false, Underline = false } } },
         };
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
         {
@@ -192,7 +193,7 @@ public sealed class ReadableMarkdownTests
         [
             new DocumentNode("title", NodeKind.Shape, null, 0, ContentLayer.Body, new TextNodeContent("概要"),
                 Extensions: new Dictionary<string, JsonElement> { ["shape_role"] = JsonSerializer.SerializeToElement("title") }),
-            new DocumentNode("body", NodeKind.Shape, null, 1, ContentLayer.Body, new TextNodeContent("通常段落\n重要\n補足"), Extensions: extensions),
+            new DocumentNode("body", NodeKind.Shape, null, 1, ContentLayer.Body, new TextNodeContent("通常段落\n重要\n補足\n• リテラル箇条書き"), Extensions: extensions),
         ])]);
 
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
@@ -201,6 +202,8 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("## スライド 1 — 概要", markdown, StringComparison.Ordinal);
         Assert.Contains("通常段落", markdown, StringComparison.Ordinal);
         Assert.Contains("- **重要**\n  - _補足_", markdown, StringComparison.Ordinal);
+        Assert.Contains("- リテラル箇条書き", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("• リテラル箇条書き", markdown, StringComparison.Ordinal);
     }
 
     [Fact]

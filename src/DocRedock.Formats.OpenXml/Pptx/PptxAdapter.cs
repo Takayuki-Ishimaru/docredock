@@ -446,6 +446,18 @@ public sealed class PptxAdapter
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
                 string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden));
         }
+        if (!result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
+        {
+            var inferredTitle = result
+                .Select((shape, index) => (Shape: shape, Index: index))
+                .Where(candidate => candidate.Shape.Role is "other" or "body" &&
+                    IsTitleLike(candidate.Shape.ParagraphDetails ?? [], candidate.Shape.Geometry))
+                .OrderBy(candidate => candidate.Shape.Geometry?.Y ?? double.MaxValue)
+                .ThenBy(candidate => candidate.Shape.Geometry?.X ?? double.MaxValue)
+                .FirstOrDefault();
+            if (inferredTitle.Shape is not null)
+                result[inferredTitle.Index] = inferredTitle.Shape with { Role = "title" };
+        }
         ResolveConnectorLabels(result);
         return result;
     }
@@ -726,8 +738,8 @@ public sealed class PptxAdapter
         if (value is "dt" or "date") return "date";
         if (value is "sldnum" or "slidenum" or "slide-number") return "slide-number";
         var fallback = name?.Trim().ToLowerInvariant() ?? string.Empty;
-        if (fallback.Contains("title", StringComparison.Ordinal)) return "title";
         if (fallback.Contains("subtitle", StringComparison.Ordinal) || fallback.Contains("sub-title", StringComparison.Ordinal)) return "subtitle";
+        if (fallback.Contains("title", StringComparison.Ordinal)) return "title";
         if (fallback.Contains("footer", StringComparison.Ordinal)) return "footer";
         if (fallback.Contains("slide number", StringComparison.Ordinal) || fallback.Contains("slide-number", StringComparison.Ordinal)) return "slide-number";
         if (fallback.Equals("date", StringComparison.Ordinal) || fallback.StartsWith("date ", StringComparison.Ordinal)) return "date";
@@ -735,6 +747,10 @@ public sealed class PptxAdapter
         return "other";
     }
     private static bool IsFurnitureRole(string role) => role is "footer" or "date" or "slide-number" or "sldnum" or "ftr";
+
+    private static bool IsTitleLike(IReadOnlyList<PptxTextParagraph> paragraphs, Geometry? geometry) =>
+        geometry is { Y: <= 1_200_000 } && paragraphs.Count == 1 &&
+        paragraphs[0].Runs is { Count: > 0 } runs && runs.All(run => run.Bold);
     private static void AppendParagraph(XmlDocument document, XmlNode body, string text, XmlNamespaceManager ns)
     {
         var paragraph = document.CreateElement("a", "p", ns.LookupNamespace("a")!);
