@@ -80,11 +80,11 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 ## Distributions
 
 - [ ] Publish win-x64, win-arm64, osx-x64, osx-arm64, linux-x64, and linux-arm64
-- [ ] Start each artifact on its target OS/CPU or a trusted equivalent CI runner
-- [ ] Start the GUI on every target runner and exercise **Readable Markdown (readable)** for DOCX, XLSX, and PPTX
+- [ ] Extract each artifact on its target OS/CPU or a trusted equivalent CI runner, then verify the CLI and GUI binary
+- [ ] On headless CI, verify PE format and target CPU for Windows, Mach-O format, target CPU, and executable permission for macOS, and GUI startup under Xvfb for Linux
 - [ ] Exercise the v0.1.3 CLI version, visible/complete/sanitized policies, experimental gate, readable export, F0 SHA comparison, F1 editing, pack/unpack, and tamper rejection for DOCX, XLSX, and PPTX (restore results are mechanical regression evidence, not v0.1.3 user support)
 - [ ] Record in the README and release evidence that PDF conversion and original-format restoration are unsupported in v0.1.3 and require DOCREDOCK_ENABLE_EXPERIMENTAL=1
-- [ ] Verify the GUI content-policy selector and complete warning, plus DOCREDOCK_DISABLE_UPDATE_CHECK=1
+- [ ] In an attended graphical environment, verify the GUI content-policy selector, complete warning, DOCREDOCK_DISABLE_UPDATE_CHECK=1, and the rendered appearance of DOCX/XLSX/PPTX Readable Markdown
 - [ ] Apply Windows signing and macOS signing/notarization only when configured; otherwise continue with an explicit unsigned status
 - [ ] Embed enough version and commit information to trace every executable
 - [ ] Include LICENSE, THIRD-PARTY-NOTICES, Japanese/English README/QUICKSTART and security guidance, an artifact-file-linked SBOM, provenance, internal checksums, and signing status

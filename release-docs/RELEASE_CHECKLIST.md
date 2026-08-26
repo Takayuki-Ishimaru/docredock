@@ -80,11 +80,11 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 ## 配布物
 
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
-- [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で起動した
-- [ ] GUI を各対象 runner で起動し、DOCX／XLSX／PPTX の**閲覧用Markdown（readable）**を確認した
+- [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で展開し、CLI と GUI バイナリを検証した
+- [ ] headless CI では Windows GUI の PE 形式・対象 CPU、macOS GUI の Mach-O 形式・対象 CPU・実行権限を検証し、Linux では Xvfb 上の GUI 起動も確認した
 - [ ] CLIのv0.1.3バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、v0.1.3のユーザーサポートを意味しない）
 - [ ] PDF変換と元ファイル形式への反映がv0.1.3でサポート対象外であり、DOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
-- [ ] GUIの内容ポリシー選択とcomplete警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1を確認した
+- [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX の閲覧用Markdownの見た目を確認した
 - [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
 - [ ] 実行ファイルへバージョンと commit を追跡できる情報を付与した
 - [ ] 配布アーカイブに LICENSE、THIRD-PARTY-NOTICES、日英 README/QUICKSTART／セキュリティ文書、実ファイル連携 SBOM、provenance、内部チェックサム、署名状況を含めた

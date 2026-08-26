@@ -166,6 +166,71 @@ def exercise_pack_and_tamper(root: Path, cli: Path, projection: Path) -> None:
         raise RuntimeError("tampered sidecar was accepted")
 
 
+def inspect_gui_binary(gui: Path) -> None:
+    if gui.stat().st_size < 1024 * 1024:
+        raise RuntimeError("GUI executable is unexpectedly small")
+    if os.name != "nt" and not os.access(gui, os.X_OK):
+        raise RuntimeError("GUI executable does not have its executable bit set")
+
+    with gui.open("rb") as stream:
+        header = stream.read(65536)
+    host_machine = (
+        os.environ.get("PROCESSOR_ARCHITEW6432")
+        or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+        if sys.platform.startswith("win")
+        else os.uname().machine
+    ).lower()
+    expected_architecture = {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "arm64": "arm64",
+        "aarch64": "arm64",
+    }.get(host_machine)
+    if expected_architecture is None:
+        raise RuntimeError(f"unsupported runner CPU architecture: {host_machine or 'unknown'}")
+
+    if sys.platform.startswith("win"):
+        if len(header) < 64 or header[:2] != b"MZ":
+            raise RuntimeError("GUI executable is not a PE image")
+        pe_offset = int.from_bytes(header[60:64], "little")
+        if pe_offset + 6 > len(header) or header[pe_offset:pe_offset + 4] != b"PE\0\0":
+            raise RuntimeError("GUI executable has an invalid PE header")
+        actual_architecture = {
+            0x8664: "x86_64",
+            0xAA64: "arm64",
+        }.get(int.from_bytes(header[pe_offset + 4:pe_offset + 6], "little"))
+    elif sys.platform == "darwin":
+        byte_order = {
+            b"\xcf\xfa\xed\xfe": "little",
+            b"\xfe\xed\xfa\xcf": "big",
+        }.get(header[:4])
+        if byte_order is None:
+            raise RuntimeError("GUI executable is not a 64-bit Mach-O image")
+        actual_architecture = {
+            0x01000007: "x86_64",
+            0x0100000C: "arm64",
+        }.get(int.from_bytes(header[4:8], byte_order))
+    elif sys.platform.startswith("linux"):
+        if len(header) < 20 or header[:4] != b"\x7fELF" or header[4] != 2:
+            raise RuntimeError("GUI executable is not a 64-bit ELF image")
+        if header[5] not in (1, 2):
+            raise RuntimeError("GUI executable has an invalid ELF byte-order marker")
+        byte_order = "little" if header[5] == 1 else "big"
+        actual_architecture = {
+            62: "x86_64",
+            183: "arm64",
+        }.get(int.from_bytes(header[18:20], byte_order))
+    else:
+        raise RuntimeError(f"unsupported GUI smoke-test platform: {sys.platform}")
+
+    if actual_architecture is None:
+        raise RuntimeError("GUI executable has an unsupported CPU architecture")
+    if actual_architecture != expected_architecture:
+        raise RuntimeError(
+            f"GUI architecture {actual_architecture} does not match runner {expected_architecture}"
+        )
+
+
 def exercise_gui(gui: Path) -> None:
     command = [str(gui)]
     if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
@@ -194,6 +259,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--gui", required=True, type=Path)
+    parser.add_argument("--gui-mode", choices=("startup", "binary"), default="startup")
     args = parser.parse_args()
     cli = args.cli.resolve()
     gui = args.gui.resolve()
@@ -213,9 +279,12 @@ def main() -> int:
         exercise_format(root, cli, "xlsx", "xl/worksheets/sheet1.xml", create_xlsx)
         exercise_format(root, cli, "pptx", "ppt/slides/slide1.xml", create_pptx)
         exercise_pack_and_tamper(root, cli, docx_projection)
-        exercise_gui(gui)
+        inspect_gui_binary(gui)
+        if args.gui_mode == "startup":
+            exercise_gui(gui)
 
-    print("Release smoke test passed for v0.1.3 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, F0/F1 restore, pack/unpack, tamper rejection, and GUI startup.")
+    gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
+    print(f"Release smoke test passed for v0.1.3 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, F0/F1 restore, pack/unpack, tamper rejection, and {gui_result}.")
     print("PDF paths intentionally skipped: current policy is do not use pending validation.")
     return 0
 
