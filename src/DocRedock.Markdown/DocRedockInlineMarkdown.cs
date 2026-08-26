@@ -6,7 +6,7 @@ namespace DocRedock.Markdown;
 /// <summary>
 /// Deterministic inline Markdown used by DRMD rich-text blocks.  The supported
 /// subset is deliberately small and reversible: bold, italic, underline,
-/// strike-through, inline code, line breaks, and tabs.
+/// strike-through, inline code, hyperlinks, line breaks, and tabs.
 /// </summary>
 public static class DocRedockInlineMarkdown
 {
@@ -45,18 +45,14 @@ public static class DocRedockInlineMarkdown
     private static bool SameStyle(TextRun left, TextRun right) =>
         left.Bold == right.Bold && left.Italic == right.Italic &&
         left.Underline == right.Underline && left.Strike == right.Strike &&
-        left.Code == right.Code;
+        left.Code == right.Code && left.LinkTarget == right.LinkTarget &&
+        left.Color == right.Color && left.HighlightColor == right.HighlightColor;
 
     private static void AppendStyledText(StringBuilder output, string text, TextRun style)
     {
         if (text.Length == 0) return;
-        if (!style.Bold && !style.Italic && !style.Underline && !style.Strike && !style.Code)
-        {
-            output.Append(Escape(text));
-            return;
-        }
 
-        // Keep whitespace outside emphasis delimiters. This avoids a run
+        // Keep whitespace outside emphasis and hyperlink delimiters. This avoids a run
         // boundary producing '**Recommendation. **Proceed' and keeps the
         // following word visibly separated in every Markdown renderer.
         var start = 0;
@@ -75,6 +71,7 @@ public static class DocRedockInlineMarkdown
         if (style.Bold) value = "**" + value + "**";
         if (style.Strike) value = "~~" + value + "~~";
         if (style.Underline) value = "<u>" + value + "</u>";
+        if (style.LinkTarget is not null) value = "[" + value + "](" + LinkDestination(style.LinkTarget) + ")";
         output.Append(value).Append(Escape(text[end..]));
     }
 
@@ -102,6 +99,15 @@ public static class DocRedockInlineMarkdown
             {
                 text.Append(markdown[index + 1]);
                 index += 2;
+                continue;
+            }
+            if (TryReadLink(markdown, index, out var label, out var target, out var nextIndex))
+            {
+                Flush();
+                var linkBaseline = baselineRuns?.Where(run => StringComparer.Ordinal.Equals(run.LinkTarget, target)).ToArray();
+                foreach (var linkRun in Parse(label, linkBaseline).Runs)
+                    AddRun(runs, linkRun with { LinkTarget = target });
+                index = nextIndex;
                 continue;
             }
             if (StartsWith(markdown, index, "<br>"))
@@ -198,7 +204,9 @@ public static class DocRedockInlineMarkdown
         if (run.Text.Length == 0) return;
         if (runs.Count > 0 && runs[^1].Kind == TextRunKind.Text && run.Kind == TextRunKind.Text &&
             runs[^1].StyleId == run.StyleId && runs[^1].Bold == run.Bold && runs[^1].Italic == run.Italic &&
-            runs[^1].Underline == run.Underline && runs[^1].Strike == run.Strike && runs[^1].Code == run.Code)
+            runs[^1].Underline == run.Underline && runs[^1].Strike == run.Strike && runs[^1].Code == run.Code &&
+            runs[^1].LinkTarget == run.LinkTarget && runs[^1].Color == run.Color &&
+            runs[^1].HighlightColor == run.HighlightColor)
         {
             runs[^1] = runs[^1] with { Text = runs[^1].Text + run.Text };
             return;
@@ -209,6 +217,48 @@ public static class DocRedockInlineMarkdown
     private static string? MatchingStyleId(IReadOnlyList<TextRun>? baselineRuns, bool bold, bool italic, bool underline, bool strike, bool code) =>
         baselineRuns?.FirstOrDefault(run => run.Kind == TextRunKind.Text && run.Bold == bold && run.Italic == italic &&
             run.Underline == underline && run.Strike == strike && run.Code == code)?.StyleId;
+
+    private static bool TryReadLink(string markdown, int start, out string label, out string target, out int nextIndex)
+    {
+        label = string.Empty;
+        target = string.Empty;
+        nextIndex = start;
+        if (start >= markdown.Length || markdown[start] != '[') return false;
+
+        var closeLabel = -1;
+        for (var index = start + 1; index < markdown.Length; index++)
+        {
+            if (markdown[index] == ']' && (index == start + 1 || markdown[index - 1] != '\\'))
+            {
+                closeLabel = index;
+                break;
+            }
+        }
+        if (closeLabel < 0 || closeLabel + 1 >= markdown.Length || markdown[closeLabel + 1] != '(') return false;
+
+        var targetStart = closeLabel + 2;
+        int closeTarget;
+        if (targetStart < markdown.Length && markdown[targetStart] == '<')
+        {
+            closeTarget = markdown.IndexOf(">)", targetStart + 1, StringComparison.Ordinal);
+            if (closeTarget < 0) return false;
+            target = markdown[(targetStart + 1)..closeTarget];
+            nextIndex = closeTarget + 2;
+        }
+        else
+        {
+            closeTarget = markdown.IndexOf(')', targetStart);
+            if (closeTarget < 0) return false;
+            target = markdown[targetStart..closeTarget];
+            nextIndex = closeTarget + 1;
+        }
+
+        label = markdown[(start + 1)..closeLabel];
+        return target.Length > 0;
+    }
+
+    private static string LinkDestination(string target) =>
+        target.IndexOfAny([' ', '(', ')']) >= 0 ? "<" + target.Replace(">", "%3E", StringComparison.Ordinal) + ">" : target;
 
     private static string CodeSpan(string value)
     {

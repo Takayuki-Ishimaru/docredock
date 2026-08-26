@@ -2,8 +2,8 @@
 
 [日本語ドキュメント](release-docs/README.md) | [English documentation](release-docs/README.en.md)
 
-[![Release: v0.1.1 Public Beta](https://img.shields.io/badge/release-v0.1.1%20Public%20Beta-f97316)](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1)
-[Download ready-to-run GUI + CLI](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1) · [Release notes](release-docs/RELEASE_NOTES_v0.1.1.md)
+[![Release: v0.1.2 Public Beta](https://img.shields.io/badge/release-v0.1.2%20Public%20Beta-f97316)](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.2)
+[Download ready-to-run GUI + CLI](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.2) · [Release notes](release-docs/RELEASE_NOTES_v0.1.2.md)
 
 <p align="center">
   <img src="assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" alt="DocRedock app icon" width="96" height="96">

@@ -31,6 +31,93 @@ public sealed class DocumentServiceTests
     }
 
     [Fact]
+    public async Task Readable_export_rejects_unrecognized_input_with_the_source_name()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "broken.pptx");
+        await File.WriteAllTextAsync(source, "not an Office package");
+
+        var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
+            new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "broken.md"))));
+
+        Assert.Contains("broken.pptx", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("not a supported or readable", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Readable_xlsx_export_preflights_oversized_media_before_adapter_processing()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "source.xlsx");
+            await new MarkdownRenderer().RenderAsync("# Image workbook\n\nBody", RenderFormat.Xlsx, source);
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            await using (var media = archive.CreateEntry("xl/media/oversized.png").Open())
+                await media.WriteAsync(RandomNumberGenerator.GetBytes(33 * 1024 * 1024));
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "source.md"))));
+
+            Assert.Contains("xl/media/oversized.png", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("32 MiB limit", exception.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(Path.Combine(root, "source.md")));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Readable_xlsx_export_preflights_oversized_non_media_before_adapter_processing()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "source.xlsx");
+            await new MarkdownRenderer().RenderAsync("# Workbook\n\nBody", RenderFormat.Xlsx, source);
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            await using (var content = archive.CreateEntry("xl/worksheets/oversized.xml", CompressionLevel.NoCompression).Open())
+                await content.WriteAsync(new byte[33 * 1024 * 1024]);
+
+            var exception = await Assert.ThrowsAsync<InvalidDataException>(() =>
+                new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "source.md"))));
+
+            Assert.Contains("xl/worksheets/oversized.xml", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("per-entry limit", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Readable_xlsx_export_rejects_a_highly_compressed_non_media_entry()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "source.xlsx");
+            await new MarkdownRenderer().RenderAsync("# Workbook\n\nBody", RenderFormat.Xlsx, source);
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            await using (var content = archive.CreateEntry("xl/sharedStrings.xml", CompressionLevel.Optimal).Open())
+                await content.WriteAsync(new byte[2 * 1024 * 1024]);
+
+            var exception = await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+                new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "source.md"))));
+
+            Assert.Contains("xl/sharedStrings.xml", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("compression-ratio", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task Readable_xlsx_export_writes_embedded_images_and_labels_ocr_as_derived_text()
     {
         var root = TempDirectory();

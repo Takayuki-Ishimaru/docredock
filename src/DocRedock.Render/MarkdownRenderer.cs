@@ -7,7 +7,7 @@ using DocRedock.Markdown;
 
 namespace DocRedock.Render;
 
-public enum RenderFormat { Docx, Pptx, Xlsx, Pdf }
+public enum RenderFormat { Docx, Pptx, Xlsx, Pdf, Html }
 public sealed record RenderOptions(
     string? Title = null,
     string? TemplatePath = null,
@@ -25,6 +25,9 @@ public sealed record RenderReport(string Operation, RenderFormat Format, string 
 public sealed class MarkdownRenderer
 {
     private const int MaxMermaidDiagrams = 32;
+    private static readonly Regex HtmlInlineToken = new(
+        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly IMermaidRenderer mermaidRenderer;
 
     public MarkdownRenderer(IMermaidRenderer? mermaidRenderer = null) =>
@@ -48,7 +51,8 @@ public sealed class MarkdownRenderer
         string? templatePath = null;
         if (options?.TemplatePath is not null)
         {
-            if (format == RenderFormat.Pdf) throw new NotSupportedException("PDF templates are not supported by the built-in renderer.");
+            if (format is RenderFormat.Pdf or RenderFormat.Html)
+                throw new NotSupportedException($"{format.ToString().ToUpperInvariant()} templates are not supported by the built-in renderer.");
             templatePath = ValidateTemplate(options.TemplatePath, format);
         }
         document = await MaterializeMermaidAsync(document, options, cancellationToken).ConfigureAwait(false);
@@ -59,11 +63,11 @@ public sealed class MarkdownRenderer
         {
             if (templatePath is not null)
             {
-                WriteGenerated(document, format, generatedPath, options);
+                WriteGenerated(document, format, generatedPath, options, sanitizedDocRedock);
                 File.Copy(templatePath, tempPath);
                 OfficeTemplatePackageMerger.ApplyGeneratedContent(generatedPath, tempPath, format);
             }
-            else WriteGenerated(document, format, tempPath, options);
+            else WriteGenerated(document, format, tempPath, options, sanitizedDocRedock);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(tempPath, fullPath);
         }
@@ -75,9 +79,11 @@ public sealed class MarkdownRenderer
         var fidelity = options?.TemplatePath is null ? "F3" : "F2";
         var warnings = new List<string>
         {
-            options?.TemplatePath is null
-                ? "Render creates a new document; it is not an Office/PDF Restore."
-                : "Template render preserved template package parts and merged generated content dependencies; it is not Restore."
+            format == RenderFormat.Html
+                ? "HTML preview is a review artifact; it is not Restore."
+                : options?.TemplatePath is null
+                    ? "Render creates a new document; it is not an Office/PDF Restore."
+                    : "Template render preserved template package parts and merged generated content dependencies; it is not Restore."
         };
         if (sanitizedDocRedock) warnings.Add("DRMD control metadata was removed before rendering.");
         var diagramCount = document.Blocks.OfType<MarkdownDiagram>().Count();
@@ -133,7 +139,7 @@ public sealed class MarkdownRenderer
         _ => false,
     });
 
-    private static void WriteGenerated(MarkdownDocument document, RenderFormat format, string path, RenderOptions? options)
+    private static void WriteGenerated(MarkdownDocument document, RenderFormat format, string path, RenderOptions? options, bool sanitizedDocRedock)
     {
         switch (format)
         {
@@ -141,9 +147,126 @@ public sealed class MarkdownRenderer
             case RenderFormat.Pptx: WritePptx(document, path, options); break;
             case RenderFormat.Xlsx: WriteXlsx(document, path, options); break;
             case RenderFormat.Pdf: WritePdf(document, path, options); break;
+            case RenderFormat.Html: WriteHtml(document, path, options, sanitizedDocRedock); break;
             default: throw new ArgumentOutOfRangeException(nameof(format));
         }
     }
+
+    private static void WriteHtml(MarkdownDocument document, string path, RenderOptions? options, bool sanitizedDocRedock)
+    {
+        var sourceTitle = options?.Title ?? document.Blocks.OfType<MarkdownHeading>().FirstOrDefault()?.Text ?? "DocRedock Preview";
+        var title = Regex.Replace(Regex.Replace(sourceTitle, @"<[^>]+>", " ", RegexOptions.CultureInvariant), @"[*_`~]+", string.Empty, RegexOptions.CultureInvariant);
+        title = Regex.Replace(title, @"\s+", " ", RegexOptions.CultureInvariant).Trim();
+        var language = ContainsNonAscii(document) ? "ja" : "en";
+        var output = new StringBuilder(16_384);
+        output.Append("<!doctype html><html lang=\"").Append(language).Append("\"><head><meta charset=\"utf-8\">")
+            .Append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+            .Append("<title>").Append(Html(title)).AppendLine("</title>");
+        output.AppendLine("""
+            <style>
+            :root{color-scheme:light;--ink:#172033;--muted:#5d687b;--line:#dfe4ec;--paper:#fff;--wash:#f5f7fb;--accent:#3157d5;--accent-wash:#edf2ff}
+            *{box-sizing:border-box}body{margin:0;background:var(--wash);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;line-height:1.7}
+            .shell{width:min(1120px,calc(100% - 32px));margin:28px auto 64px;background:var(--paper);border:1px solid var(--line);border-radius:16px;box-shadow:0 16px 50px rgba(34,49,82,.08);overflow:hidden}
+            .preview-bar{display:flex;gap:12px;align-items:center;padding:14px 24px;background:var(--accent-wash);border-bottom:1px solid #cfd9ff;color:#233d91;font-size:.9rem}
+            .preview-badge{padding:3px 9px;border-radius:999px;background:var(--accent);color:#fff;font-weight:700;letter-spacing:.03em}.preview-note{color:#44598f}
+            main{padding:clamp(24px,5vw,64px)}h1,h2,h3,h4,h5,h6{line-height:1.25;margin:1.7em 0 .55em;letter-spacing:-.02em}h1{font-size:clamp(2rem,5vw,3.4rem);margin-top:0}h2{font-size:1.65rem;border-bottom:1px solid var(--line);padding-bottom:.35em}h3{font-size:1.25rem}
+            p,ul{margin:.75em 0 1.15em}li+li{margin-top:.3em}a{color:var(--accent)}code{font-family:"SFMono-Regular",Consolas,monospace;background:#eef1f6;border-radius:4px;padding:.12em .35em;font-size:.92em}
+            pre{overflow:auto;padding:18px 20px;background:#111827;color:#e5e7eb;border-radius:10px;line-height:1.5}pre code{padding:0;background:transparent;color:inherit}
+            .table-scroll{overflow-x:auto;margin:1.2rem 0 2rem;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:max-content;min-width:100%;font-variant-numeric:tabular-nums}th,td{padding:10px 13px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:pre-wrap}th{position:sticky;top:0;background:#f2f5fa;font-weight:700}tr:last-child td{border-bottom:0}th:last-child,td:last-child{border-right:0}
+            figure{margin:1.5rem 0;text-align:center}figure img,.inline-image{max-width:100%;height:auto;border-radius:8px}figcaption{margin-top:.5rem;color:var(--muted);font-size:.9rem}.empty{color:var(--muted);font-style:italic}
+            details{margin:1.2rem 0;padding:12px 16px;border:1px solid var(--line);border-radius:9px;background:#fafbfe;color:var(--muted)}summary{cursor:pointer;color:var(--ink);font-weight:700}details[open] summary{margin-bottom:.65rem}hr{border:0;border-top:2px solid var(--line);margin:2.5rem 0}
+            @media(max-width:640px){.shell{width:100%;margin:0;border:0;border-radius:0}.preview-bar{align-items:flex-start;flex-direction:column}main{padding:24px 18px}}
+            @media print{body{background:#fff}.shell{width:100%;margin:0;border:0;box-shadow:none}.preview-bar{display:none}main{padding:0}.table-scroll{overflow:visible}}
+            </style></head><body><div class="shell">
+            """);
+        if (sanitizedDocRedock)
+            output.AppendLine("<div class=\"preview-bar\"><span class=\"preview-badge\">ROUNDTRIP PREVIEW</span><span class=\"preview-note\">編集用メタデータを隠し、復元対象の内容だけを表示しています。</span></div>");
+        output.AppendLine("<main>");
+        foreach (var block in document.Blocks)
+        {
+            switch (block)
+            {
+                case MarkdownHeading heading:
+                    var level = Math.Clamp(heading.Level, 1, 6);
+                    output.Append('<').Append('h').Append(level).Append('>').Append(HtmlInline(heading.Text))
+                        .Append("</h").Append(level).AppendLine(">");
+                    break;
+                case MarkdownParagraph paragraph:
+                    if (paragraph.Text.Trim() is "---" or "***" or "___") output.AppendLine("<hr>");
+                    else output.Append("<p>").Append(HtmlInline(paragraph.Text)).AppendLine("</p>");
+                    break;
+                case MarkdownList list:
+                    output.AppendLine("<ul>");
+                    foreach (var item in list.Items) output.Append("<li>").Append(HtmlInline(item)).AppendLine("</li>");
+                    output.AppendLine("</ul>");
+                    break;
+                case MarkdownCodeBlock code:
+                    output.Append("<pre><code data-language=\"").Append(Html(code.Language)).Append("\">")
+                        .Append(Html(code.Text)).AppendLine("</code></pre>");
+                    break;
+                case MarkdownDiagram diagram:
+                    output.Append("<figure><img src=\"data:image/png;base64,")
+                        .Append(Convert.ToBase64String(diagram.Image.PngBytes)).Append("\" alt=\"").Append(Html(diagram.AltText))
+                        .Append("\"><figcaption>").Append(Html(diagram.AltText)).AppendLine("</figcaption></figure>");
+                    break;
+                case MarkdownTable table:
+                    output.AppendLine("<div class=\"table-scroll\"><table><thead><tr>");
+                    foreach (var header in table.Headers) output.Append("<th scope=\"col\">").Append(HtmlInline(header)).AppendLine("</th>");
+                    output.AppendLine("</tr></thead><tbody>");
+                    foreach (var row in table.Rows)
+                    {
+                        output.AppendLine("<tr>");
+                        for (var index = 0; index < table.Headers.Count; index++)
+                        {
+                            var value = index < row.Count ? row[index] : string.Empty;
+                            output.Append("<td>").Append(HtmlInline(value).Replace("\n", "<br>", StringComparison.Ordinal)).AppendLine("</td>");
+                        }
+                        output.AppendLine("</tr>");
+                    }
+                    output.AppendLine("</tbody></table></div>");
+                    break;
+            }
+        }
+        if (document.Blocks.Count == 0) output.AppendLine("<p class=\"empty\">表示できる内容がありません。</p>");
+        output.AppendLine("</main></div></body></html>");
+        File.WriteAllText(path, output.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+    }
+
+    private static string HtmlInline(string value)
+    {
+        var output = new StringBuilder(value.Length + 32);
+        var cursor = 0;
+        foreach (Match match in HtmlInlineToken.Matches(value))
+        {
+            output.Append(Html(value[cursor..match.Index]));
+            if (match.Groups["safeTag"].Success) output.Append(match.Value);
+            else if (match.Groups["imageUrl"].Success && IsSafeHtmlUrl(match.Groups["imageUrl"].Value, image: true))
+                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(match.Groups["imageUrl"].Value))
+                    .Append("\" alt=\"").Append(Html(match.Groups["imageAlt"].Value)).Append("\">");
+            else if (match.Groups["linkUrl"].Success && IsSafeHtmlUrl(match.Groups["linkUrl"].Value, image: false))
+                output.Append("<a href=\"").Append(Html(match.Groups["linkUrl"].Value)).Append("\">").Append(Html(match.Groups["linkText"].Value)).Append("</a>");
+            else if (match.Groups["code"].Success) output.Append("<code>").Append(Html(match.Groups["code"].Value)).Append("</code>");
+            else if (match.Groups["strike"].Success) output.Append("<del>").Append(Html(match.Groups["strike"].Value)).Append("</del>");
+            else if (match.Groups["strong"].Success) output.Append("<strong>").Append(Html(match.Groups["strong"].Value)).Append("</strong>");
+            else if (match.Groups["em"].Success) output.Append("<em>").Append(Html(match.Groups["em"].Value)).Append("</em>");
+            else output.Append(Html(match.Value));
+            cursor = match.Index + match.Length;
+        }
+        output.Append(Html(value[cursor..]));
+        return output.ToString();
+    }
+
+    private static bool IsSafeHtmlUrl(string value, bool image)
+    {
+        if (value.Length == 0 || value.StartsWith("//", StringComparison.Ordinal) || value.Contains('\0')) return false;
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+            return !Regex.IsMatch(value, @"^[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant);
+        return uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+               uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
+               !image && uri.Scheme.Equals(Uri.UriSchemeMailto, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string Html(string value) => System.Net.WebUtility.HtmlEncode(value);
 
     private static string ValidateTemplate(string path, RenderFormat format)
     {

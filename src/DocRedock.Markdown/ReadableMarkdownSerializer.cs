@@ -63,7 +63,8 @@ public sealed partial class ReadableMarkdownSerializer
             var rows = ReadRows(partition);
             var diagrams = options.IncludeDiagrams ? ReadDiagrams(partition) : [];
             var images = ReadImages(partition);
-            if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0) continue;
+            var charts = partition.Nodes.Any(node => node.Kind == NodeKind.Chart && HasExtension(node, "chart_series"));
+            if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0 && !charts) continue;
 
             WriteHeading(output, 2, HumanizePartitionName(partition.Id));
             var hasSectionHeading = false;
@@ -147,7 +148,9 @@ public sealed partial class ReadableMarkdownSerializer
                 output.AppendLine("---").AppendLine();
                 previousWasListItem = false;
             }
-            foreach (var node in partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
+            foreach (var node in isPptx
+                         ? PresentationReadingOrder(partition.Nodes)
+                         : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
                 if (aggregated.SkipIds.Contains(node.Id)) continue;
                 var text = NodeText(node).Trim();
@@ -314,6 +317,85 @@ public sealed partial class ReadableMarkdownSerializer
         }
     }
 
+    private static IEnumerable<DocumentNode> PresentationReadingOrder(IReadOnlyList<DocumentNode> nodes)
+    {
+        var titleRoles = new[] { "title", "ctrtitle", "subtitle" };
+        var titleNodes = nodes.Where(node => titleRoles.Contains(ExtensionString(node, "shape_role"), StringComparer.OrdinalIgnoreCase))
+            .OrderBy(node => Array.IndexOf(titleRoles, ExtensionString(node, "shape_role")?.ToLowerInvariant()))
+            .ThenBy(node => node.Geometry?.Y ?? double.MaxValue).ThenBy(node => node.Geometry?.X ?? double.MaxValue)
+            .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        var bodyNodes = PresentationBodyReadingOrder(nodes.Where(node =>
+            !titleRoles.Contains(ExtensionString(node, "shape_role"), StringComparer.OrdinalIgnoreCase) &&
+            node.Kind is not NodeKind.Connector and not NodeKind.SpeakerNotes).ToArray());
+        var connectors = nodes.Where(node => node.Kind == NodeKind.Connector)
+            .OrderBy(node => node.Geometry?.Y ?? double.MaxValue).ThenBy(node => node.Geometry?.X ?? double.MaxValue)
+            .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        var notes = nodes.Where(node => node.Kind == NodeKind.SpeakerNotes).OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        return titleNodes.Concat(bodyNodes).Concat(connectors).Concat(notes);
+    }
+
+    private static IEnumerable<DocumentNode> PresentationBodyReadingOrder(IReadOnlyList<DocumentNode> nodes)
+    {
+        var spatial = nodes.Where(HasFiniteGeometry).ToArray();
+        var withoutGeometry = nodes.Where(node => !HasFiniteGeometry(node))
+            .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        if (spatial.Length == 0) return withoutGeometry;
+
+        var minX = spatial.Min(node => node.Geometry!.X);
+        var maxX = spatial.Max(node => node.Geometry!.X + node.Geometry.Width);
+        var slideWidth = maxX - minX;
+        if (!double.IsFinite(slideWidth) || slideWidth <= 0)
+            return spatial.OrderBy(node => node.Geometry!.Y).ThenBy(node => node.Geometry!.X)
+                .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).Concat(withoutGeometry);
+
+        var fullWidth = spatial.Where(node => node.Geometry!.Width >= slideWidth * 0.7)
+            .OrderBy(node => node.Geometry!.Y).ThenBy(node => node.Geometry!.X).ThenBy(node => node.Order).ToArray();
+        var remaining = spatial.Except(fullWidth).ToList();
+        var ordered = new List<DocumentNode>(spatial.Length);
+        foreach (var divider in fullWidth)
+        {
+            var before = remaining.Where(node => node.Geometry!.Y + node.Geometry.Height / 2 < divider.Geometry!.Y).ToArray();
+            ordered.AddRange(OrderPresentationBand(before, slideWidth));
+            remaining.RemoveAll(before.Contains);
+            ordered.Add(divider);
+        }
+        ordered.AddRange(OrderPresentationBand(remaining, slideWidth));
+        return ordered.Concat(withoutGeometry);
+    }
+
+    private static IEnumerable<DocumentNode> OrderPresentationBand(IReadOnlyList<DocumentNode> nodes, double slideWidth)
+    {
+        IOrderedEnumerable<DocumentNode> TopThenLeft(IEnumerable<DocumentNode> items) => items
+            .OrderBy(node => node.Geometry!.Y).ThenBy(node => node.Geometry!.X)
+            .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        if (nodes.Count < 4) return TopThenLeft(nodes);
+
+        var byCenter = nodes.OrderBy(node => node.Geometry!.X + node.Geometry!.Width / 2).ToArray();
+        var split = Enumerable.Range(1, byCenter.Length - 1)
+            .Select(index => (Index: index, Gap: byCenter[index].Geometry!.X + byCenter[index].Geometry!.Width / 2 -
+                                                  (byCenter[index - 1].Geometry!.X + byCenter[index - 1].Geometry!.Width / 2)))
+            .MaxBy(item => item.Gap);
+        var left = byCenter[..split.Index];
+        var right = byCenter[split.Index..];
+        if (left.Length < 2 || right.Length < 2 || split.Gap < slideWidth * 0.15 ||
+            !LooksLikeColumn(left, split.Gap) || !LooksLikeColumn(right, split.Gap))
+            return TopThenLeft(nodes);
+        return TopThenLeft(left).Concat(TopThenLeft(right));
+    }
+
+    private static bool LooksLikeColumn(IReadOnlyList<DocumentNode> nodes, double columnGap)
+    {
+        var centersX = nodes.Select(node => node.Geometry!.X + node.Geometry.Width / 2).ToArray();
+        var centersY = nodes.Select(node => node.Geometry!.Y + node.Geometry.Height / 2).ToArray();
+        var medianWidth = nodes.Select(node => node.Geometry!.Width).Order().ElementAt(nodes.Count / 2);
+        var medianHeight = nodes.Select(node => node.Geometry!.Height).Order().ElementAt(nodes.Count / 2);
+        return centersX.Max() - centersX.Min() <= Math.Max(medianWidth, columnGap * 0.6) &&
+               centersY.Max() - centersY.Min() >= Math.Max(1, medianHeight * 0.5);
+    }
+
+    private static bool HasFiniteGeometry(DocumentNode node) => node.Geometry is { } geometry &&
+        double.IsFinite(geometry.X) && double.IsFinite(geometry.Y) && double.IsFinite(geometry.Width) && double.IsFinite(geometry.Height);
+
     private static bool IsPresentationFurniture(DocumentNode node)
     {
         if (node.Kind == NodeKind.SpeakerNotes) return false;
@@ -391,9 +473,12 @@ public sealed partial class ReadableMarkdownSerializer
         var imageText = partition.Nodes.Where(node => node.Kind == NodeKind.ImageText)
             .Where(node => node.ParentId is null || !partition.Nodes.Any(parent => parent.Id == node.ParentId && parent.Kind == NodeKind.Image && ExtensionInt(parent, "row") is not null))
             .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
-        if (images.Length == 0 && imageText.Length == 0) return;
+        var charts = partition.Nodes.Where(node => node.Kind == NodeKind.Chart && HasExtension(node, "chart_series"))
+            .OrderBy(node => ExtensionInt(node, "row") ?? int.MaxValue).ThenBy(node => ExtensionInt(node, "column") ?? int.MaxValue)
+            .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
+        if (images.Length == 0 && imageText.Length == 0 && charts.Length == 0) return;
 
-        WriteHeading(output, 3, "埋め込み画像");
+        if (images.Length > 0 || imageText.Length > 0) WriteHeading(output, 3, "埋め込み画像");
         var renderedTextIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var imageNode in images)
         {
@@ -406,6 +491,11 @@ public sealed partial class ReadableMarkdownSerializer
         }
         foreach (var textNode in imageText.Where(node => !renderedTextIds.Contains(node.Id)))
             WriteOcrDetails(output, NodeText(textNode).Trim());
+        if (charts.Length > 0)
+        {
+            WriteHeading(output, 3, "グラフ");
+            foreach (var chart in charts) WriteChart(output, chart);
+        }
     }
 
     private static void WriteImage(StringBuilder output, ReferenceNodeContent image)
@@ -687,7 +777,7 @@ public sealed partial class ReadableMarkdownSerializer
             return;
         }
 
-        if (rows.Count >= 2 && width is >= 2 and <= 8)
+        if (rows.Count >= 2 && width is >= 2 and <= 16)
         {
             if (FirstColumnLooksLikeData(rows))
                 WriteTable(output, Enumerable.Repeat(string.Empty, width).ToArray(), rows.Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
@@ -730,6 +820,7 @@ public sealed partial class ReadableMarkdownSerializer
                                          : fragment.Cells.Count > 1) &&
                                      fragment.Row.Number - region.MaxRow <= (region.HasSectionHeading ? 12 : 4) &&
                                      fragment.Row.Number >= region.MinRow &&
+                                     !region.ContainsRow(fragment.Row.Number) &&
                                      BandsOverlap(region.MinColumn, region.MaxColumn, fragment.MinColumn, fragment.MaxColumn))
                     .OrderByDescending(region => region.MaxRow)
                     .ThenBy(region => Math.Abs(region.MinColumn - fragment.MinColumn))
@@ -746,7 +837,7 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static IEnumerable<RowFragment> SplitRow(SheetRow row)
     {
-        // Keep the common two-pair metadata row together.  Wider even-column
+        // Keep the common two-pair metadata row together. Wider even-column
         // rows may be two independent tables and must still be split by space.
         if (row.Cells.Count < 2 || (row.Cells.Count <= 4 && LooksLikeKeyValueRow(row.Cells)))
         {
@@ -1030,21 +1121,94 @@ public sealed partial class ReadableMarkdownSerializer
     private static void WriteChart(StringBuilder output, DocumentNode node)
     {
         var title = ExtensionString(node, "chart_title");
-        if (!string.IsNullOrWhiteSpace(title)) output.Append("**").Append(InlineText(title)).Append("**").AppendLine().AppendLine();
+        var rawType = ExtensionString(node, "chart_type");
+        var type = ChartTypeLabel(rawType);
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            output.Append("**").Append(InlineText(title)).Append("**");
+            if (type is { Length: > 0 }) output.Append("（").Append(type).Append("）");
+            output.AppendLine().AppendLine();
+        }
         if (node.Extensions is null || !node.Extensions.TryGetValue("chart_series", out var seriesElement) || seriesElement.ValueKind != JsonValueKind.Array) return;
-        foreach (var series in seriesElement.EnumerateArray())
+        var seriesItems = seriesElement.EnumerateArray().ToArray();
+        output.Append("要約: ").Append(seriesItems.Length.ToString(CultureInfo.InvariantCulture)).AppendLine(" 系列のグラフです。");
+        foreach (var series in seriesItems)
         {
             var categories = TryProperty(series, out var catElement, "Categories", "categories") && catElement.ValueKind == JsonValueKind.Array
                 ? catElement.EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToArray() : [];
-            if (categories.Length == 0) continue;
             var values = TryProperty(series, out var valElement, "Values", "values") && valElement.ValueKind == JsonValueKind.Array
                 ? valElement.EnumerateArray().Select(item => item.GetString() ?? string.Empty).ToArray() : [];
             var name = JsonString(series, "Name", "name");
+            WriteChartSummary(output, string.IsNullOrWhiteSpace(name) ? "値" : name, categories, values, rawType);
+            if (categories.Length == 0) continue;
             var headers = new[] { "カテゴリ", string.IsNullOrWhiteSpace(name) ? "値" : name };
             var rows = categories.Select((category, index) => new[] { category, index < values.Length ? values[index] : string.Empty });
             WriteTable(output, headers, rows);
         }
     }
+
+    private static void WriteChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories, IReadOnlyList<string> values, string? chartType)
+    {
+        var numeric = values.Select((display, index) =>
+                (Index: index, Display: display, Value: TryParseChartNumber(display, out var parsed) ? parsed : (double?)null))
+            .Where(item => item.Value is not null)
+            .Select(item => (item.Index, item.Display, Value: item.Value!.Value)).ToArray();
+        if (numeric.Length == 0) return;
+        if (chartType is "pie" or "doughnut")
+        {
+            WriteCompositionChartSummary(output, name, categories, numeric);
+            return;
+        }
+
+        var first = numeric[0]; var last = numeric[^1];
+        var direction = last.Value > first.Value ? "増加" : last.Value < first.Value ? "減少" : "横ばい";
+        var minimum = numeric.MinBy(item => item.Value); var maximum = numeric.MaxBy(item => item.Value);
+        output.Append("- ").Append(InlineText(name)).Append(": ").Append(InlineText(ChartCategory(categories, first.Index))).Append(" の ")
+            .Append(InlineText(first.Display)).Append(" から ").Append(InlineText(ChartCategory(categories, last.Index))).Append(" の ")
+            .Append(InlineText(last.Display)).Append(" へ ").Append(direction)
+            .Append("。最小 ").Append(InlineText(minimum.Display)).Append("、最大 ")
+            .Append(InlineText(maximum.Display)).AppendLine("。");
+    }
+
+    private static void WriteCompositionChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories,
+        IReadOnlyList<(int Index, string Display, double Value)> numeric)
+    {
+        var minimum = numeric.MinBy(item => item.Value);
+        var maximum = numeric.MaxBy(item => item.Value);
+        var hasValidTotal = numeric.All(item => item.Value >= 0) && numeric.Sum(item => item.Value) > 0;
+        var total = hasValidTotal ? numeric.Sum(item => item.Value) : 0;
+        output.Append("- ").Append(InlineText(name)).Append(": 最大 ")
+            .Append(InlineText(ChartCategory(categories, maximum.Index))).Append(' ').Append(InlineText(maximum.Display));
+        if (hasValidTotal) output.Append("（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
+        output.Append("、最小 ").Append(InlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(InlineText(minimum.Display));
+        if (hasValidTotal) output.Append("（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
+        output.AppendLine("。");
+    }
+
+    private static string ChartCategory(IReadOnlyList<string> categories, int index) =>
+        index < categories.Count && !string.IsNullOrWhiteSpace(categories[index])
+            ? categories[index]
+            : (index + 1).ToString(CultureInfo.InvariantCulture);
+
+    private static bool TryParseChartNumber(string value, out double number)
+    {
+        var normalized = value.Trim();
+        var negative = normalized.StartsWith('(') && normalized.EndsWith(')');
+        var percentage = normalized.EndsWith('%');
+        normalized = Regex.Replace(normalized, @"[^0-9eE+\-.,]", string.Empty, RegexOptions.CultureInvariant)
+            .Replace(",", string.Empty, StringComparison.Ordinal);
+        if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out number)) return false;
+        if (negative) number = -Math.Abs(number);
+        if (percentage) number /= 100;
+        return true;
+    }
+
+    private static string? ChartTypeLabel(string? type) => type?.ToLowerInvariant() switch
+    {
+        "bar" => "棒グラフ", "line" => "折れ線グラフ", "pie" => "円グラフ", "doughnut" => "ドーナツグラフ",
+        "area" => "面グラフ", "scatter" => "散布図", "bubble" => "バブルチャート", "radar" => "レーダーチャート",
+        "stock" => "株価チャート", "surface" => "等高線グラフ", _ => type,
+    };
 
     // P07: SmartArt's dgm:dataModel text (invisible to a normal shape scan) becomes a plain bullet
     // list, extracted by PptxAdapter into the diagram_items extension.
@@ -1102,7 +1266,9 @@ public sealed partial class ReadableMarkdownSerializer
             while (index < runs.Count && runs[index].LinkTarget == current.LinkTarget &&
                    runs[index].Color == current.Color && runs[index].HighlightColor == current.HighlightColor)
                 index++;
-            var segment = DocRedockInlineMarkdown.Serialize(runs.Skip(start).Take(index - start).ToArray());
+            var segmentRuns = runs.Skip(start).Take(index - start)
+                .Select(run => run with { LinkTarget = null }).ToArray();
+            var segment = DocRedockInlineMarkdown.Serialize(segmentRuns);
             if (segment.Length == 0) continue;
             if (current.HighlightColor is not null) segment = "<mark>" + segment + "</mark>";
             if (current.Color is not null) segment = "<span style=\"color:#" + current.Color + "\">" + segment + "</span>";
@@ -1186,6 +1352,7 @@ public sealed partial class ReadableMarkdownSerializer
         public int MinColumn { get; private set; } = int.MaxValue;
         public int MaxColumn { get; private set; }
         public bool HasSectionHeading { get; private set; }
+        public bool ContainsRow(int row) => cellsByRow.ContainsKey(row);
         public void Add(int row, IReadOnlyList<ReadableCell> cells)
         {
             if (!cellsByRow.TryGetValue(row, out var values)) cellsByRow[row] = values = [];

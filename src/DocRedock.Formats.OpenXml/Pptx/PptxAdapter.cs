@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Xml;
 using DocRedock.Core.Documents;
+using DocRedock.Formats.OpenXml;
 
 namespace DocRedock.Formats.OpenXml.Pptx;
 
@@ -79,6 +80,7 @@ public sealed class PptxAdapter
                 if (chartData is not null)
                 {
                     if (!string.IsNullOrWhiteSpace(chartData.Title)) extension["chart_title"] = JsonSerializer.SerializeToElement(chartData.Title);
+                    if (!string.IsNullOrWhiteSpace(chartData.Type)) extension["chart_type"] = JsonSerializer.SerializeToElement(chartData.Type);
                     if (chartData.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chartData.Series);
                 }
                 if (diagramTexts is { Count: > 0 }) extension["diagram_items"] = JsonSerializer.SerializeToElement(diagramTexts);
@@ -187,14 +189,138 @@ public sealed class PptxAdapter
         return result;
     }
 
+    private readonly record struct AffineTransform(double M11, double M12, double M21, double M22, double Tx, double Ty)
+    {
+        public static AffineTransform Identity => new(1, 0, 0, 1, 0, 0);
+        public (double X, double Y) Apply(double x, double y) =>
+            (M11 * x + M12 * y + Tx, M21 * x + M22 * y + Ty);
+
+        public static AffineTransform operator *(AffineTransform left, AffineTransform right) => new(
+            left.M11 * right.M11 + left.M12 * right.M21,
+            left.M11 * right.M12 + left.M12 * right.M22,
+            left.M21 * right.M11 + left.M22 * right.M21,
+            left.M21 * right.M12 + left.M22 * right.M22,
+            left.M11 * right.Tx + left.M12 * right.Ty + left.Tx,
+            left.M21 * right.Tx + left.M22 * right.Ty + left.Ty);
+
+        public static AffineTransform Translation(double x, double y) => new(1, 0, 0, 1, x, y);
+        public static AffineTransform Scale(double x, double y) => new(x, 0, 0, y, 0, 0);
+        public static AffineTransform Rotation(double degrees)
+        {
+            var radians = degrees * Math.PI / 180.0;
+            var cos = Math.Cos(radians);
+            var sin = Math.Sin(radians);
+            return new(cos, -sin, sin, cos, 0, 0);
+        }
+    }
+
+    private sealed class GroupFrame
+    {
+        public AffineTransform Transform { get; set; } = AffineTransform.Identity;
+    }
+
+    private static AffineTransform ParseGroupTransform(XmlReader source)
+    {
+        var offX = 0d; var offY = 0d; var extX = 0d; var extY = 0d;
+        var childX = 0d; var childY = 0d; var childWidth = 0d; var childHeight = 0d;
+        var hasExt = false; var hasChildExt = false;
+        var rotation = 0d; var flipH = false; var flipV = false;
+        using var subtree = source.ReadSubtree();
+        while (subtree.Read())
+        {
+            if (subtree.NodeType != XmlNodeType.Element) continue;
+            if (subtree.LocalName == "xfrm")
+            {
+                rotation = ParseDouble(subtree.GetAttribute("rot")) / 60000.0;
+                flipH = IsOn(subtree.GetAttribute("flipH"));
+                flipV = IsOn(subtree.GetAttribute("flipV"));
+            }
+            else if (subtree.LocalName == "off")
+            {
+                offX = ParseDouble(subtree.GetAttribute("x"));
+                offY = ParseDouble(subtree.GetAttribute("y"));
+            }
+            else if (subtree.LocalName == "ext")
+            {
+                extX = ParseDouble(subtree.GetAttribute("cx"));
+                extY = ParseDouble(subtree.GetAttribute("cy"));
+                hasExt = true;
+            }
+            else if (subtree.LocalName == "chOff")
+            {
+                childX = ParseDouble(subtree.GetAttribute("x"));
+                childY = ParseDouble(subtree.GetAttribute("y"));
+            }
+            else if (subtree.LocalName == "chExt")
+            {
+                childWidth = ParseDouble(subtree.GetAttribute("cx"));
+                childHeight = ParseDouble(subtree.GetAttribute("cy"));
+                hasChildExt = true;
+            }
+        }
+
+        // chExt may be omitted in malformed/degenerate files. Preserve finite child
+        // coordinates in that case instead of introducing an infinite scale.
+        var scaleX = !hasExt || !hasChildExt || childWidth == 0 ? 1 : extX / childWidth;
+        var scaleY = !hasExt || !hasChildExt || childHeight == 0 ? 1 : extY / childHeight;
+        if (!double.IsFinite(scaleX)) scaleX = 1;
+        if (!double.IsFinite(scaleY)) scaleY = 1;
+        var mapped = AffineTransform.Translation(offX, offY) *
+                     AffineTransform.Scale(scaleX, scaleY) *
+                     AffineTransform.Translation(-childX, -childY);
+        var centerX = offX + extX / 2;
+        var centerY = offY + extY / 2;
+        var orientation = AffineTransform.Translation(centerX, centerY) *
+                          AffineTransform.Rotation(rotation) *
+                          (flipH ? AffineTransform.Scale(-1, 1) : AffineTransform.Identity) *
+                          (flipV ? AffineTransform.Scale(1, -1) : AffineTransform.Identity) *
+                          AffineTransform.Translation(-centerX, -centerY);
+        return orientation * mapped;
+    }
+
+    private static AffineTransform ShapeOrientation(Geometry geometry, bool flipH, bool flipV)
+    {
+        var centerX = geometry.X + geometry.Width / 2;
+        var centerY = geometry.Y + geometry.Height / 2;
+        return AffineTransform.Translation(centerX, centerY) *
+               AffineTransform.Rotation(geometry.RotationDegrees) *
+               (flipH ? AffineTransform.Scale(-1, 1) : AffineTransform.Identity) *
+               (flipV ? AffineTransform.Scale(1, -1) : AffineTransform.Identity) *
+               AffineTransform.Translation(-centerX, -centerY);
+    }
+
+    private static Geometry TransformGeometry(Geometry geometry, AffineTransform transform)
+    {
+        var p1 = transform.Apply(geometry.X, geometry.Y);
+        var p2 = transform.Apply(geometry.X + geometry.Width, geometry.Y);
+        var p3 = transform.Apply(geometry.X + geometry.Width, geometry.Y + geometry.Height);
+        var p4 = transform.Apply(geometry.X, geometry.Y + geometry.Height);
+        var minX = Math.Min(Math.Min(p1.X, p2.X), Math.Min(p3.X, p4.X));
+        var minY = Math.Min(Math.Min(p1.Y, p2.Y), Math.Min(p3.Y, p4.Y));
+        var maxX = Math.Max(Math.Max(p1.X, p2.X), Math.Max(p3.X, p4.X));
+        var maxY = Math.Max(Math.Max(p1.Y, p2.Y), Math.Max(p3.Y, p4.Y));
+        var angle = Math.Atan2(p2.Y - p1.Y, p2.X - p1.X) * 180 / Math.PI;
+        if (!double.IsFinite(angle)) angle = 0;
+        return geometry with
+        {
+            X = minX, Y = minY,
+            Width = Math.Max(0, maxX - minX), Height = Math.Max(0, maxY - minY),
+            RotationDegrees = angle,
+        };
+    }
+
     private static List<PptxShapeRecord> ReadShapes(byte[] bytes, string slideId, out string? notes, PlaceholderBulletResolver bulletResolver)
     {
-        notes = null; var result = new List<PptxShapeRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        notes = null; var result = new List<PptxShapeRecord>(); var groupStack = new Stack<GroupFrame>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read())
         {
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "grpSp") { groupStack.Push(new GroupFrame()); continue; }
+            if (reader.NodeType == XmlNodeType.EndElement && reader.LocalName == "grpSp") { if (groupStack.Count > 0) groupStack.Pop(); continue; }
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "grpSpPr" && groupStack.Count > 0) { groupStack.Peek().Transform = ParseGroupTransform(reader); continue; }
             if (reader.NodeType != XmlNodeType.Element || reader.LocalName is not ("sp" or "graphicFrame" or "pic" or "cxnSp")) continue;
+            var parentTransform = groupStack.Reverse().Aggregate(AffineTransform.Identity, (current, frame) => current * frame.Transform);
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
-            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; Geometry? geometry = null; double? pendingRotation = null; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null;
+            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
@@ -267,7 +393,7 @@ public sealed class PptxAdapter
                     if (rid is not null) diagramRels.Add(rid);
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "blip") { var rid = subtree.GetAttribute("embed", PresentationRelNs) ?? subtree.GetAttribute("r:embed"); if (rid is not null) imageRels.Add(rid); }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "xfrm") pendingRotation = ParseDoubleNullable(subtree.GetAttribute("rot"));
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "xfrm") { pendingRotation = ParseDoubleNullable(subtree.GetAttribute("rot")); flipH = IsOn(subtree.GetAttribute("flipH")); flipV = IsOn(subtree.GetAttribute("flipV")); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "off") { var x = ParseDouble(subtree.GetAttribute("x")); var y = ParseDouble(subtree.GetAttribute("y")); geometry = new Geometry("pptx-emu", x, y, 0, 0, (pendingRotation ?? 0) / 60000.0); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ext")
                 {
@@ -293,6 +419,7 @@ public sealed class PptxAdapter
                     paragraph = null;
                 }
             }
+            if (geometry is not null) geometry = TransformGeometry(geometry, parentTransform * ShapeOrientation(geometry, flipH, flipV));
             var role = InferRole(placeholderType, name);
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
@@ -485,60 +612,14 @@ public sealed class PptxAdapter
     }
 
     // ------------------------------------------------------------------------------- P06: charts --
-    private static ChartData? ResolveChart(Dictionary<string, byte[]> package, string slidePart, string relationshipId)
+    private static OpenXmlChartData? ResolveChart(Dictionary<string, byte[]> package, string slidePart, string relationshipId)
     {
         var slash = slidePart.LastIndexOf('/');
         if (slash < 0) return null;
         var relationships = ReadRelationships(package, slidePart[..slash] + "/_rels/" + slidePart[(slash + 1)..] + ".rels");
         return relationships.TryGetValue(relationshipId, out var relationship) && package.TryGetValue(relationship.Target, out var bytes)
-            ? ParseChart(bytes) : null;
+            ? OpenXmlChartReader.Read(bytes) : null;
     }
-
-    private enum ChartTextContext { None, Title, SeriesName, Categories, Values }
-
-    private static ChartData? ParseChart(byte[] bytes)
-    {
-        var titleBuilder = new StringBuilder(); var seriesList = new List<ChartSeriesData>();
-        var context = ChartTextContext.None; var inSeries = false;
-        string? seriesName = null; List<string>? categories = null; List<string>? values = null;
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-        {
-            if (reader.NodeType == XmlNodeType.Element)
-            {
-                if (reader.LocalName == "title") context = ChartTextContext.Title;
-                else if (reader.LocalName == "ser") { inSeries = true; seriesName = null; categories = []; values = []; }
-                else if (reader.LocalName == "tx" && inSeries) context = ChartTextContext.SeriesName;
-                else if (reader.LocalName == "cat" && inSeries) context = ChartTextContext.Categories;
-                else if (reader.LocalName == "val" && inSeries) context = ChartTextContext.Values;
-                else if (reader.LocalName == "t" && context == ChartTextContext.Title) titleBuilder.Append(reader.ReadElementContentAsString());
-                else if (reader.LocalName == "v")
-                {
-                    var value = reader.ReadElementContentAsString();
-                    if (context == ChartTextContext.SeriesName) seriesName = (seriesName ?? string.Empty) + value;
-                    else if (context == ChartTextContext.Categories) categories?.Add(value);
-                    else if (context == ChartTextContext.Values) values?.Add(value);
-                }
-            }
-            else if (reader.NodeType == XmlNodeType.EndElement)
-            {
-                if (reader.LocalName == "title") context = ChartTextContext.None;
-                else if (reader.LocalName == "tx" && context == ChartTextContext.SeriesName) context = ChartTextContext.None;
-                else if (reader.LocalName == "cat" && context == ChartTextContext.Categories) context = ChartTextContext.None;
-                else if (reader.LocalName == "val" && context == ChartTextContext.Values) context = ChartTextContext.None;
-                else if (reader.LocalName == "ser")
-                {
-                    seriesList.Add(new ChartSeriesData(seriesName, categories ?? [], values ?? []));
-                    inSeries = false; seriesName = null; categories = null; values = null;
-                }
-            }
-        }
-        var title = titleBuilder.ToString().Trim();
-        return title.Length == 0 && seriesList.Count == 0 ? null : new ChartData(title.Length == 0 ? null : title, seriesList);
-    }
-
-    private sealed record ChartSeriesData(string? Name, IReadOnlyList<string> Categories, IReadOnlyList<string> Values);
-    private sealed record ChartData(string? Title, IReadOnlyList<ChartSeriesData> Series);
 
     // ---------------------------------------------------------------------------- P07: SmartArt --
     private static IReadOnlyList<string>? ResolveDiagramTexts(Dictionary<string, byte[]> package, string slidePart, string relationshipId)
