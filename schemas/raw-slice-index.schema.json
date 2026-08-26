@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rtmd.local/schemas/raw-slice-index.schema.json",
-  "title": "RTMD raw XML slice index line",
+  "$id": "https://docredock.local/schemas/raw-slice-index.schema.json",
+  "title": "DRMD raw XML slice index line",
   "type": "object",
   "required": ["part_uri", "start_offset", "end_offset", "sha256", "kind"],
   "properties": {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rtmd.local/schemas/graph-node.schema.json",
-  "title": "RTMD DocumentGraph node 1.1",
+  "$id": "https://docredock.local/schemas/graph-node.schema.json",
+  "title": "DRMD DocumentGraph node 1.1",
   "type": "object",
   "required": ["id", "kind", "order", "layer", "content", "editability", "provenance", "extensions"],
   "properties": {

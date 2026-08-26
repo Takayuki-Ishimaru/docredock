@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://rtmd.local/schemas/ocr.schema.json",
-  "title": "RTMD OCR result",
+  "$id": "https://docredock.local/schemas/ocr.schema.json",
+  "title": "DRMD OCR result",
   "type": "object",
   "required": ["asset_id", "status", "languages", "diagnostics"],
   "properties": {

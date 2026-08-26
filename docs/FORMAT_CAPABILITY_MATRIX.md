@@ -1,6 +1,6 @@
 # Format capability matrix（現行実装）
 
-記号: ○ = 実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規render」の機能一覧ではなく、主にexportしたRTMD Markdownから元文書を改版する際の目安です。
+記号: ○ = 実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規render」の機能一覧ではなく、主にexportしたDRMD Markdownから元文書を改版する際の目安です。
 
 | 操作 | DOCX | XLSX | PPTX | PDF |
 | --- | ---: | ---: | ---: | ---: |
@@ -13,6 +13,7 @@
 | 新規文書のrender（F3等） | ○ | ○ | ○ | ○ 日本語対応fontを埋め込む |
 | 新規renderでのMermaid図埋め込み | ○ PNG/DrawingML | ○ PNG/one-cell anchor | ○ PNG/picture | ○ PNG/Image XObject |
 | Office template付きrenderでのMermaid図埋め込み（F2） | ○ 関係/画像を衝突回避merge | ○ worksheet→drawing→画像を衝突回避merge | ○ 関係/画像を衝突回避merge | × PDF template非対応 |
+| 埋め込み画像のMarkdown投影 | ○ alt付き | ○ DrawingML anchor行・同一行の列順・表示寸法付き | ○ alt付き | △ rasterizer利用時 |
 | 編集済みPDFのrestore render fallback | × | × | × | △ `--allow-render-fallback`必須、F3報告 |
 
 ## Readable Markdown（read-only projection）
@@ -22,10 +23,17 @@
 推定されるため、横並び領域や装飾のない表では曖昧になり得ます。数式は
 評価せず、保存済みの計算値がある場合だけ表示します。数式そのものは
 明示オプションで表示できます。図は既定で標準 Mermaid fence として出力し、
-大きな inline SVG は明示オプション時だけ追加します。PDF は ToUnicode の
+大きな inline SVG は明示オプション時だけ追加します。XLSXの埋め込み画像は
+DrawingML anchorの行位置へ投影し、位置のない画像は埋め込み画像節へまとめます。
+PNG/JPEG/GIF/WebP/BMP/SVGは通常の画像リンク、TIFF/EMF/WMFは資産を保持したうえで
+Markdown previewでは表示できない旨のプレースホルダーと診断を出します。PDF は ToUnicode の
 `bfchar` / `bfrange` を持つ Type0/CID フォントを解決しますが、CMap のない
 フォント、object stream の構成、スキャン PDF では文字欠落・失敗があり得ます。
 出力時の diagnostics と生成ファイルを確認してください。
+
+`roundtrip`のXLSX画像もsheet tableとアンカー行順に並び、同じ行の画像は列順に横並びになります。
+DrawingML寸法は96 DPIでHTML `img`の`width`/`height`へ換算し、狭いpreviewでは最大49%幅へ縮小します。
+これは画像のcrop・rotation・z-orderやExcelセル装飾まで再現する完全な紙面rendererではありません。
 
 ## 共通の非対応・拒否対象
 
@@ -37,7 +45,7 @@ Markdownは人間が読める自然な投影ですが、Markdownの全機能が�
 
 `render`へ渡す通常Markdownの`mermaid` code fenceは、明示的なローカル`mmdc`実行でPNGへ変換し、DOCX/PPTX/XLSX/PDFへ画像として埋め込みます。XLSXでは既存の表・テキスト範囲の下に1行空け、図ごとに高さを確保した行へone-cell DrawingML anchorで縦に配置します。DOCX/PPTX/XLSXのOffice templateと併用する場合は、テンプレート既存partを保持し、衝突しないrelationship IDとpart名を割り当て、PNG・DrawingML・relationship・`[Content_Types].xml`を形式別にmergeします。これはF2の新規文書生成であり、既存Office drawingをMermaidへ逆変換したり、`restore`で図を追加・置換したりする契約ではありません。PDF templateは引き続き非対応です。
 
-XLSX adapter自体にはcell additionのpatch能力がありますが、現行のMarkdown sheet tableからはcell address/source anchorを新規生成しないため、AI編集契約では新規cellを許可しません。XLSXはsheetごとに`Row`とExcel列名を見出しに持つGFM表として投影され、数式はcode spanになります。表の行列見出し・range・空き座標を変更せず、既存cellだけを編集します。PPTXはslide partitionの中で既存shapeを`role=title|subtitle|body|other`として表現し、本文の複数段落は改行で保持します。PDFはページ単位の抽出が保守的で、スキャンページOCRは注釈由来のderived evidenceです。新規PDF renderはNoto Sans JPを埋め込み、日本語を欠落させません。
+XLSX adapter自体にはcell additionのpatch能力がありますが、現行のMarkdown sheet tableからはcell address/source anchorを新規生成しないため、AI編集契約では新規cellを許可しません。XLSXのGFM表は行番号とExcel列名を本文へ表示せず、`source-rows`と`source-columns`の非表示marker属性に保持します。表の行列数・順序・range・座標メタデータ・空き座標を変更せず、既存cellだけを編集します。数式はcode spanになります。PPTXはslide partitionの中で既存shapeを`role=title|subtitle|body|other`として表現し、本文の複数段落は改行で保持します。PDFはページ単位の抽出が保守的で、スキャンページOCRは注釈由来のderived evidenceです。新規PDF renderはNoto Sans JPを埋め込み、日本語を欠落させません。
 
 ## F-levelの意味
 

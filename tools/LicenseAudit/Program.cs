@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Rtmd.LicenseAudit;
+namespace DocRedock.LicenseAudit;
 
 internal static class Program
 {

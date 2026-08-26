@@ -1,4 +1,4 @@
-The RoundHound desktop GUI uses the following runtime and build packages:
+The DocRedock desktop GUI uses the following runtime and build packages:
 
 - Avalonia UI and its Desktop, Fluent theme, platform, rendering, remote
   protocol, and build packages — MIT
@@ -9,7 +9,7 @@ The RoundHound desktop GUI uses the following runtime and build packages:
 - Avalonia.Angle.Windows.Natives — BSD-3-Clause
 
 Exact versions and the complete resolved GUI dependency graph are pinned in
-`src/Rtmd.Gui/packages.lock.json`.
+`src/DocRedock.Gui/packages.lock.json`.
 
 The test project uses the following development-only packages. Their licenses
 must remain on the enterprise permissive allowlist and must be revalidated when
@@ -24,12 +24,12 @@ the locked dependency graph changes:
 - Newtonsoft.Json — MIT
 
 Exact versions and the complete resolved graph are pinned in
-`tests/Rtmd.Tests/packages.lock.json` and verified against
+`tests/DocRedock.Tests/packages.lock.json` and verified against
 `licenses/allowlist.json`. CI emits `artifacts/sbom.cdx.json`.
 
 Tesseract OCR is an optional external executable licensed under Apache-2.0.
 The built-in PDF renderer bundles the variable Noto Sans JP font
-(`src/Rtmd.Render/Assets/NotoSansJP[wght].ttf`) from Google Fonts, licensed
+(`src/DocRedock.Render/Assets/NotoSansJP[wght].ttf`) from Google Fonts, licensed
 under the SIL Open Font License 1.1 (OFL-1.1). The upstream license text is
 available at https://github.com/google/fonts/blob/main/ofl/notosansjp/OFL.txt.
 The bundled asset is sourced from the upstream `NotoSansJP[wght].ttf` at

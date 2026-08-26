@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\DocRedock.Core\DocRedock.Core.csproj" />
+    <ProjectReference Include="..\DocRedock.Providers.Abstractions\DocRedock.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\DocRedock.Markdown\DocRedock.Markdown.csproj" />
+    <ProjectReference Include="..\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
+    <ProjectReference Include="..\DocRedock.Formats.OpenXml\DocRedock.Formats.OpenXml.csproj" />
+    <ProjectReference Include="..\DocRedock.Formats.Pdf\DocRedock.Formats.Pdf.csproj" />
+    <ProjectReference Include="..\DocRedock.Ocr.Tesseract\DocRedock.Ocr.Tesseract.csproj" />
+    <ProjectReference Include="..\DocRedock.Render\DocRedock.Render.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>
