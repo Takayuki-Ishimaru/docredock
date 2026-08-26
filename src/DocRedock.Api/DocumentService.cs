@@ -68,6 +68,17 @@ public sealed class DocumentService
     // unexpectedly large or numerous bitmaps.
     private const int MaxEmbeddedImageBytes = 10 * 1024 * 1024;
     private const int MaxTotalEmbeddedImageBytes = 50 * 1024 * 1024;
+    // Round-trip exports retain original media, so keep the cap higher than the
+    // self-contained Markdown limit while still preventing a malformed package
+    // from allocating an unbounded byte array.
+    private const long MaxOfficeMediaEntryBytes = 32L * 1024 * 1024;
+    private const long MaxTotalOfficeMediaBytes = 128L * 1024 * 1024;
+    // Apply package-wide limits before handing a ZIP entry to an adapter.  Media
+    // limits alone do not protect against oversized worksheet/XML payloads.
+    private const long MaxOfficePackageEntryBytes = 32L * 1024 * 1024;
+    private const long MaxTotalOfficePackageBytes = 256L * 1024 * 1024;
+    private const long MaxOfficeCompressionRatio = 100;
+    private const int MaxOfficeRelationshipCharacters = 1 * 1024 * 1024;
     private readonly DocxAdapter docx = new();
     private readonly XlsxAdapter xlsx = new();
     private readonly PptxAdapter pptx = new();
@@ -88,6 +99,7 @@ public sealed class DocumentService
         var source = Path.GetFullPath(options.SourcePath);
         var format = await DetectFormatAsync(source, cancellationToken).ConfigureAwait(false);
         var diagnostics = new List<Diagnostic>();
+        if (IsOfficeFormat(format)) PreflightOfficePackage(source);
         DocumentGraph graph;
         IReadOnlyList<RawSliceRef> slices = Array.Empty<RawSliceRef>();
         var macro = false;
@@ -121,7 +133,7 @@ public sealed class DocumentService
             case DocumentFormatKind.Pdf:
                 graph = PdfGraph(source);
                 break;
-            default: throw new NotSupportedException("Only DOCX, XLSX, PPTX, and PDF are supported.");
+            default: throw UnsupportedSourceFormat(source);
         }
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
         {
@@ -296,6 +308,7 @@ public sealed class DocumentService
     {
         var format = await DetectFormatAsync(source, cancellationToken).ConfigureAwait(false);
         var diagnostics = new List<Diagnostic>();
+        if (IsOfficeFormat(format)) PreflightOfficePackage(source);
         DocumentGraph graph;
         switch (format)
         {
@@ -329,7 +342,7 @@ public sealed class DocumentService
                 graph = PdfGraph(source);
                 break;
             default:
-                throw new NotSupportedException("Only DOCX, XLSX, PPTX, and PDF are supported.");
+                throw UnsupportedSourceFormat(source);
         }
 
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
@@ -557,7 +570,7 @@ public sealed class DocumentService
                 new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString())]),
                 Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly, Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)])).ToArray(),
             $"pdf:page:{page.PageNumber}")).ToArray();
-        return new(DocumentGraph.CurrentSchemaVersion, "doc_" + Hash(File.ReadAllBytes(path))[..16], DocumentFormatKind.Pdf, partitions);
+        return new(DocumentGraph.CurrentSchemaVersion, "doc_" + HashFile(path)[..16], DocumentFormatKind.Pdf, partitions);
     }
 
     private static ProviderSet ProvidersFor(DocumentFormatKind format, ProviderDescriptor? ocrDescriptor) => new()
@@ -804,11 +817,12 @@ public sealed class DocumentService
         var assetsByHash = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         await using var stream = File.OpenRead(sourcePath);
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+        ValidateOfficePackage(archive);
         var index = 0;
-        foreach (var entry in archive.Entries.Where(entry => entry.FullName.Contains("/media/", StringComparison.OrdinalIgnoreCase)).OrderBy(entry => entry.FullName, StringComparer.Ordinal))
+        foreach (var entry in archive.Entries.Where(IsOfficeMediaEntry).OrderBy(entry => entry.FullName, StringComparer.Ordinal))
         {
             await using var content = entry.Open();
-            using var output = new MemoryStream();
+            using var output = new MemoryStream(checked((int)entry.Length));
             await content.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
             var bytes = output.ToArray();
             var extension = Path.GetExtension(entry.Name).ToLowerInvariant();
@@ -828,6 +842,48 @@ public sealed class DocumentService
         return result;
     }
 
+    private static bool IsOfficeFormat(DocumentFormatKind format) => format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx;
+
+    private static void PreflightOfficePackage(string sourcePath)
+    {
+        using var archive = ZipFile.OpenRead(sourcePath);
+        ValidateOfficePackage(archive);
+    }
+
+    private static void ValidateOfficePackage(ZipArchive archive)
+    {
+        const int maxEntries = 10_000;
+        if (archive.Entries.Count > maxEntries)
+            throw new InvalidDataException($"Office package contains {archive.Entries.Count} entries, exceeding the {maxEntries:N0} entry limit.");
+
+        var entryNames = new HashSet<string>(StringComparer.Ordinal);
+        long totalMediaBytes = 0;
+        long totalPackageBytes = 0;
+        foreach (var entry in archive.Entries)
+        {
+            if (!entryNames.Add(entry.FullName))
+                throw new InvalidDataException($"Office package contains duplicate entry '{entry.FullName}'.");
+            if (IsOfficeMediaEntry(entry))
+            {
+                if (entry.Length > MaxOfficeMediaEntryBytes)
+                    throw new InvalidDataException($"Office media entry '{entry.FullName}' exceeds the {MaxOfficeMediaEntryBytes / (1024 * 1024)} MiB limit.");
+                if (entry.Length > MaxTotalOfficeMediaBytes - totalMediaBytes)
+                    throw new InvalidDataException($"Office package media exceeds the {MaxTotalOfficeMediaBytes / (1024 * 1024)} MiB total limit.");
+                totalMediaBytes += entry.Length;
+            }
+            if (entry.Length > MaxOfficePackageEntryBytes)
+                throw new InvalidDataException($"Office package entry '{entry.FullName}' exceeds the {MaxOfficePackageEntryBytes / (1024 * 1024)} MiB per-entry limit.");
+            if (entry.Length > MaxTotalOfficePackageBytes - totalPackageBytes)
+                throw new InvalidDataException($"Office package contents exceed the {MaxTotalOfficePackageBytes / (1024 * 1024)} MiB total limit.");
+            if (entry.Length > 0 && (entry.CompressedLength <= 0 || entry.Length / Math.Max(entry.CompressedLength, 1) > MaxOfficeCompressionRatio))
+                throw new InvalidDataException($"Office package entry '{entry.FullName}' exceeds the {MaxOfficeCompressionRatio}:1 compression ratio limit.");
+            totalPackageBytes += entry.Length;
+        }
+    }
+
+    private static bool IsOfficeMediaEntry(ZipArchiveEntry entry) =>
+        entry.FullName.Contains("/media/", StringComparison.OrdinalIgnoreCase);
+
     private static IReadOnlyList<Diagnostic> InspectOfficePackage(string sourcePath, out bool hasMacro)
     {
         using var archive = ZipFile.OpenRead(sourcePath);
@@ -841,10 +897,24 @@ public sealed class DocumentService
         foreach (var entry in archive.Entries.Where(entry => entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
         {
             using var reader = new StreamReader(entry.Open(), Encoding.UTF8, true);
-            if (reader.ReadToEnd().Contains("TargetMode=\"External\"", StringComparison.OrdinalIgnoreCase))
+            if (ReadToEndLimited(reader, entry.FullName).Contains("TargetMode=\"External\"", StringComparison.OrdinalIgnoreCase))
                 result.Add(new Diagnostic("ExternalRelationshipPresent", "External relationships are recorded but never fetched.", DiagnosticSeverity.Warning, PartUri: "/" + entry.FullName));
         }
         return result;
+    }
+
+    private static string ReadToEndLimited(StreamReader reader, string entryName)
+    {
+        var buffer = new char[8192];
+        var builder = new StringBuilder();
+        while (true)
+        {
+            var read = reader.Read(buffer, 0, buffer.Length);
+            if (read == 0) return builder.ToString();
+            if (builder.Length > MaxOfficeRelationshipCharacters - read)
+                throw new InvalidDataException($"Office relationship entry '{entryName}' exceeds the {MaxOfficeRelationshipCharacters / (1024 * 1024)} MiB inspection limit.");
+            builder.Append(buffer, 0, read);
+        }
     }
 
     private static async Task<(OfficePackageIndex Package, IReadOnlyList<OfficeRelationship> Relationships)> BuildOfficeIndexesAsync(
@@ -942,7 +1012,14 @@ public sealed class DocumentService
         _ => "application/octet-stream",
     };
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    private static string HashFile(string path)
+    {
+        using var stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
     private static string Hash(string value) => Hash(System.Text.Encoding.UTF8.GetBytes(value));
+    private static NotSupportedException UnsupportedSourceFormat(string source) => new(
+        $"Document source '{Path.GetFileName(source)}' is not a supported or readable DOCX, XLSX, PPTX, or PDF file.");
     private static void TryDeleteDirectory(string path)
     {
         try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }

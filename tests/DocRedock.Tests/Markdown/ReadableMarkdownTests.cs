@@ -1,5 +1,7 @@
+using System.Text;
 using System.Text.Json;
 using DocRedock.Core.Documents;
+using DocRedock.Formats.OpenXml;
 using DocRedock.Markdown;
 
 namespace DocRedock.Tests.Markdown;
@@ -336,6 +338,154 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("**Recommendation.** Proceed", markdown, StringComparison.Ordinal);
         Assert.Contains("**Preservation sentinel: DOCX-2026**", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("**Recommendation. **Proceed", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void KeepsDenseWideXlsxTablesAsTables()
+    {
+        var cells = Enumerable.Range(1, 12)
+            .SelectMany(column => new[]
+            {
+                Cell($"{(char)('A' + column - 1)}1", 1, column, $"H{column}"),
+                Cell($"{(char)('A' + column - 1)}2", 2, column, $"V{column}"),
+            })
+            .ToArray();
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-wide", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Wide", 0, cells)]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| H1 | H2 | H3 | H4 | H5 | H6 | H7 | H8 | H9 | H10 | H11 | H12 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| V1 | V2 | V3 | V4 | V5 | V6 | V7 | V8 | V9 | V10 | V11 | V12 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MergedHeadingDoesNotReconnectSideBySideXlsxTables()
+    {
+        var heading = Cell("A1", 1, 1, "月次分析 | 投資と実行状況");
+        var headingExtensions = heading.Extensions!.ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+        headingExtensions["merged_to_column"] = JsonSerializer.SerializeToElement(11);
+        heading = heading with { Extensions = headingExtensions };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-regions", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Monthly", 0,
+            [
+                heading,
+                Cell("A3", 3, 1, "月"), Cell("B3", 3, 2, "予算"), Cell("C3", 3, 3, "実績"), Cell("D3", 3, 4, "件数"), Cell("E3", 3, 5, "進捗"),
+                Cell("A4", 4, 1, "4月"), Cell("B4", 4, 2, "100"), Cell("C4", 4, 3, "80"), Cell("D4", 4, 4, "2"), Cell("E4", 4, 5, "80%"),
+                Cell("H3", 3, 8, "カテゴリ"), Cell("I3", 3, 9, "予算"), Cell("J3", 3, 10, "実績"), Cell("K3", 3, 11, "消化率"),
+                Cell("H4", 4, 8, "製品"), Cell("I4", 4, 9, "100"), Cell("J4", 4, 10, "80"), Cell("K4", 4, 11, "80%"),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 月 | 予算 | 実績 | 件数 | 進捗 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| カテゴリ | 予算 | 実績 | 消化率 |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| 月 | 予算 | 実績 | 件数 | 進捗 | カテゴリ |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chart_projection_explains_type_series_and_trend_for_xlsx()
+    {
+        var chart = new DocumentNode("chart", NodeKind.Chart, null, 1, ContentLayer.Body, new TextNodeContent("売上推移"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["chart_title"] = JsonSerializer.SerializeToElement("売上推移"),
+                ["chart_type"] = JsonSerializer.SerializeToElement("line"),
+                ["chart_series"] = JsonSerializer.SerializeToElement(new[] { new { Name = "売上", Categories = new[] { "4月", "5月", "6月" }, Values = new[] { "12", "18", "15" } } }),
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-chart", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Chart", 0, [Cell("A1", 1, 1, "ダッシュボード"), chart])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("**売上推移**（折れ線グラフ）", markdown, StringComparison.Ordinal);
+        Assert.Contains("要約: 1 系列のグラフです。", markdown, StringComparison.Ordinal);
+        Assert.Contains("4月 の 12 から 6月 の 15 へ 増加", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 4月 | 12 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Chart_reader_preserves_sparse_cached_point_indexes()
+    {
+        const string chartXml = """
+            <c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:lineChart><c:ser>
+              <c:cat><c:strLit><c:ptCount val="3"/><c:pt idx="0"><c:v>4月</c:v></c:pt><c:pt idx="1"><c:v>5月</c:v></c:pt><c:pt idx="2"><c:v>6月</c:v></c:pt></c:strLit></c:cat>
+              <c:val><c:numLit><c:ptCount val="3"/><c:pt idx="0"><c:v>10</c:v></c:pt><c:pt idx="2"><c:v>30</c:v></c:pt></c:numLit></c:val>
+            </c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>
+            """;
+
+        var chart = OpenXmlChartReader.Read(Encoding.UTF8.GetBytes(chartXml));
+        var series = Assert.Single(chart!.Series);
+
+        Assert.Equal(["4月", "5月", "6月"], series.Categories);
+        Assert.Equal(["10", "", "30"], series.Values);
+    }
+
+    [Fact]
+    public void Pie_chart_summary_describes_composition_instead_of_a_trend()
+    {
+        var chart = new DocumentNode("chart", NodeKind.Chart, null, 1, ContentLayer.Body, new TextNodeContent("内訳"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["chart_title"] = JsonSerializer.SerializeToElement("内訳"),
+                ["chart_type"] = JsonSerializer.SerializeToElement("pie"),
+                ["chart_series"] = JsonSerializer.SerializeToElement(new[] { new { Name = "構成", Categories = new[] { "標準", "軽減", "非課税" }, Values = new[] { "58", "27", "15" } } }),
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-pie", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [chart])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("最大 標準 58（全体の 58%）", markdown, StringComparison.Ordinal);
+        Assert.Contains("最小 非課税 15（全体の 15%）", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(" から ", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Pptx_reading_order_uses_roles_then_canvas_positions_before_notes()
+    {
+        DocumentNode ShapeAt(string id, string text, string role, int order, double x, double y) => new(id, NodeKind.Shape, null, order,
+            ContentLayer.Body, new TextNodeContent(text), Geometry: new Geometry("pptx-emu", x, y, 100, 100),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_role"] = JsonSerializer.SerializeToElement(role) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-order", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0,
+            [
+                ShapeAt("right", "右", "body", 0, 500, 200),
+                new DocumentNode("notes", NodeKind.SpeakerNotes, null, 1, ContentLayer.Furniture, new TextNodeContent("ノート")),
+                ShapeAt("left", "左", "body", 2, 100, 200),
+                ShapeAt("title", "タイトル", "title", 3, 100, 50),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.True(markdown.IndexOf("タイトル", StringComparison.Ordinal) < markdown.IndexOf("左", StringComparison.Ordinal));
+        Assert.True(markdown.IndexOf("左", StringComparison.Ordinal) < markdown.IndexOf("右", StringComparison.Ordinal));
+        Assert.True(markdown.IndexOf("右", StringComparison.Ordinal) < markdown.IndexOf("ノート", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Pptx_two_column_reading_order_finishes_the_left_column_before_the_right()
+    {
+        DocumentNode ShapeAt(string id, string text, int order, double x, double y, double width = 250, double height = 60) => new(
+            id, NodeKind.Shape, null, order, ContentLayer.Body, new TextNodeContent(text),
+            Geometry: new Geometry("pptx-emu", x, y, width, height),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_role"] = JsonSerializer.SerializeToElement("body") });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-columns", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0,
+            [
+                ShapeAt("right-heading", "右見出し", 0, 650, 150),
+                ShapeAt("left-body", "左本文", 1, 100, 260),
+                ShapeAt("full-heading", "全幅見出し", 2, 80, 70, 850, 50),
+                ShapeAt("right-body", "右本文", 3, 650, 270),
+                ShapeAt("left-heading", "左見出し", 4, 100, 140),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.True(markdown.IndexOf("全幅見出し", StringComparison.Ordinal) < markdown.IndexOf("左見出し", StringComparison.Ordinal));
+        Assert.True(markdown.IndexOf("左見出し", StringComparison.Ordinal) < markdown.IndexOf("左本文", StringComparison.Ordinal));
+        Assert.True(markdown.IndexOf("左本文", StringComparison.Ordinal) < markdown.IndexOf("右見出し", StringComparison.Ordinal));
+        Assert.True(markdown.IndexOf("右見出し", StringComparison.Ordinal) < markdown.IndexOf("右本文", StringComparison.Ordinal));
     }
 
     private static DocumentNode Cell(string address, int row, int column, string value, bool isBold = false) => new(

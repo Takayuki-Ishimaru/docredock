@@ -12,7 +12,9 @@ namespace DocRedock.Render;
 public static class DocRedockProjectionCleaner
 {
     private static readonly Regex FrontMatter = new(@"\A\s*---\r?\n(?<body>.*?)\r?\n---\r?\n", RegexOptions.Singleline | RegexOptions.Compiled);
-    private static readonly Regex ControlComment = new(@"<!--drmd:(?:block|delete|new|partition-begin|partition-end|document-end)(?:\s+[^>]*)?-->", RegexOptions.Compiled);
+    private static readonly Regex ControlComment = new(@"<!--drmd:(?:block|delete|new|sheet-table|partition-begin|partition-end|document-end)(?:\s+[^>]*)?-->", RegexOptions.Compiled);
+    private static readonly Regex DisplayComment = new(
+        @"<!--\s*(?:drmd:(?:block|delete|new|sheet-table|partition-begin|partition-end|document-end)(?:\s+[^>]*)?|inferred:\s*[^>]*)-->", RegexOptions.Compiled);
     private static readonly Regex Fence = new(@"^ {0,3}(?<marker>`{3,}|~{3,})(?<suffix>[^\r\n]*)\r?\n?$", RegexOptions.Compiled);
 
     public static bool IsDocRedockProjection(string markdown)
@@ -27,7 +29,7 @@ public static class DocRedockProjectionCleaner
     public static string Clean(string markdown)
     {
         ArgumentNullException.ThrowIfNull(markdown);
-        if (!IsDocRedockProjection(markdown)) return markdown;
+        if (!IsDocRedockProjection(markdown)) return RemoveControlCommentsOutsideFences(markdown);
 
         var parsed = new DocRedockMarkdownParser().Parse(markdown, new MarkdownParseOptions { Strict = true });
         if (!parsed.IsComplete)
@@ -68,7 +70,7 @@ public static class DocRedockProjectionCleaner
                 output.Append(line.Value);
                 continue;
             }
-            output.Append(openFence is not null ? line.Value : ControlComment.Replace(line.Value, string.Empty));
+            output.Append(openFence is not null ? line.Value : DisplayComment.Replace(line.Value, string.Empty));
         }
         return output.ToString();
     }
