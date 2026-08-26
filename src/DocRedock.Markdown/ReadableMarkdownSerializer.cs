@@ -122,6 +122,13 @@ public sealed partial class ReadableMarkdownSerializer
             RenderWorkbookRows(output, rows.Skip(metadataRows.Length).ToArray(), ref hasSectionHeading);
             return;
         }
+        var isolatedMetadataRows = rows.Where(row => IsMetadataFragment(row.Cells)).ToArray();
+        if (isolatedMetadataRows.Length > 0)
+        {
+            RenderWorkbookRows(output, rows.Except(isolatedMetadataRows).ToArray(), ref hasSectionHeading);
+            foreach (var row in isolatedMetadataRows) RenderStandaloneRow(output, row);
+            return;
+        }
         var regions = BuildRegions(rows);
         if (!hasSectionHeading && regions.Any(region => region.MinRow <= 15 && LooksLikeKeyValueGroup(region.Rows)))
         {
@@ -180,6 +187,9 @@ public sealed partial class ReadableMarkdownSerializer
         for (var partitionIndex = 0; partitionIndex < partitions.Length; partitionIndex++)
         {
             var partition = partitions[partitionIndex];
+            // The visible policy can empty an entire hidden slide partition. Do not leave a
+            // presentation-only slide label behind when none of its content is exportable.
+            if (isPptx && partition.Nodes.Count == 0) continue;
             if (isPptx)
             {
                 var slideTitle = partition.Nodes.FirstOrDefault(node =>
@@ -196,7 +206,7 @@ public sealed partial class ReadableMarkdownSerializer
                 if (aggregated.SkipIds.Contains(node.Id)) continue;
                 var text = NodeText(node).Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
-                if (isPptx && IsPresentationFurniture(node)) continue;
+                if (isPptx && (IsPresentationFurniture(node) || IsRepeatedPresentationFooter(partitions, node))) continue;
                 if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title")) continue;
                 if (node.Kind == NodeKind.Link) continue; // D12: already inlined as [text](url) by the owning paragraph's rich text.
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
@@ -249,8 +259,13 @@ public sealed partial class ReadableMarkdownSerializer
                         var marker = StringComparer.Ordinal.Equals(ExtensionString(node, "list_format"), "ordered") && ExtensionInt(node, "list_number") is { } listNumber
                             ? listNumber.ToString(CultureInfo.InvariantCulture) + ". "
                             : "- ";
+                        var listText = InlineText(text);
+                        // Some producers include the visible ordinal in w:t as well as w:numPr.
+                        // The semantic marker above is authoritative, so suppress that duplicate.
+                        if (marker.EndsWith(". ", StringComparison.Ordinal) && listText.StartsWith(marker, StringComparison.Ordinal))
+                            listText = listText[marker.Length..].TrimStart();
                         output.Append(' ', Math.Max(0, ExtensionInt(node, "list_level") ?? 0) * 2)
-                            .Append(marker).AppendLine(InlineText(text));
+                            .Append(marker).AppendLine(listText);
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
                         WriteArbitraryTable(output, table.Rows);
@@ -431,6 +446,17 @@ public sealed partial class ReadableMarkdownSerializer
     private static bool HasFiniteGeometry(DocumentNode node) => node.Geometry is { } geometry &&
         double.IsFinite(geometry.X) && double.IsFinite(geometry.Y) && double.IsFinite(geometry.Width) && double.IsFinite(geometry.Height);
 
+    private static bool IsRepeatedPresentationFooter(IReadOnlyList<DocumentPartition> partitions, DocumentNode node)
+    {
+        if (node.Geometry is not { } geometry) return false;
+        var maxY = partitions.SelectMany(partition => partition.Nodes).Where(HasFiniteGeometry)
+            .Select(item => item.Geometry!.Y + item.Geometry.Height).DefaultIfEmpty(0).Max();
+        if (maxY <= 0 || geometry.Y + geometry.Height < maxY * 0.8) return false;
+        var normalized = Regex.Replace(NodeText(node), @"\d+", "#").Trim();
+        return normalized.Length > 0 && partitions.SelectMany(partition => partition.Nodes)
+            .Count(item => Regex.Replace(NodeText(item), @"\d+", "#").Trim().Equals(normalized, StringComparison.Ordinal)) >= 2;
+    }
+
     private static bool IsPresentationFurniture(DocumentNode node)
     {
         if (node.Kind == NodeKind.SpeakerNotes) return false;
@@ -607,14 +633,17 @@ public sealed partial class ReadableMarkdownSerializer
             if (string.IsNullOrWhiteSpace(text)) continue;
             var isBullet = JsonBool(paragraph, "IsBullet", "isBullet", "is_bullet");
             var level = JsonInt(paragraph, "Level", "level") ?? 0;
-            if (isBullet)
+            var literalBulletText = string.Empty;
+            var hasLiteralBullet = !isBullet && TryStripPptxBullet(text.TrimStart(), out literalBulletText);
+            if (isBullet || hasLiteralBullet)
             {
                 // P03: a buAutoNum paragraph carries its resolved sequence number instead of always
                 // degrading to "- ", consistent with the DOCX numbered-list projection.
-                var isOrdered = JsonBool(paragraph, "IsOrdered", "isOrdered", "is_ordered");
+                var isOrdered = isBullet && JsonBool(paragraph, "IsOrdered", "isOrdered", "is_ordered");
                 var number = JsonInt(paragraph, "ListNumber", "listNumber", "list_number");
                 var marker = isOrdered && number is { } ordinal ? ordinal.ToString(CultureInfo.InvariantCulture) + ". " : "- ";
-                output.Append(' ', Math.Max(0, level) * 2).Append(marker).AppendLine(text);
+                var itemText = hasLiteralBullet ? InlineText(literalBulletText) : text;
+                output.Append(' ', Math.Max(0, level) * 2).Append(marker).AppendLine(itemText);
                 wroteBullet = true;
             }
             else
@@ -665,8 +694,12 @@ public sealed partial class ReadableMarkdownSerializer
             value = text[2..].TrimStart();
             return value.Length > 0;
         }
-        return text.StartsWith("- ", StringComparison.Ordinal) ||
-            text.StartsWith("* ", StringComparison.Ordinal);
+        if (text.StartsWith("- ", StringComparison.Ordinal) || text.StartsWith("* ", StringComparison.Ordinal))
+        {
+            value = text[2..].TrimStart();
+            return value.Length > 0;
+        }
+        return false;
     }
 
     private static string RichParagraphText(JsonElement paragraph)
@@ -859,9 +892,10 @@ public sealed partial class ReadableMarkdownSerializer
         var regions = new List<MutableRegion>();
         foreach (var fragment in rows.SelectMany(SplitRow).OrderBy(fragment => fragment.Row.Number).ThenBy(fragment => fragment.MinColumn))
         {
+            var metadataFragment = IsMetadataFragment(fragment.Cells);
             var startsSection = fragment.Cells.Count == 1 && !fragment.Cells[0].IsNumeric &&
                                 TryGetSectionHeading(fragment.Cells[0].Text, out _, out _);
-            var matching = startsSection ? null : regions
+            var matching = startsSection || metadataFragment ? null : regions
                     .Where(region => (region.HasSectionHeading
                                          ? region.MaxColumn - region.MinColumn >= 3
                                          : fragment.Cells.Count > 1) &&
@@ -880,6 +914,17 @@ public sealed partial class ReadableMarkdownSerializer
             matching.Add(fragment.Row.Number, fragment.Cells);
         }
         return regions.Select(region => region.Freeze()).OrderBy(region => region.MinRow).ThenBy(region => region.MinColumn).ToArray();
+    }
+
+    private static bool IsMetadataFragment(IReadOnlyList<ReadableCell> cells)
+    {
+        if (cells.Count != 2) return false;
+        var label = PlainText(cells[0].Text).Trim();
+        return label.Contains("更新日", StringComparison.OrdinalIgnoreCase) ||
+               label.Contains("作成日", StringComparison.OrdinalIgnoreCase) ||
+               label.Equals("状態", StringComparison.OrdinalIgnoreCase) ||
+               label.Equals("Status", StringComparison.OrdinalIgnoreCase) ||
+               label.Equals("Public Beta", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IEnumerable<RowFragment> SplitRow(SheetRow row)
@@ -1364,7 +1409,8 @@ public sealed partial class ReadableMarkdownSerializer
     }
 
     private static string PlainText(string value) => value.Replace("`", string.Empty, StringComparison.Ordinal);
-    private static string InlineText(string value) => value.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal)
+    private static string InlineText(string value) => Regex.Replace(value, @"</?span\b[^>]*>", string.Empty, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+        .Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal)
         .Replace("#", "\\#", StringComparison.Ordinal).Trim();
     private static string TableText(string value) => value.Replace("\r", string.Empty, StringComparison.Ordinal)
         .Replace("\n", "<br>", StringComparison.Ordinal).Replace("|", "\\|", StringComparison.Ordinal).Trim();

@@ -15,7 +15,8 @@ public sealed record RenderOptions(
     string MermaidExecutablePath = "mmdc",
     string MermaidBackgroundColor = "white",
     TimeSpan? MermaidTimeout = null,
-    string? SourceDirectory = null);
+    string? SourceDirectory = null,
+    string? RelativeLinkOutputPath = null);
 public sealed record RenderResult(string OutputPath, RenderFormat Format, string FidelityLevel, bool IsRestore, IReadOnlyList<string> Warnings)
 {
     public RenderReport Report => new("render", Format, FidelityLevel, IsRestore, Warnings);
@@ -27,7 +28,7 @@ public sealed class MarkdownRenderer
 {
     private const int MaxMermaidDiagrams = 32;
     private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*",
+        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*|_(?<emUnderscore>[^_\r\n]+)_",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly IMermaidRenderer mermaidRenderer;
 
@@ -183,7 +184,7 @@ public sealed class MarkdownRenderer
         if (sanitizedDocRedock)
             output.AppendLine("<div class=\"preview-bar\"><span class=\"preview-badge\">ROUNDTRIP PREVIEW</span><span class=\"preview-note\">編集用メタデータを隠し、復元対象の内容だけを表示しています。</span></div>");
         output.AppendLine("<main>");
-        string Inline(string value) => HtmlInline(value, options?.SourceDirectory, path);
+        string Inline(string value) => HtmlInline(value, options?.SourceDirectory, options?.RelativeLinkOutputPath ?? path);
         foreach (var block in document.Blocks)
         {
             switch (block)
@@ -276,6 +277,7 @@ public sealed class MarkdownRenderer
             else if (match.Groups["strike"].Success) output.Append("<del>").Append(Html(match.Groups["strike"].Value)).Append("</del>");
             else if (match.Groups["strong"].Success) output.Append("<strong>").Append(Html(match.Groups["strong"].Value)).Append("</strong>");
             else if (match.Groups["em"].Success) output.Append("<em>").Append(Html(match.Groups["em"].Value)).Append("</em>");
+            else if (match.Groups["emUnderscore"].Success) output.Append("<em>").Append(Html(match.Groups["emUnderscore"].Value)).Append("</em>");
             else output.Append(Html(match.Value));
             cursor = match.Index + match.Length;
         }

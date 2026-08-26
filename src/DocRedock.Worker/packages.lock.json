@@ -8,28 +8,28 @@
       "docredock.formats.openxml": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.formats.pdf": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.ocr.tesseract": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )"
         }
       }
     }

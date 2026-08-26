@@ -10,7 +10,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.1.3 Public Betaの対応状況
+## v0.1.4 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -64,7 +64,7 @@ docredock export input.xlsx --profile readable --content-policy visible --output
 
 ## 主な制約
 
-- v0.1.3はPublic Betaであり、本番向けの安定版ではありません。
+- v0.1.4はPublic Betaであり、本番向けの安定版ではありません。
 - 生成されたMarkdownと画像は共有前に必ず確認してください。Officeの可視性情報は複雑で、作成ソフトによって表現が異なる場合があります。
 - 閲覧用Markdownは一方向の出力です。元のOffice文書を正本として保持してください。
 - 配布版GUI／CLIの実験機能は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`を設定した場合だけ利用できます。公開ライブラリAPIは技術者向けの表面で、この入口gateを強制しません。実験機能の`.drmd`や`.drmdpkg`には元文書由来または復元用の情報が入る場合があります。
@@ -74,9 +74,9 @@ docredock export input.xlsx --profile readable --content-policy visible --output
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.1.3の対応状況](docs/ja/supported-features.md)
+- [v0.1.4の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.1.3リリースノート](release-docs/RELEASE_NOTES_v0.1.3.md)
+- [v0.1.4リリースノート](release-docs/RELEASE_NOTES_v0.1.4.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

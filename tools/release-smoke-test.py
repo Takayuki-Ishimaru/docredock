@@ -245,6 +245,33 @@ def exercise_gui(gui: Path) -> None:
         time.sleep(4)
         if process.poll() is not None:
             raise RuntimeError(f"GUI exited during startup with code {process.returncode}")
+
+        # When xvfb-run is used, its wrapper can remain alive after a child
+        # failure. Confirm that the packaged GUI executable itself is running.
+        if sys.platform.startswith("linux"):
+            expected = str(gui.resolve())
+            pending = [process.pid]
+            descendants = set()
+            while pending:
+                parent = pending.pop()
+                children_file = Path(f"/proc/{parent}/task/{parent}/children")
+                try:
+                    children = [int(value) for value in children_file.read_text().split()]
+                except (FileNotFoundError, PermissionError, ValueError):
+                    children = []
+                for child in children:
+                    if child in descendants:
+                        continue
+                    descendants.add(child)
+                    pending.append(child)
+            running_paths = []
+            for pid in descendants | {process.pid}:
+                try:
+                    running_paths.append(os.path.realpath(f"/proc/{pid}/exe"))
+                except (FileNotFoundError, PermissionError):
+                    pass
+            if expected not in running_paths:
+                raise RuntimeError("GUI executable did not remain running after startup")
     finally:
         if process.poll() is None:
             process.terminate()
@@ -267,7 +294,7 @@ def main() -> int:
         raise SystemExit("extracted GUI and CLI executables are required")
 
     version = invoke(cli, ["--version"])
-    if not version.stdout.strip().startswith("DocRedock 0.1.3"):
+    if not version.stdout.strip().startswith("DocRedock 0.1.4"):
         raise RuntimeError(f"unexpected CLI version: {version.stdout.strip()}")
     blocked = invoke(cli, ["restore", "missing.md"], allowed=(4,))
     if "DOCREDOCK_ENABLE_EXPERIMENTAL=1" not in blocked.stdout:
@@ -284,7 +311,7 @@ def main() -> int:
             exercise_gui(gui)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
-    print(f"Release smoke test passed for v0.1.3 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, F0/F1 restore, pack/unpack, tamper rejection, and {gui_result}.")
+    print(f"Release smoke test passed for v0.1.4 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, F0/F1 restore, pack/unpack, tamper rejection, and {gui_result}.")
     print("PDF paths intentionally skipped: current policy is do not use pending validation.")
     return 0
 
