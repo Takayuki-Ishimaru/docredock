@@ -8,9 +8,11 @@
 
 このディレクトリは、DocRedock の公開に必要な利用者向け文書と、公開物を組み立てる保守者向け基準をまとめた入口です。
 
-> v0.1.0 は Public Beta です。本番運用向けの安定版ではありません。既知の制約と署名状況はリリースノートを確認してください。
+> v0.1.1 は Public Beta です。本番運用向けの安定版ではありません。既知の制約と署名状況はリリースノートを確認してください。
+>
+> **現段階の利用制限:** PDF の変換・レンダリング、および元ファイル形式への復元は動作確認が不十分で、正常に動かない可能性があります。現在は使用しないでください。社内評価で使用してよい範囲は、DOCX／XLSX／PPTX からの一方向の「Markdownのみ」出力です。署名・notarization は任意で、証明書がないことだけを理由に配布を停止しません。
 
-[GitHubから v0.1.0 Public Beta をダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.0) · [日本語リリースノート](RELEASE_NOTES_v0.1.0.md) · [English release notes](RELEASE_NOTES_v0.1.0.en.md)
+[GitHubから v0.1.1 Public Beta をダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1) · [日本語リリースノート](RELEASE_NOTES_v0.1.1.md) · [English release notes](RELEASE_NOTES_v0.1.1.en.md)
 
 ## AIに渡す前にMarkdownへ変換するメリット
 
@@ -27,7 +29,7 @@ Office文書をAIが直接読む場合、シート、セル範囲、図形、関
 
 ## 利用者向け
 
-- [RELEASE_NOTES_v0.1.0.md](RELEASE_NOTES_v0.1.0.md): Public Beta のダウンロード、主な機能、既知の制約
+- [RELEASE_NOTES_v0.1.1.md](RELEASE_NOTES_v0.1.1.md): 最新 Public Beta の修正内容、ダウンロード、既知の制約
 - [USER_GUIDE.md](USER_GUIDE.md): インストール、GUI/CLI の基本操作、Readable Markdown と往復編集の違い
 - [SECURITY_AND_PRIVACY.md](SECURITY_AND_PRIVACY.md): ローカル処理、信頼境界、OCR・外部ツール、脆弱性報告
 - [対応形式一覧](../docs/FORMAT_CAPABILITY_MATRIX.md): DOCX、XLSX、PPTX、PDF の編集可能範囲と制約
@@ -43,14 +45,14 @@ Office文書をAIが直接読む場合、シート、セル範囲、図形、関
 
 1. DocRedock はローカルファーストです。組み込み処理は文書を外部サービスへ送信しません。
 2. Readable Markdown は閲覧用の一方向出力です。元文書へ戻す用途には使えません。
-3. 往復編集では Markdown と隣接する .drmd サイドカー、または .drmdpkg を一組として保持します。
+3. `.md + .drmd` は将来元ファイル形式へ復元する可能性がある場合の保存形式ですが、現段階では復元機能を使用しません。
 4. 対応外の構造は、黙って単純化せず診断または拒否として扱います。
 5. 公開ソースには再現性に必要なテストコードを含めますが、ローカル設定、生成結果、目視検証用コーパスは原則として含めません。
 
 ## リリースの二つの成果物
 
 - 公開ソースリポジトリ: ソース、仕様、スキーマ、再現可能なテスト、ライセンス情報を含みます。
-- エンドユーザー向け配布物: 対象 OS/CPU の実行ファイル、LICENSE、THIRD-PARTY-NOTICES、利用案内、チェックサム、SBOM を含みます。テストや開発用ツールは含めません。
+- エンドユーザー向け配布物: 対象 OS/CPU の実行ファイル、LICENSE、THIRD-PARTY-NOTICES、日英の利用案内とセキュリティ文書、成果物ファイルのチェックサム、実ファイルへ紐づく SBOM、provenance、署名状況を含みます。テストや開発用ツールは含めません。リリースページにはアーカイブ単位のチェックサム、SBOM／provenance、実行済みチェックの証跡も添付します。
 
 両者の正確な境界は PUBLICATION_SCOPE.md を正本とします。
 

@@ -7,8 +7,8 @@
         MinWidth="760"
         Height="820"
         MinHeight="620"
-        ExtendClientAreaToDecorationsHint="True"
-        ExtendClientAreaTitleBarHeightHint="58"
+        ExtendClientAreaToDecorationsHint="False"
+        Opened="OnWindowOpened"
         SizeChanged="OnWindowSizeChanged">
   <Window.Resources>
     <StreamGeometry x:Key="IconUpload">M12,3 L12,15 M7,8 L12,3 17,8 M4,14 L4,19 20,19 20,14</StreamGeometry>
@@ -20,7 +20,7 @@
   <DockPanel LastChildFill="True">
     <!-- A compact workspace toolbar replaces the former landing-page hero. -->
     <Border DockPanel.Dock="Top" Classes="titlebar" Height="58">
-      <Grid Margin="84,0,20,0" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
+      <Grid Margin="20,0" ColumnDefinitions="Auto,*,Auto" ColumnSpacing="18">
         <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
           <Border Classes="brand-mark" Width="32" Height="32" CornerRadius="9" Padding="3">
             <Image Source="/Assets/DocRedock-appicon-64x64.png" Stretch="Uniform" />
@@ -43,6 +43,30 @@
             <TextBlock Text="ローカル処理" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
           </StackPanel>
         </Border>
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Top"
+            x:Name="UpdatePanel"
+            Classes="notice compact-notice"
+            Margin="20,12,20,0"
+            IsVisible="False">
+      <Grid ColumnDefinitions="4,*,Auto,Auto" ColumnSpacing="12">
+        <Border Classes="status-stripe" CornerRadius="2" />
+        <StackPanel Grid.Column="1" Spacing="2" VerticalAlignment="Center">
+          <TextBlock Text="新しいバージョンがあります" FontWeight="SemiBold" />
+          <TextBlock x:Name="UpdateVersionText" Classes="muted caption" TextWrapping="Wrap" />
+        </StackPanel>
+        <Button Grid.Column="2"
+                Classes="secondary compact"
+                Click="OnOpenUpdatePage">リリースページを開く</Button>
+        <Button Grid.Column="3"
+                Classes="icon-button"
+                Click="OnCloseUpdate"
+                ToolTip.Tip="更新通知を閉じる"
+                AutomationProperties.Name="更新通知を閉じる">
+          <PathIcon Data="{StaticResource IconClose}" Width="14" Height="14" />
+        </Button>
       </Grid>
     </Border>
 
@@ -163,7 +187,7 @@
               <RadioButton x:Name="ReadableExportToggle" Classes="radio-card" GroupName="ExportFormat" IsChecked="True"
                            IsCheckedChanged="OnReadableChanged">
                 <StackPanel Spacing="3">
-                  <TextBlock Text="読みやすい Markdown" FontWeight="Bold" />
+                  <TextBlock Text="Markdownのみ" FontWeight="Bold" />
                   <TextBlock Text=".mdだけを書き出します。見出し・段落・表に再構成するため、元の形式へは戻せません。"
                              Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
@@ -171,8 +195,8 @@
               <RadioButton x:Name="RoundTripExportRadio" Classes="radio-card" GroupName="ExportFormat"
                            IsCheckedChanged="OnReadableChanged">
                 <StackPanel Spacing="3">
-                  <TextBlock Text="DocRedock（復元可能）" FontWeight="Bold" />
-                  <TextBlock Text=".mdと.drmdサイドカーを書き出します。編集後に元の文書形式へ復元できます。"
+                  <TextBlock Text=".md + .drmd" FontWeight="Bold" />
+                  <TextBlock Text="元ファイル形式へ復元する可能性がある場合はこちら。編集後の復元には動作制限があります。"
                              Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
               </RadioButton>

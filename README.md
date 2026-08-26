@@ -2,8 +2,8 @@
 
 [日本語ドキュメント](release-docs/README.md) | [English documentation](release-docs/README.en.md)
 
-[![Release: v0.1.0 Public Beta](https://img.shields.io/badge/release-v0.1.0%20Public%20Beta-f97316)](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.0)
-[Download ready-to-run GUI + CLI](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.0) · [Release notes](release-docs/RELEASE_NOTES_v0.1.0.md)
+[![Release: v0.1.1 Public Beta](https://img.shields.io/badge/release-v0.1.1%20Public%20Beta-f97316)](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1)
+[Download ready-to-run GUI + CLI](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1) · [Release notes](release-docs/RELEASE_NOTES_v0.1.1.md)
 
 <p align="center">
   <img src="assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" alt="DocRedock app icon" width="96" height="96">
@@ -18,6 +18,9 @@
 DocRedock is a local-first round-trip document system for safe Office/PDF and Markdown workflows.
 It stores the original binary beside a deterministic canonical `DocumentGraph`
 and exposes Markdown as an editable projection, not as a lossless source format.
+
+> [!WARNING]
+> **Current internal-evaluation restriction:** PDF conversion/rendering and restoration to original file formats have not been validated sufficiently and may not work. Do not use those functions for now. The approved scope is one-way **Markdown-only** export from DOCX, XLSX, and PPTX.
 
 ## Why convert documents to Markdown before asking AI?
 
@@ -157,8 +160,12 @@ The license audit validates every locked package against
 ## Cross-platform GUI
 
 The local GUI is an Avalonia desktop application. It runs the round-trip engine
-in the application process, so it does not start a web server, open a browser,
-or send documents to a remote service. The same codebase is published as native
+in the application process, so document conversion does not start a web server
+or send documents to a remote service. At startup, the GUI makes one short HTTPS
+request to the public GitHub Releases API to check release metadata. It sends no
+document content, file name, or local path, never downloads or installs an update
+automatically, and ignores update-check failures. The browser opens only when the
+user selects the release-page button. The same codebase is published as native
 desktop binaries for Windows, macOS, and Linux.
 
 ```sh
@@ -167,13 +174,14 @@ dotnet run --project src/DocRedock.Gui
 
 The GUI has two workflows:
 
-1. Select or drop a DOCX, XLSX, PPTX, or PDF. The default **Readable Markdown**
-   mode reconstructs headings, paragraphs, metadata, and tables and writes one
-   `.md` file. Turn that mode off to save the editable round-trip `.md` plus an
-   adjacent `.drmd` sidecar. A zip-form sidecar is an explicit transport option.
-2. Select or drop the edited `.md` and its `.drmd` (or `.drmdpkg`) together and save the
-   restored Office/PDF file after integrity verification and graph-aware
-   diffing.
+1. Select or drop a DOCX, XLSX, or PPTX and choose **Markdown only** to
+   reconstruct headings, paragraphs, metadata, and tables as one `.md` file.
+2. **`.md + .drmd` (when future restoration to the original file format may be needed)**
+   stores an adjacent sidecar, but restoration is outside the currently approved
+   evaluation scope and must not be used yet.
+
+PDF input/output and restoration to original file formats remain visible for development
+and evaluation, but they are not supported for current internal use.
 
 Readable Markdown is a one-way reading format and cannot be restored to the
 source document. XLSX headings, table boundaries, number formats, and
@@ -194,7 +202,8 @@ this one-way profile. Formula text is hidden by default in readable output and
 can be enabled when auditing a workbook.
 
 The CLI supports the same repeated-export loop as the GUI: pass `--force` to
-replace the requested output and `--quiet` to suppress informational diagnostics.
+replace the requested output only after a staged conversion has completed successfully;
+a failed conversion preserves the previous output. Pass `--quiet` to suppress informational diagnostics.
 Readable-only controls are `--show-formulas`, `--svg-previews`, `--no-diagrams`,
 `--sheets Sheet1,Sheet2`, and `--title "Document title"`.
 Embedded Office images are written beside the Markdown in
@@ -234,12 +243,15 @@ source payload can be placed in Git LFS, for example:
 **/*.drmd/source/** filter=lfs diff=lfs merge=lfs -text
 ```
 
-The [v0.1.0 Public Beta release](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.0)
-provides ready-to-run packages for all six targets. Each package includes the
-branded GUI, CLI, Japanese and English quick starts, licenses, checksums, and an
-SBOM; users do not need the .NET SDK. The macOS archive contains a proper
-`DocRedock.app` bundle with the app icon, Windows embeds the application icon in
-the executable, and Linux includes a PNG icon and desktop entry.
+The [Public Beta releases](https://github.com/Takayuki-Ishimaru/docredock/releases)
+provide ready-to-run packages for all six targets. Each archive includes the
+branded GUI, CLI, Japanese and English quick starts, security/privacy guidance,
+licenses, artifact-file checksums, an artifact-linked SBOM, provenance metadata,
+and an explicit signing-status record; users do not need the .NET SDK. The
+release page also provides release-level checksums, SBOM/provenance, and automated
+release evidence. The macOS archive contains a proper `DocRedock.app` bundle with
+the app icon, Windows embeds the application icon in the executable, and Linux
+includes a PNG icon and desktop entry.
 
 Developers can publish raw self-contained executables locally with either script:
 
@@ -255,9 +267,11 @@ Supported runtime identifiers are `win-x64`, `win-arm64`, `osx-x64`,
 `osx-arm64`, `linux-x64`, and `linux-arm64`. Raw developer output is written
 under `artifacts/gui/<runtime-id>/`; start `DocRedock.exe` on Windows or
 `DocRedock` on macOS/Linux. The release workflow performs the platform packaging
-and attaches the final archives to GitHub Releases. The Public Beta binaries are
-not yet code-signed or Apple-notarized; review the release notes and published
-SHA-256 checksums before launching.
+and attaches the final archives to GitHub Releases. Code signing and Apple
+notarization are optional during the current beta and their absence does not block
+a release. Each archive records whether signing/notarization was applied. For
+company-wide rollout, prefer a managed internal distribution channel and review
+the published SHA-256 checksums and signing status.
 
 ## CLI
 

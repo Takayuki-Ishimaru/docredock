@@ -4,7 +4,9 @@
 
 ## Local processing
 
-DocRedock's built-in document processing runs locally and does not upload documents to remote services. It does not fetch external URLs, execute spreadsheet formulas, or implicitly discover plugins from the wider environment.
+DocRedock's built-in document processing runs locally and does not upload documents to remote services. Document conversion does not fetch external URLs, execute spreadsheet formulas, or implicitly discover plugins from the wider environment.
+
+At startup, the GUI makes one short HTTPS request to the public GitHub Releases API (api.github.com) to check whether a newer version exists. It sends no document content, file name, local path, or DocRedock restore file. A failed check does not affect startup or document processing, and DocRedock never downloads or installs an update automatically. The default browser opens github.com only after the user selects the release-page button.
 
 Programs installed and explicitly selected by the user, such as Tesseract, Mermaid CLI, or a PDF rasterizer, are not part of the DocRedock distribution. Review each provider's security, configuration, and network behavior separately.
 
@@ -33,8 +35,10 @@ Even below these limits, process untrusted files with isolated user privileges a
 
 ## Round-trip integrity
 
+> **Do not use restoration to an original file format at the current stage.** It has not been validated sufficiently; the controls below are requirements for future evaluation and operation.
+
 - Markdown alone cannot restore the source document. Keep the matching .drmd or .drmdpkg.
-- Output paths are not overwritten by default. Use --force only for an intentional replacement.
+- Output paths are not overwritten by default. With --force, processing finishes in a staging area before replacement, so a failed conversion preserves the previous valid output.
 - Do not use restore operationally after verify has failed.
 - Review diff for unintended nodes, deletions, or format changes.
 - Open restored output in the target Office application and visually inspect the changed content and layout.
@@ -53,4 +57,4 @@ Before public release, maintainers must enable Private vulnerability reporting a
 
 ## Dependencies and licenses
 
-DocRedock itself is licensed under the MIT License. Resolved dependencies are pinned in packages.lock.json and checked with licenses/allowlist.json and LicenseAudit. Every public distribution must include LICENSE, THIRD-PARTY-NOTICES, and an SBOM, and dependencies must be revalidated for each release.
+DocRedock itself is licensed under the MIT License. Resolved dependencies are pinned in packages.lock.json and checked with licenses/allowlist.json and LicenseAudit. Every public distribution includes LICENSE, THIRD-PARTY-NOTICES, an SBOM linked to the actual artifact files by SHA-256, provenance recording the RID, commit, and artifact hashes, and an explicit signing-status record. The release page publishes attestations for the archives and SBOM, and dependencies are revalidated for each release.

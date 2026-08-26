@@ -8,9 +8,11 @@
 
 This directory is the entry point for the user-facing documentation and maintainer policies required to publish DocRedock.
 
-> v0.1.0 is a Public Beta, not a production-stable release. Review the release notes for known limitations and signing status.
+> v0.1.1 is a Public Beta, not a production-stable release. Review the release notes for known limitations and signing status.
+>
+> **Current restriction:** PDF conversion/rendering and restoration to original file formats have not been validated sufficiently and may not work. Do not use them yet. The approved internal-evaluation scope is one-way **Markdown-only** export from DOCX, XLSX, and PPTX. Signing and notarization are optional; the absence of a certificate alone does not block a release.
 
-[Download v0.1.0 Public Beta from GitHub](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.0) · [English release notes](RELEASE_NOTES_v0.1.0.en.md) · [日本語リリースノート](RELEASE_NOTES_v0.1.0.md)
+[Download v0.1.1 Public Beta from GitHub](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.1) · [English release notes](RELEASE_NOTES_v0.1.1.en.md) · [日本語リリースノート](RELEASE_NOTES_v0.1.1.md)
 
 ## Why convert to Markdown before giving a document to AI?
 
@@ -27,7 +29,7 @@ These measurements are specific to the tested fixture and environment and are no
 
 ## For users
 
-- [RELEASE_NOTES_v0.1.0.en.md](RELEASE_NOTES_v0.1.0.en.md): Public Beta downloads, highlights, and known limitations
+- [RELEASE_NOTES_v0.1.1.en.md](RELEASE_NOTES_v0.1.1.en.md): latest Public Beta fixes, downloads, and known limitations
 - [USER_GUIDE.en.md](USER_GUIDE.en.md): installation, GUI/CLI basics, and the difference between Readable Markdown and round-trip editing
 - [SECURITY_AND_PRIVACY.en.md](SECURITY_AND_PRIVACY.en.md): local processing, trust boundaries, OCR and external tools, and vulnerability reporting
 - [Format capability matrix](../docs/FORMAT_CAPABILITY_MATRIX.md): supported and unsupported DOCX, XLSX, PPTX, and PDF operations
@@ -43,14 +45,14 @@ These measurements are specific to the tested fixture and environment and are no
 
 1. DocRedock is local-first. Built-in processing does not upload documents to remote services.
 2. Readable Markdown is a one-way reading format and cannot be restored to the source document.
-3. Round-trip editing requires the Markdown and its adjacent .drmd sidecar, or a .drmdpkg bundle, to be kept together.
+3. `.md + .drmd` is the storage option when future restoration may be needed, but restoration must not be used at the current stage.
 4. Unsupported structures are diagnosed or rejected instead of being silently flattened.
 5. The public source repository includes tests required for reproducibility, but excludes local settings, generated results, and visual-review corpora by default.
 
 ## Two release deliverables
 
 - Public source repository: source code, specifications, schemas, reproducible tests, and licensing information.
-- End-user distributions: an OS/architecture-specific application, LICENSE, THIRD-PARTY-NOTICES, a quick start, checksums, and an SBOM. They do not contain tests or development tools.
+- End-user distributions: an OS/architecture-specific application, LICENSE, THIRD-PARTY-NOTICES, Japanese and English quick starts and security guidance, artifact-file checksums, an artifact-linked SBOM, provenance, and an explicit signing-status record. They do not contain tests or development tools. The release page also carries archive-level checksums, SBOM/provenance, and completed release evidence.
 
 PUBLICATION_SCOPE.en.md is authoritative for the exact boundary between these deliverables.
 

@@ -2,7 +2,9 @@
 
 日本語 | [English](RELEASE_CHECKLIST.en.md)
 
-このチェックリストは、公開用 commit/tag と各 OS 向け配布物を作る前に実施します。必須項目が一つでも未完了なら一般公開しません。
+この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。必須の自動検査が一つでも失敗した場合は公開しません。
+
+PDF の変換・レンダリングと元ファイル形式への復元は現在の承認対象外であり、smoke test と一般利用から除外します。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
 
 ## 現状監査メモ（2026-08-26）
 
@@ -55,7 +57,7 @@
 - [ ] Noto Sans JP の OFL 文書、配布元、ハッシュを確認した
 - [ ] ブランド素材と test fixture の再配布権を確認した
 - [ ] provenance/ の記録が採用コードと一致する
-- [ ] SBOM を生成し、配布物と同じ依存関係であることを確認した
+- [ ] SBOM に対象 RID、commit、配布物内の実ファイルと SHA-256 を記録し、成果物 provenance／attestation と結び付けた
 
 ## ビルドとテスト
 
@@ -79,11 +81,12 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で起動した
-- [ ] GUI の readable、roundtrip、verify/diff/restore を代表文書で確認した
-- [ ] CLI の export、verify、diff、restore、render、pack/unpack を確認した
-- [ ] macOS の .app bundle／notarization 方針、Windows の署名／installer 方針を確定した
+- [ ] GUI を各対象 runner で起動し、DOCX／XLSX／PPTX の「Markdownのみ」を確認した
+- [ ] CLI の DOCX／XLSX／PPTX readable export、F0 SHA 比較、F1 編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、利用承認ではない）
+- [ ] PDF と元ファイル形式への復元を一般利用しない制限が README とリリース証跡に記録されている
+- [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
 - [ ] 実行ファイルへバージョンと commit を追跡できる情報を付与した
-- [ ] 配布アーカイブに LICENSE、THIRD-PARTY-NOTICES、README/QUICKSTART、SBOM を含めた
+- [ ] 配布アーカイブに LICENSE、THIRD-PARTY-NOTICES、日英 README/QUICKSTART／セキュリティ文書、実ファイル連携 SBOM、provenance、内部チェックサム、署名状況を含めた
 - [ ] 配布アーカイブに tests、fixture、output、source document、debug symbol、ローカル設定がない
 - [ ] 各アーカイブの SHA-256 を生成した
 - [ ] 生成したアーカイブを別ディレクトリへ展開し、そこから smoke test した
@@ -104,6 +107,6 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] 公開 commit/tag が保護され、CI が成功している
 - [ ] source archive の全ファイル一覧を PUBLICATION_SCOPE.md と照合した
 - [ ] binary archive の全ファイル一覧を PUBLICATION_SCOPE.md と照合した
-- [ ] SHA256SUMS、SBOM、リリースノートを公開ページへ添付した
+- [ ] SHA256SUMS、SBOM、provenance、attestations、リリースノート、チェック済み RELEASE-EVIDENCE.md を公開ページへ添付した
 - [ ] 既知の P0/P1 問題がなく、残る制約を利用者向けに文書化した
 - [ ] 公開責任者が最終成果物のハッシュを承認した

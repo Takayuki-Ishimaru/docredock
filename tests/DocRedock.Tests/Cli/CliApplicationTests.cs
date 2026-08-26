@@ -75,6 +75,8 @@ public sealed class CliApplicationTests
         Assert.Contains("DocRedock 0.1.0 Public Beta", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("licenses", stdout.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("--strict", stdout.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -97,6 +99,21 @@ public sealed class CliApplicationTests
     }
 
     [Fact]
+    public async Task Force_preserves_the_previous_output_when_conversion_fails()
+    {
+        using var fixture = new Fixture();
+        await File.WriteAllTextAsync(fixture.SourcePath, "not-an-openxml-package");
+        await File.WriteAllTextAsync(fixture.MarkdownPath, "previous-good-output");
+        var app = new CliApplication(new StringWriter(), new StringWriter());
+
+        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--force"]);
+
+        Assert.NotEqual((int)ExitCode.Success, result);
+        Assert.Equal("previous-good-output", await File.ReadAllTextAsync(fixture.MarkdownPath));
+        Assert.Empty(Directory.EnumerateDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
     public async Task Export_verify_and_F0_restore_are_a_byte_identical_vertical_slice()
     {
         using var fixture = new Fixture();
@@ -113,6 +130,8 @@ public sealed class CliApplicationTests
         Assert.Equal((int)ExitCode.Success, verify);
         Assert.Equal((int)ExitCode.Success, restore);
         Assert.Equal(await File.ReadAllBytesAsync(fixture.SourcePath), await File.ReadAllBytesAsync(fixture.RestoredPath));
+        Assert.Contains("Workspace integrity: OK", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Restore readiness: F0 eligible.", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("Fidelity: F0", stdout.ToString());
         Assert.True(Directory.Exists(Path.ChangeExtension(fixture.MarkdownPath, ".drmd")));
         Assert.True(string.IsNullOrEmpty(stderr.ToString()), stderr.ToString());
@@ -138,6 +157,8 @@ public sealed class CliApplicationTests
         var restore = await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.RestoredPath]);
 
         Assert.Equal((int)ExitCode.SuccessWithWarnings, verify);
+        Assert.Contains("Edit applicability: NOT CHECKED", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Restore readiness: NOT CHECKED.", stdout.ToString(), StringComparison.Ordinal);
         Assert.Equal((int)ExitCode.Success, restore);
         Assert.True(File.Exists(fixture.RestoredPath));
         using var archive = ZipFile.OpenRead(fixture.RestoredPath);

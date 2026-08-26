@@ -38,7 +38,6 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 "rebase" => await RebaseAsync(parsed, cancellationToken),
                 "pack" => await PackAsync(parsed, cancellationToken),
                 "unpack" => await UnpackAsync(parsed, cancellationToken),
-                "licenses" => await LicensesAsync(parsed, cancellationToken),
                 "rules" => await RulesAsync(parsed, cancellationToken),
                 "migrate" => await MigrateAsync(parsed, cancellationToken),
                 _ => Invalid($"Unknown command '{args[0]}'."),
@@ -82,17 +81,21 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (profile == "readable")
         {
             var embedImages = args.HasFlag("embed-images");
-            PrepareReadableOutput(markdown, force, writeAssets: !embedImages);
+            var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
+            var readableTargets = embedImages ? new[] { markdown } : new[] { markdown, readableAssets };
+            using var stagedOutputs = new StagedOutputTransaction(readableTargets, force);
+            var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var sheets = args.Option("sheets")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             var readable = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
-                source, markdown, ocrMode != "off", languages, contentPolicy,
+                source, stagedMarkdown, ocrMode != "off", languages, contentPolicy,
                 ShowFormulas: args.HasFlag("show-formulas"),
                 IncludeSvgPreviews: args.HasFlag("svg-previews"),
                 IncludeDiagrams: !args.HasFlag("no-diagrams"),
                 Sheets: sheets,
                 Title: args.Option("title"),
                 EmbedImages: embedImages), token);
-            await output.WriteLineAsync($"Exported: {readable.MarkdownPath}");
+            stagedOutputs.Commit();
+            await output.WriteLineAsync($"Exported: {markdown}");
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
             await output.WriteLineAsync("Mode:     Readable Markdown (one-way; no sidecar)");
             foreach (var item in readable.Diagnostics.Where(item => !quiet || item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information))
@@ -105,13 +108,16 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return readable.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
         }
 
-        PrepareOutput(markdown, force);
-        var result = await Service.ExportAsync(new DocumentExportOptions(source, SidecarFor(markdown), markdown,
+        var sidecarPath = SidecarFor(markdown);
+        using var stagedRoundTrip = new StagedOutputTransaction([markdown, sidecarPath], force);
+        var stagedRoundTripMarkdown = stagedRoundTrip.PathFor(markdown);
+        var stagedSidecar = stagedRoundTrip.PathFor(sidecarPath);
+        var result = await Service.ExportAsync(new DocumentExportOptions(source, stagedSidecar, stagedRoundTripMarkdown,
             ocrMode != "off", languages, contentPolicy, Profile: profile), token);
-        var sidecarPath = result.Workspace.RootPath;
         if (sidecarForm == "zip")
-            sidecarPath = await SidecarContainer.PackInPlaceAsync(sidecarPath, markdown, token);
-        await output.WriteLineAsync($"Exported: {result.MarkdownPath}");
+            await SidecarContainer.PackInPlaceAsync(result.Workspace.RootPath, stagedRoundTripMarkdown, token);
+        stagedRoundTrip.Commit();
+        await output.WriteLineAsync($"Exported: {markdown}");
         await output.WriteLineAsync($"Sidecar:  {sidecarPath} ({(sidecarForm == "zip" ? "zip" : "directory")})");
         await output.WriteLineAsync($"Format:   {result.Graph.Format.ToString().ToLowerInvariant()}");
         await output.WriteLineAsync(result.Graph.Format == DocumentFormatKind.Pdf
@@ -125,6 +131,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private async Task<int> RestoreAsync(Arguments args, CancellationToken token)
     {
+        if (args.HasFlag("strict")) return Invalid("--strict was removed because strict Markdown validation is always enabled.");
         var markdown = RequireExistingFile(args);
         var parsed = await ParseMarkdownAsync(markdown, token); WriteMarkdownDiagnostics(parsed);
         if (!parsed.IsComplete) return (int)ExitCode.WorkspaceInvalid;
@@ -133,8 +140,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var workspace = await RoundTripWorkspace.OpenAsync(lease.RootPath, token);
         var destination = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(markdown)!,
             Path.GetFileNameWithoutExtension(markdown) + "-restored" + Path.GetExtension(workspace.Manifest.Source.FileName)));
-        PrepareSingleOutput(destination, args.HasFlag("force"));
-        var result = await Service.RestoreAsync(new DocumentRestoreOptions(lease.RootPath, destination, markdown,
+        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+        var stagedDestination = stagedOutput.PathFor(destination);
+        var result = await Service.RestoreAsync(new DocumentRestoreOptions(lease.RootPath, stagedDestination, markdown,
             args.HasFlag("allow-render-fallback")), token);
         foreach (var item in result.Diagnostics)
         {
@@ -144,7 +152,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (lease.Form == SidecarForm.Zip)
             await output.WriteLineAsync("INFORMATION SidecarZipFormReadOnly: サイドカーは zip 形のため、workspace 内のレポートは保存されません。`docredock unpack <base>.drmd --in-place` で展開してください。");
         if (!result.Succeeded) return (int)ExitCode.RestoreConflict;
-        await output.WriteLineAsync($"Restored: {result.OutputPath}"); await output.WriteLineAsync($"Fidelity: {result.Fidelity}");
+        stagedOutput.Commit();
+        await output.WriteLineAsync($"Restored: {destination}"); await output.WriteLineAsync($"Fidelity: {result.Fidelity}");
         return result.Diagnostics.Any(item => item.Severity == DocRedock.Core.Reporting.DiagnosticSeverity.Warning) ? 1 : 0;
     }
 
@@ -154,10 +163,11 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var value = args.Option("format") ?? throw new IOException("render requires --format docx|pptx|xlsx|pdf.");
         if (!Enum.TryParse<RenderFormat>(value, true, out var format)) return Unsupported($"Unsupported render format '{value}'.");
         var destination = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(input, "." + value.ToLowerInvariant()));
-        PrepareSingleOutput(destination, args.HasFlag("force"));
-        var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), destination, format,
+        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+        var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), stagedOutput.PathFor(destination), format,
             new RenderOptions(TemplatePath: args.Option("template"), MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc")), token);
-        await output.WriteLineAsync($"Rendered: {result.OutputPath}");
+        stagedOutput.Commit();
+        await output.WriteLineAsync($"Rendered: {destination}");
         await output.WriteLineAsync($"Fidelity: {result.FidelityLevel} (new document, not restore)");
         foreach (var warning in result.Warnings) await output.WriteLineAsync($"WARNING Render: {warning}");
         return result.Warnings.Count == 0 ? 0 : 1;
@@ -240,7 +250,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         foreach (var issue in report.Issues) await error.WriteLineAsync($"ERROR {issue.Code}: {issue.Message}");
         foreach (var warning in report.Warnings) await output.WriteLineAsync($"WARNING {warning.Code}: {warning.Message}");
         if (!report.IsValid) return 3;
-        await output.WriteLineAsync(report.ProjectionChanged ? "Workspace is valid; the projection contains graph-aware edits." : "Workspace is valid and eligible for F0 restore.");
+        await WriteVerificationSummaryAsync(report.ProjectionChanged);
         return report.Warnings.Count == 0 ? 0 : 1;
     }
 
@@ -253,7 +263,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         foreach (var issue in report.Issues) await error.WriteLineAsync($"ERROR {issue.Code}: {issue.Message}");
         foreach (var warning in report.Warnings) await output.WriteLineAsync($"WARNING {warning.Code}: {warning.Message}");
         if (!report.IsValid) return 3;
-        await output.WriteLineAsync(report.ProjectionChanged ? "Workspace is valid; the projection contains graph-aware edits." : "Workspace is valid and eligible for F0 restore.");
+        await WriteVerificationSummaryAsync(report.ProjectionChanged);
         return report.Warnings.Count == 0 ? 0 : 1;
     }
 
@@ -294,10 +304,12 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return 0;
         }
         var package = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(markdown, ".drmdpkg"));
-        PrepareSingleOutput(package, args.HasFlag("force"));
+        using var stagedOutput = new StagedOutputTransaction([package], args.HasFlag("force"));
         var markdownDocument = await ParseMarkdownAsync(markdown, token);
         if (!markdownDocument.IsComplete) { WriteMarkdownDiagnostics(markdownDocument); return 3; }
-        var result = await RoundTripPackage.PackAsync(markdown, ResolveWorkspace(markdown, markdownDocument.RoundTripStore), package, token); await output.WriteLineAsync($"Packed: {result.PackagePath} ({result.EntryCount} entries)"); return 0;
+        var result = await RoundTripPackage.PackAsync(markdown, ResolveWorkspace(markdown, markdownDocument.RoundTripStore), stagedOutput.PathFor(package), token);
+        stagedOutput.Commit();
+        await output.WriteLineAsync($"Packed: {package} ({result.EntryCount} entries)"); return 0;
     }
 
     private async Task<int> UnpackAsync(Arguments args, CancellationToken token)
@@ -306,8 +318,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (SidecarContainer.IsBundle(package))
         {
             var destination = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(package)!, Path.GetFileNameWithoutExtension(package)));
-            PrepareSingleOutput(destination, args.HasFlag("force"));
-            var result = await RoundTripPackage.UnpackAsync(package, destination, token); await output.WriteLineAsync($"Unpacked: {result.OutputDirectory} ({result.EntryCount} entries)"); return 0;
+            using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+            var result = await RoundTripPackage.UnpackAsync(package, stagedOutput.PathFor(destination), token);
+            stagedOutput.Commit();
+            await output.WriteLineAsync($"Unpacked: {destination} ({result.EntryCount} entries)"); return 0;
         }
         if (args.HasFlag("in-place") == (args.Option("output") is not null))
             return Invalid("unpack sidecar requires exactly one of --in-place or --output.");
@@ -362,43 +376,25 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var code = await VerifyMarkdownAsync(markdown, token); if (code is 0 or 1) await output.WriteLineAsync("Workspace already uses schema 1.1; no migration was required."); return code;
     }
 
+    private async Task WriteVerificationSummaryAsync(bool projectionChanged)
+    {
+        await output.WriteLineAsync("Workspace integrity: OK");
+        if (projectionChanged)
+        {
+            await output.WriteLineAsync("Edit applicability: NOT CHECKED (run `docredock diff <file.md>`).");
+            await output.WriteLineAsync("Restore readiness: NOT CHECKED.");
+        }
+        else
+        {
+            await output.WriteLineAsync("Edit applicability: not applicable (projection unchanged).");
+            await output.WriteLineAsync("Restore readiness: F0 eligible.");
+        }
+    }
+
     private static async Task<TypedMarkdownDocument> ParseMarkdownAsync(string path, CancellationToken token) => new DocRedockMarkdownParser().Parse(await File.ReadAllTextAsync(path, Encoding.UTF8, token), new MarkdownParseOptions { Strict = true });
     private static string RequireExistingFile(Arguments args) { if (args.Positionals.Count != 1) throw new FileNotFoundException("Exactly one input file path is required."); var path = Path.GetFullPath(args.Positionals[0]); return File.Exists(path) ? path : throw new FileNotFoundException("Input file was not found.", path); }
     private static string RequireExistingPath(Arguments args) { if (args.Positionals.Count != 1) throw new FileNotFoundException("Exactly one input path is required."); var path = Path.GetFullPath(args.Positionals[0]); return File.Exists(path) || Directory.Exists(path) ? path : throw new FileNotFoundException("Input path was not found.", path); }
     private static string SidecarFor(string markdown) => Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".drmd");
-    private static void PrepareOutput(string markdown, bool force)
-    {
-        var workspace = SidecarFor(markdown);
-        var targets = new[] { markdown, workspace };
-        if (!force && targets.Any(path => File.Exists(path) || Directory.Exists(path)))
-            throw new IOException("Output already exists; refusing to overwrite it. Use --force to replace the requested output.");
-        if (!force) return;
-        foreach (var path in targets)
-        {
-            if (File.Exists(path)) File.Delete(path);
-            else if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-        }
-    }
-
-    private static void PrepareSingleOutput(string path, bool force)
-    {
-        if (!force && (File.Exists(path) || Directory.Exists(path)))
-            throw new IOException("Output already exists; refusing to overwrite it. Use --force to replace the requested output.");
-        if (force && File.Exists(path)) File.Delete(path);
-        else if (force && Directory.Exists(path)) Directory.Delete(path, recursive: true);
-    }
-
-    private static void PrepareReadableOutput(string markdownPath, bool force, bool writeAssets)
-    {
-        PrepareSingleOutput(markdownPath, force);
-        if (!writeAssets) return;
-        var assetDirectory = Path.Combine(Path.GetDirectoryName(markdownPath)!,
-            Path.GetFileNameWithoutExtension(markdownPath) + ".assets");
-        if (!force && (File.Exists(assetDirectory) || Directory.Exists(assetDirectory)))
-            throw new IOException("Readable Markdown asset output already exists; refusing to overwrite it. Use --force to replace the requested output.");
-        if (force && File.Exists(assetDirectory)) File.Delete(assetDirectory);
-        else if (force && Directory.Exists(assetDirectory)) Directory.Delete(assetDirectory, recursive: true);
-    }
     private static string ResolveWorkspace(string markdownPath, string? reference)
     {
         reference ??= Path.GetFileNameWithoutExtension(markdownPath) + ".drmd"; if (Path.IsPathRooted(reference)) throw new WorkspaceIntegrityException("roundtrip_store must be a relative local path.");
@@ -426,7 +422,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         DocRedock 0.1.0 Public Beta
           docredock export <source> [--output file.md] [--profile roundtrip|readable|audit] [--sidecar dir|zip] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
-          docredock restore <file.md> [--output file] [--strict] [--allow-render-fallback]
+          docredock restore <file.md> [--output file] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf [--template file] [--mermaid-cli mmdc] [--output file]
           docredock inspect <source-or-file.md>
           docredock diff <file.md> [--json]
@@ -436,7 +432,6 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock pack <file.md> --sidecar (--in-place | --output file.drmd)
           docredock unpack <file.drmdpkg> [--output directory]
           docredock unpack <file.drmd> (--in-place | --output directory)
-          docredock licenses [--json] [--verify]
           docredock rules
           docredock migrate <file.md> --to-schema 1.1
         """);

@@ -2,14 +2,13 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.0
+        default: v0.1.1
 
 permissions:
   contents: read
@@ -18,56 +17,142 @@ concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
 jobs:
-  package:
-    name: Package ${{ matrix.rid }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - rid: win-x64
-            os: windows-latest
-            family: windows
-          - rid: win-arm64
-            os: windows-latest
-            family: windows
-          - rid: osx-x64
-            os: macos-14
-            family: macos
-          - rid: osx-arm64
-            os: macos-14
-            family: macos
-          - rid: linux-x64
-            os: ubuntu-latest
-            family: linux
-          - rid: linux-arm64
-            os: ubuntu-latest
-            family: linux
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+  quality:
+    name: Required CI and release preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
-      - name: Check out source
+      - name: Check out tagged source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
           persist-credentials: false
-
+      - name: Refuse an existing release and record tag verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::Release $RELEASE_TAG already exists. Create a new version tag instead of replacing artifacts."
+            exit 1
+          fi
+          ref_json=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          object_type=$(jq -r '.object.type' <<<"$ref_json")
+          object_sha=$(jq -r '.object.sha' <<<"$ref_json")
+          if [ "$object_type" = "tag" ]; then
+            verified=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.verification.verified')
+            [ "$verified" = "true" ] && echo "Tag signature: verified" || echo "::warning::Tag $RELEASE_TAG signature is not verified."
+          else
+            echo "::warning::Tag $RELEASE_TAG is lightweight and has no verifiable tag signature."
+          fi
+      - name: Require tag-specific bilingual release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
+          test -f "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md"
       - name: Set up .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
+      - name: Restore locked dependencies
+        run: dotnet restore DocRedock.sln --locked-mode
+      - name: Build
+        run: dotnet build DocRedock.sln --configuration Release --no-restore
+      - name: Test
+        run: dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj --configuration Release --no-build --no-restore
+      - name: Run conversion QA
+        run: python3 tools/conversion-qa/run.py --all
+      - name: Verify licenses and generate source dependency SBOM
+        run: dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output artifacts/compliance
+      - name: Upload compliance input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quality-compliance
+          path: artifacts/compliance/*
+          if-no-files-found: error
+          retention-days: 7
 
-      - name: Publish self-contained GUI and CLI
+  package:
+    name: Package and smoke-test ${{ matrix.rid }}
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: win-x64, os: windows-2025, family: windows }
+          - { rid: win-arm64, os: windows-11-arm, family: windows }
+          - { rid: osx-x64, os: macos-15-intel, family: macos }
+          - { rid: osx-arm64, os: macos-14, family: macos }
+          - { rid: linux-x64, os: ubuntu-24.04, family: linux }
+          - { rid: linux-arm64, os: ubuntu-24.04-arm, family: linux }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record source commit
+        id: source
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Download compliance input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: quality-compliance
+          path: artifacts/compliance
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish self-contained GUI and CLI from locked dependencies
         shell: bash
         run: |
           sh tools/publish-gui.sh "${{ matrix.rid }}"
           sh tools/publish-cli.sh "${{ matrix.rid }}"
 
+      - name: Optionally sign Windows executables
+        if: matrix.family == 'windows'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_BASE64 }}
+          WINDOWS_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          New-Item -ItemType Directory -Force -Path "artifacts/signing" | Out-Null
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_BASE64)) {
+            '{"platform":"windows","status":"unsigned","reason":"signing certificate not configured"}' | Set-Content -Encoding utf8 "artifacts/signing/SIGNING-STATUS.json"
+            Write-Warning "Windows signing credentials are not configured; publishing an explicitly unsigned beta artifact."
+            exit 0
+          }
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD)) { throw "Certificate password is required when a certificate is configured." }
+          $pfx = Join-Path $env:RUNNER_TEMP "docredock-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_CERTIFICATE_BASE64))
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" | Sort-Object FullName -Descending | Select-Object -First 1
+          if ($null -eq $signtool) { throw "signtool.exe was not found." }
+          foreach ($file in @("artifacts/gui/${{ matrix.rid }}/DocRedock.exe", "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli.exe")) {
+            & $signtool.FullName sign /fd SHA256 /td SHA256 /tr "http://timestamp.digicert.com" /f $pfx /p $env:WINDOWS_SIGNING_CERTIFICATE_PASSWORD $file
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed: $file" }
+            & $signtool.FullName verify /pa $file
+            if ($LASTEXITCODE -ne 0) { throw "Signature verification failed: $file" }
+          }
+          '{"platform":"windows","status":"signed","verification":"signtool /pa"}' | Set-Content -Encoding utf8 "artifacts/signing/SIGNING-STATUS.json"
+
       - name: Package Windows application
         if: matrix.family == 'windows'
         shell: pwsh
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
-          $tag = "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          $name = "DocRedock-$tag-${{ matrix.rid }}"
+          $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           $staging = Join-Path "artifacts/package" $name
           New-Item -ItemType Directory -Force -Path $staging, "release" | Out-Null
           Copy-Item "artifacts/gui/${{ matrix.rid }}/DocRedock.exe" "$staging/DocRedock.exe"
@@ -76,20 +161,26 @@ jobs:
           Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt" $staging
           Copy-Item "release-docs/USER_GUIDE.md" "$staging/QUICKSTART.ja.md"
           Copy-Item "release-docs/USER_GUIDE.en.md" "$staging/QUICKSTART.en.md"
-          Copy-Item "release-docs/RELEASE_NOTES_v0.1.0.md", "release-docs/RELEASE_NOTES_v0.1.0.en.md" $staging
+          Copy-Item "release-docs/SECURITY_AND_PRIVACY.md", "release-docs/SECURITY_AND_PRIVACY.en.md" $staging
+          Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" $staging
+          Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
+          New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
+          Copy-Item "artifacts/gui/${{ matrix.rid }}/runtime-locks/*" "$staging/build-metadata/gui-runtime-locks/"
+          Copy-Item "artifacts/cli/${{ matrix.rid }}/runtime-locks/*" "$staging/build-metadata/cli-runtime-locks/"
+          python tools/generate-release-metadata.py --root $staging --rid "${{ matrix.rid }}" --commit $env:SOURCE_COMMIT --source-sbom "artifacts/compliance/sbom.cdx.json"
           Compress-Archive -Path "$staging/*" -DestinationPath "release/$name.zip" -CompressionLevel Optimal
 
-      - name: Package macOS application bundle
+      - name: Assemble macOS application bundle
         if: matrix.family == 'macos'
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          name="DocRedock-$tag-${{ matrix.rid }}"
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
           staging="artifacts/package/$name"
           app="$staging/DocRedock.app"
           iconset="artifacts/package/DocRedock.iconset"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset" release
+          version="${RELEASE_TAG#v}"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset" release artifacts/signing
           cp "artifacts/gui/${{ matrix.rid }}/DocRedock" "$app/Contents/MacOS/DocRedock"
           chmod 755 "$app/Contents/MacOS/DocRedock"
           for row in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x" "128 icon_128x128" "256 icon_128x128@2x" "256 icon_256x256" "512 icon_256x256@2x" "512 icon_512x512" "1024 icon_512x512@2x"; do
@@ -97,7 +188,7 @@ jobs:
             sips -z "$1" "$1" "assets/brand/docredock/app-icons/png/DocRedock-appicon-1024x1024.png" --out "$iconset/$2.png" >/dev/null
           done
           iconutil -c icns "$iconset" -o "$app/Contents/Resources/DocRedock.icns"
-          cat > "$app/Contents/Info.plist" <<'PLIST'
+          cat > "$app/Contents/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
@@ -108,8 +199,8 @@ jobs:
             <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
             <key>CFBundleName</key><string>DocRedock</string>
             <key>CFBundlePackageType</key><string>APPL</string>
-            <key>CFBundleShortVersionString</key><string>0.1.0</string>
-            <key>CFBundleVersion</key><string>1</string>
+            <key>CFBundleShortVersionString</key><string>$version</string>
+            <key>CFBundleVersion</key><string>${{ github.run_number }}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
           </dict></plist>
@@ -119,16 +210,76 @@ jobs:
           cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
           cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
           cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
-          cp release-docs/RELEASE_NOTES_v0.1.0.md release-docs/RELEASE_NOTES_v0.1.0.en.md "$staging/"
+          cp release-docs/SECURITY_AND_PRIVACY.md release-docs/SECURITY_AND_PRIVACY.en.md "$staging/"
+          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
+          mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
+          cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
+          cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"
+
+      - name: Optionally sign and notarize macOS application
+        if: matrix.family == 'macos'
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
+          staging="artifacts/package/$name"
+          app="$staging/DocRedock.app"
+          if [ -z "$APPLE_DEVELOPER_ID_P12_BASE64" ]; then
+            printf '%s\n' '{"platform":"macos","status":"unsigned-and-not-notarized","reason":"Apple signing credentials not configured"}' > artifacts/signing/SIGNING-STATUS.json
+            echo "::warning::Apple signing credentials are not configured; publishing an explicitly unsigned beta artifact."
+            exit 0
+          fi
+          for variable in APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD; do
+            if [ -z "${!variable}" ]; then echo "::error::$variable is required when an Apple certificate is configured."; exit 1; fi
+          done
+          p12="$RUNNER_TEMP/docredock-signing.p12"
+          keychain="$RUNNER_TEMP/docredock-signing.keychain-db"
+          keychain_password=$(uuidgen)
+          P12_PATH="$p12" python3 -c 'import base64, os, pathlib; pathlib.Path(os.environ["P12_PATH"]).write_bytes(base64.b64decode(os.environ["APPLE_DEVELOPER_ID_P12_BASE64"]))'
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$p12" -k "$keychain" -P "$APPLE_DEVELOPER_ID_P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$staging/DocRedock.Cli"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          notary_zip="$RUNNER_TEMP/DocRedock-notary.zip"
+          ditto -c -k --keepParent "$app" "$notary_zip"
+          xcrun notarytool submit "$notary_zip" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD" --wait
+          xcrun stapler staple "$app"
+          xcrun stapler validate "$app"
+          printf '%s\n' '{"platform":"macos","status":"signed-and-notarized","verification":"codesign + notarytool + stapler"}' > artifacts/signing/SIGNING-STATUS.json
+
+      - name: Package macOS application
+        if: matrix.family == 'macos'
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+        run: |
+          set -euo pipefail
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
+          staging="artifacts/package/$name"
+          cp artifacts/signing/SIGNING-STATUS.json "$staging/"
+          python3 tools/generate-release-metadata.py --root "$staging" --rid "${{ matrix.rid }}" --commit "$SOURCE_COMMIT" --source-sbom artifacts/compliance/sbom.cdx.json
           ditto -c -k --sequesterRsrc --keepParent "$staging" "release/$name.zip"
 
       - name: Package Linux application
         if: matrix.family == 'linux'
         shell: bash
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
         run: |
           set -euo pipefail
-          tag="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
-          name="DocRedock-$tag-${{ matrix.rid }}"
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
           staging="artifacts/package/$name"
           mkdir -p "$staging" "$staging/share/applications" "$staging/share/icons/hicolor/256x256/apps" release
           install -m 755 "artifacts/gui/${{ matrix.rid }}/DocRedock" "$staging/DocRedock"
@@ -138,7 +289,7 @@ jobs:
           [Desktop Entry]
           Type=Application
           Name=DocRedock
-          Comment=Local-first Office and PDF Markdown workspace
+          Comment=Local-first Office to Markdown utility
           Exec=DocRedock
           Icon=docredock
           Terminal=false
@@ -147,9 +298,45 @@ jobs:
           cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
           cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
           cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
-          cp release-docs/RELEASE_NOTES_v0.1.0.md release-docs/RELEASE_NOTES_v0.1.0.en.md "$staging/"
+          cp release-docs/SECURITY_AND_PRIVACY.md release-docs/SECURITY_AND_PRIVACY.en.md "$staging/"
+          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
+          mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
+          cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
+          cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"
+          printf '%s\n' '{"platform":"linux","status":"not-applicable","reason":"no platform code-signing gate"}' > "$staging/SIGNING-STATUS.json"
+          python3 tools/generate-release-metadata.py --root "$staging" --rid "${{ matrix.rid }}" --commit "$SOURCE_COMMIT" --source-sbom artifacts/compliance/sbom.cdx.json
           tar -czf "release/$name.tar.gz" -C artifacts/package "$name"
 
+      - name: Extract and smoke-test Windows package
+        if: matrix.family == 'windows'
+        shell: pwsh
+        run: |
+          $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
+          Expand-Archive "release/$name.zip" "artifacts/smoke"
+          $root = Join-Path "artifacts/smoke" $name
+          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe"
+      - name: Extract and smoke-test macOS package
+        if: matrix.family == 'macos'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
+          mkdir -p artifacts/smoke
+          ditto -x -k "release/$name.zip" artifacts/smoke
+          root="artifacts/smoke/$name"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock"
+      - name: Extract and smoke-test Linux package
+        if: matrix.family == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
+          mkdir -p artifacts/smoke
+          tar -xzf "release/$name.tar.gz" -C artifacts/smoke
+          root="artifacts/smoke/$name"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock"
       - name: Upload packaged application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -159,62 +346,87 @@ jobs:
           retention-days: 7
 
   release:
-    name: Publish Public Beta
+    name: Publish immutable Public Beta
     needs: package
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
-      - name: Check out source
+      - name: Check out tagged source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
           persist-credentials: false
-
       - name: Download packages
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: package-*
           path: release-files
           merge-multiple: true
-
-      - name: Set up .NET
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+      - name: Download compliance input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          dotnet-version: 10.0.x
+          name: quality-compliance
+          path: release-compliance
+      - name: Write checked release evidence
+        shell: bash
+        run: |
+          commit=$(git rev-parse HEAD)
+          cat > release-files/RELEASE-EVIDENCE.md <<EOF
+          # Release evidence: $RELEASE_TAG
 
-      - name: Generate SBOM and checksums
+          - [x] Tagged source checked out: `$commit`
+          - [x] Locked restore, Release build, unit tests, and conversion QA passed
+          - [x] License allowlist check passed
+          - [x] Six RID-specific self-contained packages were built
+          - [x] Every archive was extracted before testing
+          - [x] Extracted CLI passed DOCX/XLSX/PPTX readable export
+          - [x] Extracted CLI passed DOCX/XLSX/PPTX F0 SHA-256 equality
+          - [x] Extracted CLI passed DOCX/XLSX/PPTX F1 edits
+          - [x] Pack/unpack and tamper rejection passed
+          - [x] Extracted GUI startup passed on the target OS/CPU runner
+          - [x] Signing status is recorded inside every archive; unsigned beta packages remain allowed
+          - [x] Artifact-linked CycloneDX SBOM, RID-specific runtime locks, hashes, RID, and commit provenance were generated
+          - [ ] PDF conversion and all source-format restore workflows are approved (intentionally pending; do not use)
+
+          Workflow evidence: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+      - name: Generate release SBOM, provenance, and checksums
         shell: bash
         run: |
           set -euo pipefail
-          dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output release-files
-          (
-            cd release-files
-            find . -maxdepth 1 -type f ! -name SHA256SUMS -print0 |
-              sort -z |
-              xargs -0 sha256sum |
-              sed 's#  \./#  #' > SHA256SUMS
-          )
-
+          python3 tools/generate-release-metadata.py --root release-files --rid multi-platform --commit "$(git rev-parse HEAD)" --source-sbom release-compliance/sbom.cdx.json --provenance-name RELEASE-PROVENANCE.json --checksums-name SHA256SUMS --sbom-name sbom.cdx.json
+      - name: Attest build provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: |
+            release-files/*.zip
+            release-files/*.tar.gz
+      - name: Attest release SBOM
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-path: |
+            release-files/*.zip
+            release-files/*.tar.gz
+          sbom-path: release-files/sbom.cdx.json
       - name: Build bilingual release body
         shell: bash
         run: |
           {
-            cat release-docs/RELEASE_NOTES_v0.1.0.md
+            cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
             printf '\n---\n\n'
-            cat release-docs/RELEASE_NOTES_v0.1.0.en.md
+            cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md"
+            printf '\n---\n\n'
+            cat release-files/RELEASE-EVIDENCE.md
           } > release-body.md
-
-      - name: Create or update GitHub prerelease
+      - name: Create new GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release-files/* --clobber
-            gh release edit "$RELEASE_TAG" --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease
-          else
-            gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease
-          fi
+          gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease

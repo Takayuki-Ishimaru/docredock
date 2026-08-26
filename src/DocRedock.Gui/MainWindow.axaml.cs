@@ -24,6 +24,7 @@ public partial class MainWindow : Window
         { ".docx", ".xlsx", ".pptx", ".pdf" };
 
     private readonly GuiWorkflowService _workflow;
+    private readonly UpdateCheckService _updateCheckService;
     private readonly List<IStorageFile> _sourceFiles = [];
     private IStorageFile? _markdownFile;
     private string? _sidecarPath;
@@ -35,16 +36,27 @@ public partial class MainWindow : Window
     private CancellationTokenSource? _restoreCancellation;
     private bool _exportBusy;
     private bool _restoreBusy;
+    private bool _updateCheckStarted;
+    private Uri? _updateReleaseUri;
 
     // This keeps the window usable by a plain App.axaml.cs while Program may
     // also construct it with its configured GuiWorkflowService instance.
-    public MainWindow() : this(new GuiWorkflowService())
+    public MainWindow() : this(new GuiWorkflowService(), new UpdateCheckService())
     {
     }
 
     public MainWindow(GuiWorkflowService workflow)
+        : this(workflow, new UpdateCheckService())
+    {
+    }
+
+    internal MainWindow(
+        GuiWorkflowService workflow,
+        UpdateCheckService updateCheckService)
     {
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
+        _updateCheckService =
+            updateCheckService ?? throw new ArgumentNullException(nameof(updateCheckService));
         InitializeComponent();
         LoadSettings();
         UpdateExportSelection();
@@ -582,6 +594,65 @@ public partial class MainWindow : Window
         _exportCancellation?.Cancel();
         _restoreCancellation?.Cancel();
     }
+
+    private async void OnWindowOpened(object? sender, EventArgs e)
+    {
+        if (_updateCheckStarted)
+        {
+            return;
+        }
+
+        _updateCheckStarted = true;
+        try
+        {
+            var update = await _updateCheckService.CheckAsync();
+            if (update is null)
+            {
+                return;
+            }
+
+            _updateReleaseUri = update.ReleaseUri;
+            UpdateVersionText.Text =
+                $"v{UpdateCheckService.FormatVersion(update.LatestVersion)} を利用できます。" +
+                $"（現在 v{UpdateCheckService.FormatVersion(update.CurrentVersion)}）";
+            UpdatePanel.IsVisible = true;
+        }
+        catch (Exception exception)
+        {
+            // Update availability is informational and must never prevent startup.
+            Debug.WriteLine($"Update check failed: {exception.GetType().Name}");
+        }
+    }
+
+    private void OnOpenUpdatePage(object? sender, RoutedEventArgs e)
+    {
+        if (_updateReleaseUri is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _updateReleaseUri.AbsoluteUri,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            ShowResult(
+                false,
+                "リリースページを開けませんでした",
+                exception.Message,
+                null,
+                []);
+        }
+    }
+
+    private void OnCloseUpdate(object? sender, RoutedEventArgs e) =>
+        UpdatePanel.IsVisible = false;
 
     private void OnCloseResult(object? sender, RoutedEventArgs e) => ResultPanel.IsVisible = false;
 

@@ -389,7 +389,19 @@ public sealed class XlsxAdapter
         var index = 0; var text = new StringBuilder();
         while (reader.Read())
         {
-            if (reader is { NodeType: XmlNodeType.Element, LocalName: "si" }) { text.Clear(); using var sub = reader.ReadSubtree(); while (sub.Read()) if (sub.NodeType == XmlNodeType.Text) text.Append(sub.Value); result[index++.ToString(CultureInfo.InvariantCulture)] = text.ToString(); }
+            if (reader is { NodeType: XmlNodeType.Element, LocalName: "si" })
+            {
+                text.Clear();
+                using var sub = reader.ReadSubtree();
+                var phoneticDepth = -1;
+                while (sub.Read())
+                {
+                    if (sub.NodeType == XmlNodeType.Element && sub.LocalName == "rPh") phoneticDepth = sub.Depth;
+                    else if (sub.NodeType == XmlNodeType.EndElement && sub.LocalName == "rPh") phoneticDepth = -1;
+                    else if (sub.NodeType == XmlNodeType.Text && phoneticDepth < 0) text.Append(sub.Value);
+                }
+                result[index++.ToString(CultureInfo.InvariantCulture)] = text.ToString();
+            }
         }
         return result;
     }
