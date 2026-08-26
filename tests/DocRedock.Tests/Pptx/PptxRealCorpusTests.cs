@@ -26,8 +26,10 @@ public sealed class PptxRealCorpusTests
         Assert.Contains(nodes, node => node.Kind == NodeKind.Image && node.Editability == NodeEditability.Protected);
         Assert.Contains(nodes, node => node.Kind == NodeKind.Chart && node.Editability == NodeEditability.Protected);
         Assert.Contains(nodes, node => node.Kind == NodeKind.Connector && node.Editability == NodeEditability.Protected);
-        Assert.Equal(4, nodes.Count(node => node.Kind == NodeKind.SpeakerNotes && node.Layer == ContentLayer.Furniture));
+        Assert.Equal(4, nodes.Count(node => node.Kind == NodeKind.SpeakerNotes && node.Layer == ContentLayer.Metadata));
         Assert.Equal(4, nodes.Count(node => node.Layer == ContentLayer.Furniture && node.Kind == NodeKind.Shape));
+        Assert.All(nodes.Where(node => node.Kind is NodeKind.Chart or NodeKind.Connector), node => Assert.Equal(ContentLayer.Body, node.Layer));
+        Assert.All(nodes.Where(node => node.Layer == ContentLayer.Hidden), node => Assert.True(node.Kind == NodeKind.Shape && string.IsNullOrWhiteSpace(Assert.IsType<TextNodeContent>(node.Content).Text)));
         Assert.Equal("ppt/media/image.png", Assert.IsType<ReferenceNodeContent>(nodes.Single(node => node.Kind == NodeKind.Image).Content).Reference);
         Assert.Contains("[Sources]", Assert.IsType<TextNodeContent>(nodes.First(node => node.Kind == NodeKind.SpeakerNotes).Content).Text);
         Assert.All(extraction.Slides, slide => Assert.Contains(slide.Shapes, shape => shape.Role == "title"));

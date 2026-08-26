@@ -241,7 +241,16 @@ public sealed class DocumentService
             var source = Path.GetFullPath(options.SourcePath);
             var (graph, extractedDiagnostics, assets) = await ExtractReadableGraphAsync(source, options, cancellationToken).ConfigureAwait(false);
             var diagnostics = extractedDiagnostics.ToList();
-            var imageAssets = assets.Where(asset => asset.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)).ToArray();
+            AddContentPolicyDiagnostics(diagnostics, graph, options.ContentPolicy);
+            var contentPolicy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
+            var includedImageAssetIds = graph.Nodes
+                .Where(node => DocumentContentPolicyRules.Includes(node, contentPolicy))
+                .Where(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent)
+                .Select(node => ((ReferenceNodeContent)node.Content).Reference)
+                .ToHashSet(StringComparer.Ordinal);
+            var imageAssets = assets.Where(asset =>
+                asset.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) &&
+                includedImageAssetIds.Contains(asset.Id)).ToArray();
             if (imageAssets.Length > 0)
             {
                 if (options.EmbedImages)
@@ -284,12 +293,21 @@ public sealed class DocumentService
                         StringComparer.Ordinal));
                 }
             }
-            var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(
+            var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(
                 options.ShowFormulas,
                 options.IncludeSvgPreviews,
                 options.IncludeDiagrams,
                 options.Sheets,
-                options.Title)).Serialize(graph);
+                options.Title,
+                options.ContentPolicy));
+            var markdown = serializer.Serialize(graph);
+            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing => existing.Code != item.Code)))
+                diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity switch
+                {
+                    MarkdownDiagnosticSeverity.Info => DiagnosticSeverity.Information,
+                    MarkdownDiagnosticSeverity.Error => DiagnosticSeverity.Error,
+                    _ => DiagnosticSeverity.Warning,
+                }, NodeId: item.BlockId));
             await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
             return new ReadableDocumentExportResult(markdownPath, graph, diagnostics);
         }
@@ -406,6 +424,46 @@ public sealed class DocumentService
         _ => false,
     };
 
+    private static void AddContentPolicyDiagnostics(ICollection<Diagnostic> diagnostics, DocumentGraph graph, string contentPolicy)
+    {
+        var policy = DocumentContentPolicyRules.Parse(contentPolicy);
+        var sensitive = graph.Nodes.Where(node => !DocumentContentPolicyRules.Includes(node, DocumentContentPolicy.Visible)).ToArray();
+        if (policy == DocumentContentPolicy.Complete)
+        {
+            if (sensitive.Length > 0)
+                diagnostics.Add(new Diagnostic("HiddenContentIncluded",
+                    $"Complete content policy includes {sensitive.Length} hidden or metadata node(s). Review the Markdown before sharing it.",
+                    DiagnosticSeverity.Warning));
+            return;
+        }
+
+        void AddIf(string code, string message, Func<DocumentNode, bool> predicate)
+        {
+            var count = graph.Nodes.Count(predicate);
+            if (count > 0) diagnostics.Add(new Diagnostic(code, $"{message} ({count}).", DiagnosticSeverity.Information));
+        }
+
+        AddIf("DocxHiddenTextExcluded", "Hidden or deleted DOCX text was excluded", node =>
+            StringComparer.Ordinal.Equals(ExtensionText(node, "hidden_content_type"), "docx-hidden-text"));
+        AddIf("XlsxHiddenSheetExcluded", "Cells on hidden or veryHidden XLSX sheets were excluded", node =>
+            ExtensionText(node, "sheet_state") is { } state && !StringComparer.OrdinalIgnoreCase.Equals(state, "visible"));
+        AddIf("XlsxHiddenRowExcluded", "Cells in hidden XLSX rows were excluded", node => ExtensionFlag(node, "hidden_row"));
+        AddIf("XlsxHiddenColumnExcluded", "Cells in hidden XLSX columns were excluded", node => ExtensionFlag(node, "hidden_column"));
+        AddIf("PptxHiddenSlideExcluded", "Content on hidden PPTX slides was excluded", node => ExtensionFlag(node, "hidden_slide"));
+        AddIf("PptxHiddenObjectExcluded", "Hidden PPTX objects were excluded", node => ExtensionFlag(node, "hidden_object"));
+        AddIf("PptxNotesExcluded", "PPTX speaker notes were excluded", node => node.Kind == NodeKind.SpeakerNotes);
+    }
+
+    private static string? ExtensionText(DocumentNode node, string key) =>
+        node.Extensions is not null && node.Extensions.TryGetValue(key, out var value)
+            ? value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString()
+            : null;
+
+    private static bool ExtensionFlag(DocumentNode node, string key) =>
+        node.Extensions is not null && node.Extensions.TryGetValue(key, out var value) &&
+        (value.ValueKind is JsonValueKind.True or JsonValueKind.False && value.GetBoolean() ||
+         bool.TryParse(value.ToString(), out var parsed) && parsed);
+
     private static void AddFormulaDiagnostics(
         ICollection<Diagnostic> diagnostics,
         IReadOnlyList<XlsxFormulaDiagnostic> formulaDiagnostics)
@@ -447,6 +505,11 @@ public sealed class DocumentService
         var verification = await workspace.VerifyAsync(projectionPath, requireUnchangedProjection: false, cancellationToken).ConfigureAwait(false);
         if (!verification.IsValid)
             throw new WorkspaceIntegrityException(string.Join("; ", verification.Issues.Select(issue => $"{issue.Code}: {issue.Message}")));
+        if (!verification.ProjectionChanged)
+        {
+            await workspace.RestoreOriginalAsync(output, projectionPath, cancellationToken).ConfigureAwait(false);
+            return new(output, FidelityLevel.F0, true, AddSidecarDiagnostics(Array.Empty<Diagnostic>(), lease));
+        }
         var baseline = await LoadGraphAsync(workspace, cancellationToken).ConfigureAwait(false);
         var markdownText = await File.ReadAllTextAsync(projectionPath, cancellationToken).ConfigureAwait(false);
         var edit = new MarkdownGraphEditor().Apply(baseline, markdownText);
@@ -701,7 +764,7 @@ public sealed class DocumentService
                 NodeKind.ImageText,
                 parent?.Id,
                 ocrOrder,
-                ContentLayer.Derived,
+                parent?.Layer is ContentLayer.Hidden or ContentLayer.Metadata ? parent.Layer : ContentLayer.Derived,
                 new TextNodeContent(item.Result.Text),
                 new SourceAnchor(graph.Format.ToString().ToLowerInvariant(), parent?.Source?.PartUri ?? "asset:" + item.AssetId,
                     [new AnchorLocator("asset_id", item.AssetId)]),
@@ -747,20 +810,24 @@ public sealed class DocumentService
         var nextOrder = nodes.Count == 0 ? 0 : nodes.Max(node => node.Order) + 1;
         foreach (var asset in unboundImages)
         {
+            var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["image_media_type"] = JsonSerializer.SerializeToElement(asset.MediaType),
+            };
+            if (graph.Format == DocumentFormatKind.Docx)
+                extensions["hidden_content_type"] = JsonSerializer.SerializeToElement("unbound-docx-media");
+
             nodes.Add(new DocumentNode(
                 "n_" + Hash(graph.DocumentId + ":asset:" + asset.Id)[..16],
                 NodeKind.Image,
                 null,
                 nextOrder++,
-                ContentLayer.Furniture,
+                graph.Format == DocumentFormatKind.Docx ? ContentLayer.Hidden : ContentLayer.Furniture,
                 new ReferenceNodeContent(asset.Id, Path.GetFileNameWithoutExtension(asset.SourcePartUri ?? asset.FileName)),
                 new SourceAnchor(graph.Format.ToString().ToLowerInvariant(), asset.SourcePartUri ?? "asset:" + asset.Id,
                     [new AnchorLocator("asset_id", asset.Id)]),
                 Editability: NodeEditability.Protected,
-                Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
-                {
-                    ["image_media_type"] = JsonSerializer.SerializeToElement(asset.MediaType),
-                }));
+                Extensions: extensions));
         }
         partitions[^1] = target with { Nodes = nodes };
         return graph with { Partitions = partitions };
@@ -892,7 +959,9 @@ public sealed class DocumentService
         if (hasMacro) result.Add(new Diagnostic("MacroPresent", "A VBA project is preserved but never executed.", DiagnosticSeverity.Warning));
         if (archive.Entries.Any(entry => entry.FullName.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)))
             result.Add(new Diagnostic("SignaturePresent", "Package signatures are preserved for F0; an edited package cannot retain their validity.", DiagnosticSeverity.Warning));
-        if (archive.Entries.Any(entry => entry.FullName.Contains("/embeddings/", StringComparison.OrdinalIgnoreCase) || entry.FullName.Contains("/activeX/", StringComparison.OrdinalIgnoreCase)))
+        var nativeChartWorkbookParts = NativeChartWorkbookParts(archive);
+        if (archive.Entries.Any(entry => entry.FullName.Contains("/activeX/", StringComparison.OrdinalIgnoreCase) ||
+            entry.FullName.Contains("/embeddings/", StringComparison.OrdinalIgnoreCase) && !nativeChartWorkbookParts.Contains(entry.FullName)))
             result.Add(new Diagnostic("EmbeddedObjectPresent", "Embedded or ActiveX content is preserved as passthrough and never executed.", DiagnosticSeverity.Warning));
         foreach (var entry in archive.Entries.Where(entry => entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
         {
@@ -901,6 +970,47 @@ public sealed class DocumentService
                 result.Add(new Diagnostic("ExternalRelationshipPresent", "External relationships are recorded but never fetched.", DiagnosticSeverity.Warning, PartUri: "/" + entry.FullName));
         }
         return result;
+    }
+
+    private static HashSet<string> NativeChartWorkbookParts(ZipArchive archive)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var entry in archive.Entries.Where(entry =>
+                     entry.FullName.StartsWith("ppt/charts/_rels/", StringComparison.OrdinalIgnoreCase) &&
+                     entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)))
+        {
+            using var reader = XmlReader.Create(entry.Open(), new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = MaxOfficeRelationshipCharacters,
+            });
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "Relationship") continue;
+                var type = reader.GetAttribute("Type") ?? string.Empty;
+                var target = reader.GetAttribute("Target");
+                if (!type.EndsWith("/package", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(target) ||
+                    StringComparer.OrdinalIgnoreCase.Equals(reader.GetAttribute("TargetMode"), "External")) continue;
+                var relsMarker = entry.FullName.IndexOf("/_rels/", StringComparison.Ordinal);
+                if (relsMarker < 0) continue;
+                var baseDirectory = entry.FullName[..relsMarker];
+                result.Add(NormalizeOfficePart(baseDirectory + "/" + target));
+            }
+        }
+        return result;
+    }
+
+    private static string NormalizeOfficePart(string value)
+    {
+        var parts = new List<string>();
+        foreach (var part in value.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (part == ".") continue;
+            if (part == "..") { if (parts.Count > 0) parts.RemoveAt(parts.Count - 1); continue; }
+            parts.Add(part);
+        }
+        return string.Join('/', parts);
     }
 
     private static string ReadToEndLimited(StreamReader reader, string entryName)

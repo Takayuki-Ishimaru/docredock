@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using DocRedock.Api;
@@ -20,10 +21,17 @@ public enum ExitCode
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
 {
     private DocumentService Service { get; } = documentService ?? new DocumentService(OcrEngineFactory.CreateDefault());
+    private static string Version => typeof(CliApplication).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(CliApplication).Assembly.GetName().Version?.ToString(3)
+        ?? "unknown";
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
         if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { WriteHelp(); return 0; }
+        if (args[0] == "--version") { await output.WriteLineAsync($"DocRedock {Version}"); return 0; }
+        if (!ExperimentalFeatures.IsEnabled && IsExperimentalCommand(args[0]))
+            return ExperimentalDisabled(args[0]);
         try
         {
             var parsed = Arguments.Parse(args[1..]);
@@ -65,6 +73,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var source = RequireExistingFile(args);
         var profile = args.Option("profile") ?? "roundtrip";
         if (profile is not ("roundtrip" or "readable" or "audit")) return Unsupported("Built-in export supports roundtrip, readable, and audit profiles.");
+        if (!ExperimentalFeatures.IsEnabled && (profile != "readable" || await DocumentService.DetectFormatAsync(source, token) == DocumentFormatKind.Pdf))
+            return ExperimentalDisabled(profile == "readable" ? "PDF export" : profile + " export");
         var markdown = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(source, ".md"));
         var ocrMode = (args.Option("ocr") ?? "auto").ToLowerInvariant();
         if (ocrMode is not ("auto" or "on" or "off")) return Invalid("--ocr must be auto, on, or off.");
@@ -166,7 +176,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var destination = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(input, "." + value.ToLowerInvariant()));
         using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
         var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), stagedOutput.PathFor(destination), format,
-            new RenderOptions(TemplatePath: args.Option("template"), MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc")), token);
+            new RenderOptions(TemplatePath: args.Option("template"), MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc",
+                SourceDirectory: Path.GetDirectoryName(input))), token);
         stagedOutput.Commit();
         await output.WriteLineAsync($"Rendered: {destination}");
         await output.WriteLineAsync($"Fidelity: {result.FidelityLevel} (new document, not restore)");
@@ -418,10 +429,18 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteMarkdownDiagnostics(TypedMarkdownDocument document) { foreach (var item in document.Diagnostics) { var writer = item.Severity == MarkdownDiagnosticSeverity.Error ? error : output; writer.WriteLine($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}"); } }
     private int Invalid(string message) { error.WriteLine(message); return 2; }
     private int Unsupported(string message) { error.WriteLine(message); return 4; }
+    private int ExperimentalDisabled(string feature)
+    {
+        error.WriteLine($"{feature} is experimental and disabled. Set {ExperimentalFeatures.EnvironmentVariable}=1 to enable it explicitly.");
+        return (int)ExitCode.Unsupported;
+    }
+    private static bool IsExperimentalCommand(string command) => command.ToLowerInvariant() is
+        "restore" or "render" or "diff" or "rebase" or "pack" or "unpack" or "migrate";
     private int LicenseFailure(string message) { error.WriteLine(message); return 9; }
-    private void WriteHelp() => output.WriteLine("""
-        DocRedock 0.1.0 Public Beta
-          docredock export <source> [--output file.md] [--profile roundtrip|readable|audit] [--sidecar dir|zip] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
+    private void WriteHelp() => output.WriteLine($"""
+        DocRedock {Version} Public Beta
+          docredock --version
+          docredock export <source> [--output file.md] [--profile roundtrip|readable|audit] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--mermaid-cli mmdc] [--output file]
@@ -435,6 +454,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock unpack <file.drmd> (--in-place | --output directory)
           docredock rules
           docredock migrate <file.md> --to-schema 1.1
+
+        Experimental commands and PDF export require DOCREDOCK_ENABLE_EXPERIMENTAL=1.
         """);
 
     private sealed class Arguments

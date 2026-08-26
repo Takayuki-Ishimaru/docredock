@@ -114,12 +114,13 @@ def discover_all_tools() -> dict:
 # サブプロセス実行
 # --------------------------------------------------------------------------
 
-def run_cmd(cmd: list, cwd: Optional[Path] = None, timeout: int = 120) -> dict:
+def run_cmd(cmd: list, cwd: Optional[Path] = None, timeout: int = 120,
+            environment: Optional[dict[str, str]] = None) -> dict:
     start = time.time()
     try:
         proc = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, env=environment,
         )
         return {
             "command": cmd,
@@ -168,7 +169,12 @@ def run_export(dotnet_path: str, source: Path, profile: str, output: Path,
         # "ocr": true の項目だけは ocr_mode="auto" の第2エクスポートで評価する。
         "--ocr", ocr_mode,
     ]
-    result = run_cmd(cmd, cwd=REPO_ROOT, timeout=timeout)
+    environment = os.environ.copy()
+    if profile == "roundtrip":
+        environment["DOCREDOCK_ENABLE_EXPERIMENTAL"] = "1"
+    else:
+        environment.pop("DOCREDOCK_ENABLE_EXPERIMENTAL", None)
+    result = run_cmd(cmd, cwd=REPO_ROOT, timeout=timeout, environment=environment)
     result["profile"] = profile
     result["output_path"] = str(output)
     result["status"] = classify_export_status(result["returncode"])

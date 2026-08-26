@@ -279,10 +279,10 @@ public sealed class DocumentServiceTests
     public async Task Ocr_is_inline_derived_evidence_and_correction_restores_original_bytes()
     {
         var root = TempDirectory();
-        var source = Path.Combine(root, "source.docx");
-        await new MarkdownRenderer().RenderAsync("Image document", RenderFormat.Docx, source);
+        var source = Path.Combine(root, "source.xlsx");
+        await new MarkdownRenderer().RenderAsync("Image document", RenderFormat.Xlsx, source);
         using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
-        await using (var media = archive.CreateEntry("word/media/image1.png").Open())
+        await using (var media = archive.CreateEntry("xl/media/image1.png").Open())
             await media.WriteAsync(new byte[] { 1, 2, 3, 4 });
         var markdown = Path.Combine(root, "source.md");
         var workspace = Path.Combine(root, "source.drmd");

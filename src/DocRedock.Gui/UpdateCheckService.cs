@@ -37,6 +37,8 @@ public sealed class UpdateCheckService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(currentVersion);
+        if (StringComparer.Ordinal.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK"), "1"))
+            return null;
 
         try
         {

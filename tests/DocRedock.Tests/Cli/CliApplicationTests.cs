@@ -4,8 +4,14 @@ using DocRedock.Cli;
 
 namespace DocRedock.Tests.Cli;
 
-public sealed class CliApplicationTests
+[Collection("Environment variables")]
+public sealed class CliApplicationTests : IDisposable
 {
+    private readonly string? previousExperimental = Environment.GetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL");
+
+    public CliApplicationTests() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+
+    public void Dispose() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previousExperimental);
     [Fact]
     public async Task Readable_profile_writes_markdown_without_a_sidecar()
     {
@@ -30,7 +36,7 @@ public sealed class CliApplicationTests
     public async Task Readable_profile_can_embed_images_without_creating_an_asset_directory()
     {
         using var fixture = new Fixture();
-        fixture.CreateDocx();
+        fixture.CreateDocx(withImage: true);
         using (var archive = ZipFile.Open(fixture.SourcePath, ZipArchiveMode.Update))
         await using (var media = archive.CreateEntry("word/media/image1.png").Open())
             await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
@@ -72,11 +78,40 @@ public sealed class CliApplicationTests
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["help"]));
 
-        Assert.Contains("DocRedock 0.1.0 Public Beta", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("DocRedock 0.1.3", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("licenses", stdout.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("--strict", stdout.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Version_is_derived_from_the_release_assembly()
+    {
+        var stdout = new StringWriter();
+        var app = new CliApplication(stdout, new StringWriter());
+
+        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["--version"]));
+        Assert.StartsWith("DocRedock 0.1.3", stdout.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Experimental_commands_require_explicit_environment_opt_in()
+    {
+        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        try
+        {
+            var stderr = new StringWriter();
+            var result = await new CliApplication(new StringWriter(), stderr).RunAsync(["restore", "missing.md"]);
+
+            Assert.Equal((int)ExitCode.Unsupported, result);
+            Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+        }
     }
 
     [Fact]
@@ -337,12 +372,17 @@ public sealed class CliApplicationTests
 
         public Fixture() => Directory.CreateDirectory(Root);
 
-        public void CreateDocx()
+        public void CreateDocx(bool withImage = false)
         {
             using var file = File.Create(SourcePath);
             using var archive = new ZipArchive(file, ZipArchiveMode.Create);
             Write(archive, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>");
-            Write(archive, "word/document.xml", "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p></w:body></w:document>");
+            var document = withImage
+                ? "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:drawing><a:blip r:embed=\"rIdImage\"/></w:drawing></w:r></w:p></w:body></w:document>"
+                : "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p></w:body></w:document>";
+            Write(archive, "word/document.xml", document);
+            if (withImage)
+                Write(archive, "word/_rels/document.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdImage\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/image1.png\"/></Relationships>");
         }
 
         private static void Write(ZipArchive archive, string path, string content)

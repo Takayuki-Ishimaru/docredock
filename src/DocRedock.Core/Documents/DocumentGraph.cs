@@ -5,6 +5,36 @@ namespace DocRedock.Core.Documents;
 
 public enum DocumentFormatKind { Unknown, Docx, Xlsx, Pptx, Pdf, Markdown }
 public enum ContentLayer { Body, Furniture, Derived, Hidden, Metadata }
+public enum DocumentContentPolicy { Visible, Complete, Sanitized }
+
+public static class DocumentContentPolicyRules
+{
+    public static DocumentContentPolicy Parse(string? value) => (value ?? "visible").Trim().ToLowerInvariant() switch
+    {
+        "visible" => DocumentContentPolicy.Visible,
+        "complete" => DocumentContentPolicy.Complete,
+        "sanitized" => DocumentContentPolicy.Sanitized,
+        _ => throw new ArgumentException("Content policy must be visible, complete, or sanitized.", nameof(value)),
+    };
+
+    public static string Name(DocumentContentPolicy policy) => policy.ToString().ToLowerInvariant();
+
+    public static bool Includes(DocumentNode node, DocumentContentPolicy policy)
+    {
+        if (policy == DocumentContentPolicy.Complete) return true;
+        if (node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
+            node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes) return false;
+        return policy != DocumentContentPolicy.Sanitized ||
+            (node.Layer is not (ContentLayer.Furniture or ContentLayer.Derived) &&
+             node.Kind is not (NodeKind.Header or NodeKind.Footer or NodeKind.Footnote or NodeKind.Endnote or NodeKind.ImageText or NodeKind.Annotation));
+    }
+}
+
+public static class ExperimentalFeatures
+{
+    public const string EnvironmentVariable = "DOCREDOCK_ENABLE_EXPERIMENTAL";
+    public static bool IsEnabled => StringComparer.Ordinal.Equals(Environment.GetEnvironmentVariable(EnvironmentVariable), "1");
+}
 public enum NodeKind
 {
     Document, Section, Page, Paragraph, Heading, List, ListItem, Quote, CodeBlock, Link,

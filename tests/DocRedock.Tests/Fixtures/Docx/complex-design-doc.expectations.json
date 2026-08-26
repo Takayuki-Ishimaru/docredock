@@ -331,9 +331,9 @@
     },
     {
       "id": "D17-3",
-      "desc": "コメント本文が出力に含まれる(現状は完全消失)",
+      "desc": "既定のvisibleポリシーではコメント本文を除外する",
       "severity": "guard",
-      "type": "contains",
+      "type": "not_contains",
       "value": "経理主管との調整完了予定日を明記してください。"
     },
     {

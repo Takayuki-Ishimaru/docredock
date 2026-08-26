@@ -4,10 +4,10 @@
   "items": [
     {
       "id": "P01-1",
-      "desc": "タイトルスライドが見出し1になる",
+      "desc": "文書見出しの下でタイトルスライドが見出し2になる",
       "severity": "guard",
       "type": "contains",
-      "value": "# 経費精算システム　基本・詳細設計書"
+      "value": "## スライド 1 — 経費精算システム　基本・詳細設計書"
     },
     {
       "id": "P01-2",
@@ -146,16 +146,16 @@
     },
     {
       "id": "P10-1",
-      "desc": "ノート本文のテキスト自体は残る",
+      "desc": "既定のvisibleポリシーではノート本文を除外する",
       "severity": "guard",
-      "type": "contains",
+      "type": "not_contains",
       "value": "状態遷移とAPI契約の整合性を重点確認"
     },
     {
       "id": "P10-2",
-      "desc": "ノート内の太字/箇条書き装飾が保持される（現状はプレーンテキスト化）",
+      "desc": "既定のvisibleポリシーではノート内の装飾済み本文も除外する",
       "severity": "guard",
-      "type": "contains",
+      "type": "not_contains",
       "value": "**レビュー進行メモ**"
     },
     {

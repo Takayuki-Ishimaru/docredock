@@ -4,7 +4,7 @@
 
 この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。必須の自動検査が一つでも失敗した場合は公開しません。
 
-PDF の変換・レンダリングと元ファイル形式への復元は現在の承認対象外であり、smoke test と一般利用から除外します。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
+PDFの変換・レンダリングと元ファイル形式への復元はv0.1.3のサポート対象外で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされ、利用者向けsmoke testから除外します。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
 
 ## 現状監査メモ（2026-08-26）
 
@@ -46,7 +46,7 @@ PDF の変換・レンダリングと元ファイル形式への復元は現在�
 - [ ] .drmd/.drmdpkg、元文書、export/restore report が意図せず含まれていない
 - [ ] Git hosting の Private vulnerability reporting を有効化した
 - [ ] ルート SECURITY.md に対象バージョン、非公開連絡方法、初動目安を記載した
-- [ ] SECURITY_AND_PRIVACY.md の説明が現行実装と一致する
+- [ ] docs/ja/security-and-privacy.md の説明が現行実装と一致する
 
 ## P0: ライセンスと由来
 
@@ -81,9 +81,10 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で起動した
-- [ ] GUI を各対象 runner で起動し、DOCX／XLSX／PPTX の「Markdownのみ」を確認した
-- [ ] CLI の DOCX／XLSX／PPTX readable export、F0 SHA 比較、F1 編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、利用承認ではない）
-- [ ] PDF と元ファイル形式への復元を一般利用しない制限が README とリリース証跡に記録されている
+- [ ] GUI を各対象 runner で起動し、DOCX／XLSX／PPTX の**閲覧用Markdown（readable）**を確認した
+- [ ] CLIのv0.1.3バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、v0.1.3のユーザーサポートを意味しない）
+- [ ] PDF変換と元ファイル形式への反映がv0.1.3でサポート対象外であり、DOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
+- [ ] GUIの内容ポリシー選択とcomplete警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1を確認した
 - [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
 - [ ] 実行ファイルへバージョンと commit を追跡できる情報を付与した
 - [ ] 配布アーカイブに LICENSE、THIRD-PARTY-NOTICES、日英 README/QUICKSTART／セキュリティ文書、実ファイル連携 SBOM、provenance、内部チェックサム、署名状況を含めた
@@ -95,6 +96,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 
 - [ ] README の概要、コマンド、対応 OS、ファイル名が最終成果物と一致する
 - [ ] USER_GUIDE.md の GUI/CLI 手順を新規利用者として再実行した
+- [ ] 日本語版と英語版のリリース文書が同じ要件を網羅している
 - [ ] FORMAT_CAPABILITY_MATRIX.md が現行実装とテスト結果に一致する
 - [ ] Readable Markdown が復元不可であることを明示した
 - [ ] .drmd/.drmdpkg が元文書を含み得ることを明示した

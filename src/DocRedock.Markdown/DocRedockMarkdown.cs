@@ -91,7 +91,8 @@ public sealed record TypedMarkdownDocument(
     bool IsComplete,
     string? SourceFormat = null,
     string? RoundTripStore = null,
-    string? RulesVersion = null);
+    string? RulesVersion = null,
+    string? ContentPolicy = null);
 
 public sealed record MarkdownParseOptions
 {
@@ -411,7 +412,7 @@ public sealed class DocRedockMarkdownSerializer
     }
 
     private static bool IncludeCorePolicy(DocumentNode node, string policy) =>
-        policy == "complete" || (node.Layer is not (ContentLayer.Hidden or ContentLayer.Metadata) && node.Kind is not (NodeKind.Comment or NodeKind.Revision));
+        DocumentContentPolicyRules.Includes(node, DocumentContentPolicyRules.Parse(policy));
 
     private static void AppendPartitionLabel(StringBuilder output, DocumentFormatKind format, string partitionId)
     {
@@ -914,6 +915,7 @@ public sealed class DocRedockMarkdownParser
         var rulesVersion = Get(values, "drmd_rules");
         var sourceFormat = Get(values, "source_format");
         var store = Get(values, "roundtrip_store");
+        var contentPolicy = Get(values, "content_policy");
         if (string.IsNullOrWhiteSpace(documentId))
             diagnostics.Add(new("DRMD011", "Front matter document_id is missing.", MarkdownDiagnosticSeverity.Error));
         if (!StringComparer.Ordinal.Equals(schema, "1.0"))
@@ -922,6 +924,8 @@ public sealed class DocRedockMarkdownParser
             diagnostics.Add(new("DRMD022", $"Unsupported DRMD AI editing rules version '{rulesVersion}'.", MarkdownDiagnosticSeverity.Error));
         if (string.IsNullOrWhiteSpace(sourceFormat))
             diagnostics.Add(new("DRMD013", "Front matter source_format is missing.", MarkdownDiagnosticSeverity.Error));
+        if (contentPolicy is not null && contentPolicy is not ("visible" or "complete" or "sanitized"))
+            diagnostics.Add(new("DRMD025", $"Unsupported content policy '{contentPolicy}'.", MarkdownDiagnosticSeverity.Error));
         var markers = ReadMarkers(markdown);
         var declaredIds = new HashSet<string>(StringComparer.Ordinal);
         var blocks = new List<TypedMarkdownBlock>();
@@ -1040,8 +1044,8 @@ public sealed class DocRedockMarkdownParser
         }
         var hasError = diagnostics.Any(d => d.Severity == MarkdownDiagnosticSeverity.Error);
         if (options.Strict && hasError)
-            return new TypedMarkdownDocument(documentId, schema, blocks, declaredIds, diagnostics, false, sourceFormat, store, rulesVersion);
-        return new TypedMarkdownDocument(documentId, schema, blocks, declaredIds, diagnostics, complete && !hasError, sourceFormat, store, rulesVersion);
+            return new TypedMarkdownDocument(documentId, schema, blocks, declaredIds, diagnostics, false, sourceFormat, store, rulesVersion, contentPolicy);
+        return new TypedMarkdownDocument(documentId, schema, blocks, declaredIds, diagnostics, complete && !hasError, sourceFormat, store, rulesVersion, contentPolicy);
     }
 
     /// <summary>Checks baseline inventory and reports missing markers without treating them as deletions.</summary>

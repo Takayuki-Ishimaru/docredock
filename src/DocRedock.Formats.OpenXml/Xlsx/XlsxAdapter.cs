@@ -25,7 +25,10 @@ public sealed record XlsxCellRecord(
     string? DisplayValue = null,
     XlsxCellStyle? DisplayStyle = null,
     int? MergedToRow = null,
-    int? MergedToColumn = null)
+    int? MergedToColumn = null,
+    bool IsHiddenRow = false,
+    bool IsHiddenColumn = false,
+    string SheetState = "visible")
 {
     public bool IsBlank => string.IsNullOrEmpty(Value) && string.IsNullOrEmpty(Formula);
 }
@@ -102,7 +105,10 @@ public sealed record XlsxWorksheetRecord(
     IReadOnlyList<string>? MergedRanges = null,
     IReadOnlyList<XlsxDrawingShapeRecord>? DrawingShapes = null,
     IReadOnlyList<XlsxPictureRecord>? Pictures = null,
-    IReadOnlyList<XlsxChartRecord>? Charts = null)
+    IReadOnlyList<XlsxChartRecord>? Charts = null,
+    string SheetState = "visible",
+    IReadOnlySet<int>? HiddenRows = null,
+    IReadOnlySet<int>? HiddenColumns = null)
 {
     public int RowCount => MinRow == 0 || MaxRow < MinRow ? 0 : MaxRow - MinRow + 1;
     public int ColumnCount => MinColumn == 0 || MaxColumn < MinColumn ? 0 : MaxColumn - MinColumn + 1;
@@ -132,6 +138,10 @@ public sealed record XlsxRestoreResult(byte[] Bytes, bool IsByteIdentical, XlsxP
 /// <summary>BCL-only XLSX extractor and minimal cell patcher. Formulas are classified, never evaluated.</summary>
 public sealed class XlsxAdapter
 {
+    private const int MaxExcelRows = 1_048_576;
+    private const int MaxExcelColumns = 16_384;
+    private const long MaxChartResolutionCells = 100_000;
+
     private static readonly Regex ChartCellReference = new(
         @"^(?:(?:'(?<quoted>(?:[^']|'')+)'|(?<plain>[^!]+))!)?\$?(?<startColumn>[A-Za-z]{1,3})\$?(?<startRow>\d+)(?::\$?(?<endColumn>[A-Za-z]{1,3})\$?(?<endRow>\d+))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -157,16 +167,21 @@ public sealed class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
+        var workbookHasHiddenChartSources = workbook.Sheets.Any(sheet =>
+            sheet.IsHidden || package.TryGetValue(sheet.PartUri, out var worksheetXml) &&
+            (ReadHiddenRows(worksheetXml).Count > 0 || ReadHiddenColumns(worksheetXml).Count > 0));
         foreach (var sheet in workbook.Sheets)
         {
             if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
             var mergedRanges = ReadMergedRanges(xml);
-            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, workbook.Uses1904DateSystem), mergedRanges);
+            var hiddenRows = ReadHiddenRows(xml);
+            var hiddenColumns = ReadHiddenColumns(xml);
+            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
             var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells);
-            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts);
+            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns);
             worksheets.Add(worksheet);
             var nodes = cells
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
@@ -178,7 +193,17 @@ public sealed class XlsxAdapter
             foreach (var picture in pictures)
                 nodes.Add(ToPictureNode(sheet, picture, nodes.Count));
             foreach (var chart in charts)
-                nodes.Add(ToChartNode(sheet, chart, nodes.Count));
+                nodes.Add(ToChartNode(sheet, chart, nodes.Count, workbookHasHiddenChartSources));
+            if (charts.Count > 0 && workbookHasHiddenChartSources)
+                warnings.Add($"{sheet.Name}: native chart marked hidden because its workbook contains hidden rows, columns, or sheets.");
+            if (sheet.IsHidden)
+            {
+                nodes = nodes.Select(node => node with
+                {
+                    Layer = ContentLayer.Hidden,
+                    Extensions = WithExtension(node.Extensions, "sheet_state", sheet.State)
+                }).ToList();
+            }
             partitions.Add(new DocumentPartition("sheet-" + sheet.Name, partitions.Count, nodes, sheet.PartUri));
         }
         var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Xlsx, partitions);
@@ -311,6 +336,9 @@ public sealed class XlsxAdapter
         if (cell.DisplayValue is not null) extension["display_value"] = JsonSerializer.SerializeToElement(cell.DisplayValue);
         if (cell.MergedToRow is not null) extension["merged_to_row"] = JsonSerializer.SerializeToElement(cell.MergedToRow);
         if (cell.MergedToColumn is not null) extension["merged_to_column"] = JsonSerializer.SerializeToElement(cell.MergedToColumn);
+        extension["sheet_state"] = JsonSerializer.SerializeToElement(cell.SheetState);
+        extension["hidden_row"] = JsonSerializer.SerializeToElement(cell.IsHiddenRow);
+        extension["hidden_column"] = JsonSerializer.SerializeToElement(cell.IsHiddenColumn);
         if (cell.DisplayStyle is not null)
         {
             extension["is_bold"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.IsBold);
@@ -320,8 +348,11 @@ public sealed class XlsxAdapter
             if (cell.DisplayStyle.FontSize is not null) extension["font_size"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.FontSize.Value);
             if (cell.DisplayStyle.NumberFormat is not null) extension["number_format"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.NumberFormat);
         }
+        var layer = cell.IsHiddenRow || cell.IsHiddenColumn || !string.Equals(cell.SheetState, "visible", StringComparison.OrdinalIgnoreCase)
+            ? ContentLayer.Hidden
+            : ContentLayer.Body;
         return new($"n_{Hash(cell.SheetName + "!" + cell.CellReference)[..16]}", NodeKind.Cell, null, order,
-            ContentLayer.Body, new TextNodeContent(cell.Value ?? string.Empty),
+            layer, new TextNodeContent(cell.Value ?? string.Empty),
             new SourceAnchor("xlsx", partUri, [new AnchorLocator("cell_address", cell.CellReference)]), Extensions: extension);
     }
 
@@ -368,7 +399,7 @@ public sealed class XlsxAdapter
             Extensions: extension);
     }
 
-    private static DocumentNode ToChartNode(SheetInfo sheet, XlsxChartRecord chart, int order)
+    private static DocumentNode ToChartNode(SheetInfo sheet, XlsxChartRecord chart, int order, bool hiddenSource)
     {
         var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
         {
@@ -381,6 +412,7 @@ public sealed class XlsxAdapter
         if (!string.IsNullOrWhiteSpace(chart.Title)) extension["chart_title"] = JsonSerializer.SerializeToElement(chart.Title);
         if (!string.IsNullOrWhiteSpace(chart.Type)) extension["chart_type"] = JsonSerializer.SerializeToElement(chart.Type);
         if (chart.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chart.Series);
+        if (hiddenSource) extension["hidden_chart_source"] = JsonSerializer.SerializeToElement(true);
         if (chart.Row is { } row) extension["row"] = JsonSerializer.SerializeToElement(row);
         if (chart.Column is { } column) extension["column"] = JsonSerializer.SerializeToElement(column);
         if (chart.Row is { } addressRow && chart.Column is { } addressColumn)
@@ -389,8 +421,17 @@ public sealed class XlsxAdapter
         if (chart.Row is { } locatorRow && chart.Column is { } locatorColumn)
             locators.Add(new("cell_address", ColumnName(locatorColumn) + locatorRow.ToString(CultureInfo.InvariantCulture)));
         return new("n_" + Hash($"{sheet.Name}!chart:{chart.DrawingPartUri}:{chart.Id}:{chart.RelationshipId}")[..16], NodeKind.Chart, null, order,
-            ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
+            hiddenSource ? ContentLayer.Hidden : ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
             Editability: NodeEditability.Protected, Provenance: [new ProvenanceItem(EvidenceKind.Native)], Extensions: extension);
+    }
+
+    private static IReadOnlyDictionary<string, JsonElement> WithExtension(IReadOnlyDictionary<string, JsonElement>? source, string key, string value)
+    {
+        var result = source is null
+            ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            : new Dictionary<string, JsonElement>(source, StringComparer.Ordinal);
+        result[key] = JsonSerializer.SerializeToElement(value);
+        return result;
     }
 
     private static bool IsNumericCell(XlsxCellRecord cell) =>
@@ -451,7 +492,10 @@ public sealed class XlsxAdapter
         }
         return result;
     }
-    private sealed record SheetInfo(string Name, string PartUri);
+    private sealed record SheetInfo(string Name, string PartUri, string State)
+    {
+        public bool IsHidden => !string.Equals(State, "visible", StringComparison.OrdinalIgnoreCase);
+    }
     private sealed record WorkbookInfo(IReadOnlyList<SheetInfo> Sheets, bool Uses1904DateSystem);
     private static WorkbookInfo ReadWorkbook(Dictionary<string, byte[]> package, Dictionary<string, string> relationships)
     {
@@ -471,7 +515,8 @@ public sealed class XlsxAdapter
             {
                 var name = reader.GetAttribute("name") ?? "Sheet" + (result.Count + 1);
                 var rid = reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") ?? reader.GetAttribute("r:id") ?? "";
-                if (relationships.TryGetValue(rid, out var target)) result.Add(new(name, target));
+                var state = reader.GetAttribute("state") ?? "visible";
+                if (relationships.TryGetValue(rid, out var target)) result.Add(new(name, target, state));
             }
         }
         return new(result, uses1904DateSystem);
@@ -504,7 +549,44 @@ public sealed class XlsxAdapter
         }
         return string.Join('/', stack);
     }
-    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, bool uses1904DateSystem)
+    private static IReadOnlySet<int> ReadHiddenRows(byte[] bytes)
+    {
+        var result = new HashSet<int>();
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "row" && IsHiddenFlag(reader.GetAttribute("hidden")) &&
+                int.TryParse(reader.GetAttribute("r"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var row) &&
+                row is >= 1 and <= MaxExcelRows)
+                result.Add(row);
+        return result;
+    }
+
+    private static IReadOnlySet<int> ReadHiddenColumns(byte[] bytes)
+    {
+        var result = new HashSet<int>();
+        var examinedColumns = 0;
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "col" || !IsHiddenFlag(reader.GetAttribute("hidden"))) continue;
+            if (!int.TryParse(reader.GetAttribute("min"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var min) ||
+                !int.TryParse(reader.GetAttribute("max"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var max) ||
+                min < 1 || max < min || max > MaxExcelColumns) continue;
+            var span = max - min + 1;
+            if (span > MaxExcelColumns - examinedColumns) break;
+            examinedColumns += span;
+            for (var column = min; ; column++)
+            {
+                result.Add(column);
+                if (column == max) break;
+            }
+        }
+        return result;
+    }
+
+    private static bool IsHiddenFlag(string? value) => value is "1" || bool.TryParse(value, out var parsed) && parsed;
+
+    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
     {
         var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
@@ -525,14 +607,16 @@ public sealed class XlsxAdapter
                 }
                 sub.Read();
             }
+            var (row, column) = ParseCellReference(reference);
+            if (row == 0 || column == 0) continue;
             if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) value = sharedValue;
             if (formula is not null) diagnostics.Add(ClassifyFormula(reference, formula));
-            var (row, column) = ParseCellReference(reference);
             var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
                 ? styles[styleIndex]
                 : null;
             var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
-            result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle));
+            result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
+                IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState));
         }
         return result;
     }
@@ -843,10 +927,17 @@ public sealed class XlsxAdapter
             ? ParseCellReference(match.Groups["endColumn"].Value + match.Groups["endRow"].Value)
             : start;
         if (start.Row <= 0 || start.Column <= 0 || end.Row <= 0 || end.Column <= 0) return [];
+        var minRow = Math.Min(start.Row, end.Row);
+        var maxRow = Math.Max(start.Row, end.Row);
+        var minColumn = Math.Min(start.Column, end.Column);
+        var maxColumn = Math.Max(start.Column, end.Column);
+        var rowSpan = (long)maxRow - minRow + 1;
+        var columnSpan = (long)maxColumn - minColumn + 1;
+        if (rowSpan <= 0 || columnSpan <= 0 || rowSpan > MaxChartResolutionCells / columnSpan) return [];
         var byCoordinate = cells.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex));
-        var values = new List<string>();
-        for (var row = Math.Min(start.Row, end.Row); row <= Math.Max(start.Row, end.Row); row++)
-            for (var column = Math.Min(start.Column, end.Column); column <= Math.Max(start.Column, end.Column); column++)
+        var values = new List<string>(checked((int)(rowSpan * columnSpan)));
+        for (var row = minRow; row <= maxRow; row++)
+            for (var column = minColumn; column <= maxColumn; column++)
                 values.Add(byCoordinate.TryGetValue((row, column), out var cell)
                     ? cell.DisplayValue ?? cell.Value ?? string.Empty
                     : string.Empty);
@@ -1090,12 +1181,15 @@ public sealed class XlsxAdapter
     {
         var split = 0;
         while (split < reference.Length && char.IsLetter(reference[split])) split++;
-        if (split == 0 || split == reference.Length || !int.TryParse(reference[split..], NumberStyles.None, CultureInfo.InvariantCulture, out var row)) return (0, 0);
+        if (split is 0 or > 3 || split == reference.Length ||
+            !int.TryParse(reference[split..], NumberStyles.None, CultureInfo.InvariantCulture, out var row) ||
+            row is < 1 or > MaxExcelRows) return (0, 0);
         var column = 0;
         foreach (var character in reference[..split].ToUpperInvariant())
         {
             if (character is < 'A' or > 'Z') return (0, 0);
-            column = column * 26 + character - 'A' + 1;
+            column = checked(column * 26 + character - 'A' + 1);
+            if (column > MaxExcelColumns) return (0, 0);
         }
         return (row, column);
     }

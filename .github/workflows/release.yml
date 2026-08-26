@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.2
+        default: v0.1.3
 
 permissions:
   contents: read
@@ -159,9 +159,10 @@ jobs:
           Copy-Item "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli.exe" "$staging/DocRedock.Cli.exe"
           Copy-Item "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/DocRedock-icon.png"
           Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt" $staging
-          Copy-Item "release-docs/USER_GUIDE.md" "$staging/QUICKSTART.ja.md"
-          Copy-Item "release-docs/USER_GUIDE.en.md" "$staging/QUICKSTART.en.md"
-          Copy-Item "release-docs/SECURITY_AND_PRIVACY.md", "release-docs/SECURITY_AND_PRIVACY.en.md" $staging
+          Copy-Item "docs/ja/user-guide.md" "$staging/QUICKSTART.ja.md"
+          Copy-Item "docs/en/user-guide.md" "$staging/QUICKSTART.en.md"
+          Copy-Item "docs/ja/security-and-privacy.md" "$staging/SECURITY_AND_PRIVACY.ja.md"
+          Copy-Item "docs/en/security-and-privacy.md" "$staging/SECURITY_AND_PRIVACY.en.md"
           Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" $staging
           Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
           New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
@@ -208,9 +209,10 @@ jobs:
           cp "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
           chmod 755 "$staging/DocRedock.Cli"
           cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
-          cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
-          cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
-          cp release-docs/SECURITY_AND_PRIVACY.md release-docs/SECURITY_AND_PRIVACY.en.md "$staging/"
+          cp docs/ja/user-guide.md "$staging/QUICKSTART.ja.md"
+          cp docs/en/user-guide.md "$staging/QUICKSTART.en.md"
+          cp docs/ja/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.ja.md"
+          cp docs/en/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.en.md"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
@@ -296,9 +298,10 @@ jobs:
           Categories=Office;Utility;
           DESKTOP
           cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
-          cp release-docs/USER_GUIDE.md "$staging/QUICKSTART.ja.md"
-          cp release-docs/USER_GUIDE.en.md "$staging/QUICKSTART.en.md"
-          cp release-docs/SECURITY_AND_PRIVACY.md release-docs/SECURITY_AND_PRIVACY.en.md "$staging/"
+          cp docs/ja/user-guide.md "$staging/QUICKSTART.ja.md"
+          cp docs/en/user-guide.md "$staging/QUICKSTART.en.md"
+          cp docs/ja/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.ja.md"
+          cp docs/en/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.en.md"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"

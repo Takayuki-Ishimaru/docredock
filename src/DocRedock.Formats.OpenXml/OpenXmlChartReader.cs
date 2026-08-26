@@ -62,18 +62,31 @@ public static class OpenXmlChartReader
         if (element is null) return [];
         var points = element.SelectNodes(".//*[local-name()='pt']")?.OfType<XmlElement>().ToArray() ?? [];
         if (points.Length == 0) return TextValues(element);
+        if (points.Length > MaxChartPoints) return [];
 
-        var indexed = points.Select((point, position) =>
+        var indexed = new (int Index, string Value)[points.Length];
+        for (var position = 0; position < points.Length; position++)
         {
-            var index = int.TryParse(point.GetAttribute("idx"), out var parsed) && parsed >= 0 ? parsed : position;
-            return (Index: index, Value: TextFrom(point));
-        }).ToArray();
-        var declaredCount = element.SelectNodes(".//*[local-name()='ptCount']")?.OfType<XmlElement>()
-            .Select(item => int.TryParse(item.GetAttribute("val"), out var count) && count >= 0 ? count : 0)
-            .DefaultIfEmpty(0).Max() ?? 0;
+            var point = points[position];
+            var rawIndex = point.GetAttribute("idx");
+            var index = rawIndex.Length == 0
+                ? position
+                : long.TryParse(rawIndex, out var parsed) && parsed is >= 0 and < MaxChartPoints
+                    ? (int)parsed
+                    : -1;
+            if (index < 0) return [];
+            indexed[position] = (index, TextFrom(point));
+        }
+
+        var declaredCount = 0;
+        foreach (var item in element.SelectNodes(".//*[local-name()='ptCount']")?.OfType<XmlElement>() ?? [])
+        {
+            if (!long.TryParse(item.GetAttribute("val"), out var declared) || declared < 0 || declared > MaxChartPoints)
+                return [];
+            declaredCount = Math.Max(declaredCount, (int)declared);
+        }
+
         var count = Math.Max(declaredCount, indexed.Max(item => item.Index) + 1);
-        if (count > MaxChartPoints)
-            throw new InvalidDataException($"Chart cache declares {count:N0} points, exceeding the {MaxChartPoints:N0} point limit.");
         var values = Enumerable.Repeat(string.Empty, count).ToArray();
         foreach (var point in indexed) values[point.Index] = point.Value;
         return values;

@@ -55,13 +55,17 @@ public sealed class GuiWorkflowService
         bool includeSvgPreviews = false,
         bool includeDiagrams = true,
         bool embedReadableImages = false,
-        bool zipSidecar = false)
+        bool zipSidecar = false,
+        string contentPolicy = "visible")
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
         var extension = Path.GetExtension(sourcePath);
         if (!SupportedSourceExtensions.Contains(extension))
             throw new NotSupportedException("DOCX, XLSX, PPTX, and PDF files are supported.");
+        _ = DocRedock.Core.Documents.DocumentContentPolicyRules.Parse(contentPolicy);
+        if (!DocRedock.Core.Documents.ExperimentalFeatures.IsEnabled && (!readable || extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase)))
+            throw new NotSupportedException($"This workflow is experimental and disabled. Set {DocRedock.Core.Documents.ExperimentalFeatures.EnvironmentVariable}=1 to enable it explicitly.");
 
         Directory.CreateDirectory(outputDirectory);
         var baseName = SafeBaseName(Path.GetFileNameWithoutExtension(sourcePath));
@@ -80,6 +84,7 @@ public sealed class GuiWorkflowService
                     markdownPath,
                     enableOcr,
                     NormalizeLanguages(ocrLanguages),
+                    ContentPolicy: contentPolicy,
                     ShowFormulas: showFormulas,
                     IncludeSvgPreviews: includeSvgPreviews,
                     IncludeDiagrams: includeDiagrams,
@@ -113,7 +118,8 @@ public sealed class GuiWorkflowService
                 sidecarPath,
                 markdownPath,
                 enableOcr,
-                NormalizeLanguages(ocrLanguages)), cancellationToken).ConfigureAwait(false);
+                NormalizeLanguages(ocrLanguages),
+                ContentPolicy: contentPolicy), cancellationToken).ConfigureAwait(false);
             var sidecarForm = SidecarForm.Directory;
             if (zipSidecar)
             {

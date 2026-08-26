@@ -21,6 +21,7 @@ public sealed class DocxAdapter : IFormatProbe
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    private static readonly XNamespace V = "urn:schemas-microsoft-com:vml";
     private static readonly XNamespace W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
 
     public ProviderDescriptor Descriptor { get; } = new(
@@ -213,6 +214,7 @@ public sealed class DocxAdapter : IFormatProbe
             paraId is null ? [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))] : [new("w14_para_id", paraId)], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
         var text = ParagraphText(paragraph);
+        var hiddenText = HiddenParagraphText(paragraph);
         var style = (string?)paragraph.Element(W + "pPr")?.Element(W + "pStyle")?.Attribute(W + "val");
         // Word commonly stores list semantics through a paragraph style (ListBullet /
         // ListNumber) while other producers emit an explicit w:numPr.  Treat both as
@@ -220,10 +222,11 @@ public sealed class DocxAdapter : IFormatProbe
         var isList = paragraph.Element(W + "pPr")?.Element(W + "numPr") is not null ||
                      IsListStyle(style);
         var headingLevel = HeadingLevel(style);
+        var isDocumentTitle = IsTitleStyle(style);
         // A character-level CodeChar run is inline code, not a code block.  Only
         // paragraph styles classify the whole paragraph as a Markdown code block.
         var isCode = IsCodeStyle(style);
-        var kind = isList ? NodeKind.ListItem : headingLevel > 0 ? NodeKind.Heading : isCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
+        var kind = isList ? NodeKind.ListItem : headingLevel > 0 || isDocumentTitle ? NodeKind.Heading : isCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
         var map = BuildRunMap(id, paragraph);
         var projectionLayer = string.IsNullOrWhiteSpace(text) ? ContentLayer.Hidden : layer;
         var richRuns = ExtractRichTextRuns(paragraph, relationships);
@@ -235,6 +238,7 @@ public sealed class DocxAdapter : IFormatProbe
             : new TextNodeContent(text);
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         if (headingLevel > 0) extensions["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
+        if (isDocumentTitle) extensions["document_title"] = JsonSerializer.SerializeToElement(true);
         if (isList)
         {
             extensions["list_level"] = JsonSerializer.SerializeToElement(ListLevel(paragraph));
@@ -251,6 +255,21 @@ public sealed class DocxAdapter : IFormatProbe
         nodes.Add(node);
         if (slice is not null) sliceMap[id] = slice;
         runMaps[id] = map;
+        if (!string.IsNullOrWhiteSpace(hiddenText))
+        {
+            var hiddenAnchor = anchor with
+            {
+                Locators = anchor.Locators.Concat([new AnchorLocator("hidden_content", "w:vanish-or-deletion")]).ToArray()
+            };
+            var hiddenId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, hiddenAnchor);
+            var hiddenExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["hidden_content_type"] = JsonSerializer.SerializeToElement("docx-hidden-text")
+            };
+            nodes.Add(new(hiddenId, NodeKind.Annotation, id, order, ContentLayer.Hidden,
+                new TextNodeContent(hiddenText), hiddenAnchor, Editability: NodeEditability.Protected,
+                Provenance: [new(EvidenceKind.Native)], Extensions: hiddenExtensions));
+        }
 
         foreach (var link in paragraph.Descendants(W + "hyperlink"))
         {
@@ -270,8 +289,29 @@ public sealed class DocxAdapter : IFormatProbe
             var docPr = blip.Ancestors().SelectMany(ancestor => ancestor.Elements(WP + "docPr")).FirstOrDefault()
                 ?? blip.Ancestors().Descendants(WP + "docPr").FirstOrDefault();
             var description = FirstNonEmptyAttribute(docPr, "descr", "title", "name");
-            nodes.Add(new(imageId, NodeKind.Image, id, order, layer, new ReferenceNodeContent(target, description), imageAnchor,
+            var imageLayer = IsHiddenContentElement(blip) ? ContentLayer.Hidden : layer;
+            nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer, new ReferenceNodeContent(target, description), imageAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
+        }
+        foreach (var imageData in paragraph.Descendants(V + "imagedata"))
+        {
+            var relationshipId = (string?)imageData.Attribute(R + "id");
+            if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var target)) continue;
+            var imageAnchor = anchor with { Locators = [new("vml_image_relationship", relationshipId)] };
+            var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
+            var shape = imageData.Ancestors(V + "shape").FirstOrDefault();
+            var description = FirstNonEmptyAttribute(shape, "alt", "title", "id");
+            var imageLayer = IsHiddenContentElement(imageData) ? ContentLayer.Hidden : layer;
+            var imageExtensions = imageLayer == ContentLayer.Hidden
+                ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                {
+                    ["hidden_content_type"] = JsonSerializer.SerializeToElement("docx-hidden-vml-image"),
+                }
+                : null;
+            nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer,
+                new ReferenceNodeContent(target, description), imageAnchor,
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
+                Extensions: imageExtensions));
         }
         foreach (var textBox in paragraph.Descendants(W + "txbxContent"))
         {
@@ -473,7 +513,7 @@ public sealed class DocxAdapter : IFormatProbe
             var extensions = string.IsNullOrWhiteSpace(author)
                 ? null
                 : new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["comment_author"] = JsonSerializer.SerializeToElement(author) };
-            nodes.Add(new(id, NodeKind.Comment, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(comment)), anchor,
+            nodes.Add(new(id, NodeKind.Comment, null, ordinal++, ContentLayer.Metadata, new TextNodeContent(ParagraphText(comment)), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
         }
     }
@@ -509,6 +549,7 @@ public sealed class DocxAdapter : IFormatProbe
         var output = new StringBuilder();
         foreach (var element in RelevantDescendants(container))
         {
+            if (IsHiddenContentElement(element)) continue;
             if (element.Name == W + "t") output.Append(element.Value);
             else if (element.Name is var name && (name == W + "br" || name == W + "cr"))
             {
@@ -520,11 +561,30 @@ public sealed class DocxAdapter : IFormatProbe
         return output.ToString();
     }
 
+    private static string HiddenParagraphText(XContainer container)
+    {
+        var output = new StringBuilder();
+        foreach (var element in RelevantDescendants(container))
+        {
+            if (element.Name == W + "delText" || element.Name == W + "t" && IsHiddenContentElement(element))
+                output.Append(element.Value);
+        }
+        return output.ToString();
+    }
+
+    private static bool IsHiddenContentElement(XElement element) =>
+        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "del") ||
+        element.AncestorsAndSelf().FirstOrDefault(ancestor => ancestor.Name == W + "r") is { } run && IsHiddenRun(run);
+
+    private static bool IsHiddenRun(XElement run) =>
+        run.Ancestors(W + "del").Any() || IsEnabled(run.Element(W + "rPr")?.Element(W + "vanish"));
+
     private static IReadOnlyList<TextRun> ExtractRichTextRuns(XElement paragraph, IReadOnlyDictionary<string, string> relationships)
     {
         var runs = new List<TextRun>();
         foreach (var run in RelevantDescendants(paragraph).Where(element => element.Name == W + "r"))
         {
+            if (IsHiddenRun(run)) continue;
             var properties = ReadRunProperties(run);
             var linkTarget = ResolveEnclosingHyperlinkTarget(run, relationships);
             foreach (var child in run.Elements())
@@ -602,6 +662,7 @@ public sealed class DocxAdapter : IFormatProbe
         var ordinal = 0;
         foreach (var run in RelevantDescendants(paragraph).Where(element => element.Name == W + "r"))
         {
+            if (IsHiddenRun(run)) continue;
             var text = string.Concat(run.Elements().Select(element => element.Name == W + "t" ? element.Value :
                 element.Name is var name && (name == W + "br" || name == W + "cr") ? (IsPageBreakElement(element) ? string.Empty : "\n") :
                 element.Name == W + "tab" ? "\t" : string.Empty));
@@ -905,6 +966,9 @@ public sealed class DocxAdapter : IFormatProbe
         paragraph.Add(new XElement(W + "r", value));
         return SafeXml.Utf8(paragraph.ToString(SaveOptions.DisableFormatting));
     }
+
+    private static bool IsTitleStyle(string? style) =>
+        style is not null && style.Equals("Title", StringComparison.OrdinalIgnoreCase);
 
     private static int HeadingLevel(string? style)
     {

@@ -108,7 +108,9 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("# 経費精算システム 設計書", markdown, StringComparison.Ordinal);
         Assert.Contains("## 00 表紙・文書情報", markdown, StringComparison.Ordinal);
         Assert.Contains("### 文書情報", markdown, StringComparison.Ordinal);
-        Assert.Contains("| 項目 | 内容 | 項目 | 内容 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("- **文書ID**: EXP-001", markdown, StringComparison.Ordinal);
+        Assert.Contains("- **作成日**: 2026-08-23", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| 項目 | 内容 | 項目 | 内容 |", markdown, StringComparison.Ordinal);
         Assert.Contains("### 1. 文書の目的", markdown, StringComparison.Ordinal);
         Assert.Contains("利用者と対象範囲", markdown, StringComparison.Ordinal);
         Assert.Contains("| 版 | 日付 | 変更内容 | 作成者 |", markdown, StringComparison.Ordinal);
@@ -195,7 +197,8 @@ public sealed class ReadableMarkdownTests
 
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
 
-        Assert.Contains("# 概要", markdown, StringComparison.Ordinal);
+        Assert.Contains("# プレゼンテーション", markdown, StringComparison.Ordinal);
+        Assert.Contains("## スライド 1 — 概要", markdown, StringComparison.Ordinal);
         Assert.Contains("通常段落", markdown, StringComparison.Ordinal);
         Assert.Contains("- **重要**\n  - _補足_", markdown, StringComparison.Ordinal);
     }
@@ -221,14 +224,19 @@ public sealed class ReadableMarkdownTests
 
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
 
-        Assert.Contains("# Overview", markdown, StringComparison.Ordinal);
+        Assert.Contains("# プレゼンテーション", markdown, StringComparison.Ordinal);
+        Assert.Contains("## スライド 1 — Overview", markdown, StringComparison.Ordinal);
         Assert.Contains("- First point\n- Second point", markdown, StringComparison.Ordinal);
         Assert.Contains("| Gate | Status |", markdown, StringComparison.Ordinal);
-        Assert.Contains("\n---\n\n## Decision", markdown, StringComparison.Ordinal);
-        Assert.Contains("<details class=\"speaker-notes\">", markdown, StringComparison.Ordinal);
-        Assert.Contains("<summary>スピーカーノート（クリックで展開）</summary>", markdown, StringComparison.Ordinal);
-        Assert.Contains("Keep rollback enabled.", markdown, StringComparison.Ordinal);
+        Assert.Contains("## スライド 2 — Decision", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("speaker-notes", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("Keep rollback enabled.", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("PROJECT · 1", markdown, StringComparison.Ordinal);
+
+        var complete = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(graph);
+        Assert.Contains("<details class=\"speaker-notes\">", complete, StringComparison.Ordinal);
+        Assert.Contains("<summary>スピーカーノート（クリックで展開）</summary>", complete, StringComparison.Ordinal);
+        Assert.Contains("Keep rollback enabled.", complete, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -310,7 +318,10 @@ public sealed class ReadableMarkdownTests
 
         Assert.Contains("### 脚注\n\n1. Footnote body", markdown, StringComparison.Ordinal);
         Assert.Contains("### 文末脚注\n\n1. Endnote body", markdown, StringComparison.Ordinal);
-        Assert.Contains("> **コメント** (Reviewer): Please clarify.", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("> **コメント** (Reviewer): Please clarify.", markdown, StringComparison.Ordinal);
+
+        var complete = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(graph);
+        Assert.Contains("> **コメント** (Reviewer): Please clarify.", complete, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -460,7 +471,10 @@ public sealed class ReadableMarkdownTests
 
         Assert.True(markdown.IndexOf("タイトル", StringComparison.Ordinal) < markdown.IndexOf("左", StringComparison.Ordinal));
         Assert.True(markdown.IndexOf("左", StringComparison.Ordinal) < markdown.IndexOf("右", StringComparison.Ordinal));
-        Assert.True(markdown.IndexOf("右", StringComparison.Ordinal) < markdown.IndexOf("ノート", StringComparison.Ordinal));
+        Assert.DoesNotContain("ノート", markdown, StringComparison.Ordinal);
+
+        var complete = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(graph);
+        Assert.True(complete.IndexOf("右", StringComparison.Ordinal) < complete.IndexOf("ノート", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -486,6 +500,37 @@ public sealed class ReadableMarkdownTests
         Assert.True(markdown.IndexOf("左見出し", StringComparison.Ordinal) < markdown.IndexOf("左本文", StringComparison.Ordinal));
         Assert.True(markdown.IndexOf("左本文", StringComparison.Ordinal) < markdown.IndexOf("右見出し", StringComparison.Ordinal));
         Assert.True(markdown.IndexOf("右見出し", StringComparison.Ordinal) < markdown.IndexOf("右本文", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Rich_text_preserves_safe_color_and_highlight_decorations()
+    {
+        var graph = new DocumentGraph(
+            DocumentGraph.CurrentSchemaVersion,
+            "doc-rich-text",
+            DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode(
+                    "paragraph",
+                    NodeKind.Paragraph,
+                    null,
+                    0,
+                    ContentLayer.Body,
+                    new RichTextNodeContent(
+                    [
+                        new TextRun("colored", Color: "b42318"),
+                        new TextRun(" highlighted", HighlightColor: "FFFF00"),
+                        new TextRun(" unsafe", Color: "red;display:none"),
+                    ])),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("<span style=\"color:#B42318\">colored</span>", markdown, StringComparison.Ordinal);
+        Assert.Contains("<mark> highlighted</mark>", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("display:none", markdown, StringComparison.Ordinal);
+        Assert.Contains(" unsafe", markdown, StringComparison.Ordinal);
     }
 
     private static DocumentNode Cell(string address, int row, int column, string value, bool isBold = false) => new(
