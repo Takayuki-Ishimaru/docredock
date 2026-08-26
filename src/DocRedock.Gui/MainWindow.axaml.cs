@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     private bool _restoreBusy;
     private bool _updateCheckStarted;
     private Uri? _updateReleaseUri;
+    private bool _componentsInitialized;
 
     // This keeps the window usable by a plain App.axaml.cs while Program may
     // also construct it with its configured GuiWorkflowService instance.
@@ -59,6 +60,7 @@ public partial class MainWindow : Window
         _updateCheckService =
             updateCheckService ?? throw new ArgumentNullException(nameof(updateCheckService));
         InitializeComponent();
+        _componentsInitialized = true;
         LoadSettings();
         var experimentalEnabled = ExperimentalFeatures.IsEnabled;
         RoundTripExportRadio.IsEnabled = experimentalEnabled;
@@ -211,6 +213,7 @@ public partial class MainWindow : Window
 
     private void OnContentPolicyChanged(object? sender, SelectionChangedEventArgs e)
     {
+        if (!_componentsInitialized) return;
         UpdateContentPolicyWarning();
         SaveSettings();
     }

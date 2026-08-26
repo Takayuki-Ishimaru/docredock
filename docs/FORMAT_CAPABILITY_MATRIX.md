@@ -1,7 +1,7 @@
 # Format capability matrix（現行実装）
 
-> **これはコードとして実装されている能力の技術リファレンスです。v0.1.3の公開サポート状況を示す表ではありません。**
-> v0.1.3 Public Betaで利用者向けにサポートする操作は、DOCX／XLSX／PPTXから閲覧用Markdownへの一方向変換です。PDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
+> **これはコードとして実装されている能力の技術リファレンスです。v0.1.4の公開サポート状況を示す表ではありません。**
+> v0.1.4 Public Betaで利用者向けにサポートする操作は、DOCX／XLSX／PPTXから閲覧用Markdownへの一方向変換です。PDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
 
 記号: ○ = コードとして実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規文書の生成（render）」だけの機能一覧ではなく、主にエクスポートしたDRMD Markdownから元文書を改版する実験エンジンの実装能力を示します。
 

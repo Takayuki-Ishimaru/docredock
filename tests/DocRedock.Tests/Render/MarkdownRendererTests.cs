@@ -333,8 +333,10 @@ public sealed class MarkdownRendererTests
         var markdown = $$"""
             # 見出し
 
-            **太字** と *斜体*{{"  "}}
+            **太字** と *斜体* と _下線風の斜体_{{"  "}}
             次の行
+
+            <span style="color:#11223344">色付き</span>
 
             1. 最初
               - 入れ子
@@ -359,12 +361,30 @@ public sealed class MarkdownRendererTests
         var html = await File.ReadAllTextAsync(output);
         Assert.Contains("<h1>見出し</h1>", html, StringComparison.Ordinal);
         Assert.Contains("<strong>太字</strong>", html, StringComparison.Ordinal);
-        Assert.Contains("<em>斜体</em><br>", html, StringComparison.Ordinal);
+        Assert.Contains("<em>斜体</em>", html, StringComparison.Ordinal);
+        Assert.Contains("<em>下線風の斜体</em><br>", html, StringComparison.Ordinal);
+        Assert.Contains("<span style=\"color:#11223344\">色付き</span>", html, StringComparison.Ordinal);
         Assert.Contains("<ol>", html, StringComparison.Ordinal);
         Assert.Contains("<ul>", html, StringComparison.Ordinal);
         Assert.Contains("<div class=\"table-scroll\">", html, StringComparison.Ordinal);
         Assert.Contains("<pre><code data-language=\"text\">code &lt;safe&gt;</code></pre>", html, StringComparison.Ordinal);
         Assert.Contains("src=\"../source/assets/diagram%20one.png\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Html_preview_rebases_images_against_the_final_output_path_when_writing_to_staging()
+    {
+        using var fixture = new Fixture();
+        var sourceDirectory = Path.Combine(fixture.Root, "readable");
+        var stagedOutput = Path.Combine(fixture.Root, "html", ".docredock-stage-test", "report.html");
+        var finalOutput = Path.Combine(fixture.Root, "html", "report.html");
+
+        await new MarkdownRenderer().RenderAsync("![図](report.assets/image.png)", RenderFormat.Html, stagedOutput,
+            new RenderOptions(SourceDirectory: sourceDirectory, RelativeLinkOutputPath: finalOutput));
+
+        var html = await File.ReadAllTextAsync(stagedOutput);
+        Assert.Contains("src=\"../readable/report.assets/image.png\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("../../readable", html, StringComparison.Ordinal);
     }
 
     [Fact]

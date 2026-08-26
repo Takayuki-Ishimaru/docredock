@@ -1,10 +1,10 @@
-# v0.1.3 の対応機能
+# v0.1.4 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.1.3 Public Betaでは、DOCX、XLSX、PPTXをローカルで**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.1.4 Public Betaでは、DOCX、XLSX、PPTXをローカルで**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.1.3での扱い |
+| 機能 | v0.1.4での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート |
 | `visible`／`complete`／`sanitized` | サポート |

@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These workflows are unsupported experiments in v0.1.3. They are disabled unless you explicitly opt in.
+> These workflows are unsupported experiments in v0.1.4. They are disabled unless you explicitly opt in.
 
 Set the environment variable before starting the GUI or CLI:
 

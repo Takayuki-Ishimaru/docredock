@@ -90,8 +90,12 @@ public sealed record XlsxChartRecord(
     string ChartPartUri,
     int? Column,
     int? Row,
-    string DrawingPartUri);
+    string DrawingPartUri,
+    IReadOnlyList<XlsxChartReference>? References = null,
+    bool ReferencesParsed = true,
+    bool IsHidden = false);
 
+public sealed record XlsxChartReference(string SheetName, int MinRow, int MaxRow, int MinColumn, int MaxColumn);
 /// <summary>Worksheet projection metadata used by the Markdown table projector.</summary>
 public sealed record XlsxWorksheetRecord(
     string Name,
@@ -167,9 +171,12 @@ public sealed class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
-        var workbookHasHiddenChartSources = workbook.Sheets.Any(sheet =>
-            sheet.IsHidden || package.TryGetValue(sheet.PartUri, out var worksheetXml) &&
-            (ReadHiddenRows(worksheetXml).Count > 0 || ReadHiddenColumns(worksheetXml).Count > 0));
+        var sheetVisibility = workbook.Sheets.ToDictionary(
+            sheet => sheet.Name,
+            sheet => package.TryGetValue(sheet.PartUri, out var worksheetXml)
+                ? (sheet.IsHidden, Rows: ReadHiddenRows(worksheetXml), Columns: ReadHiddenColumns(worksheetXml))
+                : (sheet.IsHidden, Rows: (IReadOnlySet<int>)new HashSet<int>(), Columns: (IReadOnlySet<int>)new HashSet<int>()),
+            StringComparer.OrdinalIgnoreCase);
         foreach (var sheet in workbook.Sheets)
         {
             if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
@@ -180,7 +187,7 @@ public sealed class XlsxAdapter
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
-            var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells);
+            var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells, sheetVisibility, warnings);
             var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns);
             worksheets.Add(worksheet);
             var nodes = cells
@@ -193,9 +200,7 @@ public sealed class XlsxAdapter
             foreach (var picture in pictures)
                 nodes.Add(ToPictureNode(sheet, picture, nodes.Count));
             foreach (var chart in charts)
-                nodes.Add(ToChartNode(sheet, chart, nodes.Count, workbookHasHiddenChartSources));
-            if (charts.Count > 0 && workbookHasHiddenChartSources)
-                warnings.Add($"{sheet.Name}: native chart marked hidden because its workbook contains hidden rows, columns, or sheets.");
+                nodes.Add(ToChartNode(sheet, chart, nodes.Count));
             if (sheet.IsHidden)
             {
                 nodes = nodes.Select(node => node with
@@ -399,7 +404,7 @@ public sealed class XlsxAdapter
             Extensions: extension);
     }
 
-    private static DocumentNode ToChartNode(SheetInfo sheet, XlsxChartRecord chart, int order, bool hiddenSource)
+    private static DocumentNode ToChartNode(SheetInfo sheet, XlsxChartRecord chart, int order)
     {
         var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
         {
@@ -412,7 +417,7 @@ public sealed class XlsxAdapter
         if (!string.IsNullOrWhiteSpace(chart.Title)) extension["chart_title"] = JsonSerializer.SerializeToElement(chart.Title);
         if (!string.IsNullOrWhiteSpace(chart.Type)) extension["chart_type"] = JsonSerializer.SerializeToElement(chart.Type);
         if (chart.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chart.Series);
-        if (hiddenSource) extension["hidden_chart_source"] = JsonSerializer.SerializeToElement(true);
+        if (chart.IsHidden) extension["hidden_chart_source"] = JsonSerializer.SerializeToElement(true);
         if (chart.Row is { } row) extension["row"] = JsonSerializer.SerializeToElement(row);
         if (chart.Column is { } column) extension["column"] = JsonSerializer.SerializeToElement(column);
         if (chart.Row is { } addressRow && chart.Column is { } addressColumn)
@@ -421,7 +426,7 @@ public sealed class XlsxAdapter
         if (chart.Row is { } locatorRow && chart.Column is { } locatorColumn)
             locators.Add(new("cell_address", ColumnName(locatorColumn) + locatorRow.ToString(CultureInfo.InvariantCulture)));
         return new("n_" + Hash($"{sheet.Name}!chart:{chart.DrawingPartUri}:{chart.Id}:{chart.RelationshipId}")[..16], NodeKind.Chart, null, order,
-            hiddenSource ? ContentLayer.Hidden : ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
+            chart.IsHidden ? ContentLayer.Hidden : ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
             Editability: NodeEditability.Protected, Provenance: [new ProvenanceItem(EvidenceKind.Native)], Extensions: extension);
     }
 
@@ -870,11 +875,13 @@ public sealed class XlsxAdapter
         return result;
     }
 
-    private static IReadOnlyList<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells)
+    private static IReadOnlyList<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells, IReadOnlyDictionary<string, (bool Hidden, IReadOnlySet<int> Rows, IReadOnlySet<int> Columns)> sheetVisibility, List<string> warnings)
     {
         var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
         var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
         var result = new List<XlsxChartRecord>();
+        var workbookHasPotentiallyHiddenSources = sheetVisibility.Values.Any(visibility =>
+            visibility.Hidden || visibility.Rows.Count > 0 || visibility.Columns.Count > 0);
         foreach (var drawingPart in relationships.Values
                      .Where(path => path.StartsWith("xl/drawings/", StringComparison.Ordinal) && path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
                      .Distinct(StringComparer.Ordinal))
@@ -900,15 +907,53 @@ public sealed class XlsxAdapter
                     if (string.IsNullOrWhiteSpace(relationshipId)) relationshipId = chartElement.GetAttribute("r:id");
                     if (string.IsNullOrWhiteSpace(relationshipId) || !drawingRelationships.TryGetValue(relationshipId, out var chartPart) || !package.TryGetValue(chartPart, out var chartBytes)) continue;
                     var data = OpenXmlChartReader.Read(chartBytes, reference => ResolveChartReference(reference, sheetName, cells));
+                    var (references, referencesParsedFromXml) = ReadChartReferences(chartBytes, sheetName);
+                    var referencesParsed = referencesParsedFromXml && references.All(reference => sheetVisibility.ContainsKey(reference.SheetName));
+                    var isHidden = referencesParsed
+                        ? references.Count > 0 && references.Any(reference =>
+                            !sheetVisibility.TryGetValue(reference.SheetName, out var visibility) || visibility.Hidden ||
+                            visibility.Rows.Any(hiddenRow => hiddenRow >= reference.MinRow && hiddenRow <= reference.MaxRow) ||
+                            visibility.Columns.Any(hiddenColumn => hiddenColumn >= reference.MinColumn && hiddenColumn <= reference.MaxColumn))
+                        : workbookHasPotentiallyHiddenSources;
+                    if (!referencesParsed)
+                        warnings.Add(isHidden
+                            ? $"{sheetName}: native chart references could not be fully parsed and the workbook contains potentially hidden sources; the chart was kept hidden."
+                            : $"{sheetName}: native chart references could not be fully parsed; cached chart data was retained with an explicit warning.");
                     var id = properties?.GetAttribute("id");
                     if (string.IsNullOrWhiteSpace(id)) id = $"chart-{result.Count + 1}";
                     var name = properties?.GetAttribute("name");
                     if (string.IsNullOrWhiteSpace(name)) name = data?.Title ?? id;
-                    result.Add(new XlsxChartRecord(id, name!, data?.Title, data?.Type, data?.Series ?? [], relationshipId, chartPart, column, row, drawingPart));
+                    result.Add(new XlsxChartRecord(id, name!, data?.Title, data?.Type, data?.Series ?? [], relationshipId, chartPart, column, row, drawingPart, references, referencesParsed, isHidden));
                 }
             }
         }
         return result;
+    }
+
+    private static (IReadOnlyList<XlsxChartReference> References, bool Parsed) ReadChartReferences(byte[] bytes, string hostSheet)
+    {
+        var document = new XmlDocument { PreserveWhitespace = false };
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        document.Load(reader);
+        var formulas = document.SelectNodes("//*[local-name()='f']")?.OfType<XmlElement>()
+            .Select(element => element.InnerText.Trim()).Where(formula => formula.Length > 0).ToArray() ?? [];
+        if (formulas.Length == 0) return ([], false);
+        var references = new List<XlsxChartReference>();
+        foreach (var formula in formulas)
+        {
+            var match = ChartCellReference.Match(formula.TrimStart('='));
+            if (!match.Success) return (references, false);
+            var sheet = match.Groups["quoted"].Success
+                ? match.Groups["quoted"].Value.Replace("''", "'", StringComparison.Ordinal)
+                : match.Groups["plain"].Success ? match.Groups["plain"].Value : hostSheet;
+            var start = ParseCellReference(match.Groups["startColumn"].Value + match.Groups["startRow"].Value);
+            var end = match.Groups["endColumn"].Success
+                ? ParseCellReference(match.Groups["endColumn"].Value + match.Groups["endRow"].Value)
+                : start;
+            if (start.Row <= 0 || start.Column <= 0 || end.Row <= 0 || end.Column <= 0) return (references, false);
+            references.Add(new(sheet, Math.Min(start.Row, end.Row), Math.Max(start.Row, end.Row), Math.Min(start.Column, end.Column), Math.Max(start.Column, end.Column)));
+        }
+        return (references, true);
     }
 
     private static IReadOnlyList<string> ResolveChartReference(string formula, string sheetName, IReadOnlyList<XlsxCellRecord> cells)

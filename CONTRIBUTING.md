@@ -11,6 +11,7 @@ The required .NET SDK version is pinned in global.json. Restore dependencies in 
     dotnet restore DocRedock.sln --locked-mode
     dotnet build DocRedock.sln -c Release --no-restore
     dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj -c Release --no-build --no-restore
+    dotnet test tests/DocRedock.Gui.HeadlessTests/DocRedock.Gui.HeadlessTests.csproj -c Release --no-build --no-restore
     dotnet run --project tools/LicenseAudit -- --root . --output artifacts
 
 The license audit checks locked packages against licenses/allowlist.json and writes the CycloneDX SBOM under artifacts/.
@@ -25,7 +26,7 @@ CLI, supported readable export example:
 
     dotnet run --project src/DocRedock.Cli -- export input.xlsx --profile readable --output input.md --ocr off
 
-The codebase also contains experimental PDF, round-trip, restore, and render paths. Their presence does not make them supported in v0.1.3; they require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. See the [release support table](docs/en/supported-features.md).
+The codebase also contains experimental PDF, round-trip, restore, and render paths. Their presence does not make them supported in v0.1.4; they require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. See the [release support table](docs/en/supported-features.md).
 
 ## Project areas
 
@@ -34,7 +35,7 @@ The codebase also contains experimental PDF, round-trip, restore, and render pat
 - src/DocRedock.Formats.OpenXml and src/DocRedock.Formats.Pdf: format adapters
 - src/DocRedock.Gui and src/DocRedock.Cli: user interfaces
 - schemas/: public data contracts
-- tests/DocRedock.Tests/: security, behavior, and regression tests
+- tests/DocRedock.Tests/ and tests/DocRedock.Gui.HeadlessTests/: security, behavior, conversion, and GUI startup regression tests
 - tools/: build, audit, publication, and verification utilities
 
 ## Documentation rules

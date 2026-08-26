@@ -5,14 +5,14 @@
       "docredock.api": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Formats.OpenXml": "[1.0.0, )",
-          "DocRedock.Formats.Pdf": "[1.0.0, )",
-          "DocRedock.Markdown": "[1.0.0, )",
-          "DocRedock.Ocr.Tesseract": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )",
-          "DocRedock.Render": "[1.0.0, )",
-          "DocRedock.RoundTrip": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Formats.OpenXml": "[0.1.4, )",
+          "DocRedock.Formats.Pdf": "[0.1.4, )",
+          "DocRedock.Markdown": "[0.1.4, )",
+          "DocRedock.Ocr.Tesseract": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )",
+          "DocRedock.Render": "[0.1.4, )",
+          "DocRedock.RoundTrip": "[0.1.4, )"
         }
       },
       "docredock.core": {
@@ -21,48 +21,48 @@
       "docredock.formats.openxml": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.formats.pdf": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.markdown": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.ocr.tesseract": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Providers.Abstractions": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Providers.Abstractions": "[0.1.4, )"
         }
       },
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )"
         }
       },
       "docredock.render": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )",
-          "DocRedock.Markdown": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )",
+          "DocRedock.Markdown": "[0.1.4, )"
         }
       },
       "docredock.roundtrip": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[1.0.0, )"
+          "DocRedock.Core": "[0.1.4, )"
         }
       }
     }

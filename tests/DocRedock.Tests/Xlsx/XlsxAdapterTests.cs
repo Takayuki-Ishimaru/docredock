@@ -454,14 +454,43 @@ public sealed class XlsxAdapterTests
     }
 
     [Fact]
-    public void Native_xlsx_chart_is_hidden_when_workbook_contains_hidden_sources()
+    public void Native_xlsx_chart_ignores_hidden_unrelated_sheet()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(hiddenUnrelatedSheet: true)));
+        var node = Assert.Single(result.Graph.Nodes, item => item.Kind == DocRedock.Core.Documents.NodeKind.Chart);
+
+        Assert.Equal(DocRedock.Core.Documents.ContentLayer.Body, node.Layer);
+        Assert.DoesNotContain(result.Warnings, warning => warning.Contains("marked hidden", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Xlsx_metadata_rows_are_not_merged_into_adjacent_tables()
+    {
+        var worksheet = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1" t="inlineStr"><is><t>更新日</t></is></c><c r="B1" t="inlineStr"><is><t>2026-08-27</t></is></c></row>
+              <row r="2"><c r="A2" t="inlineStr"><is><t>リスク</t></is></c><c r="B2" t="inlineStr"><is><t>影響</t></is></c><c r="C2" t="inlineStr"><is><t>対策</t></is></c></row>
+              <row r="3"><c r="A3" t="inlineStr"><is><t>納期</t></is></c><c r="B3" t="inlineStr"><is><t>中</t></is></c><c r="C3" t="inlineStr"><is><t>監視</t></is></c></row>
+              <row r="4"><c r="A4" t="inlineStr"><is><t>状態</t></is></c><c r="B4" t="inlineStr"><is><t>Public Beta</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        var graph = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet))).Graph;
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("| リスク | 影響 | 対策 |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| 更新日 | 2026-08-27 | リスク |", markdown, StringComparison.Ordinal);
+        Assert.Contains("状態", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Native_xlsx_chart_with_unparsed_reference_stays_hidden_when_workbook_has_hidden_sources()
     {
         const string cellSecret = "DOCREDOCK_SECRET_HIDDEN_CHART";
         const string cacheSecret = "DOCREDOCK_SECRET_HIDDEN_CHART_CACHE";
         var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(hideValueColumn: true, chartCacheOnly: true)));
         var node = Assert.Single(result.Graph.Nodes, item => item.Kind == DocRedock.Core.Documents.NodeKind.Chart);
         Assert.Equal(DocRedock.Core.Documents.ContentLayer.Hidden, node.Layer);
-        Assert.Contains(result.Warnings, warning => warning.Contains("native chart marked hidden", StringComparison.Ordinal));
+        Assert.Contains(result.Warnings, warning => warning.Contains("kept hidden", StringComparison.Ordinal));
         var visible = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "visible")).Serialize(result.Graph);
         var sanitized = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "sanitized")).Serialize(result.Graph);
         var complete = new DocRedock.Markdown.ReadableMarkdownSerializer(new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(result.Graph);
@@ -471,6 +500,18 @@ public sealed class XlsxAdapterTests
         Assert.DoesNotContain(cacheSecret, sanitized, StringComparison.Ordinal);
         Assert.Contains(cellSecret, complete, StringComparison.Ordinal);
         Assert.Contains(cacheSecret, complete, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Native_xlsx_chart_retains_cached_data_when_unparsed_reference_has_no_hidden_sources()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage(chartCacheOnly: true)));
+        var node = Assert.Single(result.Graph.Nodes, item => item.Kind == DocRedock.Core.Documents.NodeKind.Chart);
+
+        Assert.Equal(DocRedock.Core.Documents.ContentLayer.Body, node.Layer);
+        Assert.Contains(result.Warnings, warning => warning.Contains("cached chart data was retained", StringComparison.Ordinal));
+        Assert.Contains("DOCREDOCK_SECRET_HIDDEN_CHART_CACHE",
+            new DocRedock.Markdown.ReadableMarkdownSerializer().Serialize(result.Graph), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -524,7 +565,8 @@ public sealed class XlsxAdapterTests
         bool repeatedHiddenColumns = false,
         bool invalidCellReference = false,
         bool chartCacheOnly = false,
-        bool chartPointIndexOverflow = false)
+        bool chartPointIndexOverflow = false,
+        bool hiddenUnrelatedSheet = false)
     {
         var hiddenColumns = hideValueColumn
             ? "<cols><col min=\"2\" max=\"2\" hidden=\"1\"/></cols>"
@@ -547,14 +589,16 @@ public sealed class XlsxAdapterTests
         var parts = new Dictionary<string, string>
         {
             ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
-            ["xl/workbook.xml"] = "<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\" /></sheets></workbook>",
-            ["xl/_rels/workbook.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"worksheet\" Target=\"worksheets/sheet1.xml\" /></Relationships>",
+            ["xl/workbook.xml"] = $"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet name=\"Sheet1\" sheetId=\"1\" r:id=\"rId1\" />{(hiddenUnrelatedSheet ? "<sheet name=\"RawData\" sheetId=\"2\" state=\"hidden\" r:id=\"rId2\" />" : string.Empty)}</sheets></workbook>",
+            ["xl/_rels/workbook.xml.rels"] = $"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"worksheet\" Target=\"worksheets/sheet1.xml\" />{(hiddenUnrelatedSheet ? "<Relationship Id=\"rId2\" Type=\"worksheet\" Target=\"worksheets/sheet2.xml\" />" : string.Empty)}</Relationships>",
             ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">{hiddenColumns}<sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>4月</t></is></c><c r=\"B1\" t=\"n\"><v>12</v></c>{invalidCell}</row><row r=\"2\"><c r=\"A2\" t=\"inlineStr\"><is><t>5月</t></is></c><c r=\"B2\" t=\"inlineStr\"><is><t>{secondValue}</t></is></c></row></sheetData><drawing r:id=\"rDrawing\" /></worksheet>",
             ["xl/worksheets/_rels/sheet1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rDrawing\" Type=\"drawing\" Target=\"../drawings/drawing1.xml\" /></Relationships>",
             ["xl/drawings/_rels/drawing1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdChart\" Type=\"chart\" Target=\"../charts/chart1.xml\" /></Relationships>",
             ["xl/drawings/drawing1.xml"] = "<xdr:wsDr xmlns:xdr=\"http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>4</xdr:row></xdr:from><xdr:ext cx=\"1\" cy=\"1\"/><xdr:graphicFrame><xdr:nvGraphicFramePr><xdr:cNvPr id=\"7\" name=\"Sales chart\"/></xdr:nvGraphicFramePr><a:graphic><a:graphicData><c:chart r:id=\"rIdChart\"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>",
             ["xl/charts/chart1.xml"] = $"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>売上推移</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:lineChart><c:ser><c:tx><c:v>売上</c:v></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$1:$A$2</c:f></c:strRef></c:cat><c:val><c:numRef><c:f>{valueFormula}</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"2\"/><c:pt idx=\"{cacheFirstIndex}\"><c:v>12</c:v></c:pt><c:pt idx=\"1\"><c:v>{cachedSecondValue}</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:lineChart></c:plotArea></c:chart></c:chartSpace>",
         };
+        if (hiddenUnrelatedSheet)
+            parts["xl/worksheets/sheet2.xml"] = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>hidden raw data</t></is></c></row></sheetData></worksheet>";
         using var output = new MemoryStream();
         using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
             foreach (var part in parts)

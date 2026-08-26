@@ -241,7 +241,7 @@ public sealed class DocxAdapter : IFormatProbe
         if (isDocumentTitle) extensions["document_title"] = JsonSerializer.SerializeToElement(true);
         if (isList)
         {
-            extensions["list_level"] = JsonSerializer.SerializeToElement(ListLevel(paragraph));
+            extensions["list_level"] = JsonSerializer.SerializeToElement(ListLevel(paragraph, style));
             var (isOrdered, orderedNumber) = ResolveListNumbering(paragraph, style, numberingInfo, listCounters);
             if (isOrdered && orderedNumber is { } number)
             {
@@ -984,10 +984,16 @@ public sealed class DocxAdapter : IFormatProbe
         (style.Contains("code", StringComparison.OrdinalIgnoreCase) || style.Contains("preformatted", StringComparison.OrdinalIgnoreCase) ||
          style.Contains("source", StringComparison.OrdinalIgnoreCase) || style.Contains("monospace", StringComparison.OrdinalIgnoreCase));
 
-    private static int ListLevel(XElement paragraph)
+    private static int ListLevel(XElement paragraph, string? style)
     {
         var ilvl = paragraph.Element(W + "pPr")?.Element(W + "numPr")?.Element(W + "ilvl")?.Attribute(W + "val")?.Value;
-        return int.TryParse(ilvl, out var level) ? level : 0;
+        if (int.TryParse(ilvl, out var level)) return Math.Max(0, level);
+        // Word style-only lists such as "List Bullet 2" do not carry w:ilvl. The
+        // trailing style number is the conventional nesting level (1 is top-level).
+        var match = System.Text.RegularExpressions.Regex.Match(style ?? string.Empty,
+            @"list(?:bullet|number|paragraph)\s*(?<level>[1-9][0-9]*)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success && int.TryParse(match.Groups["level"].Value, out var styleLevel) ? Math.Max(0, styleLevel - 1) : 0;
     }
 
     private static bool IsListStyle(string? style) => style is not null &&

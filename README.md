@@ -10,7 +10,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.1.3 Public Beta support
+## v0.1.4 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -64,7 +64,7 @@ docredock export input.xlsx --profile readable --content-policy visible --output
 
 ## Important limitations
 
-- v0.1.3 is a Public Beta, not a production-stable release.
+- v0.1.4 is a Public Beta, not a production-stable release.
 - Always review generated Markdown and images before sharing. Office visibility metadata is complex and third-party producers may encode content differently.
 - Readable Markdown is one-way output. Keep the original Office file as the authoritative source.
 - Experimental workflows in the distributed GUI and CLI require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. The public library APIs are engineering surfaces and do not enforce this entry-point gate. Experimental workflows may create `.drmd` or `.drmdpkg` files containing source-derived or restoration data.
@@ -75,9 +75,9 @@ docredock export input.xlsx --profile readable --content-policy visible --output
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.1.3 supported features](docs/en/supported-features.md)
+- [v0.1.4 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.1.3 release notes](release-docs/RELEASE_NOTES_v0.1.3.en.md)
+- [v0.1.4 release notes](release-docs/RELEASE_NOTES_v0.1.4.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

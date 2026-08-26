@@ -177,7 +177,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
         var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), stagedOutput.PathFor(destination), format,
             new RenderOptions(TemplatePath: args.Option("template"), MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc",
-                SourceDirectory: Path.GetDirectoryName(input))), token);
+                SourceDirectory: Path.GetDirectoryName(input), RelativeLinkOutputPath: destination)), token);
         stagedOutput.Commit();
         await output.WriteLineAsync($"Rendered: {destination}");
         await output.WriteLineAsync($"Fidelity: {result.FidelityLevel} (new document, not restore)");

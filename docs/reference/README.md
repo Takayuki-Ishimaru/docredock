@@ -2,7 +2,7 @@
 
 These documents describe formats and capabilities implemented in the repository. They are for developers and advanced users.
 
-> Implementation status is not release support. For operations users may rely on in v0.1.3, see [English supported features](../en/supported-features.md) or [日本語の対応状況](../ja/supported-features.md).
+> Implementation status is not release support. For operations users may rely on in v0.1.4, see [English supported features](../en/supported-features.md) or [日本語の対応状況](../ja/supported-features.md).
 
 ## Formats and editing contracts
 
@@ -23,4 +23,4 @@ These documents describe formats and capabilities implemented in the repository.
 | Restoration data / 復元データ | .drmd |
 | Portable package / 持ち運び用パッケージ | .drmdpkg |
 
-Round-trip editing, restoration, new-document generation, PDF conversion, .drmd, and .drmdpkg are experimental and unsupported for v0.1.3 user operation; executable paths require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.
+Round-trip editing, restoration, new-document generation, PDF conversion, .drmd, and .drmdpkg are experimental and unsupported for v0.1.4 user operation; executable paths require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.

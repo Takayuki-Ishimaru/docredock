@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.1.3 Public Beta supported workflow: local DOCX, XLSX, and PPTX conversion to **Readable Markdown**.
+This guide covers the v0.1.4 Public Beta supported workflow: local DOCX, XLSX, and PPTX conversion to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -18,7 +18,7 @@ Download the package for your OS/CPU from GitHub Releases and verify the publish
 
 ## 3. Generated files
 
-| Output | Contents | v0.1.3 use |
+| Output | Contents | v0.1.4 use |
 | --- | --- | --- |
 | `.md` | Readable body text, headings, lists, tables, and supported visual descriptions | Use |
 | `.assets/` | Images referenced by Markdown | Use when needed |

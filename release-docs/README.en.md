@@ -4,7 +4,7 @@
 
 This directory contains versioned release notes and maintainer publication procedures. The user-facing entry point is the root [README.md](../README.md).
 
-## v0.1.3 Public Beta
+## v0.1.4 Public Beta
 
 - Supported: local DOCX/XLSX/PPTX → Readable Markdown.
 - Safe default: `visible`; broader `complete` output warns about hidden content; `sanitized` is stricter.
@@ -13,10 +13,10 @@ This directory contains versioned release notes and maintainer publication proce
 ## For users
 
 - [User guide](../docs/en/user-guide.md)
-- [v0.1.3 supported features](../docs/en/supported-features.md)
+- [v0.1.4 supported features](../docs/en/supported-features.md)
 - [Experimental features](../docs/en/experimental-features.md)
 - [Security and privacy](../docs/en/security-and-privacy.md)
-- [v0.1.3 release notes](RELEASE_NOTES_v0.1.3.en.md)
+- [v0.1.4 release notes](RELEASE_NOTES_v0.1.4.en.md)
 
 ## For maintainers
 

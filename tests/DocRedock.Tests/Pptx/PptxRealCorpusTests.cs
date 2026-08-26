@@ -32,7 +32,9 @@ public sealed class PptxRealCorpusTests
         Assert.All(nodes.Where(node => node.Layer == ContentLayer.Hidden), node => Assert.True(node.Kind == NodeKind.Shape && string.IsNullOrWhiteSpace(Assert.IsType<TextNodeContent>(node.Content).Text)));
         Assert.Equal("ppt/media/image.png", Assert.IsType<ReferenceNodeContent>(nodes.Single(node => node.Kind == NodeKind.Image).Content).Reference);
         Assert.Contains("[Sources]", Assert.IsType<TextNodeContent>(nodes.First(node => node.Kind == NodeKind.SpeakerNotes).Content).Text);
-        Assert.All(extraction.Slides, slide => Assert.Contains(slide.Shapes, shape => shape.Role == "title"));
+        Assert.All(extraction.Slides, slide => Assert.Single(slide.Shapes, shape => shape.Role == "title"));
+        Assert.Contains(extraction.Slides[1].Shapes,
+            shape => shape.Name == "flow-subtitle" && shape.Role == "subtitle");
 
         var restored = adapter.Restore(new MemoryStream(original), adapter.CreatePatchPlan(Array.Empty<PptxShapeTextEdit>()));
         Assert.True(restored.IsByteIdentical);
