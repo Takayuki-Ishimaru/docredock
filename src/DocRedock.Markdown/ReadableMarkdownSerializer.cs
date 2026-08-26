@@ -12,7 +12,8 @@ public sealed record ReadableMarkdownOptions(
     bool IncludeSvgPreviews = false,
     bool IncludeDiagrams = true,
     IReadOnlyList<string>? IncludedSheets = null,
-    string? Title = null);
+    string? Title = null,
+    string ContentPolicy = "visible");
 
 /// <summary>
 /// Produces Markdown intended for reading rather than round-tripping. Unlike the
@@ -41,10 +42,25 @@ public sealed partial class ReadableMarkdownSerializer
     public string Serialize(DocumentGraph graph)
     {
         ArgumentNullException.ThrowIfNull(graph);
-        Diagnostics = Array.Empty<MarkdownDiagnostic>();
-        return graph.Format == DocumentFormatKind.Xlsx
-            ? SerializeWorkbook(graph)
-            : SerializeDocument(graph);
+        var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
+        var excludedCount = graph.Nodes.Count(node => !DocumentContentPolicyRules.Includes(node, policy));
+        var sensitiveCount = graph.Nodes.Count(node => node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
+            node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes);
+        Diagnostics = policy == DocumentContentPolicy.Complete && sensitiveCount > 0
+            ? [new MarkdownDiagnostic("HiddenContentIncluded", $"Complete content policy included {sensitiveCount} hidden or metadata node(s).", MarkdownDiagnosticSeverity.Warning)]
+            : excludedCount > 0
+                ? [new MarkdownDiagnostic("HiddenContentExcluded", $"{DocumentContentPolicyRules.Name(policy)} content policy excluded {excludedCount} hidden or metadata node(s).", MarkdownDiagnosticSeverity.Info)]
+                : Array.Empty<MarkdownDiagnostic>();
+        var projectedGraph = graph with
+        {
+            Partitions = graph.Partitions.Select(partition => partition with
+            {
+                Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy)).ToArray()
+            }).ToArray()
+        };
+        return projectedGraph.Format == DocumentFormatKind.Xlsx
+            ? SerializeWorkbook(projectedGraph)
+            : SerializeDocument(projectedGraph);
     }
 
     private string SerializeWorkbook(DocumentGraph graph)
@@ -99,6 +115,13 @@ public sealed partial class ReadableMarkdownSerializer
     private static void RenderWorkbookRows(StringBuilder output, IReadOnlyList<SheetRow> rows, ref bool hasSectionHeading)
     {
         if (rows.Count == 0) return;
+        var metadataRows = rows.TakeWhile(row => row.Cells.Count == 2 && LooksLikeLabel(row.Cells[0])).ToArray();
+        if (metadataRows.Length > 0 && metadataRows.Length < rows.Count && rows[metadataRows.Length].Cells.Count >= 3)
+        {
+            WriteKeyValueRows(output, metadataRows);
+            RenderWorkbookRows(output, rows.Skip(metadataRows.Length).ToArray(), ref hasSectionHeading);
+            return;
+        }
         var regions = BuildRegions(rows);
         if (!hasSectionHeading && regions.Any(region => region.MinRow <= 15 && LooksLikeKeyValueGroup(region.Rows)))
         {
@@ -131,7 +154,23 @@ public sealed partial class ReadableMarkdownSerializer
         var partitions = graph.Partitions.OrderBy(partition => partition.Order)
             .ThenBy(partition => partition.Id, StringComparer.Ordinal).ToArray();
         var isPptx = graph.Format == DocumentFormatKind.Pptx;
-        var titleCount = 0;
+        var documentTitleNode = partitions.SelectMany(partition => partition.Nodes)
+            .FirstOrDefault(node => node.Kind == NodeKind.Heading && ExtensionBool(node, "document_title"));
+        if (isPptx)
+        {
+            WriteHeading(output, 1, options.Title?.Trim() is { Length: > 0 } presentationTitle ? presentationTitle : "プレゼンテーション");
+            wroteTitle = true;
+        }
+        else if (options.Title?.Trim() is { Length: > 0 } documentTitle)
+        {
+            WriteHeading(output, 1, documentTitle);
+            wroteTitle = true;
+        }
+        else if (documentTitleNode is null)
+        {
+            WriteHeading(output, 1, "ドキュメント");
+            wroteTitle = true;
+        }
         // D04/D16/D17 readability pass: headers, footers, footnotes, and endnotes no longer
         // print as bare, unlabeled paragraphs wherever their extraction order happens to land
         // them in the body flow (previously mid-appendix for the furniture, since AddFootnotes/
@@ -141,11 +180,13 @@ public sealed partial class ReadableMarkdownSerializer
         for (var partitionIndex = 0; partitionIndex < partitions.Length; partitionIndex++)
         {
             var partition = partitions[partitionIndex];
-            if (isPptx && partitionIndex > 0)
+            if (isPptx)
             {
-                // A readable projection has no slide canvas, so retain the
-                // strongest visual boundary that Markdown offers between slides.
-                output.AppendLine("---").AppendLine();
+                var slideTitle = partition.Nodes.FirstOrDefault(node =>
+                    StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"));
+                var label = $"スライド {partitionIndex + 1}";
+                var titleText = slideTitle is null ? string.Empty : NodeText(slideTitle).Trim();
+                WriteHeading(output, 2, titleText.Length == 0 ? label : $"{label} — {titleText}");
                 previousWasListItem = false;
             }
             foreach (var node in isPptx
@@ -156,13 +197,16 @@ public sealed partial class ReadableMarkdownSerializer
                 var text = NodeText(node).Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
                 if (isPptx && IsPresentationFurniture(node)) continue;
+                if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title")) continue;
                 if (node.Kind == NodeKind.Link) continue; // D12: already inlined as [text](url) by the owning paragraph's rich text.
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
                 if (previousWasListItem && !isListItem) output.AppendLine();
                 switch (node.Kind)
                 {
                     case NodeKind.Heading:
-                        WriteHeading(output, ExtensionInt(node, "heading_level") ?? (wroteTitle ? 2 : 1), text);
+                        var sourceLevel = ExtensionInt(node, "heading_level") ?? 1;
+                        var headingLevel = ExtensionBool(node, "document_title") ? 1 : wroteTitle ? sourceLevel + 1 : sourceLevel;
+                        WriteHeading(output, headingLevel, text);
                         wroteTitle = true;
                         break;
                     case NodeKind.Section when ExtensionString(node, "section_orientation") is { Length: > 0 } orientation:
@@ -221,7 +265,6 @@ public sealed partial class ReadableMarkdownSerializer
                         if (StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"))
                         {
                             WriteHeading(output, wroteTitle ? 2 : 1, text);
-                            titleCount++;
                             wroteTitle = true;
                         }
                         else
@@ -232,7 +275,7 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Shape:
                         if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"))
                         {
-                            WriteHeading(output, titleCount++ == 0 ? 1 : 2, text);
+                            WriteHeading(output, wroteTitle ? 2 : 1, text);
                             wroteTitle = true;
                         }
                         else if (isPptx)
@@ -270,15 +313,7 @@ public sealed partial class ReadableMarkdownSerializer
                         WriteQuote(output, $"図: {text}");
                         break;
                     default:
-                        if (!wroteTitle && text.Length <= 100)
-                        {
-                            WriteHeading(output, 1, text);
-                            wroteTitle = true;
-                        }
-                        else
-                        {
-                            WriteParagraph(output, text);
-                        }
+                        WriteParagraph(output, text);
                         break;
                 }
                 previousWasListItem = isListItem;
@@ -731,8 +766,12 @@ public sealed partial class ReadableMarkdownSerializer
 
         var formula = ExtensionString(node, "formula");
         var value = (ExtensionString(node, "display_value") ?? NodeText(node)).Trim();
-        var text = options.ShowFormulas && !string.IsNullOrWhiteSpace(formula)
-            ? string.IsNullOrWhiteSpace(value) ? $"`={formula!.TrimStart('=')}`" : $"`={formula!.TrimStart('=')}` → {value}"
+        var text = !string.IsNullOrWhiteSpace(formula)
+            ? options.ShowFormulas
+                ? string.IsNullOrWhiteSpace(value)
+                    ? $"（保存済み計算値なし: `={formula!.TrimStart('=')}`）"
+                    : $"`={formula!.TrimStart('=')}` → {value}"
+                : string.IsNullOrWhiteSpace(value) ? "（保存済み計算値なし）" : value
             : value;
         return new ReadableCell(row.Value, column.Value, text, !string.IsNullOrWhiteSpace(formula),
             ExtensionBool(node, "is_numeric") || StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "n"),
@@ -771,9 +810,7 @@ public sealed partial class ReadableMarkdownSerializer
 
         if (LooksLikeKeyValueGroup(rows))
         {
-            var headers = Enumerable.Range(0, width / 2).SelectMany(_ => new[] { "項目", "内容" }).ToArray();
-            WriteInference(output, "キー・値の配置から表見出しを補完");
-            WriteTable(output, headers, rows.Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+            WriteKeyValueRows(output, rows);
             return;
         }
 
@@ -787,6 +824,16 @@ public sealed partial class ReadableMarkdownSerializer
         }
 
         foreach (var row in rows) RenderStandaloneRow(output, row);
+    }
+
+    private static void WriteKeyValueRows(StringBuilder output, IReadOnlyList<SheetRow> rows)
+    {
+        WriteInference(output, "キー・値の配置を文書情報として分離");
+        foreach (var row in rows)
+            for (var index = 0; index + 1 < row.Cells.Count; index += 2)
+                output.Append("- **").Append(InlineText(row.Cells[index].Text)).Append("**: ")
+                    .AppendLine(InlineText(row.Cells[index + 1].Text));
+        output.AppendLine();
     }
 
     private static bool FirstColumnLooksLikeData(IReadOnlyList<SheetRow> rows) =>
@@ -837,9 +884,10 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static IEnumerable<RowFragment> SplitRow(SheetRow row)
     {
-        // Keep the common two-pair metadata row together. Wider even-column
-        // rows may be two independent tables and must still be split by space.
-        if (row.Cells.Count < 2 || (row.Cells.Count <= 4 && LooksLikeKeyValueRow(row.Cells)))
+        // Preserve compact rows as one logical table row. This keeps a four-column
+        // header aligned with its following data row even when the source uses wide
+        // visual spacing between cells (a common revision-history layout).
+        if (row.Cells.Count <= 4)
         {
             yield return new(row, row.Cells);
             yield break;
@@ -1250,7 +1298,10 @@ public sealed partial class ReadableMarkdownSerializer
     // profile — which reuses that same shared serializer — renders exactly as it did before.
     private static string ReadableInlineText(IReadOnlyList<TextRun> runs)
     {
-        var needsDecoration = runs.Any(run => run.LinkTarget is not null || run.Color is not null || run.HighlightColor is not null);
+        var needsDecoration = runs.Any(run =>
+            run.LinkTarget is not null ||
+            !string.IsNullOrWhiteSpace(run.Color) ||
+            !string.IsNullOrWhiteSpace(run.HighlightColor));
         var serialized = needsDecoration ? SerializeReadableRuns(runs) : DocRedockInlineMarkdown.Serialize(runs);
         return serialized.Contains("&#9;", StringComparison.Ordinal) ? serialized.Replace("&#9;", "\t", StringComparison.Ordinal) : serialized;
     }
@@ -1263,15 +1314,27 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var current = runs[index];
             var start = index;
-            while (index < runs.Count && runs[index].LinkTarget == current.LinkTarget &&
-                   runs[index].Color == current.Color && runs[index].HighlightColor == current.HighlightColor)
+            while (index < runs.Count &&
+                   runs[index].LinkTarget == current.LinkTarget &&
+                   runs[index].Color == current.Color &&
+                   runs[index].HighlightColor == current.HighlightColor)
+            {
                 index++;
+            }
+
             var segmentRuns = runs.Skip(start).Take(index - start)
-                .Select(run => run with { LinkTarget = null }).ToArray();
+                .Select(run => run with { LinkTarget = null, Color = null, HighlightColor = null }).ToArray();
             var segment = DocRedockInlineMarkdown.Serialize(segmentRuns);
             if (segment.Length == 0) continue;
-            if (current.HighlightColor is not null) segment = "<mark>" + segment + "</mark>";
-            if (current.Color is not null) segment = "<span style=\"color:#" + current.Color + "\">" + segment + "</span>";
+
+            if (!string.IsNullOrWhiteSpace(current.HighlightColor))
+            {
+                segment = "<mark>" + segment + "</mark>";
+            }
+            if (TryNormalizeHtmlColor(current.Color, out var color))
+            {
+                segment = "<span style=\"color:" + color + "\">" + segment + "</span>";
+            }
             if (current.LinkTarget is not null)
             {
                 var url = current.LinkTarget.IndexOfAny([' ', '(', ')']) >= 0 ? "<" + current.LinkTarget + ">" : current.LinkTarget;
@@ -1280,6 +1343,16 @@ public sealed partial class ReadableMarkdownSerializer
             output.Append(segment);
         }
         return output.ToString();
+    }
+
+    private static bool TryNormalizeHtmlColor(string? value, out string color)
+    {
+        color = string.Empty;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var hex = value.Trim().TrimStart('#');
+        if (hex.Length is not (6 or 8) || !hex.All(Uri.IsHexDigit)) return false;
+        color = "#" + hex.ToUpperInvariant();
+        return true;
     }
 
     private static string HumanizePartitionName(string id)

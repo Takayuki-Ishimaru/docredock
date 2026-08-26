@@ -1,5 +1,10 @@
 # DRMD サイドカー容器と画像表示 — 実装仕様書（Codex 向け）
 
+> **Status: Historical**
+> **Implemented in: v0.1.2**
+> **This document is not the current user or format specification.**
+> 現在の利用可能な操作は、[`docs/ja/supported-features.md`](ja/supported-features.md) と [`docs/en/supported-features.md`](en/supported-features.md) を参照してください。コードとしての実装能力は [`FORMAT_CAPABILITY_MATRIX.md`](FORMAT_CAPABILITY_MATRIX.md) に記載しています。
+
 - 作成日: 2026-08-23
 - 対象: `develop`（HEAD `68601ec`）。着手時点でテスト 173 件 green を前提とする。
 - 目的:

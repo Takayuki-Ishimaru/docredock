@@ -324,6 +324,69 @@ public sealed class MarkdownRendererTests
     }
 
     [Fact]
+    public async Task Html_preview_preserves_ordered_nested_lists_breaks_tables_code_and_rebased_images()
+    {
+        using var fixture = new Fixture();
+        var sourceDirectory = Path.Combine(fixture.Root, "source");
+        var output = Path.Combine(fixture.Root, "preview", "readable.html");
+        Directory.CreateDirectory(sourceDirectory);
+        var markdown = $$"""
+            # 見出し
+
+            **太字** と *斜体*{{"  "}}
+            次の行
+
+            1. 最初
+              - 入れ子
+            2. 次
+
+            | 項目 | 内容 |
+            | --- | --- |
+            | A | B |
+
+            `inline`
+
+            ```text
+            code <safe>
+            ```
+
+            ![構成図](assets/diagram%20one.png)
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output,
+            new RenderOptions(SourceDirectory: sourceDirectory));
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<h1>見出し</h1>", html, StringComparison.Ordinal);
+        Assert.Contains("<strong>太字</strong>", html, StringComparison.Ordinal);
+        Assert.Contains("<em>斜体</em><br>", html, StringComparison.Ordinal);
+        Assert.Contains("<ol>", html, StringComparison.Ordinal);
+        Assert.Contains("<ul>", html, StringComparison.Ordinal);
+        Assert.Contains("<div class=\"table-scroll\">", html, StringComparison.Ordinal);
+        Assert.Contains("<pre><code data-language=\"text\">code &lt;safe&gt;</code></pre>", html, StringComparison.Ordinal);
+        Assert.Contains("src=\"../source/assets/diagram%20one.png\"", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Html_preview_does_not_rebase_images_outside_the_source_directory()
+    {
+        using var fixture = new Fixture();
+        var sourceDirectory = Path.Combine(fixture.Root, "source");
+        var output = Path.Combine(fixture.Root, "preview", "readable.html");
+        Directory.CreateDirectory(sourceDirectory);
+
+        await new MarkdownRenderer().RenderAsync(
+            "![escape](../../private-file.png)\n\n![encoded](..%2F..%2Fprivate-file.png)",
+            RenderFormat.Html,
+            output,
+            new RenderOptions(SourceDirectory: sourceDirectory));
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Equal(2, html.Split("src=\"about:blank\"", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("private-file.png", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Incomplete_docredock_projection_is_rejected_by_render()
     {
         using var fixture = new Fixture();

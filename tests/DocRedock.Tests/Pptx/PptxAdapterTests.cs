@@ -134,7 +134,7 @@ public sealed class PptxAdapterTests
         Assert.Equal("Grouped evidence", groupedText.Text);
         Assert.Equal(10800000, groupedText.Geometry!.Width);
         Assert.Equal("footer", footer.Role);
-        Assert.Contains(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Connector && node.Editability == DocRedock.Core.Documents.NodeEditability.Protected);
+        Assert.Contains(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Connector && node.Editability == DocRedock.Core.Documents.NodeEditability.Protected && node.Layer == DocRedock.Core.Documents.ContentLayer.Body);
         Assert.Contains(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Chart && node.Editability == DocRedock.Core.Documents.NodeEditability.Protected);
         Assert.Contains(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Table && node.Editability == DocRedock.Core.Documents.NodeEditability.Protected);
         Assert.Contains(extraction.Graph.Nodes, node => node.Source?.Locators.Any(locator => locator.Value == "11") == true && node.Layer == DocRedock.Core.Documents.ContentLayer.Furniture);

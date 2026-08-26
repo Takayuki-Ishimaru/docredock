@@ -33,7 +33,7 @@
             <RadioButton x:Name="ExportModeRadio" Classes="segment" GroupName="WorkflowMode" IsChecked="True"
                          Content="書き出す" IsCheckedChanged="OnModeChanged" />
             <RadioButton x:Name="RestoreModeRadio" Classes="segment" GroupName="WorkflowMode"
-                         Content="復元する" IsCheckedChanged="OnModeChanged" />
+                         Content="復元する（実験）" IsCheckedChanged="OnModeChanged" />
           </StackPanel>
         </Border>
 
@@ -195,7 +195,7 @@
               <RadioButton x:Name="RoundTripExportRadio" Classes="radio-card" GroupName="ExportFormat"
                            IsCheckedChanged="OnReadableChanged">
                 <StackPanel Spacing="3">
-                  <TextBlock Text=".md + .drmd" FontWeight="Bold" />
+                  <TextBlock Text=".md + .drmd（実験機能）" FontWeight="Bold" />
                   <TextBlock Text="元ファイル形式へ復元する可能性がある場合はこちら。編集後の復元には動作制限があります。"
                              Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
@@ -228,8 +228,16 @@
                   <TextBlock Text="OCR言語" Classes="muted" VerticalAlignment="Center" />
                   <TextBox x:Name="OcrLanguagesTextBox" Grid.Column="1" Text="jpn+eng" IsEnabled="False" PlaceholderText="例: jpn+eng" MaxLength="80" />
                 </Grid>
-                <StackPanel x:Name="ReadableOptionsPanel" Spacing="5">
+                <StackPanel x:Name="ReadableOptionsPanel" Spacing="8">
                   <TextBlock Text="Markdownに含める内容" Classes="muted caption" />
+                  <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
+                            AutomationProperties.Name="内容の公開範囲">
+                    <ComboBoxItem Content="表示中の内容のみ（推奨）" Tag="visible" />
+                    <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
+                    <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
+                  </ComboBox>
+                  <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
+                             Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
                   <WrapPanel>
                     <CheckBox x:Name="IncludeDiagramsCheckBox" Content="図" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
                     <CheckBox x:Name="ShowFormulasCheckBox" Content="数式" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
@@ -314,7 +322,7 @@
             <Border Classes="workspace-card">
               <Grid ColumnDefinitions="*,Auto" ColumnSpacing="12">
                 <StackPanel Spacing="3">
-                  <TextBlock Text="編集済みPDFを再描画" FontWeight="SemiBold" />
+                  <TextBlock Text="編集済みPDFを再描画（実験機能）" FontWeight="SemiBold" />
                   <TextBlock Text="元PDFと同一レイアウトではないF3出力を許可します。" Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
                 <ToggleSwitch x:Name="PdfFallbackToggle" Grid.Column="1" OffContent="オフ" OnContent="オン"

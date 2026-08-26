@@ -4,8 +4,30 @@ using DocRedock.Gui;
 
 namespace DocRedock.Tests.Gui;
 
+[Collection("Environment variables")]
 public sealed class UpdateCheckServiceTests
 {
+    [Fact]
+    public async Task CheckAsync_DoesNotSendWhenDisabledByEnvironment()
+    {
+        var previous = Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK");
+        Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK", "1");
+        try
+        {
+            var handler = new StubHttpMessageHandler(_ => throw new InvalidOperationException("HTTP must not be reached."));
+            using var client = new HttpClient(handler);
+
+            var update = await new UpdateCheckService(client).CheckAsync(new Version(0, 1, 3));
+
+            Assert.Null(update);
+            Assert.Null(handler.RequestUri);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK", previous);
+        }
+    }
+
     [Fact]
     public async Task CheckAsync_ReportsNewestNonDraftReleaseIncludingPrerelease()
     {

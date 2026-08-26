@@ -4,10 +4,32 @@
 
 Released: August 26, 2026
 
-v0.1.2 is a Public Beta update focused on complex XLSX/PPTX structure recognition, readable Markdown quality, round-trip previews, and safer output processing.
+v0.1.2 is a Public Beta update that improves readable Markdown output for using Office documents with AI search, summaries, and question answering.
 
-> **The currently approved scope is one-way “Markdown only” export from DOCX, XLSX, and PPTX.**
-> PDF conversion/rendering and restoration to original file formats have not been validated sufficiently and may not work. Do not use them at this stage.
+## Who should update
+
+- Users who want to pass DOCX, XLSX, or PPTX documents to AI for search, summaries, or questions.
+- Users working with wide or separated tables, two-column slides, charts, or embedded images.
+- Users who need PDF conversion, round-trip editing, restoration to an original format, or new-document generation should not use this release for those workflows yet.
+
+## User-visible improvements
+
+| Area | Before | In v0.1.2 |
+| --- | --- | --- |
+| XLSX tables and values | Separated regions could merge, and raw numbers could appear in output | Separated tables are distinguished more reliably, with dates, times, and percentages formatted as display values more often |
+| PPTX reading order | Two-column and full-width elements could be difficult to follow | Columns are ordered more naturally, and chart highlights are easier to review |
+| Output safety | Large or malformed inputs could increase processing pressure | Stronger resource limits protect processing and preserve outputs on failure |
+
+## v0.1.2 support scope
+
+| Operation | Treatment |
+| --- | --- |
+| DOCX/XLSX/PPTX → Readable Markdown (`readable`) | Supported |
+| PDF → Markdown | Not supported |
+| Round-trip editing (`roundtrip`) and restoration (`restore`) | Not supported; experimental engine |
+| New-document generation (`render`) | Not supported; experimental engine |
+
+Readable Markdown is a one-way output. Review the source and generated content before sharing. When images are present, the `.assets` directory beside the Markdown is also part of the shareable output.
 
 ## Downloads
 
@@ -21,52 +43,32 @@ Choose the asset matching your operating system and CPU on GitHub Releases.
 
 Each package includes the GUI, CLI, Japanese and English quick starts and security guidance, licenses, artifact-file checksums, an artifact-linked SBOM, provenance, and an explicit signing-status record. A separate .NET SDK installation is not required.
 
-## Highlights
-
-### XLSX
-
-- Distinguishes separated table regions, wide layouts, recurring column gaps, and nearby singleton cells, reducing accidental attachment of unrelated cells to a table.
-- Detects the 1900 and 1904 date systems and formats dates, date-times, clock times, elapsed times, and percentages according to the workbook’s number formats.
-- Preserves sparse chart point indexes so categories and values do not shift out of alignment.
-- Improves consistency between readable table regions/display values and the editable round-trip projection.
-
-### PPTX
-
-- Detects full-width bands and left/right columns so two-column slides read down the left column before continuing with the right column.
-- Summarizes bar and line series with direction, minima, and maxima; pie and doughnut charts report the largest and smallest components with their share of the total.
-- Composes nested group `off/ext/chOff/chExt`, rotation, horizontal/vertical flips, and non-uniform scaling into absolute slide coordinates.
-- Handles missing or zero-sized group transforms without producing non-finite geometry.
-
-### Markdown and previews
-
-- Improves ordering and presentation of headings, tables, notes, shapes, and charts while keeping readable and round-trip profiles distinct.
-- Round-trip-specific previews preserve DRMD control comments as the editing contract while reducing their visual noise.
-- Improves inline formatting and line-break handling for slide shape text and table content.
-
-### Safety and reliability
-
-- Applies per-entry, total expanded-size, and compression-ratio limits to non-media Office ZIP entries as well as media.
-- Bounds relationship XML and chart point counts to prevent excessive memory use from hostile or malformed input.
-- A backup-cleanup failure after a successful multi-output commit no longer rolls back valid installed outputs.
-- Rollback continues all feasible recovery operations and reports multiple failures together.
-
 ## Verification
 
 - All 259 tests pass in Release configuration.
 - Readable and round-trip exports were checked with a complex XLSX, a complex PPTX, and a 15-slide synthetic PPTX.
-- The tested XLSX and PPTX files restored byte-identically in unchanged F0 regression checks.
+- The tested XLSX and PPTX files restored byte-identically in unchanged F0 regression checks. This is a mechanical regression check, not support for round-trip or restore operation.
 - The release workflow requires locked restore, Release build, the full test suite, conversion QA, LicenseAudit, and extracted-package smoke tests for all six RIDs.
 
 ## Known limitations
 
-- Do not use PDF conversion or rendering.
-- Do not restore DOCX, XLSX, PPTX, or PDF files to their original formats. Restore checks in this release are mechanical regression tests, not approval for user operation.
+- PDF conversion and rendering are not supported in this release.
+- Restoration of DOCX, XLSX, PPTX, or PDF files to their original formats is not supported in this release.
 - `.drmd` and `.drmdpkg` can contain the original document and must be protected at the same confidentiality level.
 - Tesseract, language models, Mermaid CLI, and a PDF rasterizer are not bundled.
 - Macros, signatures, encryption, protection, and unsafe or unsupported package structures may be rejected.
 - Windows signing and macOS signing/notarization are applied only when credentials are configured; every package records its status.
 
-See the [user guide](USER_GUIDE.en.md), [format capability matrix](../docs/FORMAT_CAPABILITY_MATRIX.md), and [security and privacy guide](SECURITY_AND_PRIVACY.en.md) for details.
+## Experimental engine changes — not supported in v0.1.2
+
+The following changes are part of implementation and regression testing but are outside the v0.1.2 user support scope.
+
+- The round-trip preview, `.drmd`/`.drmdpkg`, `verify`, `diff`, and `restore` paths were maintained and improved.
+- Nested PPTX groups compose `off/ext/chOff/chExt`, rotation, flips, and non-uniform scaling into coordinates while avoiding non-finite geometry for missing or zero-sized transforms.
+- Relationship XML, ZIP expanded-size/compression-ratio, and sparse chart-point limits are enforced. A backup-cleanup failure after a successful multi-output commit does not roll back committed outputs; feasible rollback operations continue and are reported.
+- Mermaid rendering in `render`, Office templates, PDF fallback, and restoration to original formats remain experimental engine features and are not supported for users.
+
+See the [user guide](../docs/en/user-guide.md), [supported features](../docs/en/supported-features.md), and [security and privacy guide](../docs/en/security-and-privacy.md) for details.
 
 ## License
 

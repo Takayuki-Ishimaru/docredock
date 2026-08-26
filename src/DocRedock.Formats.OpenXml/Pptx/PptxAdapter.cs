@@ -25,14 +25,15 @@ public sealed record PptxShapeRecord(
     IReadOnlyList<string>? ChartRelationshipIds = null,
     IReadOnlyList<string>? DiagramRelationshipIds = null,
     string? ConnectorStartId = null,
-    string? ConnectorEndId = null);
+    string? ConnectorEndId = null,
+    bool IsHidden = false);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
     string? BulletCharacter = null, IReadOnlyList<PptxTextRun>? Runs = null,
     bool IsOrdered = false, int? ListNumber = null);
 public sealed record PptxSlideRecord(string SlideId, string PartUri, IReadOnlyList<PptxShapeRecord> Shapes, string? NotesText,
-    IReadOnlyList<PptxTextParagraph>? NotesDetails = null);
+    IReadOnlyList<PptxTextParagraph>? NotesDetails = null, bool IsHidden = false);
 public sealed record PptxExtractionResult(DocumentGraph Graph, IReadOnlyList<PptxSlideRecord> Slides, IReadOnlyDictionary<string, string> PartSha256, IReadOnlyList<string> Warnings);
 public sealed record PptxShapeTextEdit(string SlideId, string ShapeId, string Text);
 public sealed record PptxPatchPlan(IReadOnlyList<PptxShapeTextEdit> Edits, IReadOnlySet<string> DirtyParts);
@@ -57,6 +58,8 @@ public sealed class PptxAdapter
             foreach (var shape in slide.Shapes)
             {
                 var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_id"] = JsonSerializer.SerializeToElement(shape.ShapeId), ["shape_name"] = JsonSerializer.SerializeToElement(shape.Name), ["shape_role"] = JsonSerializer.SerializeToElement(shape.Role) };
+                extension["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden);
+                extension["hidden_object"] = JsonSerializer.SerializeToElement(shape.IsHidden);
                 if (shape.Paragraphs is not null) extension["paragraphs"] = JsonSerializer.SerializeToElement(shape.Paragraphs);
                 if (shape.ParagraphDetails is not null) extension["paragraph_details"] = JsonSerializer.SerializeToElement(shape.ParagraphDetails);
                 if (shape.IsTable) extension["is_table"] = JsonSerializer.SerializeToElement(true);
@@ -93,7 +96,7 @@ public sealed class PptxAdapter
                     _ => CreateShapeTextContent(shape),
                 };
                 var editability = kind == NodeKind.Shape ? NodeEditability.EditableWithConstraints : NodeEditability.Protected;
-                var layer = kind is NodeKind.Connector or NodeKind.Chart or NodeKind.Diagram || (kind == NodeKind.Shape && string.IsNullOrWhiteSpace(shape.Text))
+                var layer = slide.IsHidden || shape.IsHidden || (kind == NodeKind.Shape && string.IsNullOrWhiteSpace(shape.Text))
                     ? ContentLayer.Hidden
                     : IsFurnitureRole(shape.Role) ? ContentLayer.Furniture : ContentLayer.Body;
                 nodes.Add(new($"n_{Hash(slide.SlideId + ":" + shape.ShapeId)[..16]}", kind, null, order++, layer,
@@ -102,10 +105,16 @@ public sealed class PptxAdapter
             }
             if (!string.IsNullOrWhiteSpace(slide.NotesText))
             {
-                var notesExtension = slide.NotesDetails is { Count: > 0 }
-                    ? new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["paragraph_details"] = JsonSerializer.SerializeToElement(slide.NotesDetails) }
-                    : null;
-                nodes.Add(new($"n_{Hash(slide.SlideId + ":notes")[..16]}", NodeKind.SpeakerNotes, null, order, ContentLayer.Furniture, new TextNodeContent(slide.NotesText), new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("slide_id", slide.SlideId)]), Editability: NodeEditability.Protected, Extensions: notesExtension));
+                var notesExtension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                {
+                    ["hidden_content_type"] = JsonSerializer.SerializeToElement("pptx-notes"),
+                    ["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden)
+                };
+                if (slide.NotesDetails is { Count: > 0 }) notesExtension["paragraph_details"] = JsonSerializer.SerializeToElement(slide.NotesDetails);
+                nodes.Add(new($"n_{Hash(slide.SlideId + ":notes")[..16]}", NodeKind.SpeakerNotes, null, order,
+                    slide.IsHidden ? ContentLayer.Hidden : ContentLayer.Metadata, new TextNodeContent(slide.NotesText),
+                    new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("slide_id", slide.SlideId)]),
+                    Editability: NodeEditability.Protected, Extensions: notesExtension));
             }
             partitions.Add(new DocumentPartition(slide.SlideId, partitions.Count, nodes, slide.PartUri));
         }
@@ -175,7 +184,7 @@ public sealed class PptxAdapter
             var bulletResolver = BuildBulletResolver(package, target.Target, resolverCache);
             var shapes = ReadShapes(slideBytes, slideId, out _, bulletResolver);
             var (notes, notesDetails) = ReadNotesParagraphs(package, target.Target);
-            result.Add(new(slideId, target.Target, shapes, notes, notesDetails));
+            result.Add(new(slideId, target.Target, shapes, notes, notesDetails, IsSlideHidden(slideBytes)));
             _ = id;
         }
         if (result.Count == 0)
@@ -184,9 +193,21 @@ public sealed class PptxAdapter
                 var slideId = Path.GetFileNameWithoutExtension(part);
                 var bulletResolver = BuildBulletResolver(package, part, resolverCache);
                 var (notes, notesDetails) = ReadNotesParagraphs(package, part);
-                result.Add(new(slideId, part, ReadShapes(package[part], slideId, out _, bulletResolver), notes, notesDetails));
+                result.Add(new(slideId, part, ReadShapes(package[part], slideId, out _, bulletResolver), notes, notesDetails, IsSlideHidden(package[part])));
             }
         return result;
+    }
+
+    private static bool IsSlideHidden(byte[] bytes)
+    {
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "sld") continue;
+            var show = reader.GetAttribute("show");
+            return show is "0" || bool.TryParse(show, out var parsed) && !parsed;
+        }
+        return false;
     }
 
     private readonly record struct AffineTransform(double M11, double M12, double M21, double M22, double Tx, double Ty)
@@ -320,7 +341,7 @@ public sealed class PptxAdapter
             if (reader.NodeType != XmlNodeType.Element || reader.LocalName is not ("sp" or "graphicFrame" or "pic" or "cxnSp")) continue;
             var parentTransform = groupStack.Reverse().Aggregate(AffineTransform.Identity, (current, frame) => current * frame.Transform);
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
-            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null;
+            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
@@ -328,7 +349,7 @@ public sealed class PptxAdapter
             var autoNumCounters = new Dictionary<int, int>();
             while (subtree.Read())
             {
-                if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); }
+                if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); shapeHidden = IsOn(subtree.GetAttribute("hidden")); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ph") { placeholderType = subtree.GetAttribute("type") ?? "body"; placeholderIdx = subtree.GetAttribute("idx"); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "stCxn") connectorStartId = subtree.GetAttribute("id");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "endCxn") connectorEndId = subtree.GetAttribute("id");
@@ -423,7 +444,7 @@ public sealed class PptxAdapter
             var role = InferRole(placeholderType, name);
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
-                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId));
+                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden));
         }
         ResolveConnectorLabels(result);
         return result;

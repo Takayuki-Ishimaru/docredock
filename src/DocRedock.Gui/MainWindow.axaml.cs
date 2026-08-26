@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.Pdf;
 using DocRedock.RoundTrip;
@@ -59,6 +60,16 @@ public partial class MainWindow : Window
             updateCheckService ?? throw new ArgumentNullException(nameof(updateCheckService));
         InitializeComponent();
         LoadSettings();
+        var experimentalEnabled = ExperimentalFeatures.IsEnabled;
+        RoundTripExportRadio.IsEnabled = experimentalEnabled;
+        RestoreModeRadio.IsEnabled = experimentalEnabled;
+        PdfFallbackToggle.IsEnabled = experimentalEnabled;
+        if (!experimentalEnabled)
+        {
+            ReadableExportToggle.IsChecked = true;
+            RoundTripExportRadio.IsChecked = false;
+        }
+        UpdateContentPolicyWarning();
         UpdateExportSelection();
         UpdateRestoreSelection();
         UpdateButtons();
@@ -198,6 +209,18 @@ public partial class MainWindow : Window
 
     private void OnSettingsChanged(object? sender, RoutedEventArgs e) => SaveSettings();
 
+    private void OnContentPolicyChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        UpdateContentPolicyWarning();
+        SaveSettings();
+    }
+
+    private string SelectedContentPolicy() =>
+        (ContentPolicyComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() is { Length: > 0 } policy ? policy : "visible";
+
+    private void UpdateContentPolicyWarning() =>
+        CompletePolicyWarning.IsVisible = StringComparer.Ordinal.Equals(SelectedContentPolicy(), "complete");
+
     private async void OnExport(object? sender, RoutedEventArgs e)
     {
         if (_sourceFiles.Count == 0 || _exportBusy) return;
@@ -232,7 +255,8 @@ public partial class MainWindow : Window
                     includeSvgPreviews: IncludeSvgCheckBox.IsChecked == true,
                     includeDiagrams: IncludeDiagramsCheckBox.IsChecked == true,
                     embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true,
-                    zipSidecar: ZipSidecarCheckBox.IsChecked == true));
+                    zipSidecar: ZipSidecarCheckBox.IsChecked == true,
+                    contentPolicy: SelectedContentPolicy()));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -346,6 +370,11 @@ public partial class MainWindow : Window
         if (unsupported.Length > 0)
         {
             ShowError(ExportErrorText, "DOCX、XLSX、PPTX、PDFのいずれかを選択してください。");
+            return;
+        }
+        if (!ExperimentalFeatures.IsEnabled && selected.Any(file => Path.GetExtension(file.Name).Equals(".pdf", StringComparison.OrdinalIgnoreCase)))
+        {
+            ShowError(ExportErrorText, $"PDF出力は実験機能です。利用するには {ExperimentalFeatures.EnvironmentVariable}=1 を設定してください。");
             return;
         }
         if (selected.Any(file => !WithinSizeLimit(file, MaxSourceBytes)))
@@ -745,6 +774,7 @@ public partial class MainWindow : Window
             if (settings.IncludeDiagrams is not null) IncludeDiagramsCheckBox.IsChecked = settings.IncludeDiagrams;
             if (settings.EmbedReadableImages is not null) EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
             if (settings.ZipSidecar is not null) ZipSidecarCheckBox.IsChecked = settings.ZipSidecar;
+            ContentPolicyComboBox.SelectedIndex = settings.ContentPolicy switch { "complete" => 1, "sanitized" => 2, _ => 0 };
             ExportFolderText.Text = OutputFolderLabel(_exportDirectory);
             RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
             OcrLanguagesTextBox.IsEnabled = OcrToggle.IsChecked == true;
@@ -765,7 +795,7 @@ public partial class MainWindow : Window
             File.WriteAllText(path, JsonSerializer.Serialize(new GuiSettings(_exportDirectory, _restoreDirectory,
                 ReadableExportToggle.IsChecked, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
-                EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked)));
+                EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy())));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -784,7 +814,8 @@ public partial class MainWindow : Window
         bool? IncludeSvgPreviews = null,
         bool? IncludeDiagrams = null,
         bool? EmbedReadableImages = null,
-        bool? ZipSidecar = null);
+        bool? ZipSidecar = null,
+        string? ContentPolicy = null);
 
     private static void ShowError(TextBlock control, string message)
     {

@@ -14,7 +14,8 @@ public sealed record RenderOptions(
     string? FontPath = null,
     string MermaidExecutablePath = "mmdc",
     string MermaidBackgroundColor = "white",
-    TimeSpan? MermaidTimeout = null);
+    TimeSpan? MermaidTimeout = null,
+    string? SourceDirectory = null);
 public sealed record RenderResult(string OutputPath, RenderFormat Format, string FidelityLevel, bool IsRestore, IReadOnlyList<string> Warnings)
 {
     public RenderReport Report => new("render", Format, FidelityLevel, IsRestore, Warnings);
@@ -170,7 +171,7 @@ public sealed class MarkdownRenderer
             .preview-bar{display:flex;gap:12px;align-items:center;padding:14px 24px;background:var(--accent-wash);border-bottom:1px solid #cfd9ff;color:#233d91;font-size:.9rem}
             .preview-badge{padding:3px 9px;border-radius:999px;background:var(--accent);color:#fff;font-weight:700;letter-spacing:.03em}.preview-note{color:#44598f}
             main{padding:clamp(24px,5vw,64px)}h1,h2,h3,h4,h5,h6{line-height:1.25;margin:1.7em 0 .55em;letter-spacing:-.02em}h1{font-size:clamp(2rem,5vw,3.4rem);margin-top:0}h2{font-size:1.65rem;border-bottom:1px solid var(--line);padding-bottom:.35em}h3{font-size:1.25rem}
-            p,ul{margin:.75em 0 1.15em}li+li{margin-top:.3em}a{color:var(--accent)}code{font-family:"SFMono-Regular",Consolas,monospace;background:#eef1f6;border-radius:4px;padding:.12em .35em;font-size:.92em}
+            p,ul,ol{margin:.75em 0 1.15em}li+li{margin-top:.3em}a{color:var(--accent)}code{font-family:"SFMono-Regular",Consolas,monospace;background:#eef1f6;border-radius:4px;padding:.12em .35em;font-size:.92em}
             pre{overflow:auto;padding:18px 20px;background:#111827;color:#e5e7eb;border-radius:10px;line-height:1.5}pre code{padding:0;background:transparent;color:inherit}
             .table-scroll{overflow-x:auto;margin:1.2rem 0 2rem;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:max-content;min-width:100%;font-variant-numeric:tabular-nums}th,td{padding:10px 13px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);text-align:left;vertical-align:top;white-space:pre-wrap}th{position:sticky;top:0;background:#f2f5fa;font-weight:700}tr:last-child td{border-bottom:0}th:last-child,td:last-child{border-right:0}
             figure{margin:1.5rem 0;text-align:center}figure img,.inline-image{max-width:100%;height:auto;border-radius:8px}figcaption{margin-top:.5rem;color:var(--muted);font-size:.9rem}.empty{color:var(--muted);font-style:italic}
@@ -182,23 +183,22 @@ public sealed class MarkdownRenderer
         if (sanitizedDocRedock)
             output.AppendLine("<div class=\"preview-bar\"><span class=\"preview-badge\">ROUNDTRIP PREVIEW</span><span class=\"preview-note\">編集用メタデータを隠し、復元対象の内容だけを表示しています。</span></div>");
         output.AppendLine("<main>");
+        string Inline(string value) => HtmlInline(value, options?.SourceDirectory, path);
         foreach (var block in document.Blocks)
         {
             switch (block)
             {
                 case MarkdownHeading heading:
                     var level = Math.Clamp(heading.Level, 1, 6);
-                    output.Append('<').Append('h').Append(level).Append('>').Append(HtmlInline(heading.Text))
+                    output.Append('<').Append('h').Append(level).Append('>').Append(Inline(heading.Text))
                         .Append("</h").Append(level).AppendLine(">");
                     break;
                 case MarkdownParagraph paragraph:
                     if (paragraph.Text.Trim() is "---" or "***" or "___") output.AppendLine("<hr>");
-                    else output.Append("<p>").Append(HtmlInline(paragraph.Text)).AppendLine("</p>");
+                    else output.Append("<p>").Append(Inline(paragraph.Text)).AppendLine("</p>");
                     break;
                 case MarkdownList list:
-                    output.AppendLine("<ul>");
-                    foreach (var item in list.Items) output.Append("<li>").Append(HtmlInline(item)).AppendLine("</li>");
-                    output.AppendLine("</ul>");
+                    WriteHtmlList(output, list, Inline);
                     break;
                 case MarkdownCodeBlock code:
                     output.Append("<pre><code data-language=\"").Append(Html(code.Language)).Append("\">")
@@ -211,7 +211,7 @@ public sealed class MarkdownRenderer
                     break;
                 case MarkdownTable table:
                     output.AppendLine("<div class=\"table-scroll\"><table><thead><tr>");
-                    foreach (var header in table.Headers) output.Append("<th scope=\"col\">").Append(HtmlInline(header)).AppendLine("</th>");
+                    foreach (var header in table.Headers) output.Append("<th scope=\"col\">").Append(Inline(header)).AppendLine("</th>");
                     output.AppendLine("</tr></thead><tbody>");
                     foreach (var row in table.Rows)
                     {
@@ -219,7 +219,7 @@ public sealed class MarkdownRenderer
                         for (var index = 0; index < table.Headers.Count; index++)
                         {
                             var value = index < row.Count ? row[index] : string.Empty;
-                            output.Append("<td>").Append(HtmlInline(value).Replace("\n", "<br>", StringComparison.Ordinal)).AppendLine("</td>");
+                            output.Append("<td>").Append(Inline(value).Replace("\n", "<br>", StringComparison.Ordinal)).AppendLine("</td>");
                         }
                         output.AppendLine("</tr>");
                     }
@@ -232,16 +232,43 @@ public sealed class MarkdownRenderer
         File.WriteAllText(path, output.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 
-    private static string HtmlInline(string value)
+    private static void WriteHtmlList(StringBuilder output, MarkdownList list, Func<string, string> inline)
+    {
+        var levels = list.Levels ?? Enumerable.Repeat(0, list.Items.Count).ToArray();
+        var ordered = list.Ordered ?? Enumerable.Repeat(false, list.Items.Count).ToArray();
+        var index = 0;
+        while (index < list.Items.Count) WriteLevel(Math.Max(0, levels.ElementAtOrDefault(index)));
+
+        void WriteLevel(int level)
+        {
+            var isOrdered = ordered.ElementAtOrDefault(index);
+            var tag = isOrdered ? "ol" : "ul";
+            output.Append('<').Append(tag).AppendLine(">");
+            while (index < list.Items.Count)
+            {
+                var itemLevel = Math.Max(0, levels.ElementAtOrDefault(index));
+                if (itemLevel < level || ordered.ElementAtOrDefault(index) != isOrdered && itemLevel == level) break;
+                if (itemLevel > level) { WriteLevel(itemLevel); continue; }
+                output.Append("<li>").Append(inline(list.Items[index]));
+                index++;
+                while (index < list.Items.Count && Math.Max(0, levels.ElementAtOrDefault(index)) > level)
+                    WriteLevel(Math.Max(0, levels.ElementAtOrDefault(index)));
+                output.AppendLine("</li>");
+            }
+            output.Append("</").Append(tag).AppendLine(">");
+        }
+    }
+
+    private static string HtmlInline(string value, string? sourceDirectory = null, string? outputPath = null)
     {
         var output = new StringBuilder(value.Length + 32);
         var cursor = 0;
         foreach (Match match in HtmlInlineToken.Matches(value))
         {
-            output.Append(Html(value[cursor..match.Index]));
+            output.Append(HtmlText(value[cursor..match.Index]));
             if (match.Groups["safeTag"].Success) output.Append(match.Value);
             else if (match.Groups["imageUrl"].Success && IsSafeHtmlUrl(match.Groups["imageUrl"].Value, image: true))
-                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(match.Groups["imageUrl"].Value))
+                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(ResolveHtmlImageUrl(match.Groups["imageUrl"].Value, sourceDirectory, outputPath)))
                     .Append("\" alt=\"").Append(Html(match.Groups["imageAlt"].Value)).Append("\">");
             else if (match.Groups["linkUrl"].Success && IsSafeHtmlUrl(match.Groups["linkUrl"].Value, image: false))
                 output.Append("<a href=\"").Append(Html(match.Groups["linkUrl"].Value)).Append("\">").Append(Html(match.Groups["linkText"].Value)).Append("</a>");
@@ -252,13 +279,36 @@ public sealed class MarkdownRenderer
             else output.Append(Html(match.Value));
             cursor = match.Index + match.Length;
         }
-        output.Append(Html(value[cursor..]));
+        output.Append(HtmlText(value[cursor..]));
         return output.ToString();
+    }
+
+    private static string HtmlText(string value) => Html(value)
+        .Replace("  \n", "<br>\n", StringComparison.Ordinal)
+        .Replace("\n", " ", StringComparison.Ordinal);
+
+    private static string ResolveHtmlImageUrl(string value, string? sourceDirectory, string? outputPath)
+    {
+        if (string.IsNullOrWhiteSpace(sourceDirectory) || string.IsNullOrWhiteSpace(outputPath) ||
+            Uri.TryCreate(value, UriKind.Absolute, out _)) return value;
+        var decoded = Uri.UnescapeDataString(value).Replace('/', Path.DirectorySeparatorChar);
+        var sourceRoot = Path.GetFullPath(sourceDirectory);
+        var sourcePath = Path.GetFullPath(Path.Combine(sourceRoot, decoded));
+        var sourceRelative = Path.GetRelativePath(sourceRoot, sourcePath);
+        if (Path.IsPathRooted(sourceRelative) || sourceRelative == ".." ||
+            sourceRelative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            return "about:blank";
+        var relative = Path.GetRelativePath(Path.GetDirectoryName(Path.GetFullPath(outputPath))!, sourcePath).Replace('\\', '/');
+        return string.Join('/', relative.Split('/').Select(Uri.EscapeDataString));
     }
 
     private static bool IsSafeHtmlUrl(string value, bool image)
     {
         if (value.Length == 0 || value.StartsWith("//", StringComparison.Ordinal) || value.Contains('\0')) return false;
+        if (image && (value.StartsWith("data:image/png;base64,", StringComparison.OrdinalIgnoreCase) ||
+                      value.StartsWith("data:image/jpeg;base64,", StringComparison.OrdinalIgnoreCase) ||
+                      value.StartsWith("data:image/gif;base64,", StringComparison.OrdinalIgnoreCase) ||
+                      value.StartsWith("data:image/webp;base64,", StringComparison.OrdinalIgnoreCase))) return true;
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
             return !Regex.IsMatch(value, @"^[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant);
         return uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
