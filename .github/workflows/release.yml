@@ -313,7 +313,7 @@ jobs:
         run: |
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
-          $root = Join-Path "artifacts/smoke" $name
+          $root = "artifacts/smoke"
           python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe"
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
