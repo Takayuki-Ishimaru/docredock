@@ -24,9 +24,9 @@ Desktop GUI:
 
 CLI, supported readable export example:
 
-    dotnet run --project src/DocRedock.Cli -- export input.xlsx --profile readable --output input.md --ocr off
+    dotnet run --project src/DocRedock.Cli -- export input.xlsx --output input.md --ocr off
 
-The codebase also contains experimental PDF, round-trip, restore, and render paths. Their presence does not make them supported in v0.1.4; they require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. See the [release support table](docs/en/supported-features.md).
+The codebase also contains experimental CLI PDF, round-trip, restore, and render paths. Their presence does not make them supported in v0.1.5; CLI access requires `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. The desktop GUI accepts PDF input by default, while PDF OCR still needs configured providers. See the [release support table](docs/en/supported-features.md).
 
 ## Project areas
 

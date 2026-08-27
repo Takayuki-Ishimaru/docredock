@@ -179,7 +179,7 @@ public sealed class ReadableMarkdownTests
         var details = new[]
         {
             new { Text = "通常段落", Level = 0, IsBullet = false, Runs = new[] { new { Text = "通常段落", Bold = false, Italic = false, Underline = false } } },
-            new { Text = "重要", Level = 0, IsBullet = true, Runs = new[] { new { Text = "重要", Bold = true, Italic = false, Underline = false } } },
+            new { Text = "• 重要", Level = 0, IsBullet = true, Runs = new[] { new { Text = "• 重要", Bold = true, Italic = false, Underline = false } } },
             new { Text = "補足", Level = 1, IsBullet = true, Runs = new[] { new { Text = "補足", Bold = false, Italic = true, Underline = false } } },
             new { Text = "• リテラル箇条書き", Level = 0, IsBullet = false, Runs = new[] { new { Text = "• リテラル箇条書き", Bold = false, Italic = false, Underline = false } } },
         };
@@ -193,7 +193,7 @@ public sealed class ReadableMarkdownTests
         [
             new DocumentNode("title", NodeKind.Shape, null, 0, ContentLayer.Body, new TextNodeContent("概要"),
                 Extensions: new Dictionary<string, JsonElement> { ["shape_role"] = JsonSerializer.SerializeToElement("title") }),
-            new DocumentNode("body", NodeKind.Shape, null, 1, ContentLayer.Body, new TextNodeContent("通常段落\n重要\n補足\n• リテラル箇条書き"), Extensions: extensions),
+            new DocumentNode("body", NodeKind.Shape, null, 1, ContentLayer.Body, new TextNodeContent("通常段落\n• 重要\n補足\n• リテラル箇条書き"), Extensions: extensions),
         ])]);
 
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
@@ -243,7 +243,7 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
-    public void Document_table_expands_vertical_merge_and_partial_grid_span_into_a_plain_gfm_grid()
+    public void Document_table_projects_merged_cells_with_blank_continuations()
     {
         var table = new DocumentNode("table", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
         [
@@ -261,9 +261,9 @@ public sealed class ReadableMarkdownTests
         // across only the columns it covers instead of leaving them blank (D07-3), so no row ever
         // collapses to a run of empty "|  |" cells.
         Assert.Contains("| A1 | B1 | C1 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| A2 | B1 | C2 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| Partial | Partial | C3 |", markdown, StringComparison.Ordinal);
-        Assert.DoesNotContain("|  |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| A2 |  | C2 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| Partial |  | C3 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("|  |", markdown, StringComparison.Ordinal);
     }
 
     [Fact]

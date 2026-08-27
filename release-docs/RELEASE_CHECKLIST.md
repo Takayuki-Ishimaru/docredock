@@ -4,7 +4,7 @@
 
 この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。必須の自動検査が一つでも失敗した場合は公開しません。
 
-PDFの変換・レンダリングと元ファイル形式への復元はv0.1.4のサポート対象外で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされ、利用者向けsmoke testから除外します。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
+デスクトップGUIのPDF入力はv0.1.5で既定利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元はサポート対象外の実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
 
 ## 現状監査メモ（2026-08-26）
 
@@ -54,7 +54,7 @@ PDFの変換・レンダリングと元ファイル形式への復元はv0.1.4�
 - [ ] LICENSE の著作権表記と公開主体を法務／権利者が確認した
 - [ ] THIRD-PARTY-NOTICES.txt が最新の lock file と一致する
 - [ ] licenses/allowlist.json の全依存関係を再検査した
-- [ ] Noto Sans JP の OFL 文書、配布元、ハッシュを確認した
+- [ ] 最終archiveに.ttf/.ttc/.otf/.otc/.woff/.woff2のfont binaryが同梱されていないことを確認し、PDF smoke testで使うsystem／user fontのライセンスを記録した
 - [ ] ブランド素材と test fixture の再配布権を確認した
 - [ ] provenance/ の記録が採用コードと一致する
 - [ ] SBOM に対象 RID、commit、配布物内の実ファイルと SHA-256 を記録し、成果物 provenance／attestation と結び付けた
@@ -83,9 +83,9 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で展開し、CLI と GUI バイナリを検証した
 - [ ] headless CI ではパッケージ前にAvalonia headlessでMainWindowを構築し、Windows GUIのPE形式・CPU、macOS GUIのMach-O形式・CPU・実行権限を検証し、LinuxではXvfb上で実配布GUI子プロセスの生存を確認した
-- [ ] CLIのv0.1.4バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、v0.1.4のユーザーサポートを意味しない）
-- [ ] PDF変換と元ファイル形式への反映がv0.1.4でサポート対象外であり、DOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
-- [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX の閲覧用Markdownの見た目を確認した
+- [ ] CLIのv0.1.5バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、v0.1.5のユーザーサポートを意味しない）
+- [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換／復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
+- [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX／PDF入力と閲覧用Markdownの見た目を確認した
 - [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
 - [ ] 実行ファイルへバージョンと commit を追跡できる情報を付与した
 - [ ] 配布アーカイブに LICENSE、THIRD-PARTY-NOTICES、日英 README/QUICKSTART／セキュリティ文書、実ファイル連携 SBOM、provenance、内部チェックサム、署名状況を含めた

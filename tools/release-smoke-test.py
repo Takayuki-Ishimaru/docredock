@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test an extracted DocRedock distribution without exercising PDF paths."""
+"""Smoke-test an extracted DocRedock v0.1.5 distribution across supported paths."""
 
 from __future__ import annotations
 
@@ -29,11 +29,18 @@ def write_zip(path: Path, parts: dict[str, str]) -> None:
 
 
 def create_docx(path: Path) -> None:
+    merged_table = """<w:tbl>
+      <w:tblGrid><w:gridCol w:w="3000"/><w:gridCol w:w="3000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Merged origin</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:p><w:r><w:t>Left</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Right</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>Vertical origin</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>V1</w:t></w:r></w:p></w:tc></w:tr>
+      <w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p><w:r><w:t>V2</w:t></w:r></w:p></w:tc></w:tr>
+    </w:tbl>"""
     write_zip(
         path,
         {
             "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
-            "word/document.xml": f'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>{HIDDEN_SENTINELS["docx"]}</w:t></w:r></w:p></w:body></w:document>',
+            "word/document.xml": f'<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>{HIDDEN_SENTINELS["docx"]}</w:t></w:r></w:p>{merged_table}</w:body></w:document>',
         },
     )
 
@@ -111,7 +118,12 @@ def exercise_format(root: Path, cli: Path, extension: str, member: str, creator)
     f1 = root / f"{extension}-f1.{extension}"
     creator(source)
 
-    invoke(cli, ["export", str(source), "--output", str(readable), "--profile", "readable", "--ocr", "off"])
+    readable_arguments = ["export", str(source), "--output", str(readable), "--ocr", "off"]
+    if extension != "docx":
+        readable_arguments.extend(["--profile", "readable"])
+    invoke(cli, readable_arguments)
+    if extension == "docx" and readable.with_suffix(".drmd").exists():
+        raise RuntimeError("profile-omitted DOCX export unexpectedly created a round-trip sidecar")
     complete = root / f"{extension}-complete.md"
     sanitized = root / f"{extension}-sanitized.md"
     complete_result = invoke(
@@ -130,9 +142,15 @@ def exercise_format(root: Path, cli: Path, extension: str, member: str, creator)
     if sentinel not in complete.read_text(encoding="utf-8") or "HiddenContentIncluded" not in complete_result.stdout:
         raise RuntimeError(f"{extension} complete policy did not include and warn about hidden content")
 
-    invoke(cli, ["export", str(source), "--output", str(projection), "--ocr", "off"], experimental=True)
+    invoke(
+        cli,
+        ["export", str(source), "--output", str(projection), "--profile", "roundtrip", "--ocr", "off"],
+        experimental=True,
+    )
     invoke(cli, ["verify", str(projection)])
-    invoke(cli, ["diff", str(projection)], experimental=True)
+    initial_diff = invoke(cli, ["diff", str(projection)], experimental=True)
+    if "Operations: 0" not in initial_diff.stdout:
+        raise RuntimeError(f"{extension} export-immediate diff was not empty:\n{initial_diff.stdout}")
     invoke(cli, ["restore", str(projection), "--output", str(f0)], experimental=True)
     if digest(source) != digest(f0):
         raise RuntimeError(f"{extension} F0 restore is not byte-identical")
@@ -282,6 +300,69 @@ def exercise_gui(gui: Path) -> None:
                 process.wait(timeout=10)
 
 
+FONT_SUFFIXES = {".ttf", ".ttc", ".otf", ".otc", ".woff", ".woff2"}
+
+
+def inspect_distribution(root: Path) -> str:
+    font_files = [
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file() and path.suffix.lower() in FONT_SUFFIXES
+    ]
+    if font_files:
+        raise RuntimeError(f"release package contains font files: {', '.join(sorted(font_files))}")
+
+    checksum_file = root / "BINARY-SHA256SUMS"
+    if not checksum_file.is_file():
+        raise RuntimeError("release package is missing BINARY-SHA256SUMS")
+    root_resolved = root.resolve()
+    checked = 0
+    for line in checksum_file.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            expected, relative = line.split("  ", 1)
+        except ValueError as exc:
+            raise RuntimeError(f"malformed checksum line: {line!r}") from exc
+        target = (root / relative).resolve()
+        if root_resolved not in target.parents or not target.is_file():
+            raise RuntimeError(f"checksum target is unsafe or missing: {relative}")
+        actual = digest(target)
+        if actual != expected:
+            raise RuntimeError(f"checksum mismatch for {relative}")
+        checked += 1
+    if checked == 0:
+        raise RuntimeError("BINARY-SHA256SUMS did not contain any files")
+    return digest(checksum_file)
+
+
+def exercise_pdf_render(root: Path, cli: Path) -> None:
+    sentinel = "DocRedock 日本語PDF検証 ABC123"
+    markdown = root / "japanese-pdf.md"
+    pdf = root / "japanese-pdf.pdf"
+    extracted = root / "japanese-pdf-extracted.md"
+    markdown.write_text(f"# PDF smoke\n\n{sentinel}\n", encoding="utf-8")
+
+    rendered = invoke(
+        cli,
+        ["render", str(markdown), "--format", "pdf", "--output", str(pdf)],
+        allowed=(0,),
+        experimental=True,
+    )
+    if not pdf.is_file():
+        raise RuntimeError("Japanese PDF render did not create a PDF")
+    if "PdfFontSelected" not in rendered.stdout:
+        raise RuntimeError(f"Japanese PDF render did not report PdfFontSelected:\n{rendered.stdout}")
+
+    invoke(
+        cli,
+        ["export", str(pdf), "--profile", "readable", "--output", str(extracted), "--ocr", "off"],
+        experimental=True,
+    )
+    if sentinel not in extracted.read_text(encoding="utf-8"):
+        raise RuntimeError("Japanese PDF re-extraction did not preserve the sentinel")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
@@ -293,8 +374,9 @@ def main() -> int:
     if not cli.is_file() or not gui.is_file():
         raise SystemExit("extracted GUI and CLI executables are required")
 
+    package_checksum = inspect_distribution(cli.parent)
     version = invoke(cli, ["--version"])
-    if not version.stdout.strip().startswith("DocRedock 0.1.4"):
+    if not version.stdout.strip().startswith("DocRedock 0.1.5"):
         raise RuntimeError(f"unexpected CLI version: {version.stdout.strip()}")
     blocked = invoke(cli, ["restore", "missing.md"], allowed=(4,))
     if "DOCREDOCK_ENABLE_EXPERIMENTAL=1" not in blocked.stdout:
@@ -305,14 +387,15 @@ def main() -> int:
         docx_projection = exercise_format(root, cli, "docx", "word/document.xml", create_docx)
         exercise_format(root, cli, "xlsx", "xl/worksheets/sheet1.xml", create_xlsx)
         exercise_format(root, cli, "pptx", "ppt/slides/slide1.xml", create_pptx)
+        exercise_pdf_render(root, cli)
         exercise_pack_and_tamper(root, cli, docx_projection)
         inspect_gui_binary(gui)
         if args.gui_mode == "startup":
             exercise_gui(gui)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
-    print(f"Release smoke test passed for v0.1.4 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, F0/F1 restore, pack/unpack, tamper rejection, and {gui_result}.")
-    print("PDF paths intentionally skipped: current policy is do not use pending validation.")
+    print(f"Release smoke test passed for v0.1.5 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, empty merged-DOCX diff, F0/F1 restore, Japanese PDF rendering, package checksums/font exclusion, pack/unpack, tamper rejection, and {gui_result}.")
+    print(f"Verified package checksum manifest SHA-256: {package_checksum}")
     return 0
 
 

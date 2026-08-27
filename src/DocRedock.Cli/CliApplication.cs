@@ -71,7 +71,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private async Task<int> ExportAsync(Arguments args, CancellationToken token)
     {
         var source = RequireExistingFile(args);
-        var profile = args.Option("profile") ?? "roundtrip";
+        var profile = args.Option("profile") ?? "readable";
         if (profile is not ("roundtrip" or "readable" or "audit")) return Unsupported("Built-in export supports roundtrip, readable, and audit profiles.");
         if (!ExperimentalFeatures.IsEnabled && (profile != "readable" || await DocumentService.DetectFormatAsync(source, token) == DocumentFormatKind.Pdf))
             return ExperimentalDisabled(profile == "readable" ? "PDF export" : profile + " export");
@@ -174,14 +174,31 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var value = args.Option("format") ?? throw new IOException("render requires --format docx|pptx|xlsx|pdf|html.");
         if (!Enum.TryParse<RenderFormat>(value, true, out var format)) return Unsupported($"Unsupported render format '{value}'.");
         var destination = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(input, "." + value.ToLowerInvariant()));
+        int? fontFaceIndex = null;
+        var fontFaceValue = args.Option("font-face-index");
+        if (fontFaceValue is not null)
+        {
+            if (!int.TryParse(fontFaceValue, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedFace) || parsedFace < 0)
+                throw new IOException("--font-face-index must be a non-negative integer.");
+            fontFaceIndex = parsedFace;
+        }
+
         using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
         var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), stagedOutput.PathFor(destination), format,
-            new RenderOptions(TemplatePath: args.Option("template"), MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc",
-                SourceDirectory: Path.GetDirectoryName(input), RelativeLinkOutputPath: destination)), token);
+            new RenderOptions(
+                TemplatePath: args.Option("template"),
+                FontPath: args.Option("font-path"),
+                FontFaceIndex: fontFaceIndex,
+                MermaidExecutablePath: args.Option("mermaid-cli") ?? "mmdc",
+                SourceDirectory: Path.GetDirectoryName(input),
+                RelativeLinkOutputPath: destination,
+                Verbose: args.HasFlag("verbose"))), token);
         stagedOutput.Commit();
         await output.WriteLineAsync($"Rendered: {destination}");
         await output.WriteLineAsync($"Fidelity: {result.FidelityLevel} (new document, not restore)");
-        foreach (var warning in result.Warnings) await output.WriteLineAsync($"WARNING Render: {warning}");
+        if (!args.HasFlag("quiet"))
+            foreach (var information in result.Information) await output.WriteLineAsync(information);
+        foreach (var warning in result.Warnings) await output.WriteLineAsync(warning);
         return result.Warnings.Count == 0 ? 0 : 1;
     }
 
@@ -440,10 +457,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
           docredock --version
-          docredock export <source> [--output file.md] [--profile roundtrip|readable|audit] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
+          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--allow-render-fallback]
-          docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--mermaid-cli mmdc] [--output file]
+          docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
           docredock diff <file.md> [--json]
           docredock verify <file.md|file.drmd|file.drmdpkg>

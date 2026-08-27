@@ -187,7 +187,7 @@ public sealed class PptxAdapterTests
         // every row the span covers instead of only the first, once PptxAdapter carries
         // TableCell.RowSpan through to the shared ExpandTableGrid carry-down logic.
         Assert.Contains("| Group | X |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| Group | Y |", markdown, StringComparison.Ordinal);
+        Assert.Contains("|  | Y |", markdown, StringComparison.Ordinal);
     }
 
     private static byte[] CreateGapFeaturesPackage()

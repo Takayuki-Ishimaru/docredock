@@ -148,7 +148,7 @@ public sealed class DocumentService
             : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
             options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
-        graph = AttachAssetsAndOcr(graph, assets, ocrResults);
+        graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
         AddImageDisplayDiagnostics(diagnostics, graph);
 
         var serializer = new DocRedockMarkdownSerializer();
@@ -370,7 +370,7 @@ public sealed class DocumentService
             : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
             options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
-        graph = AttachAssetsAndOcr(graph, assets, ocrResults);
+        graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
         AddImageDisplayDiagnostics(diagnostics, graph);
         return (graph, diagnostics, assets);
     }
@@ -688,7 +688,10 @@ public sealed class DocumentService
             {
                 var status = enabled ? OcrProcessingStatus.Unavailable : OcrProcessingStatus.SkippedByPolicy;
                 var diagnostic = enabled
-                    ? new OcrDiagnostic("PdfRasterizerUnavailable", "This page has no native text and no local PDF rasterizer is configured.", DiagnosticSeverity.Warning)
+                    ? new OcrDiagnostic(
+                        "PdfRasterizerUnavailable",
+                        "This PDF page has no native text. DocRedock v0.1.5 does not include a PDF rasterizer, so OCR could not run for this page.",
+                        DiagnosticSeverity.Warning)
                     : new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this textless PDF page.", DiagnosticSeverity.Information);
                 records.Add(new OcrAssetRecord(partition.Id, status, languages, null, [diagnostic]));
                 diagnostics.Add(new Diagnostic(diagnostic.Code, diagnostic.Message, diagnostic.Severity, partition.Id, partition.SourcePartUri));
@@ -735,45 +738,188 @@ public sealed class DocumentService
     private static DocumentGraph AttachAssetsAndOcr(
         DocumentGraph graph,
         IReadOnlyList<WorkspaceAsset> assets,
-        IReadOnlyList<OcrAssetRecord> ocrResults)
+        IReadOnlyList<OcrAssetRecord> ocrResults,
+        ICollection<Diagnostic> diagnostics)
     {
         var descriptors = assets.ToDictionary(
             asset => asset.Id,
             asset => new AssetDescriptor(asset.Id, asset.Sha256, asset.MediaType, asset.FileName),
             StringComparer.Ordinal);
         graph = AttachAssetReferences(graph, assets);
-        var completed = ocrResults.Where(item => item.Status == OcrProcessingStatus.Completed && item.Result is not null && item.Result.Text.Length > 0).ToArray();
+        var completed = ocrResults
+            .Where(item => item.Status == OcrProcessingStatus.Completed &&
+                           item.Result is not null &&
+                           item.Result.Text.Length > 0)
+            .OrderBy(item => item.AssetId, StringComparer.Ordinal)
+            .ToArray();
         if (completed.Length == 0) return graph with { Assets = descriptors };
+
         var partitions = graph.Partitions.ToList();
-        if (partitions.Count == 0) partitions.Add(new DocumentPartition("part-0001", 0, []));
-        var target = partitions[^1];
-        var nodes = target.Nodes.ToList();
+        if (partitions.Count == 0)
+            partitions.Add(new DocumentPartition("part-0001", 0, []));
+
+        // Resolve every OCR item independently. In particular, never use the last
+        // partition as an implicit target: that caused slide/page OCR to leak into
+        // an unrelated trailing partition (including hidden slides).
+        var placements = new List<(int PartitionIndex, DocumentNode? Parent, OcrAssetRecord Item)>();
         foreach (var item in completed)
         {
-            var parent = graph.Nodes.FirstOrDefault(node => node.Kind == NodeKind.Image &&
-                node.Content is ReferenceNodeContent reference &&
-                StringComparer.Ordinal.Equals(FindAsset(reference.Reference, assets)?.Id, item.AssetId));
-            var confidence = item.Result!.Regions.Where(region => region.Confidence is not null).Select(region => region.Confidence!.Value).DefaultIfEmpty().Average();
-            // D13-4: place OCR text right after its own image (readable renders it inline there)
-            // instead of always at the very end of the document, which put it far from its
-            // caption/context. Order still falls back to "append at the end" when there is no
-            // matching Image node (e.g. a rasterized, textless PDF page has none).
-            var ocrOrder = parent is not null ? parent.Order + 1 : nodes.Count == 0 ? 0 : nodes.Max(node => node.Order) + 1;
-            nodes.Add(new DocumentNode(
-                "n_" + Hash(graph.DocumentId + ":ocr:" + item.AssetId)[..16],
-                NodeKind.ImageText,
-                parent?.Id,
-                ocrOrder,
-                parent?.Layer is ContentLayer.Hidden or ContentLayer.Metadata ? parent.Layer : ContentLayer.Derived,
-                new TextNodeContent(item.Result.Text),
-                new SourceAnchor(graph.Format.ToString().ToLowerInvariant(), parent?.Source?.PartUri ?? "asset:" + item.AssetId,
-                    [new AnchorLocator("asset_id", item.AssetId)]),
-                Editability: NodeEditability.AnnotationOnly,
-                Provenance: [new ProvenanceItem(EvidenceKind.Ocr, confidence, DerivedFromNodeId: parent?.Id)]));
+            var asset = assets.FirstOrDefault(candidate =>
+                StringComparer.Ordinal.Equals(candidate.Id, item.AssetId));
+            DocumentNode? parent = null;
+            var partitionIndex = -1;
+
+            if (asset is not null)
+            {
+                for (var index = 0; index < partitions.Count; index++)
+                {
+                    parent = partitions[index].Nodes.FirstOrDefault(node =>
+                        node.Kind == NodeKind.Image &&
+                        node.Content is ReferenceNodeContent reference &&
+                        StringComparer.Ordinal.Equals(reference.Reference, asset.Id));
+                    if (parent is not null)
+                    {
+                        partitionIndex = index;
+                        break;
+                    }
+                }
+
+                // A rasterized PDF page is itself the source asset. Keep its OCR
+                // beside the corresponding page and do not invent an image parent.
+                if (partitionIndex < 0 && graph.Format == DocumentFormatKind.Pdf)
+                    partitionIndex = FindPdfPagePartitionIndex(partitions, asset);
+
+                if (partitionIndex < 0)
+                    partitionIndex = FindPartitionBySourcePartUri(partitions, asset.SourcePartUri);
+            }
+
+            if (partitionIndex < 0)
+            {
+                partitionIndex = EnsureDerivedAssetsPartition(partitions);
+                diagnostics.Add(new Diagnostic(
+                    "OcrParentPartitionUnresolved",
+                    $"OCR asset '{item.AssetId}' could not be associated with its source partition and was placed in 'derived-assets'.",
+                    DiagnosticSeverity.Warning,
+                    NodeId: item.AssetId));
+                parent = null;
+            }
+
+            placements.Add((partitionIndex, parent, item));
         }
-        partitions[^1] = target with { Nodes = nodes };
+
+        // Rebuild each partition in source order, inserting OCR immediately after
+        // its parent image. Parentless entries (PDF page OCR and unresolved assets)
+        // are appended in stable asset-id order. Re-numbering makes the result
+        // deterministic across repeated conversions.
+        for (var partitionIndex = 0; partitionIndex < partitions.Count; partitionIndex++)
+        {
+            var partition = partitions[partitionIndex];
+            var output = new List<DocumentNode>();
+            foreach (var node in partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
+            {
+                output.Add(node);
+                foreach (var placement in placements.Where(placement =>
+                             placement.PartitionIndex == partitionIndex &&
+                             placement.Parent?.Id == node.Id)
+                             .OrderBy(placement => placement.Item.AssetId, StringComparer.Ordinal))
+                    output.Add(CreateOcrNode(graph, placement.Item, placement.Parent));
+            }
+
+            foreach (var placement in placements.Where(placement =>
+                         placement.PartitionIndex == partitionIndex &&
+                         placement.Parent is null)
+                         .OrderBy(placement => placement.Item.AssetId, StringComparer.Ordinal))
+                output.Add(CreateOcrNode(graph, placement.Item, null));
+
+            partitions[partitionIndex] = partition with
+            {
+                Nodes = output.Select((node, order) => node with { Order = order }).ToArray()
+            };
+        }
+
         return graph with { Partitions = partitions, Assets = descriptors };
     }
+
+    private static DocumentNode CreateOcrNode(
+        DocumentGraph graph,
+        OcrAssetRecord item,
+        DocumentNode? parent)
+    {
+        var confidence = item.Result!.Regions
+            .Where(region => region.Confidence is not null)
+            .Select(region => region.Confidence!.Value)
+            .DefaultIfEmpty()
+            .Average();
+        return new DocumentNode(
+            "n_" + Hash(graph.DocumentId + ":ocr:" + item.AssetId)[..16],
+            NodeKind.ImageText,
+            parent?.Id,
+            parent?.Order + 1 ?? 0,
+            parent?.Layer is ContentLayer.Hidden or ContentLayer.Metadata
+                ? parent.Layer
+                : ContentLayer.Derived,
+            new TextNodeContent(item.Result.Text),
+            new SourceAnchor(
+                graph.Format.ToString().ToLowerInvariant(),
+                parent?.Source?.PartUri ?? "asset:" + item.AssetId,
+                [new AnchorLocator("asset_id", item.AssetId)]),
+            Editability: NodeEditability.AnnotationOnly,
+            Provenance: [new ProvenanceItem(EvidenceKind.Ocr, confidence, DerivedFromNodeId: parent?.Id)]);
+    }
+
+    private static bool IsGeneratedUnboundAsset(DocumentNode node) =>
+        node.Extensions is not null &&
+        node.Extensions.TryGetValue("unbound_asset", out var marker) &&
+        marker.ValueKind == JsonValueKind.True &&
+        marker.GetBoolean();
+
+    private static int FindPdfPagePartitionIndex(
+        IReadOnlyList<DocumentPartition> partitions,
+        WorkspaceAsset asset)
+    {
+        var pageUri = asset.SourcePartUri;
+        if (pageUri is null && asset.Id.StartsWith("page-", StringComparison.Ordinal))
+            pageUri = "pdf:page:" + asset.Id["page-".Length..].TrimStart('0');
+        if (pageUri is null) return -1;
+        var normalized = NormalizePartUri(pageUri);
+        for (var index = 0; index < partitions.Count; index++)
+        {
+            var partition = partitions[index];
+            if (StringComparer.OrdinalIgnoreCase.Equals(NormalizePartUri(partition.SourcePartUri), normalized) ||
+                StringComparer.OrdinalIgnoreCase.Equals(NormalizePartUri(partition.Id), normalized) ||
+                StringComparer.OrdinalIgnoreCase.Equals(partition.Id, asset.Id))
+                return index;
+        }
+        return -1;
+    }
+
+    private static int FindPartitionBySourcePartUri(
+        IReadOnlyList<DocumentPartition> partitions,
+        string? sourcePartUri)
+    {
+        if (string.IsNullOrWhiteSpace(sourcePartUri)) return -1;
+        var normalized = NormalizePartUri(sourcePartUri);
+        for (var index = 0; index < partitions.Count; index++)
+        {
+            if (StringComparer.OrdinalIgnoreCase.Equals(
+                    NormalizePartUri(partitions[index].SourcePartUri), normalized))
+                return index;
+        }
+        return -1;
+    }
+
+    private static int EnsureDerivedAssetsPartition(List<DocumentPartition> partitions)
+    {
+        var existing = partitions.FindIndex(partition =>
+            StringComparer.Ordinal.Equals(partition.Id, "derived-assets"));
+        if (existing >= 0) return existing;
+        var nextOrder = partitions.Count == 0 ? 0 : partitions.Max(partition => partition.Order) + 1;
+        partitions.Add(new DocumentPartition("derived-assets", nextOrder, [], null));
+        return partitions.Count - 1;
+    }
+
+    private static string NormalizePartUri(string? value) =>
+        (value ?? string.Empty).Replace('\\', '/').TrimStart('/');
 
     private static DocumentGraph AttachAssetReferences(DocumentGraph graph, IReadOnlyList<WorkspaceAsset> assets)
     {
@@ -800,38 +946,48 @@ public sealed class DocumentService
         }).ToList();
 
         var unboundImages = assets
-            .Where(asset => asset.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) && !boundAssetIds.Contains(asset.Id))
+            .Where(asset => asset.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) &&
+                            !boundAssetIds.Contains(asset.Id) &&
+                            !(graph.Format == DocumentFormatKind.Pdf && IsPdfPageAsset(asset)))
             .OrderBy(asset => asset.Id, StringComparer.Ordinal)
             .ToArray();
         if (unboundImages.Length == 0) return graph with { Partitions = partitions };
         if (partitions.Count == 0) partitions.Add(new DocumentPartition("part-0001", 0, []));
-        var target = partitions[^1];
-        var nodes = target.Nodes.ToList();
-        var nextOrder = nodes.Count == 0 ? 0 : nodes.Max(node => node.Order) + 1;
+
         foreach (var asset in unboundImages)
         {
+            var targetIndex = FindPartitionBySourcePartUri(partitions, asset.SourcePartUri);
+            if (targetIndex < 0) targetIndex = EnsureDerivedAssetsPartition(partitions);
+            var target = partitions[targetIndex];
             var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
             {
                 ["image_media_type"] = JsonSerializer.SerializeToElement(asset.MediaType),
+                ["unbound_asset"] = JsonSerializer.SerializeToElement(true),
             };
             if (graph.Format == DocumentFormatKind.Docx)
                 extensions["hidden_content_type"] = JsonSerializer.SerializeToElement("unbound-docx-media");
 
+            var nextOrder = target.Nodes.Count == 0 ? 0 : target.Nodes.Max(node => node.Order) + 1;
+            var nodes = target.Nodes.ToList();
             nodes.Add(new DocumentNode(
                 "n_" + Hash(graph.DocumentId + ":asset:" + asset.Id)[..16],
                 NodeKind.Image,
                 null,
-                nextOrder++,
+                nextOrder,
                 graph.Format == DocumentFormatKind.Docx ? ContentLayer.Hidden : ContentLayer.Furniture,
                 new ReferenceNodeContent(asset.Id, Path.GetFileNameWithoutExtension(asset.SourcePartUri ?? asset.FileName)),
                 new SourceAnchor(graph.Format.ToString().ToLowerInvariant(), asset.SourcePartUri ?? "asset:" + asset.Id,
                     [new AnchorLocator("asset_id", asset.Id)]),
                 Editability: NodeEditability.Protected,
                 Extensions: extensions));
+            partitions[targetIndex] = target with { Nodes = nodes };
         }
-        partitions[^1] = target with { Nodes = nodes };
         return graph with { Partitions = partitions };
     }
+
+    private static bool IsPdfPageAsset(WorkspaceAsset asset) =>
+        asset.SourcePartUri?.StartsWith("pdf:page:", StringComparison.OrdinalIgnoreCase) == true ||
+        asset.Id.StartsWith("page-", StringComparison.OrdinalIgnoreCase);
 
     private static WorkspaceAsset? FindAsset(string reference, IReadOnlyList<WorkspaceAsset> assets)
     {

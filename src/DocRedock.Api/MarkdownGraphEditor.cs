@@ -116,7 +116,7 @@ public sealed class MarkdownGraphEditor
                     nodes.Add(node);
                     continue;
                 }
-                nodes.Add(ApplyBlock(node, block));
+                nodes.Add(ApplyBlock(node, block, diagnostics));
             }
             partitions.Add(partition with { Nodes = nodes });
         }
@@ -158,8 +158,10 @@ public sealed class MarkdownGraphEditor
         return new GraphEditResult(parsed, edited, diff, diagnostics);
     }
 
-    private static DocumentNode ApplyBlock(DocumentNode node, TypedMarkdownBlock block)
+    private static DocumentNode ApplyBlock(DocumentNode node, TypedMarkdownBlock block, ICollection<Diagnostic> diagnostics)
     {
+        if (node.Content is TableNodeContent)
+            return ApplyTable(node, DecodeBlockText(block), diagnostics);
         if (node.Kind == NodeKind.CodeBlock &&
             StringComparer.Ordinal.Equals(ProjectNodeText(node), DecodeBlockText(block)))
             return node;
@@ -177,10 +179,50 @@ public sealed class MarkdownGraphEditor
         _ when node.Kind == NodeKind.Cell => ApplyCell(node, text),
         TextNodeContent current when StringComparer.Ordinal.Equals(current.Text, text) => node,
         TextNodeContent => node with { Content = new TextNodeContent(text) },
-        TableNodeContent current when StringComparer.Ordinal.Equals(ProjectTable(current), text) => node,
-        TableNodeContent => node with { Content = ParseTable(text) },
         _ => node,
     };
+
+    private static DocumentNode ApplyTable(DocumentNode baselineNode, string markdownText, ICollection<Diagnostic> diagnostics)
+    {
+        var baseline = (TableNodeContent)baselineNode.Content;
+        if (!TableGrid.TryCreate(baseline, out var grid, out var reason))
+        {
+            diagnostics.Add(new Diagnostic("InvalidTableGrid", reason ?? "The baseline table has invalid spans.",
+                DiagnosticSeverity.Error, baselineNode.Id, baselineNode.Source?.PartUri));
+            return baselineNode;
+        }
+
+        var validatedGrid = grid!;
+        var projected = ParseTable(markdownText);
+        if (projected.Rows.Count != validatedGrid.RowCount || projected.Rows.Any(row => row.Count != validatedGrid.ColumnCount))
+        {
+            diagnostics.Add(new Diagnostic("MergedTableShapeChanged",
+                "The Markdown table dimensions no longer match the baseline table. Structural table edits are not supported.",
+                DiagnosticSeverity.Error, baselineNode.Id, baselineNode.Source?.PartUri));
+            return baselineNode;
+        }
+
+        var updatedRows = baseline.Rows.Select(row => row.ToArray()).ToArray();
+        foreach (var row in validatedGrid.Rows)
+        foreach (var slot in row)
+        {
+            var value = projected.Rows[slot.Row][slot.Column].Text;
+            if (slot.IsContinuation)
+            {
+                if (value.Length != 0 && !StringComparer.Ordinal.Equals(value, slot.Origin.Text))
+                {
+                    diagnostics.Add(new Diagnostic("MergedTableContinuationEdited",
+                        "A merged-cell continuation cannot be edited. Edit the merge origin cell instead.",
+                        DiagnosticSeverity.Error, baselineNode.Id, baselineNode.Source?.PartUri));
+                    return baselineNode;
+                }
+                continue;
+            }
+            updatedRows[slot.OriginRow][slot.OriginCellIndex] =
+                updatedRows[slot.OriginRow][slot.OriginCellIndex] with { Text = value };
+        }
+        return baselineNode with { Content = new TableNodeContent(updatedRows) };
+    }
 
     private static string ProjectNodeText(DocumentNode node) => node.Content switch
     {

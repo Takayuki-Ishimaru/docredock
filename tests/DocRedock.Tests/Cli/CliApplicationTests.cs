@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using DocRedock.Cli;
+using DocRedock.Render;
 
 namespace DocRedock.Tests.Cli;
 
@@ -29,6 +30,23 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Readable Markdown", stdout.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("Sidecar:", stdout.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("drmd_schema", await File.ReadAllTextAsync(fixture.MarkdownPath), StringComparison.Ordinal);
+        Assert.Empty(stderr.ToString());
+    }
+
+    [Fact]
+    public async Task Export_defaults_to_readable_profile_without_creating_a_sidecar()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var app = new CliApplication(stdout, stderr);
+
+        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "off"]);
+
+        Assert.Equal((int)ExitCode.Success, result);
+        Assert.Contains("Mode:     Readable Markdown", stdout.ToString(), StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.ChangeExtension(fixture.MarkdownPath, ".drmd")));
         Assert.Empty(stderr.ToString());
     }
 
@@ -78,7 +96,7 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["help"]));
 
-        Assert.Contains("DocRedock 0.1.4", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("DocRedock 0.1.5", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
@@ -93,20 +111,79 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, new StringWriter());
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["--version"]));
-        Assert.StartsWith("DocRedock 0.1.4", stdout.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith("DocRedock 0.1.5", stdout.ToString(), StringComparison.Ordinal);
     }
 
-    [Fact]
-    public async Task Experimental_commands_require_explicit_environment_opt_in()
+    [Theory]
+    [InlineData("restore")]
+    [InlineData("render")]
+    [InlineData("diff")]
+    [InlineData("rebase")]
+    [InlineData("pack")]
+    [InlineData("unpack")]
+    [InlineData("migrate")]
+    public async Task Experimental_commands_require_explicit_environment_opt_in(string command)
     {
         Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
         try
         {
             var stderr = new StringWriter();
-            var result = await new CliApplication(new StringWriter(), stderr).RunAsync(["restore", "missing.md"]);
+            var result = await new CliApplication(new StringWriter(), stderr).RunAsync([command, "missing.md"]);
 
             Assert.Equal((int)ExitCode.Unsupported, result);
             Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", stderr.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+        }
+    }
+
+    [Theory]
+    [InlineData("roundtrip")]
+    [InlineData("audit")]
+    public async Task Export_profiles_require_explicit_environment_opt_in(string profile)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        try
+        {
+            var stderr = new StringWriter();
+            var result = await new CliApplication(new StringWriter(), stderr).RunAsync(
+                ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", profile]);
+
+            Assert.Equal((int)ExitCode.Unsupported, result);
+            Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", stderr.ToString(), StringComparison.Ordinal);
+            Assert.False(File.Exists(fixture.MarkdownPath));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+        }
+    }
+
+    [Fact]
+    public async Task Cli_pdf_export_requires_explicit_environment_opt_in_but_read_only_inspection_is_available()
+    {
+        using var fixture = new Fixture();
+        await new MarkdownRenderer().RenderAsync("PDF text", RenderFormat.Pdf, fixture.PdfPath);
+        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        try
+        {
+            var exportError = new StringWriter();
+            var export = await new CliApplication(new StringWriter(), exportError).RunAsync(
+                ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
+
+            Assert.Equal((int)ExitCode.Unsupported, export);
+            Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", exportError.ToString(), StringComparison.Ordinal);
+            Assert.False(File.Exists(fixture.MarkdownPath));
+
+            var inspectOutput = new StringWriter();
+            var inspect = await new CliApplication(inspectOutput, new StringWriter()).RunAsync(["inspect", fixture.PdfPath]);
+
+            Assert.Equal((int)ExitCode.Success, inspect);
+            Assert.Contains("Format: pdf", inspectOutput.ToString(), StringComparison.Ordinal);
         }
         finally
         {
@@ -157,7 +234,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
 
-        var export = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath]);
+        var export = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]);
         var verify = await app.RunAsync(["verify", fixture.MarkdownPath]);
         var restore = await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.RestoredPath]);
 
@@ -181,7 +258,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
         Assert.Equal((int)ExitCode.Success,
-            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath]));
+            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath, Encoding.UTF8);
         await File.WriteAllTextAsync(
             fixture.MarkdownPath,
@@ -211,7 +288,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, stderr);
         var sidecar = Path.ChangeExtension(fixture.MarkdownPath, ".drmd");
 
-        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath]));
+        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var markdown = await File.ReadAllBytesAsync(fixture.MarkdownPath);
         Assert.True(Directory.Exists(sidecar));
 
@@ -239,7 +316,7 @@ public sealed class CliApplicationTests : IDisposable
         var sidecar = Path.ChangeExtension(fixture.MarkdownPath, ".drmd");
 
         Assert.Equal((int)ExitCode.Success,
-            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--sidecar", "zip"]));
+            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--sidecar", "zip"]));
 
         Assert.True(File.Exists(sidecar));
         Assert.False(Directory.Exists(sidecar));
@@ -254,7 +331,7 @@ public sealed class CliApplicationTests : IDisposable
         using var fixture = new Fixture();
         fixture.CreateDocx();
         var app = new CliApplication(new StringWriter(), new StringWriter());
-        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath]));
+        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
 
         Assert.Equal((int)ExitCode.InvalidInput, await app.RunAsync(["pack", fixture.MarkdownPath, "--sidecar"]));
     }
@@ -367,6 +444,7 @@ public sealed class CliApplicationTests : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "docredock-cli-tests", Guid.NewGuid().ToString("N"));
         public string SourcePath => Path.Combine(Root, "source.docx");
+        public string PdfPath => Path.Combine(Root, "source.pdf");
         public string MarkdownPath => Path.Combine(Root, "projection.md");
         public string RestoredPath => Path.Combine(Root, "restored.docx");
 

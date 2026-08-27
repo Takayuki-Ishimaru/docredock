@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.4
+        default: v0.1.5
 
 permissions:
   contents: read
@@ -336,7 +336,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y xvfb
+          sudo apt-get install -y xvfb fonts-ipafont-gothic
           name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
@@ -397,7 +397,8 @@ jobs:
           - [x] Extracted GUI binary format and CPU architecture passed on every target runner; the actual packaged Linux GUI child process stayed alive under Xvfb
           - [x] Signing status is recorded inside every archive; unsigned beta packages remain allowed
           - [x] Artifact-linked CycloneDX SBOM, RID-specific runtime locks, hashes, RID, and commit provenance were generated
-          - [ ] PDF conversion and all source-format restore workflows are approved (intentionally pending; do not use)
+          - [x] Desktop GUI PDF input default availability and the CLI PDF experimental gate passed regression tests
+          - [ ] Round-trip/source-format restore and edited-PDF F3 output are approved as supported user workflows (intentionally pending; do not use)
 
           Workflow evidence: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF

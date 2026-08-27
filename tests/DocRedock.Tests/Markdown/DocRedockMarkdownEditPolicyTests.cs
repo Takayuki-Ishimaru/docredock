@@ -68,7 +68,7 @@ public sealed class DocRedockMarkdownEditPolicyTests
 
         var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
 
-        Assert.Contains("drmd_rules: 1.0", markdown);
+        Assert.Contains("drmd_rules: 1.1", markdown);
         Assert.Contains("editability=cell-value-or-formula", markdown);
         Assert.Contains("operations=replace-cell", markdown);
         Assert.Contains("constraints=preserve-address,no-delete,safe-formula", markdown);

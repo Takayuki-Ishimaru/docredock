@@ -6,6 +6,8 @@ Usage:
 """
 from pathlib import Path
 import io
+import os
+import subprocess
 import sys
 
 from PIL import Image, ImageDraw
@@ -21,13 +23,52 @@ from reportlab.platypus import (
     Paragraph, Spacer, Table, TableStyle, PageBreak,
 )
 
-ROOT = Path(__file__).resolve().parents[4]
-FONT = ROOT / "artifacts/cli/osx-arm64/Assets/NotoSansJP[wght].ttf"
-if not FONT.exists():
-    candidates = list(ROOT.glob("**/NotoSansJP[wght].ttf"))
-    if candidates:
-        FONT = candidates[0]
-pdfmetrics.registerFont(TTFont("NotoSansJP", str(FONT)))
+FONT_NAME = "DocRedockFixtureFont"
+
+
+def resolve_font():
+    explicit = os.environ.get("DOCREDOCK_PDF_FONT_PATH")
+    if explicit:
+        path = Path(explicit).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"DOCREDOCK_PDF_FONT_PATH does not exist: {path}")
+        face = int(os.environ.get("DOCREDOCK_PDF_FONT_FACE_INDEX", "0"))
+        if face < 0:
+            raise ValueError("DOCREDOCK_PDF_FONT_FACE_INDEX must be non-negative")
+        return path, face
+
+    candidates = [
+        Path("/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"),
+        Path("/System/Library/Fonts/ヒラギノ丸ゴ ProN W4.ttc"),
+        Path("C:/Windows/Fonts/YuGothR.ttc"),
+        Path("C:/Windows/Fonts/meiryo.ttc"),
+        Path("/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf"),
+        Path("/usr/share/fonts/opentype/ipaexfont-gothic/ipaexg.ttf"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path, 0
+
+    try:
+        match = subprocess.run(
+            ["fc-match", "-f", "%{file}\\n", "Noto Sans CJK JP,Noto Sans JP,IPAexGothic,IPAGothic"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.splitlines()
+        for value in match:
+            path = Path(value.strip())
+            if path.is_file():
+                return path, 0
+    except (FileNotFoundError, subprocess.SubprocessError):
+        pass
+
+    raise FileNotFoundError(
+        "No installed Japanese font was found. Set DOCREDOCK_PDF_FONT_PATH "
+        "and optional DOCREDOCK_PDF_FONT_FACE_INDEX."
+    )
+
+
+FONT, FONT_FACE_INDEX = resolve_font()
+pdfmetrics.registerFont(TTFont(FONT_NAME, str(FONT), subfontIndex=FONT_FACE_INDEX))
 
 PAGE_W, PAGE_H = A4
 BLUE = colors.HexColor("#17365D")
@@ -40,15 +81,15 @@ RED = colors.HexColor("#B42318")
 GREEN = colors.HexColor("#067647")
 
 styles = getSampleStyleSheet()
-styles.add(ParagraphStyle("JpTitle", parent=styles["Title"], fontName="NotoSansJP", fontSize=19, leading=24, textColor=BLUE, alignment=TA_LEFT, spaceAfter=4))
-styles.add(ParagraphStyle("JpH1", parent=styles["Heading1"], fontName="NotoSansJP", fontSize=13, leading=17, textColor=BLUE, spaceBefore=7, spaceAfter=5))
-styles.add(ParagraphStyle("JpH2", parent=styles["Heading2"], fontName="NotoSansJP", fontSize=10.5, leading=14, textColor=TEAL, spaceBefore=5, spaceAfter=3))
-styles.add(ParagraphStyle("JpBody", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=8.2, leading=12, textColor=INK, spaceAfter=3))
-styles.add(ParagraphStyle("JpSmall", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=6.8, leading=9, textColor=MUTED))
-styles.add(ParagraphStyle("JpCell", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=6.7, leading=8.5, textColor=INK))
-styles.add(ParagraphStyle("JpCellHead", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=6.8, leading=8.5, textColor=colors.white, alignment=TA_CENTER))
-styles.add(ParagraphStyle("JpBullet", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=7.8, leading=11, leftIndent=9, firstLineIndent=-7, textColor=INK, bulletIndent=0))
-styles.add(ParagraphStyle("JpCaption", parent=styles["BodyText"], fontName="NotoSansJP", fontSize=6.5, leading=8, textColor=MUTED, alignment=TA_CENTER))
+styles.add(ParagraphStyle("JpTitle", parent=styles["Title"], fontName=FONT_NAME, fontSize=19, leading=24, textColor=BLUE, alignment=TA_LEFT, spaceAfter=4))
+styles.add(ParagraphStyle("JpH1", parent=styles["Heading1"], fontName=FONT_NAME, fontSize=13, leading=17, textColor=BLUE, spaceBefore=7, spaceAfter=5))
+styles.add(ParagraphStyle("JpH2", parent=styles["Heading2"], fontName=FONT_NAME, fontSize=10.5, leading=14, textColor=TEAL, spaceBefore=5, spaceAfter=3))
+styles.add(ParagraphStyle("JpBody", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=8.2, leading=12, textColor=INK, spaceAfter=3))
+styles.add(ParagraphStyle("JpSmall", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=6.8, leading=9, textColor=MUTED))
+styles.add(ParagraphStyle("JpCell", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=6.7, leading=8.5, textColor=INK))
+styles.add(ParagraphStyle("JpCellHead", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=6.8, leading=8.5, textColor=colors.white, alignment=TA_CENTER))
+styles.add(ParagraphStyle("JpBullet", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=7.8, leading=11, leftIndent=9, firstLineIndent=-7, textColor=INK, bulletIndent=0))
+styles.add(ParagraphStyle("JpCaption", parent=styles["BodyText"], fontName=FONT_NAME, fontSize=6.5, leading=8, textColor=MUTED, alignment=TA_CENTER))
 
 def P(text, style="JpBody"):
     return Paragraph(text, styles[style])
@@ -75,7 +116,7 @@ def make_chart():
 
 def header_footer(canvas, doc):
     canvas.saveState()
-    canvas.setFont("NotoSansJP", 7)
+    canvas.setFont(FONT_NAME, 7)
     canvas.setFillColor(MUTED)
     canvas.drawString(16 * mm, PAGE_H - 11 * mm, "DRMD PDF変換検証 / CONFIDENTIAL")
     canvas.drawRightString(PAGE_W - 16 * mm, 10 * mm, f"ページ {doc.page}")
@@ -87,7 +128,7 @@ def header_footer(canvas, doc):
 def table(data, widths, header=True):
     t = Table(data, colWidths=widths, repeatRows=1 if header else 0, hAlign="LEFT")
     commands = [
-        ("FONTNAME", (0, 0), (-1, -1), "NotoSansJP"),
+        ("FONTNAME", (0, 0), (-1, -1), FONT_NAME),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#CBD5E1")),
         ("LEFTPADDING", (0, 0), (-1, -1), 4),
@@ -179,7 +220,7 @@ def build(path):
         checklist.append([P(x, "JpCell") for x in row])
     ct = table(checklist, [14*mm, 43*mm, doc.width-92*mm, 25*mm])
     ct.setStyle(TableStyle([("TEXTCOLOR",(3,1),(3,-1),GREEN),("BACKGROUND",(3,4),(3,6),colors.HexColor("#FFF4E5"))]))
-    story += [ct, Spacer(1, 8), P("再現情報", "JpH2"), P("このPDFは tests/DocRedock.Tests/Fixtures/Pdf/generate_complex_pdf.py から生成する。フォントはリポジトリ同梱の NotoSansJP を使用し、日時・識別子・測定値は固定している。", "JpBody"), Spacer(1, 20), P("PDF-COMPLEX-001 / END", "JpTitle")]
+    story += [ct, Spacer(1, 8), P("再現情報", "JpH2"), P(f"このPDFは tests/DocRedock.Tests/Fixtures/Pdf/generate_complex_pdf.py から生成する。フォントはシステムまたは DOCREDOCK_PDF_FONT_PATH から選択し、日時・識別子・測定値は固定している（{FONT.name}）。", "JpBody"), Spacer(1, 20), P("PDF-COMPLEX-001 / END", "JpTitle")]
     doc.build(story)
 
 if __name__ == "__main__":

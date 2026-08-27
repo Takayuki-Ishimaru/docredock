@@ -42,9 +42,13 @@ public sealed class MarkdownRendererTests
 
         Assert.Equal(RenderFormat.Pdf, result.Format);
         var bytes = await File.ReadAllBytesAsync(output);
+        var latin = System.Text.Encoding.Latin1.GetString(bytes);
         Assert.StartsWith("%PDF-1.4", System.Text.Encoding.ASCII.GetString(bytes, 0, 8));
-        Assert.True(bytes.Length > 100_000);
-        Assert.Contains("/Subtype /Type0", System.Text.Encoding.Latin1.GetString(bytes));
+        Assert.Contains("/Subtype /Type1", latin);
+        Assert.Contains("/BaseFont /Helvetica", latin);
+        Assert.DoesNotContain("/FontFile2", latin);
+        Assert.Empty(result.Warnings);
+        Assert.Contains(result.Information, item => item.Contains("new document", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -58,9 +62,41 @@ public sealed class MarkdownRendererTests
         Assert.Equal(RenderFormat.Pdf, result.Format);
         var bytes = await File.ReadAllBytesAsync(output);
         var latin = System.Text.Encoding.Latin1.GetString(bytes);
-        Assert.True(bytes.Length > 9_000_000);
+        Assert.True(bytes.Length > 100_000);
         Assert.Contains("/CIDToGIDMap", latin);
         Assert.Contains("/ToUnicode", latin);
+        Assert.Contains(result.Information, item => item.Contains("PdfFontSelected", StringComparison.Ordinal));
+        Assert.Empty(result.Warnings);
+    }
+
+    [Fact]
+    public async Task Pdf_render_reports_content_truncation()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "truncated.pdf");
+        var markdown = string.Join("\n", Enumerable.Range(1, 73).Select(index => $"Line {index:D2}"));
+
+        var result = await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Pdf, output);
+
+        Assert.NotNull(result.Coverage);
+        Assert.True(result.Coverage.Truncated);
+        Assert.Contains(result.Warnings, warning => warning.Contains("PdfContentTruncated", StringComparison.Ordinal));
+        Assert.Contains("42 of 73", result.Warnings.Single(warning => warning.Contains("PdfContentTruncated", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Xlsx_render_reports_blocks_it_cannot_place()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "coverage.xlsx");
+        const string markdown = "# Heading\n\n| A | B |\n| --- | --- |\n| 1 | 2 |";
+
+        var result = await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Xlsx, output);
+
+        Assert.NotNull(result.Coverage);
+        Assert.Equal(2, result.Coverage.InputBlockCount);
+        Assert.Single(result.Coverage.Omissions);
+        Assert.Contains(result.Warnings, warning => warning.Contains("RenderBlockOmitted", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -109,7 +145,7 @@ public sealed class MarkdownRendererTests
 
         var result = await renderer.RenderAsync(MermaidMarkdown, RenderFormat.Docx, output);
 
-        Assert.Contains(result.Warnings, warning => warning.Contains("1 Mermaid diagram", StringComparison.Ordinal));
+        Assert.Contains(result.Information, item => item.Contains("1 Mermaid diagram", StringComparison.Ordinal));
         using var archive = ZipFile.OpenRead(output);
         Assert.NotNull(archive.GetEntry("word/media/docredock-mermaid-1.png"));
         Assert.Contains("rIdDocRedockMermaid1", await ReadEntryAsync(archive, "word/_rels/document.xml.rels"));
@@ -289,7 +325,7 @@ public sealed class MarkdownRendererTests
         Assert.Contains("<strong>判断:</strong>", html, StringComparison.Ordinal);
         Assert.DoesNotContain("drmd_schema", html, StringComparison.Ordinal);
         Assert.DoesNotContain("drmd:block", html, StringComparison.Ordinal);
-        Assert.Contains(result.Warnings, warning => warning.Contains("control metadata", StringComparison.Ordinal));
+        Assert.Contains(result.Information, item => item.Contains("control metadata", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -483,7 +519,7 @@ public sealed class MarkdownRendererTests
             new RenderOptions(TemplatePath: template));
 
         Assert.Equal("F2", result.FidelityLevel);
-        Assert.Contains(result.Warnings, warning => warning.Contains("merged generated content dependencies", StringComparison.Ordinal));
+        Assert.Contains(result.Information, item => item.Contains("merged generated content dependencies", StringComparison.Ordinal));
         using var rendered = ZipFile.OpenRead(output);
         Assert.NotNull(rendered.GetEntry("custom/company-theme.bin"));
 
