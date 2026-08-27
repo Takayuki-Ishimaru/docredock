@@ -319,6 +319,33 @@ public sealed class DocumentServiceTests
         Assert.True(File.Exists(Path.Combine(workspace, "assets", "page-0001.png")));
     }
 
+    [Fact]
+    public async Task Textless_pdf_without_rasterizer_reports_explicit_unavailability()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "scan.pdf");
+            await new MarkdownRenderer().RenderAsync(string.Empty, RenderFormat.Pdf, source);
+            var exported = await new DocumentService(new FakeOcrEngine()).ExportAsync(
+                new DocumentExportOptions(
+                    source,
+                    Path.Combine(root, "scan.drmd"),
+                    Path.Combine(root, "scan.md"),
+                    EnableOcr: true,
+                    OcrLanguages: ["jpn"]));
+
+            var diagnostic = Assert.Single(exported.Diagnostics, item =>
+                item.Code == "PdfRasterizerUnavailable");
+            Assert.Contains("does not include a PDF rasterizer", diagnostic.Message, StringComparison.Ordinal);
+            Assert.Empty(exported.Graph.Nodes);
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string TempDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), "docredock-service-tests", Guid.NewGuid().ToString("N"));

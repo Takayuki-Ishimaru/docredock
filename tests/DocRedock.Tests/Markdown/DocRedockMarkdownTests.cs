@@ -21,7 +21,7 @@ public sealed class DocRedockMarkdownTests
 
         Assert.Equal(first.Markdown, second.Markdown);
         Assert.Contains("drmd_schema: 1.0", first.Markdown);
-        Assert.Contains("drmd_rules: 1.0", first.Markdown);
+        Assert.Contains("drmd_rules: 1.1", first.Markdown);
         Assert.Contains("roundtrip_store: document.drmd", first.Markdown);
         Assert.Contains("<!--drmd:partition-begin id=part-0001 baseline_nodes=2-->", first.Markdown);
         Assert.Contains("<!--drmd:document-end id=doc_1 partitions=1-->", first.Markdown);
@@ -433,7 +433,7 @@ public sealed class DocRedockMarkdownTests
             "doc_1",
             DocumentFormatKind.Docx,
             [new DocumentPartition("part-a", 0, [])])).Markdown
-            .Replace("drmd_rules: 1.0", "drmd_rules: 9.9", StringComparison.Ordinal);
+            .Replace("drmd_rules: 1.1", "drmd_rules: 9.9", StringComparison.Ordinal);
 
         var parsed = new DocRedockMarkdownParser().Parse(markdown);
 

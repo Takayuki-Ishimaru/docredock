@@ -22,6 +22,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from generate_complex_xlsx import generate_complex_xlsx
+
 try:
     from PIL import Image
 except ImportError:  # pragma: no cover - README に Pillow 導入を前提として明記する
@@ -34,7 +36,9 @@ except ImportError:  # pragma: no cover - README に Pillow 導入を前提と�
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUT_ROOT = REPO_ROOT / "artifacts" / "conversion-qa"
 FIXTURES_ROOT = REPO_ROOT / "tests" / "DocRedock.Tests" / "Fixtures"
-REFERENCE_XLSX = REPO_ROOT / "経費精算システム_設計書_検証用.xlsx"
+GENERATED_FIXTURES_ROOT = REPO_ROOT / "artifacts" / "fixtures"
+GENERATED_XLSX = GENERATED_FIXTURES_ROOT / "generated-complex.xlsx"
+GENERATED_XLSX_EXPECTATIONS = REPO_ROOT / "tools" / "conversion-qa" / "fixtures" / "generated-complex-xlsx.expectations.json"
 
 EXPORT_TIMEOUT_SEC = 180
 RENDER_TIMEOUT_SEC = 120
@@ -704,7 +708,7 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     mode.add_argument("--file", help="単一の変換対象ファイル")
     mode.add_argument(
         "--all", action="store_true",
-        help="Fixtures 配下の *.expectations.json を全て処理し、xlsx 参考エントリも処理する",
+        help="DOCX/PPTX fixtures と標準ライブラリ生成XLSXを処理し、3形式のcoverageを保証する",
     )
     parser.add_argument(
         "--expectations",
@@ -756,24 +760,44 @@ def main(argv: Optional[list] = None) -> int:
             results.append(result)
             print(f"  -> status={result['status']}")
 
-        if REFERENCE_XLSX.is_file():
-            out_dir = _resolve_out_dir(DEFAULT_OUT_ROOT, REFERENCE_XLSX, None)
-            print(f"[conversion-qa] processing reference entry {REFERENCE_XLSX.name} ...")
-            try:
-                result = process_target(REFERENCE_XLSX, None, out_dir, tools, args.render)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[conversion-qa] ERROR processing {REFERENCE_XLSX}: {exc}", file=sys.stderr)
-                result = error_result(REFERENCE_XLSX, None, out_dir, exc)
-            results.append(result)
-            print(f"  -> status={result['status']}")
-        else:
-            print(f"[conversion-qa] reference xlsx not found: {REFERENCE_XLSX}", file=sys.stderr)
+        print(f"[conversion-qa] generating {GENERATED_XLSX} ...")
+        generate_complex_xlsx(GENERATED_XLSX)
+        out_dir = _resolve_out_dir(DEFAULT_OUT_ROOT, GENERATED_XLSX, None)
+        print(f"[conversion-qa] processing generated fixture {GENERATED_XLSX.name} ...")
+        try:
+            result = process_target(
+                GENERATED_XLSX,
+                GENERATED_XLSX_EXPECTATIONS,
+                out_dir,
+                tools,
+                args.render,
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"[conversion-qa] ERROR processing {GENERATED_XLSX}: {exc}", file=sys.stderr)
+            result = error_result(GENERATED_XLSX, GENERATED_XLSX_EXPECTATIONS, out_dir, exc)
+        results.append(result)
+        print(f"  -> status={result['status']}")
+
+        required_formats = {".docx", ".xlsx", ".pptx"}
+        executed_formats = {Path(item["target_path"]).suffix.lower() for item in results}
+        missing_formats = sorted(required_formats - executed_formats)
+        coverage_failed = bool(missing_formats or len(results) < 3)
+        if coverage_failed:
+            missing_text = ", ".join(missing_formats) if missing_formats else "target count below 3"
+            print(
+                "ERROR ConversionQaCoverageTooLow: "
+                f"Expected at least one DOCX, XLSX, and PPTX target; missing {missing_text}.",
+                file=sys.stderr,
+            )
 
         write_summary_md(results, DEFAULT_OUT_ROOT)
         print(f"[conversion-qa] summary: {DEFAULT_OUT_ROOT / 'summary.md'}")
         failed = sum(1 for r in results if r.get("target_failed"))
-        print(f"[conversion-qa] {len(results)} targets, {failed} failed")
-        return 1 if failed else 0
+        print(
+            f"[conversion-qa] {len(results)} targets, {failed} failed; "
+            f"formats={','.join(sorted(executed_formats))}"
+        )
+        return 1 if failed or coverage_failed else 0
 
     target = Path(args.file).resolve()
     if not target.is_file():

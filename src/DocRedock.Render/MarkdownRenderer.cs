@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using DocRedock.Core.Documents;
 using DocRedock.Markdown;
+using DocRedock.Render.Fonts;
 
 namespace DocRedock.Render;
 
@@ -12,16 +13,34 @@ public sealed record RenderOptions(
     string? Title = null,
     string? TemplatePath = null,
     string? FontPath = null,
+    int? FontFaceIndex = null,
     string MermaidExecutablePath = "mmdc",
     string MermaidBackgroundColor = "white",
     TimeSpan? MermaidTimeout = null,
     string? SourceDirectory = null,
-    string? RelativeLinkOutputPath = null);
+    string? RelativeLinkOutputPath = null,
+    bool Verbose = false);
+public sealed record RenderOmission(int BlockIndex, string BlockType, string Reason);
+public sealed record RenderCoverageReport(
+    int InputBlockCount,
+    int RenderedBlockCount,
+    IReadOnlyList<RenderOmission> Omissions,
+    bool Truncated);
 public sealed record RenderResult(string OutputPath, RenderFormat Format, string FidelityLevel, bool IsRestore, IReadOnlyList<string> Warnings)
 {
-    public RenderReport Report => new("render", Format, FidelityLevel, IsRestore, Warnings);
+    public IReadOnlyList<string> Information { get; init; } = [];
+    public RenderCoverageReport? Coverage { get; init; }
+    public RenderReport Report => new("render", Format, FidelityLevel, IsRestore, Warnings)
+    {
+        Information = Information,
+        Coverage = Coverage
+    };
 }
-public sealed record RenderReport(string Operation, RenderFormat Format, string FidelityLevel, bool IsRestore, IReadOnlyList<string> Warnings);
+public sealed record RenderReport(string Operation, RenderFormat Format, string FidelityLevel, bool IsRestore, IReadOnlyList<string> Warnings)
+{
+    public IReadOnlyList<string> Information { get; init; } = [];
+    public RenderCoverageReport? Coverage { get; init; }
+}
 
 /// <summary>Generates new documents from generic Markdown. This path is intentionally separate from Restore.</summary>
 public sealed class MarkdownRenderer
@@ -61,15 +80,16 @@ public sealed class MarkdownRenderer
         Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
         var tempPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var generatedPath = tempPath + ".generated";
+        RenderWriteOutcome outcome;
         try
         {
             if (templatePath is not null)
             {
-                WriteGenerated(document, format, generatedPath, options, sanitizedDocRedock);
+                outcome = WriteGenerated(document, format, generatedPath, options, sanitizedDocRedock);
                 File.Copy(templatePath, tempPath);
                 OfficeTemplatePackageMerger.ApplyGeneratedContent(generatedPath, tempPath, format);
             }
-            else WriteGenerated(document, format, tempPath, options, sanitizedDocRedock);
+            else outcome = WriteGenerated(document, format, tempPath, options, sanitizedDocRedock);
             cancellationToken.ThrowIfCancellationRequested();
             File.Move(tempPath, fullPath);
         }
@@ -79,18 +99,33 @@ public sealed class MarkdownRenderer
             if (File.Exists(generatedPath)) File.Delete(generatedPath);
         }
         var fidelity = options?.TemplatePath is null ? "F3" : "F2";
-        var warnings = new List<string>
+        var information = new List<string>
         {
             format == RenderFormat.Html
-                ? "HTML preview is a review artifact; it is not Restore."
+                ? "INFORMATION Render: HTML preview is a review artifact; it is not Restore."
                 : options?.TemplatePath is null
-                    ? "Render creates a new document; it is not an Office/PDF Restore."
-                    : "Template render preserved template package parts and merged generated content dependencies; it is not Restore."
+                    ? "INFORMATION Render: Render creates a new document; it is not Restore."
+                    : "INFORMATION Render: Template render preserved template package parts and merged generated content dependencies; it is not Restore."
         };
-        if (sanitizedDocRedock) warnings.Add("DRMD control metadata was removed before rendering.");
+        if (sanitizedDocRedock) information.Add("INFORMATION Render: DRMD control metadata was removed before rendering.");
         var diagramCount = document.Blocks.OfType<MarkdownDiagram>().Count();
-        if (diagramCount > 0) warnings.Add($"Rendered {diagramCount} Mermaid diagram(s) with a local Mermaid CLI.");
-        return new RenderResult(fullPath, format, fidelity, false, warnings);
+        if (diagramCount > 0) information.Add($"INFORMATION Render: Rendered {diagramCount} Mermaid diagram(s) with a local Mermaid CLI.");
+        if (outcome.Font is not null)
+        {
+            var detail = options?.Verbose == true ? $" Path: {outcome.Font.SourcePath}; face index: {outcome.Font.FaceIndex}." : string.Empty;
+            information.Add($"INFORMATION PdfFontSelected: Selected {(outcome.Font.Source == PdfFontSource.System ? "system " : string.Empty)}font '{outcome.Font.FamilyName}' for PDF rendering.{detail}");
+        }
+
+        var warnings = outcome.Coverage.Omissions
+            .Select(omission => $"WARNING RenderBlockOmitted: {format.ToString().ToUpperInvariant()} renderer omitted {omission.BlockType} at block {omission.BlockIndex} because {omission.Reason}.")
+            .ToList();
+        if (outcome.Pdf is { Truncated: true } pdf)
+            warnings.Add($"WARNING PdfContentTruncated: PDF renderer emitted {pdf.EmittedVisualLineCount} of {pdf.TotalVisualLineCount} visual lines.");
+        return new RenderResult(fullPath, format, fidelity, false, warnings)
+        {
+            Information = information,
+            Coverage = outcome.Coverage
+        };
     }
 
     private async Task<MarkdownDocument> MaterializeMermaidAsync(MarkdownDocument document, RenderOptions? options, CancellationToken cancellationToken)
@@ -141,18 +176,49 @@ public sealed class MarkdownRenderer
         _ => false,
     });
 
-    private static void WriteGenerated(MarkdownDocument document, RenderFormat format, string path, RenderOptions? options, bool sanitizedDocRedock)
+    private static RenderWriteOutcome WriteGenerated(MarkdownDocument document, RenderFormat format, string path, RenderOptions? options, bool sanitizedDocRedock)
     {
+        var omissions = FindOmissions(document, format);
+        PdfWriteResult? pdf = null;
         switch (format)
         {
             case RenderFormat.Docx: WriteDocx(document, path, options); break;
             case RenderFormat.Pptx: WritePptx(document, path, options); break;
             case RenderFormat.Xlsx: WriteXlsx(document, path, options); break;
-            case RenderFormat.Pdf: WritePdf(document, path, options); break;
+            case RenderFormat.Pdf: pdf = WritePdf(document, path, options); break;
             case RenderFormat.Html: WriteHtml(document, path, options, sanitizedDocRedock); break;
             default: throw new ArgumentOutOfRangeException(nameof(format));
         }
+        var coverage = new RenderCoverageReport(
+            document.Blocks.Count,
+            document.Blocks.Count - omissions.Count,
+            omissions,
+            pdf?.Truncated ?? false);
+        return new RenderWriteOutcome(coverage, pdf, pdf?.Font);
     }
+
+    private static IReadOnlyList<RenderOmission> FindOmissions(MarkdownDocument document, RenderFormat format)
+    {
+        var xlsxHasTables = document.Blocks.OfType<MarkdownTable>().Any();
+        var omissions = new List<RenderOmission>();
+        for (var index = 0; index < document.Blocks.Count; index++)
+        {
+            var block = document.Blocks[index];
+            var supported = format switch
+            {
+                RenderFormat.Xlsx when xlsxHasTables => block is MarkdownTable or MarkdownDiagram,
+                RenderFormat.Xlsx => block is MarkdownHeading or MarkdownParagraph or MarkdownDiagram,
+                RenderFormat.Docx or RenderFormat.Pptx or RenderFormat.Pdf or RenderFormat.Html =>
+                    block is MarkdownHeading or MarkdownParagraph or MarkdownList or MarkdownCodeBlock or MarkdownTable or MarkdownDiagram,
+                _ => false
+            };
+            if (!supported)
+                omissions.Add(new RenderOmission(index, block.GetType().Name, "ordinary placement for this block type is not supported"));
+        }
+        return omissions;
+    }
+
+    private sealed record RenderWriteOutcome(RenderCoverageReport Coverage, PdfWriteResult? Pdf, ResolvedPdfFont? Font);
 
     private static void WriteHtml(MarkdownDocument document, string path, RenderOptions? options, bool sanitizedDocRedock)
     {
@@ -722,7 +788,7 @@ public sealed class MarkdownRenderer
         .Replace("*", "\\*", StringComparison.Ordinal).Replace("_", "\\_", StringComparison.Ordinal)
         .Replace("~", "\\~", StringComparison.Ordinal).Replace("`", "\\`", StringComparison.Ordinal);
 
-    private static void WritePdf(MarkdownDocument document, string path, RenderOptions? options)
+    private static PdfWriteResult WritePdf(MarkdownDocument document, string path, RenderOptions? options)
     {
         var lines = document.Blocks.SelectMany(block => block switch
         {
@@ -733,8 +799,14 @@ public sealed class MarkdownRenderer
             MarkdownTable table => table.Rows.Select(row => string.Join(" | ", row.Select(PlainInlineText))).Prepend(string.Join(" | ", table.Headers.Select(PlainInlineText))),
             _ => Array.Empty<string>()
         }).ToArray();
-        PdfBuilder.Write(path, lines, document.Blocks.OfType<MarkdownDiagram>().ToArray(), options?.FontPath);
+        return PdfBuilder.Write(path, lines, document.Blocks.OfType<MarkdownDiagram>().ToArray(), options?.FontPath, options?.FontFaceIndex);
     }
+
+    private sealed record PdfWriteResult(
+        int TotalVisualLineCount,
+        int EmittedVisualLineCount,
+        bool Truncated,
+        ResolvedPdfFont? Font);
 
     private static void Add(ZipArchive archive, string name, string content)
     {
@@ -763,10 +835,26 @@ public sealed class MarkdownRenderer
         private const int MaxLines = 42;
         private const int MaxLineWidth = PageWidth - (Left * 2);
 
-        public static void Write(string path, IReadOnlyList<string> lines, IReadOnlyList<MarkdownDiagram> diagrams, string? fontPath)
+        public static PdfWriteResult Write(
+            string path,
+            IReadOnlyList<string> lines,
+            IReadOnlyList<MarkdownDiagram> diagrams,
+            string? fontPath,
+            int? fontFaceIndex)
         {
-            var font = TrueTypeFont.Load(ResolveFont(fontPath));
-            var visualLines = WrapLines(lines, font).Take(diagrams.Count == 0 ? MaxLines : Math.Min(MaxLines, 18)).ToArray();
+            var requiredCodePoints = lines
+                .SelectMany(line => line.EnumerateRunes())
+                .Select(rune => (uint)rune.Value)
+                .Where(codePoint => codePoint is not ('\r' or '\n' or '\t'))
+                .ToHashSet();
+            var unicodeRequired = requiredCodePoints.Any(codePoint => codePoint is < 0x20 or > 0x7E);
+            if (!unicodeRequired) return WriteAscii(path, lines, diagrams);
+
+            var resolved = new PdfFontResolver().Resolve(new PdfFontRequest(requiredCodePoints, fontPath, fontFaceIndex));
+            var font = TrueTypeFont.Load(resolved.StandaloneSfntBytes);
+            var allVisualLines = WrapLines(lines, font).ToArray();
+            var lineLimit = diagrams.Count == 0 ? MaxLines : Math.Min(MaxLines, 18);
+            var visualLines = allVisualLines.Take(lineLimit).ToArray();
             var encoding = font.BuildEncoding(visualLines.SelectMany(line => line.CodePoints));
             var placements = PlaceDiagrams(diagrams, visualLines.Length);
             var content = BuildContent(visualLines, placements, encoding);
@@ -774,6 +862,7 @@ public sealed class MarkdownRenderer
             var widths = encoding.BuildWidths(font);
             var cidToGid = encoding.BuildCidToGidMap(font);
             var imageResources = placements.Count == 0 ? string.Empty : " /XObject << " + string.Join(' ', placements.Select((placement, index) => $"/{placement.Name} {11 + index} 0 R")) + " >>";
+            var fontName = resolved.PostScriptName;
 
             var objects = new List<byte[]>
             {
@@ -781,50 +870,98 @@ public sealed class MarkdownRenderer
                 Ascii("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
                 Ascii($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PageWidth} {PageHeight}] /Resources << /Font << /F1 5 0 R >>{imageResources} >> /Contents 4 0 R >>"),
                 StreamObject($"<< /Length {content.Length} >>", content),
-                Ascii("<< /Type /Font /Subtype /Type0 /BaseFont /NotoSansJP-Regular /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"),
-                Ascii($"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /NotoSansJP-Regular /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R /CIDToGIDMap 10 0 R /DW 1000 /W [0 [ {widths} ]] >>"),
+                Ascii($"<< /Type /Font /Subtype /Type0 /BaseFont /{fontName} /Encoding /Identity-H /DescendantFonts [6 0 R] /ToUnicode 7 0 R >>"),
+                Ascii($"<< /Type /Font /Subtype /CIDFontType2 /BaseFont /{fontName} /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> /FontDescriptor 8 0 R /CIDToGIDMap 10 0 R /DW 1000 /W [0 [ {widths} ]] >>"),
                 StreamObject($"<< /Length {toUnicode.Length} >>", toUnicode),
-                Ascii("<< /Type /FontDescriptor /FontName /NotoSansJP-Regular /Flags 4 /FontBBox [" + font.FontBBox + "] /ItalicAngle 0 /Ascent " + font.Ascent + " /Descent " + font.Descent + " /CapHeight " + font.CapHeight + " /StemV 80 /FontFile2 9 0 R >>"),
+                Ascii($"<< /Type /FontDescriptor /FontName /{fontName} /Flags 4 /FontBBox [{font.FontBBox}] /ItalicAngle 0 /Ascent {font.Ascent} /Descent {font.Descent} /CapHeight {font.CapHeight} /StemV 80 /FontFile2 9 0 R >>"),
                 StreamObject($"<< /Length {font.Data.Length} /Length1 {font.Data.Length} >>", font.Data),
                 StreamObject($"<< /Length {cidToGid.Length} >>", cidToGid),
             };
+            AddImages(objects, placements);
+            WriteObjects(path, objects);
+            return new PdfWriteResult(allVisualLines.Length, visualLines.Length, visualLines.Length < allVisualLines.Length, resolved);
+        }
+
+        private static PdfWriteResult WriteAscii(
+            string path,
+            IReadOnlyList<string> lines,
+            IReadOnlyList<MarkdownDiagram> diagrams)
+        {
+            var allVisualLines = WrapAsciiLines(lines).ToArray();
+            var lineLimit = diagrams.Count == 0 ? MaxLines : Math.Min(MaxLines, 18);
+            var visualLines = allVisualLines.Take(lineLimit).ToArray();
+            var placements = PlaceDiagrams(diagrams, visualLines.Length);
+            var content = BuildAsciiContent(visualLines, placements);
+            var imageResources = placements.Count == 0 ? string.Empty : " /XObject << " + string.Join(' ', placements.Select((placement, index) => $"/{placement.Name} {6 + index} 0 R")) + " >>";
+            var objects = new List<byte[]>
+            {
+                Ascii("<< /Type /Catalog /Pages 2 0 R >>"),
+                Ascii("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                Ascii($"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PageWidth} {PageHeight}] /Resources << /Font << /F1 5 0 R >>{imageResources} >> /Contents 4 0 R >>"),
+                StreamObject($"<< /Length {content.Length} >>", content),
+                Ascii("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")
+            };
+            AddImages(objects, placements);
+            WriteObjects(path, objects);
+            return new PdfWriteResult(allVisualLines.Length, visualLines.Length, visualLines.Length < allVisualLines.Length, null);
+        }
+
+        private static IEnumerable<string> WrapAsciiLines(IEnumerable<string> source)
+        {
+            const int maximumCharacters = 70;
+            foreach (var sourceLine in source.SelectMany(line => line.Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n')))
+            {
+                var line = sourceLine.Replace("\t", "    ", StringComparison.Ordinal);
+                if (line.Length == 0) { yield return string.Empty; continue; }
+                for (var offset = 0; offset < line.Length; offset += maximumCharacters)
+                    yield return line.Substring(offset, Math.Min(maximumCharacters, line.Length - offset));
+            }
+        }
+
+        private static byte[] BuildAsciiContent(
+            IEnumerable<string> lines,
+            IReadOnlyList<PdfDiagramPlacement> placements)
+        {
+            var builder = new StringBuilder("BT\n/F1 12 Tf\n54 738 Td\n");
+            foreach (var line in lines)
+                builder.Append('(').Append(EscapePdfLiteral(line)).Append(") Tj\n0 -17 Td\n");
+            builder.Append("ET\n");
+            AppendDiagramContent(builder, placements);
+            return Encoding.ASCII.GetBytes(builder.ToString());
+        }
+
+        private static string EscapePdfLiteral(string value) => value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("(", "\\(", StringComparison.Ordinal)
+            .Replace(")", "\\)", StringComparison.Ordinal);
+
+        private static void AddImages(ICollection<byte[]> objects, IReadOnlyList<PdfDiagramPlacement> placements)
+        {
             foreach (var placement in placements)
             {
                 var image = placement.Diagram.Image;
                 var compressed = image.DeflateRgb();
                 objects.Add(StreamObject($"<< /Type /XObject /Subtype /Image /Width {image.Width} /Height {image.Height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length {compressed.Length} >>", compressed));
             }
+        }
 
+        private static void WriteObjects(string path, IReadOnlyList<byte[]> objects)
+        {
             using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             output.Write(Encoding.ASCII.GetBytes("%PDF-1.4\n%\xFF\xFF\xFF\xFF\n"));
             var offsets = new List<long> { 0 };
-            for (var i = 0; i < objects.Count; i++)
+            for (var index = 0; index < objects.Count; index++)
             {
                 offsets.Add(output.Position);
-                output.Write(Encoding.ASCII.GetBytes($"{i + 1} 0 obj\n"));
-                output.Write(objects[i]);
+                output.Write(Encoding.ASCII.GetBytes($"{index + 1} 0 obj\n"));
+                output.Write(objects[index]);
                 output.Write(Encoding.ASCII.GetBytes("\nendobj\n"));
             }
-
             var xref = output.Position;
             output.Write(Encoding.ASCII.GetBytes($"xref\n0 {objects.Count + 1}\n0000000000 65535 f \n"));
-            for (var i = 1; i < offsets.Count; i++)
-                output.Write(Encoding.ASCII.GetBytes($"{offsets[i]:D10} 00000 n \n"));
+            for (var index = 1; index < offsets.Count; index++)
+                output.Write(Encoding.ASCII.GetBytes($"{offsets[index]:D10} 00000 n \n"));
             output.Write(Encoding.ASCII.GetBytes($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"));
-        }
-
-        private static string ResolveFont(string? requestedPath)
-        {
-            if (!string.IsNullOrWhiteSpace(requestedPath))
-            {
-                var fullPath = Path.GetFullPath(requestedPath);
-                if (!File.Exists(fullPath)) throw new FileNotFoundException("PDF font was not found.", fullPath);
-                return fullPath;
-            }
-
-            var bundled = Path.Combine(AppContext.BaseDirectory, "Assets", "NotoSansJP[wght].ttf");
-            if (File.Exists(bundled)) return bundled;
-            throw new FileNotFoundException("The bundled Japanese PDF font is missing. Provide RenderOptions.FontPath or restore the application assets.", bundled);
         }
 
         private static IReadOnlyList<PdfDiagramPlacement> PlaceDiagrams(IReadOnlyList<MarkdownDiagram> diagrams, int textLineCount)
@@ -853,12 +990,17 @@ public sealed class MarkdownRenderer
             foreach (var line in lines)
                 builder.Append('<').Append(encoding.Encode(line.CodePoints)).Append("> Tj\n0 -17 Td\n");
             builder.Append("ET\n");
+            AppendDiagramContent(builder, placements);
+            return Encoding.ASCII.GetBytes(builder.ToString());
+        }
+
+        private static void AppendDiagramContent(StringBuilder builder, IReadOnlyList<PdfDiagramPlacement> placements)
+        {
             foreach (var placement in placements)
                 builder.Append("q\n")
                     .Append(PdfNumber(placement.Width)).Append(" 0 0 ").Append(PdfNumber(placement.Height)).Append(' ')
                     .Append(PdfNumber(placement.X)).Append(' ').Append(PdfNumber(placement.Y)).Append(" cm\n/")
                     .Append(placement.Name).Append(" Do\nQ\n");
-            return Encoding.ASCII.GetBytes(builder.ToString());
         }
 
         private static string PdfNumber(double value) => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
@@ -930,9 +1072,9 @@ public sealed class MarkdownRenderer
                 CapHeight = Ascent;
             }
 
-            public static TrueTypeFont Load(string path)
+            public static TrueTypeFont Load(byte[] data)
             {
-                var data = File.ReadAllBytes(path);
+                ArgumentNullException.ThrowIfNull(data);
                 if (data.Length < 12) throw new InvalidDataException("PDF font is not a valid TrueType font.");
                 var count = ReadUInt16(data, 4);
                 var tables = new Dictionary<string, Table>(StringComparer.Ordinal);

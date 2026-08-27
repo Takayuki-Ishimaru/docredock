@@ -1,5 +1,6 @@
 using System.Text;
 using DocRedock.Api;
+using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Ocr.Tesseract;
 using DocRedock.RoundTrip;
@@ -38,10 +39,16 @@ public sealed class GuiWorkflowService
         "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     };
 
-    private static readonly HashSet<string> SupportedSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> OfficeSourceExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".docx", ".xlsx", ".pptx", ".pdf",
+        ".docx", ".xlsx", ".pptx",
     };
+
+    private static bool IsSupportedSourceExtension(string extension) =>
+        OfficeSourceExtensions.Contains(extension) ||
+        extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase);
+
+    private static string SupportedSourceDescription => "DOCX, XLSX, PPTX, and PDF";
 
     public async Task<GuiExportResult> ExportAsync(
         string sourcePath,
@@ -61,11 +68,13 @@ public sealed class GuiWorkflowService
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
         var extension = Path.GetExtension(sourcePath);
-        if (!SupportedSourceExtensions.Contains(extension))
-            throw new NotSupportedException("DOCX, XLSX, PPTX, and PDF files are supported.");
+        if (!IsSupportedSourceExtension(extension))
+        {
+            throw new NotSupportedException($"{SupportedSourceDescription} files are supported.");
+        }
         _ = DocRedock.Core.Documents.DocumentContentPolicyRules.Parse(contentPolicy);
-        if (!DocRedock.Core.Documents.ExperimentalFeatures.IsEnabled && (!readable || extension.Equals(".pdf", StringComparison.OrdinalIgnoreCase)))
-            throw new NotSupportedException($"This workflow is experimental and disabled. Set {DocRedock.Core.Documents.ExperimentalFeatures.EnvironmentVariable}=1 to enable it explicitly.");
+        // Office and PDF workflows are supported directly by the GUI service.
+        // The CLI applies its own explicit experimental-feature gate.
 
         Directory.CreateDirectory(outputDirectory);
         var baseName = SafeBaseName(Path.GetFileNameWithoutExtension(sourcePath));
@@ -94,7 +103,7 @@ public sealed class GuiWorkflowService
                     string.Empty,
                     exported.Graph.Format.ToString().ToLowerInvariant(),
                     "Readable Markdown (one-way)",
-                    exported.Diagnostics,
+                    AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
                     IsReadable: true);
             }
             catch
@@ -130,7 +139,7 @@ public sealed class GuiWorkflowService
             var fidelity = format == "pdf"
                 ? "F0 baseline / edited PDF is F3"
                 : "F0 baseline / supported edits are F1";
-            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, exported.Diagnostics, SidecarForm: sidecarForm);
+            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm);
         }
         catch
         {
@@ -178,8 +187,10 @@ public sealed class GuiWorkflowService
             await using var lease = await SidecarContainer.OpenAsync(workspacePath, cancellationToken).ConfigureAwait(false);
             var workspace = await RoundTripWorkspace.OpenAsync(lease.RootPath, cancellationToken).ConfigureAwait(false);
             var sourceExtension = Path.GetExtension(workspace.Manifest.Source.FileName);
-            if (!SupportedSourceExtensions.Contains(sourceExtension))
+            if (!IsSupportedSourceExtension(sourceExtension))
+            {
                 throw new InvalidDataException("The DocRedock restore information contains an unsupported source format.");
+            }
 
             var baseName = SafeBaseName(Path.GetFileNameWithoutExtension(workspace.Manifest.Source.FileName));
             if (useUniqueName) baseName = NextAvailableRestoreBaseName(outputDirectory, baseName, sourceExtension);
@@ -203,6 +214,20 @@ public sealed class GuiWorkflowService
         {
             TryDeleteDirectory(unpackDirectory);
         }
+    }
+
+    private static IReadOnlyList<Diagnostic> AddProjectionDiagnostics(
+        DocumentGraph graph,
+        IReadOnlyList<Diagnostic> diagnostics)
+    {
+        if (graph.Nodes.Any() ||
+            diagnostics.Any(diagnostic => diagnostic.Code == "EmptyProjection"))
+            return diagnostics;
+
+        return diagnostics.Append(new Diagnostic(
+            "EmptyProjection",
+            "No extractable content was found in the document projection.",
+            DiagnosticSeverity.Warning)).ToArray();
     }
 
     public static string SafeFileName(string untrustedName, string fallbackBaseName)

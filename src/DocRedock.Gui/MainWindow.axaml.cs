@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -23,6 +24,14 @@ public partial class MainWindow : Window
     private const long MaxPackageBytes = 536_870_912 - MaxMarkdownBytes;
     private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase)
         { ".docx", ".xlsx", ".pptx", ".pdf" };
+
+    private static bool IsSupportedSourceExtension(string extension) =>
+        SourceExtensions.Contains(extension);
+
+    private static string[] SourcePatterns() =>
+        ["*.docx", "*.xlsx", "*.pptx", "*.pdf"];
+
+    private static string SupportedSourceDescription => "DOCX、XLSX、PPTX、PDF";
 
     private readonly GuiWorkflowService _workflow;
     private readonly UpdateCheckService _updateCheckService;
@@ -62,15 +71,13 @@ public partial class MainWindow : Window
         InitializeComponent();
         _componentsInitialized = true;
         LoadSettings();
-        var experimentalEnabled = ExperimentalFeatures.IsEnabled;
-        RoundTripExportRadio.IsEnabled = experimentalEnabled;
-        RestoreModeRadio.IsEnabled = experimentalEnabled;
-        PdfFallbackToggle.IsEnabled = experimentalEnabled;
-        if (!experimentalEnabled)
-        {
-            ReadableExportToggle.IsChecked = true;
-            RoundTripExportRadio.IsChecked = false;
-        }
+        // Office round-trip, restore, and PDF workflows are available in the GUI.
+        // The explicit experimental labels remain for Office session opt-in.
+        RoundTripExportRadio.IsEnabled = true;
+        RestoreModeRadio.IsEnabled = true;
+        PdfFallbackToggle.IsEnabled = true;
+        PdfFallbackPanel.IsVisible = true;
+        PdfSourceChip.IsVisible = true;
         UpdateContentPolicyWarning();
         UpdateExportSelection();
         UpdateRestoreSelection();
@@ -79,6 +86,7 @@ public partial class MainWindow : Window
         // the persisted readable/round-trip setting before the window is shown.
         OnReadableChanged(null, new RoutedEventArgs());
         OnModeChanged(null, new RoutedEventArgs());
+        UpdateWorkspaceInteractionState();
     }
 
     private async void OnPickExportFile(object? sender, RoutedEventArgs e)
@@ -87,7 +95,7 @@ public partial class MainWindow : Window
         {
             Title = "変換する文書を選択",
             AllowMultiple = true,
-            FileTypeFilter = [new FilePickerFileType("対応文書") { Patterns = ["*.docx", "*.xlsx", "*.pptx", "*.pdf"] }],
+            FileTypeFilter = [new FilePickerFileType("対応文書") { Patterns = SourcePatterns() }],
         });
         if (files.Count > 0) SelectExportFiles(files);
     }
@@ -100,7 +108,7 @@ public partial class MainWindow : Window
             AllowMultiple = true,
             FileTypeFilter = [new FilePickerFileType("DocRedock 復元ファイル") { Patterns = ["*.md", "*.drmd", "*.drmdpkg"] }],
         });
-        SelectRestoreFiles(files);
+        if (!SelectRestoreFiles(files)) return;
         await TrySelectCompanionPackageAsync();
     }
 
@@ -112,7 +120,7 @@ public partial class MainWindow : Window
         try
         {
             var paths = Directory.EnumerateFiles(directory, "*", SearchOption.TopDirectoryOnly)
-                .Where(path => SourceExtensions.Contains(Path.GetExtension(path)))
+                .Where(path => IsSupportedSourceExtension(Path.GetExtension(path)))
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .Take(500)
                 .ToArray();
@@ -121,7 +129,7 @@ public partial class MainWindow : Window
                 if (await StorageProvider.TryGetFileFromPathAsync(new Uri(path)) is { } file) files.Add(file);
             if (files.Count == 0)
             {
-                ShowError(ExportErrorText, "フォルダー直下にDOCX、XLSX、PPTX、PDFがありません。");
+                ShowError(ExportErrorText, $"フォルダー直下に{SupportedSourceDescription}がありません。");
                 return;
             }
             SelectExportFiles(files);
@@ -203,8 +211,9 @@ public partial class MainWindow : Window
 
         var readable = ReadableExportToggle.IsChecked == true;
         RoundTripExportRadio.IsChecked = !readable;
-        ReadableOptionsPanel.IsVisible = ReadableExportToggle.IsChecked == true;
+        ReadableOptionsPanel.IsVisible = readable;
         SidecarOptionsPanel.IsVisible = !readable;
+        RoundTripWarningText.IsVisible = !readable;
         SaveSettings();
         UpdateButtons();
     }
@@ -226,7 +235,7 @@ public partial class MainWindow : Window
 
     private async void OnExport(object? sender, RoutedEventArgs e)
     {
-        if (_sourceFiles.Count == 0 || _exportBusy) return;
+        if (_sourceFiles.Count == 0 || _exportBusy || _restoreBusy) return;
         ClearError(ExportErrorText);
 
         var sourcePaths = _sourceFiles.Select(LocalPath).ToArray();
@@ -293,7 +302,7 @@ public partial class MainWindow : Window
 
     private async void OnRestore(object? sender, RoutedEventArgs e)
     {
-        if (_markdownFile is null || string.IsNullOrWhiteSpace(_sidecarPath) || string.IsNullOrWhiteSpace(_restoreDirectory) || _restoreBusy) return;
+        if (_markdownFile is null || string.IsNullOrWhiteSpace(_sidecarPath) || string.IsNullOrWhiteSpace(_restoreDirectory) || _restoreBusy || _exportBusy) return;
         ClearError(RestoreErrorText);
 
         var markdownPath = LocalPath(_markdownFile);
@@ -353,14 +362,37 @@ public partial class MainWindow : Window
     {
         RestoreDropZone.Classes.Set("drag-over", false);
         var items = e.DataTransfer.TryGetFiles()?.ToArray() ?? [];
-        SelectRestoreFiles(items.OfType<IStorageFile>());
-        var sidecarFolder = items.OfType<IStorageFolder>()
+        var files = items.OfType<IStorageFile>().ToArray();
+        var sidecarFolders = items.OfType<IStorageFolder>()
             .Select(LocalPath)
-            .FirstOrDefault(path => path is not null &&
-                (Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase) ||
-                 Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase)));
-        if (sidecarFolder is not null && WithinSizeLimit(sidecarFolder, MaxPackageBytes))
-            _sidecarPath = sidecarFolder;
+            .Where(path => path is not null &&
+                Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase))
+            .Cast<string>()
+            .ToArray();
+        var markdownCount = files.Count(file => Path.GetExtension(file.Name).Equals(".md", StringComparison.OrdinalIgnoreCase));
+        var sidecarFileCount = files.Count(file =>
+            Path.GetExtension(file.Name).Equals(".drmd", StringComparison.OrdinalIgnoreCase) ||
+            Path.GetExtension(file.Name).Equals(".drmdpkg", StringComparison.OrdinalIgnoreCase));
+        if (markdownCount > 1 || sidecarFileCount + sidecarFolders.Length > 1)
+        {
+            ShowError(RestoreErrorText, markdownCount > 1
+                ? "編集済みMarkdownは1つだけ選択してください。"
+                : "DocRedock復元ファイルは1つだけ選択してください。");
+            return;
+        }
+        if (files.Length > 0 && !SelectRestoreFiles(files)) return;
+        if (files.Length == 0 && sidecarFolders.Length == 0)
+        {
+            SelectRestoreFiles(files);
+            return;
+        }
+        if (sidecarFolders.Length == 1 && WithinSizeLimit(sidecarFolders[0], MaxPackageBytes))
+        {
+            _sidecarPath = sidecarFolders[0];
+            UpdateRestoreSelection();
+            RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
+            UpdateButtons();
+        }
         await TrySelectCompanionPackageAsync();
     }
 
@@ -369,15 +401,10 @@ public partial class MainWindow : Window
         ClearError(ExportErrorText);
         var selected = files.ToArray();
         if (selected.Length == 0) return;
-        var unsupported = selected.Where(file => !SourceExtensions.Contains(Path.GetExtension(file.Name))).ToArray();
+        var unsupported = selected.Where(file => !IsSupportedSourceExtension(Path.GetExtension(file.Name))).ToArray();
         if (unsupported.Length > 0)
         {
-            ShowError(ExportErrorText, "DOCX、XLSX、PPTX、PDFのいずれかを選択してください。");
-            return;
-        }
-        if (!ExperimentalFeatures.IsEnabled && selected.Any(file => Path.GetExtension(file.Name).Equals(".pdf", StringComparison.OrdinalIgnoreCase)))
-        {
-            ShowError(ExportErrorText, $"PDF出力は実験機能です。利用するには {ExperimentalFeatures.EnvironmentVariable}=1 を設定してください。");
+            ShowError(ExportErrorText, $"{SupportedSourceDescription}のいずれかを選択してください。");
             return;
         }
         if (selected.Any(file => !WithinSizeLimit(file, MaxSourceBytes)))
@@ -394,11 +421,28 @@ public partial class MainWindow : Window
         UpdateButtons();
     }
 
-    private void SelectRestoreFiles(IEnumerable<IStorageFile> files)
+    private bool SelectRestoreFiles(IEnumerable<IStorageFile> files)
     {
         ClearError(RestoreErrorText);
+        var selected = files.ToArray();
+        var markdownFiles = selected.Where(file =>
+            Path.GetExtension(file.Name).Equals(".md", StringComparison.OrdinalIgnoreCase)).ToArray();
+        var sidecarFiles = selected.Where(file =>
+            Path.GetExtension(file.Name).Equals(".drmd", StringComparison.OrdinalIgnoreCase) ||
+            Path.GetExtension(file.Name).Equals(".drmdpkg", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (markdownFiles.Length > 1)
+        {
+            ShowError(RestoreErrorText, "編集済みMarkdownは1つだけ選択してください。");
+            return false;
+        }
+        if (sidecarFiles.Length > 1)
+        {
+            ShowError(RestoreErrorText, "DocRedock復元ファイルは1つだけ選択してください。");
+            return false;
+        }
+
         var found = false;
-        foreach (var file in files)
+        foreach (var file in selected)
         {
             var extension = Path.GetExtension(file.Name);
             if (extension.Equals(".md", StringComparison.OrdinalIgnoreCase))
@@ -429,6 +473,7 @@ public partial class MainWindow : Window
         UpdateRestoreSelection();
         RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
         UpdateButtons();
+        return found;
     }
 
     private async Task TrySelectCompanionPackageAsync()
@@ -454,8 +499,7 @@ public partial class MainWindow : Window
             AllowMultiple = false,
         });
         if (folders.Count == 0 || LocalPath(folders[0]) is not { } path) return;
-        if (!Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase) &&
-            !Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase))
+        if (!Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase))
         {
             ShowError(RestoreErrorText, ".drmdサイドカーフォルダーを選択してください。");
             return;
@@ -493,7 +537,7 @@ public partial class MainWindow : Window
         };
         ExportFileDetailText.Text = _sourceFiles.Count switch
         {
-            0 => "DOCX · XLSX · PPTX · PDF",
+            0 => SupportedSourceDescription.Replace("、", " · ", StringComparison.Ordinal),
             1 => FileDetail(_sourceFiles[0]),
             _ => string.Join(" · ", _sourceFiles.Select(file => Path.GetExtension(file.Name).TrimStart('.').ToUpperInvariant()).Distinct(StringComparer.OrdinalIgnoreCase)),
         };
@@ -524,8 +568,8 @@ public partial class MainWindow : Window
 
     private void UpdateButtons()
     {
-        ExportButton.IsEnabled = _sourceFiles.Count > 0 && !string.IsNullOrWhiteSpace(_exportDirectory) && !_exportBusy;
-        RestoreButton.IsEnabled = _markdownFile is not null && _sidecarPath is not null && !string.IsNullOrWhiteSpace(_restoreDirectory) && !_restoreBusy;
+        ExportButton.IsEnabled = _sourceFiles.Count > 0 && !string.IsNullOrWhiteSpace(_exportDirectory) && !_exportBusy && !_restoreBusy;
+        RestoreButton.IsEnabled = _markdownFile is not null && _sidecarPath is not null && !string.IsNullOrWhiteSpace(_restoreDirectory) && !_restoreBusy && !_exportBusy;
         ExportActionSummaryText.Text = _sourceFiles.Count == 0
             ? "文書を選択してください"
             : $"{_sourceFiles.Count}件 · {FormatBytes(_sourceFiles.Sum(file => LocalPath(file) is { } path && File.Exists(path) ? new FileInfo(path).Length : 0L))}";
@@ -541,9 +585,9 @@ public partial class MainWindow : Window
     private void SetExportBusy(bool busy, string? status)
     {
         _exportBusy = busy;
-        ExportButton.Content = busy ? "処理中…" : "書き出す";
-        ExportFolderButton.IsEnabled = !busy;
-        ExportDropZone.IsEnabled = !busy;
+        ExportButtonLabel.Text = busy ? "処理中…" : "書き出す";
+        ExportButtonShortcut.Text = busy ? "…" : "⌘↩";
+        UpdateWorkspaceInteractionState();
         UpdateButtons();
         if (status is not null) ShowTransientStatus(status);
     }
@@ -552,10 +596,20 @@ public partial class MainWindow : Window
     {
         _restoreBusy = busy;
         RestoreButton.Content = busy ? "処理中…" : "復元する";
-        RestoreFolderButton.IsEnabled = !busy;
-        RestoreDropZone.IsEnabled = !busy;
+        UpdateWorkspaceInteractionState();
         UpdateButtons();
         if (status is not null) ShowTransientStatus(status);
+    }
+
+    private void UpdateWorkspaceInteractionState()
+    {
+        var idle = !_exportBusy && !_restoreBusy;
+        ExportModeRadio.IsEnabled = idle;
+        RestoreModeRadio.IsEnabled = idle;
+        ExportWorkspace.IsEnabled = idle;
+        RestoreWorkspace.IsEnabled = idle;
+        PdfFallbackToggle.IsEnabled = idle;
+        CloseResultButton.IsEnabled = idle;
     }
 
     private void ShowTransientStatus(string message)
@@ -569,6 +623,7 @@ public partial class MainWindow : Window
         ResultKickerText.Text = "PROCESSING";
         ResultTitleText.Text = "処理しています";
         ResultMessageText.Text = message;
+        AutomationProperties.SetHelpText(ResultPanel, message);
         OperationProgressBar.IsVisible = true;
         ResultFidelityText.IsVisible = false;
         DiagnosticsTextBox.IsVisible = false;
@@ -588,6 +643,7 @@ public partial class MainWindow : Window
         ResultKickerText.Text = success ? "COMPLETE" : "CHECK REQUIRED";
         ResultTitleText.Text = title;
         ResultMessageText.Text = message;
+        AutomationProperties.SetHelpText(ResultPanel, message);
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
@@ -686,7 +742,11 @@ public partial class MainWindow : Window
     private void OnCloseUpdate(object? sender, RoutedEventArgs e) =>
         UpdatePanel.IsVisible = false;
 
-    private void OnCloseResult(object? sender, RoutedEventArgs e) => ResultPanel.IsVisible = false;
+    private void OnCloseResult(object? sender, RoutedEventArgs e)
+    {
+        if (_exportBusy || _restoreBusy) return;
+        ResultPanel.IsVisible = false;
+    }
 
     private static void SetDragState(Control zone, DragEventArgs e)
     {

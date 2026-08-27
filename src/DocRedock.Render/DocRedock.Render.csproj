@@ -3,9 +3,6 @@
   <ItemGroup>
     <ProjectReference Include="..\DocRedock.Core\DocRedock.Core.csproj" />
     <ProjectReference Include="..\DocRedock.Markdown\DocRedock.Markdown.csproj" />
-    <Content Include="Assets\NotoSansJP[wght].ttf"
-             CopyToOutputDirectory="PreserveNewest"
-             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <PropertyGroup>

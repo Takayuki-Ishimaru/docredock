@@ -4,6 +4,7 @@ using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.OpenXml.Pptx;
+using DocRedock.Providers.Abstractions.Providers;
 
 namespace DocRedock.Tests.Pptx;
 
@@ -106,6 +107,62 @@ public sealed class PptxComplexFixtureTests
                 return output.ToArray();
             },
             StringComparer.Ordinal);
+    }
+
+    [Fact]
+    public async Task Ocr_result_stays_in_the_partition_that_contains_its_image()
+    {
+        var fixture = FindFixture();
+        var root = Path.Combine(Path.GetTempPath(), "docredock-pptx-ocr-", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "source.pptx");
+            var markdown = Path.Combine(root, "source.md");
+            var sidecar = Path.Combine(root, "source.drmd");
+            File.Copy(fixture, source);
+            var exported = await new DocumentService(new PartitionTestOcrEngine()).ExportAsync(
+                new DocumentExportOptions(source, sidecar, markdown, EnableOcr: true, OcrLanguages: ["eng"]));
+
+            var parentPartitions = exported.Graph.Partitions
+                .SelectMany(partition => partition.Nodes
+                    .Where(node => node.Kind == NodeKind.Image)
+                    .Select(node => (node.Id, Partition: partition.Id)))
+                .ToDictionary(item => item.Id, item => item.Partition, StringComparer.Ordinal);
+            var ocrNodes = exported.Graph.Partitions
+                .SelectMany(partition => partition.Nodes
+                    .Where(node => node.Kind == NodeKind.ImageText)
+                    .Select(node => (Node: node, Partition: partition.Id)))
+                .ToArray();
+
+            Assert.NotEmpty(ocrNodes);
+            Assert.All(ocrNodes, item =>
+            {
+                Assert.NotNull(item.Node.ParentId);
+                Assert.True(parentPartitions.TryGetValue(item.Node.ParentId!, out var parentPartition));
+                Assert.Equal(parentPartition, item.Partition);
+            });
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class PartitionTestOcrEngine : IOcrEngine
+    {
+        public ProviderDescriptor Descriptor { get; } = new(
+            "test.ocr.partition", new Version(1, 0), 1,
+            new HashSet<string> { "ocr.text" }, "MIT", "built-in", true);
+
+        public ValueTask<OcrAttemptResult> RecognizeAsync(
+            OcrInput input, OcrOptions options, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new OcrAttemptResult(
+                OcrProcessingStatus.Completed,
+                new OcrResult(
+                    "partition OCR",
+                    [new OcrTextRegion("partition OCR", new Geometry("image-pixels", 0, 0, 1, 1), 0.9)]),
+                []));
     }
 
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes));

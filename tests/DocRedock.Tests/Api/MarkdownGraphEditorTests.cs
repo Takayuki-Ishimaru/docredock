@@ -63,6 +63,46 @@ public sealed class MarkdownGraphEditorTests
     }
 
     [Fact]
+    public void Merged_table_projection_preserves_spans_and_validates_continuations()
+    {
+        var table = new DocumentNode("table-1", NodeKind.Table, null, 0, ContentLayer.Body,
+            new TableNodeContent(
+            [
+                [new TableCell("A"), new TableCell("Merged", ColSpan: 2, RowSpan: 2)],
+                [new TableCell("A2"), new TableCell(string.Empty, ColSpan: 2, RowSpan: 0)],
+            ]),
+            Editability: NodeEditability.EditableWithConstraints);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_merged", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [table])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+        var legacy = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("| A2 |  |  |", "| A2 | Merged | Merged |", StringComparison.Ordinal));
+        var changed = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("| A | Merged |  |", "| A | Updated |  |", StringComparison.Ordinal));
+        var continuationEdit = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("| A2 |  |  |", "| A2 | changed |  |", StringComparison.Ordinal));
+        var shapeChange = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("| A | Merged |  |", "| A | Merged |  | extra |", StringComparison.Ordinal));
+
+        Assert.Contains("drmd_rules: 1.1", projection, StringComparison.Ordinal);
+        Assert.True(unchanged.IsValid);
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.True(legacy.IsValid);
+        Assert.Empty(legacy.Diff.PatchSet.Operations);
+        Assert.True(changed.IsValid);
+        var changedCell = Assert.IsType<TableNodeContent>(changed.EditedGraph.FindNode("table-1")!.Content).Rows[0][1];
+        Assert.Equal("Updated", changedCell.Text);
+        Assert.Equal(2, changedCell.ColSpan);
+        Assert.Equal(2, changedCell.RowSpan);
+        Assert.False(continuationEdit.IsValid);
+        Assert.Contains(continuationEdit.Diagnostics, diagnostic => diagnostic.Code == "MergedTableContinuationEdited");
+        Assert.False(shapeChange.IsValid);
+        Assert.Contains(shapeChange.Diagnostics, diagnostic => diagnostic.Code == "MergedTableShapeChanged");
+    }
+
+    [Fact]
     public void Unchanged_protected_table_and_trailing_document_whitespace_are_projection_equivalent()
     {
         var graph = new DocumentGraph("1.1", "doc_1", DocumentFormatKind.Pptx,

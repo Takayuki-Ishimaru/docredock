@@ -118,10 +118,10 @@
     },
     {
       "id": "D07-2",
-      "desc": "vMerge継続セル(CANCELLED行)が終端値○を引き継ぐ",
+      "desc": "vMerge継続セル(CANCELLED行)の終端列が空セルになる",
       "severity": "guard",
       "type": "contains",
-      "value": "| CANCELLED | 取消 | ○ | 参照 |"
+      "value": "| CANCELLED | 取消 |  | 参照 |"
     },
     {
       "id": "D07-3",

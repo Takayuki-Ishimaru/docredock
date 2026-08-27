@@ -58,21 +58,34 @@ public sealed class GuiWorkflowServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task Round_trip_export_requires_explicit_environment_opt_in()
+    public async Task Office_round_trip_export_and_restore_are_available_without_experimental_opt_in()
     {
         using var fixture = new Fixture();
         var source = Path.Combine(fixture.Root, "proposal.docx");
         await new MarkdownRenderer().RenderAsync("# Title", RenderFormat.Docx, source);
-        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        var previous = Environment.GetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable);
+        Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, null);
         try
         {
-            var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
-                new GuiWorkflowService().ExportAsync(source, Path.Combine(fixture.Root, "export"), enableOcr: false));
-            Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", exception.Message, StringComparison.Ordinal);
+            var workflow = new GuiWorkflowService();
+            var exported = await workflow.ExportAsync(
+                source, Path.Combine(fixture.Root, "export"), enableOcr: false);
+
+            Assert.False(exported.IsReadable);
+            Assert.EndsWith(".drmd", exported.SidecarPath, StringComparison.Ordinal);
+
+            var restored = await workflow.RestoreAsync(
+                exported.MarkdownPath,
+                exported.SidecarPath,
+                Path.Combine(fixture.Root, "restore"),
+                allowPdfRenderFallback: false);
+
+            Assert.True(restored.Succeeded);
+            Assert.Equal("F0", restored.Fidelity);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
+            Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, previous);
         }
     }
 
@@ -233,6 +246,41 @@ public sealed class GuiWorkflowServiceTests : IDisposable
     public void Uploaded_file_names_are_reduced_to_safe_local_names(string input, string expected)
     {
         Assert.Equal(expected, GuiWorkflowService.SafeFileName(input, "document"));
+    }
+
+    [Fact]
+    public async Task Pdf_export_and_restore_work_without_experimental_opt_in()
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Root, "scan.pdf");
+        await new MarkdownRenderer().RenderAsync("PDF text", RenderFormat.Pdf, source);
+        var previous = Environment.GetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable);
+        Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, null);
+        try
+        {
+            var workflow = new GuiWorkflowService();
+            var exported = await workflow.ExportAsync(
+                source,
+                Path.Combine(fixture.Root, "export"),
+                enableOcr: false);
+
+            Assert.Equal("pdf", exported.Format);
+            Assert.EndsWith(".drmd", exported.SidecarPath, StringComparison.Ordinal);
+
+            var restored = await workflow.RestoreAsync(
+                exported.MarkdownPath,
+                exported.SidecarPath,
+                Path.Combine(fixture.Root, "restore"),
+                allowPdfRenderFallback: false);
+
+            Assert.True(restored.Succeeded);
+            Assert.Equal("F0", restored.Fidelity);
+            Assert.Equal(Hash(source), Hash(restored.OutputPath));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, previous);
+        }
     }
 
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));

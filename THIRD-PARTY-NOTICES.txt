@@ -28,11 +28,7 @@ Exact versions and the complete resolved graph are pinned in
 `licenses/allowlist.json`. CI emits `artifacts/sbom.cdx.json`.
 
 Tesseract OCR is an optional external executable licensed under Apache-2.0.
-The built-in PDF renderer bundles the variable Noto Sans JP font
-(`src/DocRedock.Render/Assets/NotoSansJP[wght].ttf`) from Google Fonts, licensed
-under the SIL Open Font License 1.1 (OFL-1.1). The upstream license text is
-available at https://github.com/google/fonts/blob/main/ofl/notosansjp/OFL.txt.
-The bundled asset is sourced from the upstream `NotoSansJP[wght].ttf` at
-https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf
-(SHA-256: c2f3b4d463500a2ddcd3849cded1fceeb9fd6d1c32e6cbecd568453ba50fc68f).
-The font is embedded in generated PDF files so they remain portable.
+
+DocRedock does not redistribute PDF fonts. For non-ASCII PDF rendering it may
+embed a permitted face from a font installed by the user or operating system
+into the generated PDF. The selected font remains subject to its own license.
