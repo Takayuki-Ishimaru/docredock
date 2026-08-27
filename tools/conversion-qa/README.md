@@ -20,8 +20,8 @@ python3 tools/conversion-qa/run.py --file 経費精算システム_設計書_検
 # 出力先を明示指定
 python3 tools/conversion-qa/run.py --file <path> --out /tmp/my-check
 
-# 一括実行: tests/DocRedock.Tests/Fixtures/**/*.expectations.json を全て検出して処理し、
-# さらにリポジトリ直下の 経費精算システム_設計書_検証用.xlsx を expectations 無しの参考エントリとして処理する
+# 一括実行: 複雑DOCX/PPTX fixtureを検出し、複雑XLSXをPython標準ライブラリだけで
+# artifacts/fixtures/generated-complex.xlsxへ生成する。DOCX/XLSX/PPTXが1件ずつ無ければ失敗する。
 python3 tools/conversion-qa/run.py --all
 python3 tools/conversion-qa/run.py --all --render
 ```

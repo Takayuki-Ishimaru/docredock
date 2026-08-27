@@ -53,7 +53,7 @@ public sealed record MarkdownSerializationOptions
     public string RoundTripStore { get; init; } = "document.drmd";
     public string ContentPolicy { get; init; } = "visible";
     public string SchemaVersion { get; init; } = "1.0";
-    public string RulesVersion { get; init; } = "1.0";
+    public string RulesVersion { get; init; } = "1.1";
     public bool IncludeFrontMatter { get; init; } = true;
 }
 
@@ -760,14 +760,16 @@ public sealed class DocRedockMarkdownSerializer
     private static void AppendTable(StringBuilder output, IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
         if (rows.Count == 0) return;
-        var width = Math.Max(1, rows.Max(row => row.Count));
-        WriteRow(rows[0]);
-        output.Append('|').Append(string.Concat(Enumerable.Repeat(" --- |", width))).AppendLine();
-        foreach (var row in rows.Skip(1)) WriteRow(row);
-        void WriteRow(IReadOnlyList<TableCell> row)
+        if (!TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _)) return;
+        WriteRow(grid.Rows[0]);
+        output.Append('|').Append(string.Concat(Enumerable.Repeat(" --- |", grid.ColumnCount))).AppendLine();
+        foreach (var row in grid.Rows.Skip(1)) WriteRow(row);
+
+        void WriteRow(IReadOnlyList<TableGridSlot> row)
         {
             output.Append('|');
-            for (var index = 0; index < width; index++) output.Append(' ').Append(EscapeTableCell(index < row.Count ? row[index].Text : string.Empty)).Append(" |");
+            foreach (var slot in row)
+                output.Append(' ').Append(EscapeTableCell(slot.IsContinuation ? string.Empty : slot.Origin.Text)).Append(" |");
             output.AppendLine();
         }
     }
@@ -920,7 +922,7 @@ public sealed class DocRedockMarkdownParser
             diagnostics.Add(new("DRMD011", "Front matter document_id is missing.", MarkdownDiagnosticSeverity.Error));
         if (!StringComparer.Ordinal.Equals(schema, "1.0"))
             diagnostics.Add(new("DRMD012", $"Unsupported DRMD Markdown schema '{schema ?? "(missing)"}'.", MarkdownDiagnosticSeverity.Error));
-        if (rulesVersion is not null && !StringComparer.Ordinal.Equals(rulesVersion, "1.0"))
+        if (rulesVersion is not null && rulesVersion is not ("1.0" or "1.1"))
             diagnostics.Add(new("DRMD022", $"Unsupported DRMD AI editing rules version '{rulesVersion}'.", MarkdownDiagnosticSeverity.Error));
         if (string.IsNullOrWhiteSpace(sourceFormat))
             diagnostics.Add(new("DRMD013", "Front matter source_format is missing.", MarkdownDiagnosticSeverity.Error));

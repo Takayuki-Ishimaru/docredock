@@ -10,12 +10,12 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.1.4 Public Beta support
+## v0.1.5 Public Beta support
 
 | Feature | Status |
 | --- | --- |
 | DOCX / XLSX / PPTX → Readable Markdown | Supported as Public Beta |
-| PDF → Markdown | Experimental; explicit opt-in required |
+| PDF → Markdown | Supported in the desktop GUI; CLI requires explicit opt-in |
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
@@ -25,7 +25,7 @@ The [release support table](docs/en/supported-features.md) is authoritative for 
 
 1. Download the package for your operating system and CPU architecture from [Releases](https://github.com/Takayuki-Ishimaru/docredock/releases).
 2. Start DocRedock.
-3. Drop a DOCX, XLSX, or PPTX file.
+3. Drop a DOCX, XLSX, PPTX, or PDF file.
 4. Select **Readable Markdown** and keep **Visible content only (recommended)**.
 5. Convert, review the Markdown and diagnostics, then use the result with your AI tool.
 
@@ -38,36 +38,39 @@ input.md
 input.assets/
 ```
 
+The CLI now defaults to Readable Markdown, so `--profile readable` is optional:
+
+```sh
+docredock export input.xlsx --content-policy visible --output input.md
+```
+
+## v0.1.5 reliability improvements
+
+- OCR evidence stays with its parent image or PDF page partition; unresolved evidence is isolated in `derived-assets` with a diagnostic.
+- Horizontally and vertically merged tables use blank Markdown continuation cells and reject continuation/shape edits during round-trip processing.
+- Experimental PDF rendering no longer ships or assumes a bundled Japanese font. ASCII-only PDFs use Base14 Helvetica; non-ASCII output resolves an embeddable TrueType face from `--font-path`, environment variables, then installed system fonts.
+- PDF rendering reports selected-font and coverage information separately from actionable omission/truncation warnings. CLI render exits with code 1 when warnings exist.
+- PPTX literal bullet glyphs, including emphasized bullets, are normalized to Markdown list items.
+- Conversion QA now requires DOCX, XLSX, and PPTX coverage, and package smoke tests verify checksums and reject bundled font binaries.
+
 ## Content policy
 
-Readable export has three policies in both the GUI and CLI. They filter the Markdown projection; the external `.assets/` directory contains only image assets referenced by nodes included under the selected policy. Review both the Markdown and `.assets/` directory before sharing:
+Readable export has three policies in both the GUI and CLI. They filter the Markdown projection; the external `.assets/` directory contains only image assets referenced by nodes included under the selected policy. Review both outputs before sharing.
 
 | Policy | Behavior |
 | --- | --- |
-| `visible` | Default. Excludes Office-hidden text, hidden/very-hidden sheets, hidden rows/columns, hidden slides/objects, notes, comments, and revisions when represented by the extractor. |
-| `complete` | Includes hidden and metadata content and emits a warning. Review the output carefully before sharing it. |
+| `visible` | Default. Excludes recognized Office-hidden text, sheets, rows/columns, slides/objects, notes, comments, and revisions. |
+| `complete` | Includes hidden and metadata content and emits a warning. |
 | `sanitized` | Applies the visible filter and additionally removes privacy-sensitive metadata, derived/OCR content, and document furniture. |
-
-CLI example:
-
-```sh
-docredock export input.xlsx --profile readable --content-policy visible --output input.md
-```
-
-## Why DocRedock
-
-- **Local-first:** built-in conversion runs on your machine and does not upload document contents.
-- **Structure-aware:** document titles, heading hierarchy, lists, tables, slide boundaries, native charts, and spreadsheet regions are rendered for reading.
-- **Image-aware:** included Office images can be written beside Markdown or embedded in it.
-- **Inspectably safe defaults:** recognized hidden Office content is omitted from the Markdown projection and its referenced image output by default, and the broader mode warns before its output is shared.
-- **Efficient for AI:** one local synthetic-XLSX experiment used 74.1% fewer input tokens than direct Excel access. Results vary; see the [methodology and results](docs/AI_DOCUMENT_FORMAT_TOKEN_BENCHMARK_2026-08-25.md).
 
 ## Important limitations
 
-- v0.1.4 is a Public Beta, not a production-stable release.
+- v0.1.5 is a Public Beta, not a production-stable release.
 - Always review generated Markdown and images before sharing. Office visibility metadata is complex and third-party producers may encode content differently.
 - Readable Markdown is one-way output. Keep the original Office file as the authoritative source.
-- Experimental workflows in the distributed GUI and CLI require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. The public library APIs are engineering surfaces and do not enforce this entry-point gate. Experimental workflows may create `.drmd` or `.drmdpkg` files containing source-derived or restoration data.
+- Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export (conversion), round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
+- The desktop GUI accepts DOCX, XLSX, PPTX, and PDF input by default. PDF OCR still needs a configured rasterizer and OCR provider; if either is unavailable, review the emitted diagnostics.
+- DocRedock does not bundle a Japanese PDF font or download one. The user is responsible for installing/selecting a font and complying with its embedding license.
 - The GUI may query the public GitHub Releases API for update metadata. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable this request.
 - Verify the published SHA-256 checksum and signing/notarization status for each package.
 
@@ -75,12 +78,12 @@ docredock export input.xlsx --profile readable --content-policy visible --output
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.1.4 supported features](docs/en/supported-features.md)
+- [v0.1.5 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.1.4 release notes](release-docs/RELEASE_NOTES_v0.1.4.en.md)
+- [v0.1.5 release notes](release-docs/RELEASE_NOTES_v0.1.5.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 
 ## License
 
-DocRedock is released under the [MIT License](LICENSE). See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) for third-party dependencies and bundled assets.
+DocRedock is released under the [MIT License](LICENSE). See [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) for third-party dependencies and assets.

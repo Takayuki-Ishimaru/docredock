@@ -80,7 +80,8 @@ public sealed partial class ReadableMarkdownSerializer
             var diagrams = options.IncludeDiagrams ? ReadDiagrams(partition) : [];
             var images = ReadImages(partition);
             var charts = partition.Nodes.Any(node => node.Kind == NodeKind.Chart && HasExtension(node, "chart_series"));
-            if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0 && !charts) continue;
+            var partitionMedia = partition.Nodes.Any(node => node.Kind is NodeKind.Image or NodeKind.ImageText);
+            if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0 && !charts && !partitionMedia) continue;
 
             WriteHeading(output, 2, HumanizePartitionName(partition.Id));
             var hasSectionHeading = false;
@@ -634,7 +635,7 @@ public sealed partial class ReadableMarkdownSerializer
             var isBullet = JsonBool(paragraph, "IsBullet", "isBullet", "is_bullet");
             var level = JsonInt(paragraph, "Level", "level") ?? 0;
             var literalBulletText = string.Empty;
-            var hasLiteralBullet = !isBullet && TryStripPptxBullet(text.TrimStart(), out literalBulletText);
+            var hasLiteralBullet = TryStripPptxBullet(text.TrimStart(), out literalBulletText);
             if (isBullet || hasLiteralBullet)
             {
                 // P03: a buAutoNum paragraph carries its resolved sequence number instead of always
@@ -688,16 +689,25 @@ public sealed partial class ReadableMarkdownSerializer
     private static bool TryStripPptxBullet(string text, out string value)
     {
         value = text;
-        if (text.Length < 2) return false;
-        if (text[0] is '•' or '●' or '▪' or '◦' or '–' or '—' && char.IsWhiteSpace(text[1]))
+        var leading = text.TrimStart();
+        var indent = text[..(text.Length - leading.Length)];
+        if (leading.Length >= 2 && (leading[0] is '•' or '●' or '▪' or '◦' or '–' or '—') && char.IsWhiteSpace(leading[1]))
         {
-            value = text[2..].TrimStart();
-            return value.Length > 0;
+            value = indent + leading[2..].TrimStart();
+            return value.Length > indent.Length;
         }
-        if (text.StartsWith("- ", StringComparison.Ordinal) || text.StartsWith("* ", StringComparison.Ordinal))
+        if (leading.StartsWith("- ", StringComparison.Ordinal) || leading.StartsWith("* ", StringComparison.Ordinal))
         {
-            value = text[2..].TrimStart();
-            return value.Length > 0;
+            value = indent + leading[2..].TrimStart();
+            return value.Length > indent.Length;
+        }
+        foreach (var (open, close) in new[] { ("***", "***"), ("**", "**"), ("__", "__"), ("_", "_"), ("~~", "~~"), ("<u>", "</u>") })
+        {
+            if (!leading.StartsWith(open, StringComparison.Ordinal) || !leading.EndsWith(close, StringComparison.Ordinal) || leading.Length <= open.Length + close.Length) continue;
+            var inner = leading[open.Length..^close.Length];
+            if (!TryStripPptxBullet(inner, out var stripped)) continue;
+            value = indent + open + stripped + close;
+            return true;
         }
         return false;
     }
@@ -1103,34 +1113,13 @@ public sealed partial class ReadableMarkdownSerializer
         return (tableRows, noteRows);
     }
 
-    // GFM has no colspan/rowspan, so a merged OOXML table (D07) is expanded into a plain
-    // rectangular grid here, at render time only — the extracted TableCell model above keeps the
-    // real span metadata untouched for F1 restore. A gridSpan cell's text is repeated across
-    // every column it covers (so no cell renders as a run of empty "|  |" columns); a vMerge
-    // continuation cell (RowSpan 0, empty Text) inherits the nearest value above it in the same
-    // column, so it reads the same as its merge's origin cell instead of a blank gap.
+    // GFM has no colspan/rowspan. Preserve the visual grid width, but emit text only at a
+    // merge origin; horizontal and vertical continuation coordinates are deliberately blank.
     private static List<IReadOnlyList<string>> ExpandTableGrid(IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
-        var grid = new List<IReadOnlyList<string>>();
-        var carryDown = new Dictionary<int, string>();
-        foreach (var row in rows)
-        {
-            var expanded = new List<string>();
-            var column = 0;
-            foreach (var cell in row)
-            {
-                var value = cell.RowSpan == 0 && carryDown.TryGetValue(column, out var carried) ? carried : cell.Text;
-                var span = Math.Max(1, cell.ColSpan);
-                for (var offset = 0; offset < span; offset++)
-                {
-                    expanded.Add(value);
-                    carryDown[column + offset] = value;
-                }
-                column += span;
-            }
-            grid.Add(expanded);
-        }
-        return grid;
+        if (!TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _)) return [];
+        return grid.Rows.Select(row => (IReadOnlyList<string>)row
+            .Select(slot => slot.IsContinuation ? string.Empty : slot.Origin.Text).ToArray()).ToList();
     }
 
     private static void WriteTable(StringBuilder output, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<string>> rows)

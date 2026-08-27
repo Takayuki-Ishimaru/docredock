@@ -1,0 +1,34 @@
+{
+  "target": "generated-complex.xlsx",
+  "profile": "readable",
+  "items": [
+    {
+      "id": "XLSX-GEN-01",
+      "desc": "key-value metadata is projected",
+      "severity": "guard",
+      "type": "contains",
+      "value": "DocRedock Reliability"
+    },
+    {
+      "id": "XLSX-GEN-02",
+      "desc": "ordinary data table is projected",
+      "severity": "guard",
+      "type": "contains",
+      "value": "Renderer"
+    },
+    {
+      "id": "XLSX-GEN-03",
+      "desc": "merged origin is not duplicated",
+      "severity": "guard",
+      "type": "unique",
+      "value": "Merged summary"
+    },
+    {
+      "id": "XLSX-GEN-04",
+      "desc": "hidden row is excluded by visible policy",
+      "severity": "guard",
+      "type": "not_contains",
+      "value": "DOCREDOCK_QA_HIDDEN_ROW"
+    }
+  ]
+}
