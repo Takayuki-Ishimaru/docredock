@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.1.6 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.1.7 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -30,7 +30,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## 3. Generated files
 
-| Output | Contents | v0.1.6 use |
+| Output | Contents | Current use |
 | --- | --- | --- |
 | `.md` | Body text, headings, lists, tables, visual semantic projections, notes, and placeholders | Use |
 | `.assets/` | Images and previews referenced by Markdown as visual fallback | Use when generated |
@@ -38,7 +38,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 | `.drmd` | Source/restoration sidecar | Experimental; treat like the source document |
 | `.drmdpkg` | Markdown and restoration data package | Experimental; treat like the source document |
 
-Recognized visuals follow this order: (1) semantic projection such as Mermaid, (2) a visual fallback such as an image or page preview, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
+Mermaid is emitted only after common graph validation. Recognized visuals follow this order: (1) semantic projection such as Mermaid, (2) a visual fallback such as an image or page preview, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
 
 ## 4. Choose a content policy
 

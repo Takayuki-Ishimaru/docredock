@@ -509,15 +509,79 @@ public sealed class PptxAdapter
         var labels = new HashSet<string>(StringComparer.Ordinal);
         edgeLabelShapeIds = labels;
         var connectors = slide.Shapes.Where(shape => StringComparer.Ordinal.Equals(shape.ShapeType, "connector")).ToArray();
-        if (connectors.Length == 0) return null;
+        var directional = slide.Shapes.Where(IsDirectionalShape).ToArray();
+        // Textless directional shapes are still recognized visual content.  When no connector
+        // exists there is no safe semantic edge to invent, so retain their absolute geometry
+        // as deterministic fallback paths instead of silently dropping them.
+        if (connectors.Length == 0 && directional.Length == 0) return null;
         var drawable = slide.Shapes.Where(shape => !StringComparer.Ordinal.Equals(shape.ShapeType, "connector") &&
-                !shape.IsTable && shape.Geometry is not null && !string.IsNullOrWhiteSpace(FirstLine(shape.Text)))
+                !shape.IsTable && shape.Geometry is not null &&
+                (!string.IsNullOrWhiteSpace(FirstLine(shape.Text)) || IsDirectionalShape(shape)))
             .OrderBy(shape => shape.ShapeId, StringComparer.Ordinal).ToArray();
         var byShapeId = drawable.GroupBy(shape => shape.ShapeId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var paths = directional.Where(shape => shape.Geometry is not null)
+            .GroupBy(shape => shape.ShapeId, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .Select(shape => new VisualPath(
+                "path_" + SafeVisualId(shape.ShapeId),
+                RectanglePath(shape.Geometry!),
+                shape.Geometry,
+                new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)]),
+                Confidence: 0.9,
+                IsFallback: true,
+                SourceNodeId: shape.ShapeId))
+            .ToList();
+        if (connectors.Length == 0)
+        {
+            var fallbackItems = new List<VisualSourceItem>();
+            var seenDirectional = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var shape in directional)
+            {
+                var itemId = "directional:" + SafeVisualId(shape.ShapeId);
+                if (!seenDirectional.Add(shape.ShapeId))
+                {
+                    fallbackItems.Add(new VisualSourceItem(itemId + ":duplicate", VisualSourceItemKind.DirectionalShape,
+                        VisualDisposition.SuppressedDuplicate, DuplicateOfSourceItemId: itemId,
+                        Reason: "duplicate directional shape ID"));
+                    continue;
+                }
+                fallbackItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.DirectionalShape,
+                    VisualDisposition.VisualFallback, FallbackPathId: "path_" + SafeVisualId(shape.ShapeId),
+                    Reason: "textless directional shape has no safe semantic endpoints",
+                    SourceAnchor: new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)])));
+            }
+            return new VisualGraph(
+                "pptx_" + SafeVisualId(slide.SlideId),
+                [],
+                [],
+                [new VisualDiagnostic("VisualDirectionalShapeFallback", "Textless directional shapes were retained as geometry paths.",
+                    Fallback: "directional shape geometry", Format: "pptx", PartUri: slide.PartUri,
+                    PartitionId: slide.SlideId, SourceObjectId: directional.FirstOrDefault()?.ShapeId,
+                    SourceObjectType: "directional-shape", Confidence: 0.9)],
+                "LR",
+                Paths: paths,
+                SourceItems: fallbackItems);
+        }
+        // Reserve every shape referenced by any connector before assigning nearby text labels.
+        // A one-pass label search could otherwise consume a later connector endpoint as the
+        // earlier connector's label, leaving that later edge with a missing node reference.
+        var reservedEndpointShapeIds = connectors
+            .SelectMany(connector => new[] { connector.ConnectorStartId, connector.ConnectorEndId })
+            .Where(id => id is not null && byShapeId.ContainsKey(id))
+            .Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var connector in connectors)
+        {
+            if (InferGeometryEndpoints(connector, drawable) is { } inferred)
+            {
+                reservedEndpointShapeIds.Add(inferred.Start.ShapeId);
+                reservedEndpointShapeIds.Add(inferred.End.ShapeId);
+            }
+        }
         var edges = new List<VisualEdge>(); var diagnostics = new List<VisualDiagnostic>();
         var connectedShapeIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var connector in connectors.OrderBy(shape => shape.ShapeId, StringComparer.Ordinal))
+        foreach (var (connector, connectorIndex) in connectors.OrderBy(shape => shape.ShapeId, StringComparer.Ordinal).Select((shape, index) => (shape, index)))
         {
             var start = connector.ConnectorStartId;
             var end = connector.ConnectorEndId;
@@ -531,25 +595,138 @@ public sealed class PptxAdapter
                 }
                 else
                 {
-                    diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "A PPTX connector could not be uniquely associated with source and target shapes.", connector.ShapeId, Fallback: "connector retained as visual fallback", Remedy: "snap both connector endpoints to shapes or make geometry unambiguous"));
-                    edges.Add(new VisualEdge("e_" + SafeVisualId(connector.ShapeId), null, null, null, VisualEdgeResolution.Unresolved, connector.ShapeId));
+                    diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "A PPTX connector could not be uniquely associated with source and target shapes.", connector.ShapeId,
+                        Fallback: "connector retained as visual fallback", Remedy: "snap both connector endpoints to shapes or make geometry unambiguous",
+                        Format: "pptx", PartUri: slide.PartUri, PartitionId: slide.SlideId,
+                        SourceObjectId: connector.ShapeId, SourceObjectType: "connector", Confidence: 0));
+                    edges.Add(new VisualEdge("e_" + connectorIndex.ToString(System.Globalization.CultureInfo.InvariantCulture), null, null, null,
+                        VisualEdgeResolution.Unresolved, connector.ShapeId, Direction: "directed",
+                        Geometry: connector.Geometry, Confidence: 0,
+                        SourceAnchor: new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", connector.ShapeId)]),
+                        EdgeDirection: VisualEdgeDirection.Directed));
                     continue;
                 }
             }
-            var (label, labelAmbiguous) = FindEdgeLabel(connector, byShapeId[start!], byShapeId[end!], drawable, labels);
-            if (labelAmbiguous) diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved", "Nearby text could not be uniquely assigned to a connector edge.", connector.ShapeId, Fallback: "text retained independently", Remedy: "place the label closer to one connector"));
-            connectedShapeIds.Add(start!);
-            connectedShapeIds.Add(end!);
-            edges.Add(new VisualEdge("e_" + SafeVisualId(connector.ShapeId), "v_" + SafeVisualId(start!), "v_" + SafeVisualId(end!), label, resolution, connector.ShapeId));
+            if (start is not null && end is not null && StringComparer.Ordinal.Equals(start, end))
+            {
+                start = null;
+                end = null;
+                resolution = VisualEdgeResolution.Unresolved;
+                diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "A PPTX connector cannot connect a shape to itself.", connector.ShapeId,
+                    Fallback: "connector retained as visual fallback", Remedy: "connect two distinct shapes",
+                    Format: "pptx", PartUri: slide.PartUri, PartitionId: slide.SlideId,
+                    SourceObjectId: connector.ShapeId, SourceObjectType: "connector", Confidence: 0));
+            }
+            var (label, labelAmbiguous) = start is not null && end is not null
+                ? FindEdgeLabel(connector, byShapeId[start], byShapeId[end], drawable, labels, reservedEndpointShapeIds)
+                : (null, false);
+            if (labelAmbiguous) diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved", "Nearby text could not be uniquely assigned to a connector edge.", connector.ShapeId,
+                Fallback: "text retained independently", Remedy: "place the label closer to one connector",
+                Format: "pptx", PartUri: slide.PartUri, PartitionId: slide.SlideId,
+                SourceObjectId: connector.ShapeId, SourceObjectType: "connector", Confidence: 0));
+            if (start is not null) connectedShapeIds.Add(start);
+            if (end is not null) connectedShapeIds.Add(end);
+            var connectorAnchor = new SourceAnchor("pptx", slide.PartUri,
+                [new AnchorLocator("shape_id", connector.ShapeId)]);
+            edges.Add(new VisualEdge("e_" + connectorIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                start is null ? null : "v_" + SafeVisualId(start), end is null ? null : "v_" + SafeVisualId(end), label, resolution, connector.ShapeId,
+                Direction: "directed", Geometry: connector.Geometry,
+                Confidence: resolution == VisualEdgeResolution.NativeConnection ? 1 : 0.8,
+                SourceAnchor: connectorAnchor, EdgeDirection: VisualEdgeDirection.Directed));
         }
         if (edges.All(edge => edge.SourceId is null || edge.TargetId is null))
-            diagnostics.Add(new VisualDiagnostic("VisualSemanticProjectionPartial", "Recognized connector relationships could not be projected as a flowchart.", Fallback: "shape text and connector diagnostics retained"));
+            diagnostics.Add(new VisualDiagnostic("VisualSemanticProjectionPartial", "Recognized connector relationships could not be projected as a flowchart.",
+                Fallback: "shape text and connector diagnostics retained", Format: "pptx", PartUri: slide.PartUri,
+                PartitionId: slide.SlideId, SourceObjectId: connectors.FirstOrDefault()?.ShapeId,
+                SourceObjectType: "connector", Confidence: 0));
         // A slide often contains title, footer, and explanatory text boxes alongside a flow.  Only
         // shapes that a resolved connector actually references belong to its Mermaid topology.
         var nodes = byShapeId.Values.Where(shape => connectedShapeIds.Contains(shape.ShapeId) && !labels.Contains(shape.ShapeId))
             .OrderBy(shape => shape.ShapeId, StringComparer.Ordinal)
-            .Select(shape => new VisualNode("v_" + SafeVisualId(shape.ShapeId), FirstLine(shape.Text), VisualKind(shape.ShapePreset), shape.ShapeId)).ToArray();
-        return new VisualGraph("pptx_" + SafeVisualId(slide.SlideId), nodes, edges, diagnostics, InferDirection(nodes, byShapeId));
+            .Select(shape => new VisualNode("v_" + SafeVisualId(shape.ShapeId), VisualLabel(shape), VisualKind(shape.ShapePreset), shape.ShapeId,
+                Geometry: shape.Geometry,
+                SourceAnchor: new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)]))).ToArray();
+
+        // The source ledger makes every recognized shape/connector/label auditable. A
+        // duplicate shape ID is suppressed instead of creating an invalid graph node.
+        var sourceItems = new List<VisualSourceItem>();
+        var shapeSourceIds = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var shape in drawable)
+        {
+            var sourceItemId = "shape:" + SafeVisualId(shape.ShapeId);
+            if (shapeSourceIds.TryGetValue(shape.ShapeId, out var firstSourceId))
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId + ":duplicate:" + sourceItems.Count,
+                    IsDirectionalShape(shape) ? VisualSourceItemKind.DirectionalShape : VisualSourceItemKind.Shape,
+                    VisualDisposition.SuppressedDuplicate, DuplicateOfSourceItemId: firstSourceId,
+                    Reason: "duplicate source shape ID",
+                    SourceAnchor: new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)])));
+                continue;
+            }
+            shapeSourceIds[shape.ShapeId] = sourceItemId;
+            var sourceAnchor = new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)]);
+            if (labels.Contains(shape.ShapeId))
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.TextLabel,
+                    VisualDisposition.IgnoredDecorative, Reason: "attached as connector edge label", SourceAnchor: sourceAnchor));
+            }
+            else if (connectedShapeIds.Contains(shape.ShapeId) && nodes.Any(node => node.SourceNodeId == shape.ShapeId))
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId,
+                    IsDirectionalShape(shape) ? VisualSourceItemKind.DirectionalShape : VisualSourceItemKind.Shape,
+                    VisualDisposition.ProjectedNode,
+                    ProjectedNodeId: nodes.Single(node => node.SourceNodeId == shape.ShapeId).Id,
+                    SourceAnchor: sourceAnchor));
+            }
+            else if (IsDirectionalShape(shape))
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.DirectionalShape,
+                    VisualDisposition.VisualFallback, FallbackPathId: "path_" + SafeVisualId(shape.ShapeId),
+                    Reason: "unconnected directional shape geometry", SourceAnchor: sourceAnchor));
+            }
+            else
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Shape,
+                    VisualDisposition.IgnoredDecorative, Reason: "unconnected from recognized visual graph", SourceAnchor: sourceAnchor));
+            }
+        }
+        foreach (var (edge, index) in edges.Select((edge, index) => (edge, index)))
+        {
+            var edgeAnchor = new SourceAnchor("pptx", slide.PartUri,
+                [new AnchorLocator("connector", edge.SourceNodeId ?? index.ToString(System.Globalization.CultureInfo.InvariantCulture))]);
+            sourceItems.Add(new VisualSourceItem("connector:" + index.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                VisualSourceItemKind.Connector,
+                edge.SourceId is not null && edge.TargetId is not null
+                    ? VisualDisposition.ProjectedEdge
+                    : VisualDisposition.DiagnosticOnly,
+                ProjectedEdgeId: edge.SourceId is not null && edge.TargetId is not null ? edge.Id : null,
+                DiagnosticCode: edge.SourceId is null || edge.TargetId is null ? "VisualConnectorUnresolved" : null,
+                Reason: edge.SourceId is null || edge.TargetId is null ? "connector endpoints unresolved" : null,
+                SourceAnchor: edgeAnchor));
+        }
+        return new VisualGraph("pptx_" + SafeVisualId(slide.SlideId), nodes, edges, diagnostics, InferDirection(nodes, byShapeId), Paths: paths, SourceItems: sourceItems);
+
+        static bool IsDirectionalShape(PptxShapeRecord shape) =>
+            shape.Geometry is not null && shape.ShapePreset is not null &&
+            (shape.ShapePreset.Contains("arrow", StringComparison.OrdinalIgnoreCase) ||
+             shape.ShapePreset.Contains("chevron", StringComparison.OrdinalIgnoreCase) ||
+             shape.ShapePreset.Contains("flowChart", StringComparison.OrdinalIgnoreCase));
+
+        static string VisualLabel(PptxShapeRecord shape)
+        {
+            var text = FirstLine(shape.Text);
+            if (!string.IsNullOrWhiteSpace(text)) return text;
+            return !string.IsNullOrWhiteSpace(shape.Name) ? shape.Name!.Trim() : shape.ShapePreset ?? "Directional shape";
+        }
+
+        static IReadOnlyList<VisualPathPoint> RectanglePath(Geometry geometry) =>
+        [
+            new(geometry.X, geometry.Y),
+            new(geometry.X + geometry.Width, geometry.Y),
+            new(geometry.X + geometry.Width, geometry.Y + geometry.Height),
+            new(geometry.X, geometry.Y + geometry.Height),
+            new(geometry.X, geometry.Y),
+        ];
     }
 
     private static (PptxShapeRecord Start, PptxShapeRecord End)? InferGeometryEndpoints(PptxShapeRecord connector, IReadOnlyList<PptxShapeRecord> candidates)
@@ -580,11 +757,12 @@ public sealed class PptxAdapter
     }
 
     private static (string? Label, bool Ambiguous) FindEdgeLabel(PptxShapeRecord connector, PptxShapeRecord start, PptxShapeRecord end,
-        IReadOnlyList<PptxShapeRecord> candidates, ISet<string> used)
+        IReadOnlyList<PptxShapeRecord> candidates, ISet<string> used, IReadOnlySet<string> reservedEndpointShapeIds)
     {
         if (connector.Geometry is not { } line) return (null, false);
         var midpoint = (X: line.X + line.Width / 2, Y: line.Y + line.Height / 2);
-        var nearby = candidates.Where(candidate => candidate.ShapeId != start.ShapeId && candidate.ShapeId != end.ShapeId && !used.Contains(candidate.ShapeId))
+        var nearby = candidates.Where(candidate => candidate.ShapeId != start.ShapeId && candidate.ShapeId != end.ShapeId &&
+                !used.Contains(candidate.ShapeId) && !reservedEndpointShapeIds.Contains(candidate.ShapeId))
             .Select(candidate => (Shape: candidate, Distance: DistanceToBox(midpoint, candidate.Geometry!)))
             .OrderBy(item => item.Distance).ThenBy(item => item.Shape.ShapeId, StringComparer.Ordinal).Take(2).ToArray();
         if (nearby.Length == 0 || nearby[0].Distance > Math.Max(Math.Max(line.Width, line.Height), 1) * .35) return (null, false);

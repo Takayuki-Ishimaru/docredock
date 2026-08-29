@@ -136,13 +136,13 @@ public static class PdfTextExtractor
         }
         if (pages.Count == 0)
         {
-            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1 has no native text. DocRedock v0.1.6 does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1 has no native text. This build does not include a PDF rasterizer; rasterizer/OCR may be required.");
             pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
         }
         for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
         {
             if (pages.Any(page => page.PageNumber == pageNumber)) continue;
-            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} has no native text. DocRedock v0.1.6 does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} has no native text. This build does not include a PDF rasterizer; rasterizer/OCR may be required.");
             pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
@@ -160,6 +160,11 @@ public static class PdfTextExtractor
         var operands = new List<double>();
         var current = new List<VisualPathPoint>();
         var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
+        var arrowheadTips = new List<VisualPathPoint>();
+        var assignedLabelRegions = new HashSet<int>();
+        var duplicatePathIds = new HashSet<string>(StringComparer.Ordinal);
+        var arrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
+        var unresolvedPathIds = new HashSet<string>(StringComparer.Ordinal);
         var closed = false;
         var curveSeen = false;
         var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString())]);
@@ -229,14 +234,7 @@ public static class PdfTextExtractor
                         var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
                         paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                             curveSeen ? 0.45 : 0.9, curveSeen || !isClosed || !painted, SourceNodeId: null));
-                        if (isClosed && painted)
-                        {
-                            var id = $"pdf_p{pageNumber}_n{nodes.Count + 1}";
-                            var label = regions.Where(region => region.BoundingBox.X >= minX - 24 && region.BoundingBox.X <= maxX + 24 &&
-                                region.BoundingBox.Y >= minY - 24 && region.BoundingBox.Y <= maxY + 24)
-                                .Select(region => region.Text).FirstOrDefault() ?? $"Vector node {nodes.Count + 1}";
-                            nodes.Add(new VisualNode(id, label, VisualNodeKind.Generic, Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), SourceAnchor: anchor));
-                        }
+                        if (isClosed && painted) AddClosedNode(points);
                         else if (isStroke)
                         {
                             var start = points[0]; var end = points[^1];
@@ -246,14 +244,14 @@ public static class PdfTextExtractor
                             var label = regions.Where(region => Between(region.BoundingBox.X, minX, maxX) && Between(region.BoundingBox.Y, minY, maxY))
                                 .Select(region => region.Text).Distinct(StringComparer.Ordinal).ToArray();
                             var edgeLabel = label.Length == 1 ? label[0] : null;
-                            if (label.Length > 1) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge label is ambiguous."); graphDiagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "Edge label is ambiguous.")); }
+                            if (label.Length > 1) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge label is ambiguous."); graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge label is ambiguous.", 0.2)); }
                             edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", resolved ? source[0].Id : null, resolved ? target[0].Id : null,
                                 edgeLabel, resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved, Direction: "undirected",
                                 Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: resolved ? 0.85 : 0.2,
                                 Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
-                            if (!resolved) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous."); graphDiagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "Edge endpoint is ambiguous.")); }
+                            if (!resolved) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous."); graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2)); }
                         }
-                        if (curveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Curve path retained as fallback.")); }
+                        if (curveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
                     }
                     current.Clear(); operands.Clear(); closed = false; curveSeen = false; break;
                 default: operands.Clear(); break;
@@ -278,7 +276,64 @@ public static class PdfTextExtractor
                 message.StartsWith($"VisualConnectorUnresolved: PDF page {pageNumber}", StringComparison.Ordinal));
             if (deferredGlobal >= 0) diagnostics.RemoveAt(deferredGlobal);
         }
-        return new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths);
+        // A small closed triangle touching a shaft is an arrowhead, not a node.
+        // Promote the shaft to directed only when that evidence is unambiguous.
+        foreach (var tip in arrowheadTips)
+        {
+            var matching = edges.Select((edge, index) => (edge, index))
+                .Where(item => item.edge.Path is { Count: >= 2 } &&
+                    (Distance(item.edge.Path![^1], tip) <= 18 || Distance(item.edge.Path[0], tip) <= 18))
+                .OrderBy(item => Math.Min(Distance(item.edge.Path![^1], tip), Distance(item.edge.Path[0], tip)))
+                .ToArray();
+            if (matching.Length != 1) continue;
+            var match = matching[0];
+            var edge = match.edge;
+            var atEnd = Distance(edge.Path![^1], tip) <= Distance(edge.Path[0], tip);
+            if (!atEnd && edge.SourceId is not null && edge.TargetId is not null)
+                edge = edge with { SourceId = edge.TargetId, TargetId = edge.SourceId };
+            edges[match.index] = edge with { Direction = "directed", EdgeDirection = VisualEdgeDirection.Directed };
+        }
+        var sourceItems = new List<VisualSourceItem>();
+        foreach (var path in paths)
+        {
+            var edge = edges.FirstOrDefault(candidate => candidate.Path is not null && ReferenceEquals(candidate.Path, path.Points));
+            var node = nodes.FirstOrDefault(candidate => candidate.Geometry == path.Geometry);
+            var itemId = path.Id;
+            if (duplicatePathIds.Contains(path.Id))
+            {
+                var canonical = paths.FirstOrDefault(candidate => candidate.Id != path.Id && candidate.Geometry == path.Geometry);
+                sourceItems.Add(canonical is not null
+                    ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
+                        DuplicateOfSourceItemId: canonical.Id, Reason: "duplicate closed path canonicalized", SourceAnchor: path.SourceAnchor)
+                    : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                        FallbackPathId: path.Id, Reason: "duplicate closed path retained without canonical reference", SourceAnchor: path.SourceAnchor));
+            }
+            else if (arrowheadPathIds.Contains(path.Id))
+            {
+                var related = edges.FirstOrDefault(candidate => candidate.Path is { Count: >= 2 } &&
+                    arrowheadTips.Any(tip => Distance(candidate.Path![^1], tip) <= 18 || Distance(candidate.Path[0], tip) <= 18));
+                var relatedPath = paths.FirstOrDefault(candidate => related?.Path is not null && ReferenceEquals(candidate.Points, related.Path));
+                sourceItems.Add(relatedPath is not null
+                    ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
+                        DuplicateOfSourceItemId: relatedPath.Id, Reason: "arrowhead attached to shaft edge; not a node", SourceAnchor: path.SourceAnchor)
+                    : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                        FallbackPathId: path.Id, Reason: "arrowhead direction could not be resolved", SourceAnchor: path.SourceAnchor));
+            }
+            else if (edge is not null && edge.SourceId is not null && edge.TargetId is not null)
+                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedEdge,
+                    ProjectedEdgeId: edge.Id, SourceAnchor: path.SourceAnchor));
+            else if (node is not null)
+                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode,
+                    ProjectedNodeId: node.Id, SourceAnchor: path.SourceAnchor));
+            else if (path.IsFallback)
+                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                    FallbackPathId: path.Id, Reason: unresolvedPathIds.Contains(path.Id) ? "ambiguous label assignment; vector box retained as fallback" : "vector path retained as fallback", SourceAnchor: path.SourceAnchor));
+            else
+                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
+                    Reason: "non-semantic decorative vector path", SourceAnchor: path.SourceAnchor));
+        }
+        return new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
+            SourceItems: sourceItems);
 
         IEnumerable<string> Tokens(string value)
         {
@@ -298,6 +353,9 @@ public static class PdfTextExtractor
         static bool Near(Geometry? geometry, VisualPathPoint point) => geometry is not null &&
             (Between(point.X, geometry.X, geometry.X + geometry.Width) || Between(point.X, geometry.X + geometry.Width, geometry.X)) &&
             (Between(point.Y, geometry.Y, geometry.Y + geometry.Height) || Between(point.Y, geometry.Y + geometry.Height, geometry.Y));
+        static double Distance(VisualPathPoint left, VisualPathPoint right) => Math.Sqrt(Math.Pow(left.X - right.X, 2) + Math.Pow(left.Y - right.Y, 2));
+        VisualDiagnostic Diag(string code, string message, double? confidence = null) => new(code, message,
+            Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}", Confidence: confidence);
 
         void RetainSubpath()
         {
@@ -306,7 +364,7 @@ public static class PdfTextExtractor
             paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", current.ToArray(),
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                 curveSeen ? 0.25 : 0.35, IsFallback: true, SourceNodeId: null));
-            graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Unpainted PDF subpath retained as fallback."));
+            graphDiagnostics.Add(Diag("VisualPathPartial", "Unpainted PDF subpath retained as fallback.", 0.35));
         }
 
         void RetainClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
@@ -316,18 +374,90 @@ public static class PdfTextExtractor
             paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", subpath,
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                 0.35, IsFallback: true, SourceNodeId: null));
-            graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Unpainted PDF subpath retained as fallback."));
+            graphDiagnostics.Add(Diag("VisualPathPartial", "Unpainted PDF subpath retained as fallback.", 0.35));
         }
 
         void AddClosedNode(IReadOnlyList<VisualPathPoint> subpath)
         {
             var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
             var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
-            var label = regions.Where(region => region.BoundingBox.X >= minX - 24 && region.BoundingBox.X <= maxX + 24 &&
-                    region.BoundingBox.Y >= minY - 24 && region.BoundingBox.Y <= maxY + 24)
-                .Select(region => region.Text).FirstOrDefault() ?? $"Vector node {nodes.Count + 1}";
+            var width = maxX - minX; var height = maxY - minY;
+            var geometry = new Geometry("pdf-user-space", minX, minY, width, height);
+            // Canonicalize repeated paint operations for the same visual box.
+            if (nodes.Any(node => IoU(node.Geometry, geometry) >= 0.90))
+            {
+                if (paths.Count > 0) duplicatePathIds.Add(paths[^1].Id);
+                return;
+            }
+            var labelCandidate = regions.Select((region, index) => (region, index, score: LabelScore(region.BoundingBox, geometry)))
+                .Where(item => item.score > 0 && !assignedLabelRegions.Contains(item.index))
+                .OrderByDescending(item => item.score).ThenBy(item => item.region.ReadingOrder).ToArray();
+            var ambiguousLabel = labelCandidate.Length > 1 && labelCandidate[0].score - labelCandidate[1].score < 0.15;
+            if (ambiguousLabel)
+            {
+                if (paths.Count > 0)
+                {
+                    unresolvedPathIds.Add(paths[^1].Id);
+                    paths[^1] = paths[^1] with { IsFallback = true };
+                }
+                graphDiagnostics.Add(Diag("VisualNodeLabelMissing", "Text region assignment was ambiguous; vector box retained as fallback.", 0.2));
+                return;
+            }
+            var hasLabel = labelCandidate.Length > 0;
+            var label = hasLabel ? labelCandidate[0].region.Text : null;
+            if (hasLabel) assignedLabelRegions.Add(labelCandidate[0].index);
+            // Tiny unlabelled closed paths are markers/arrowheads, not semantic nodes.
+            if (string.IsNullOrWhiteSpace(label) && width <= 16 && height <= 16)
+            {
+                if (IsTriangle(subpath))
+                {
+                    arrowheadTips.Add(ArrowTip(subpath));
+                    if (paths.Count > 0) arrowheadPathIds.Add(paths[^1].Id);
+                }
+                paths.Add(new VisualPath($"pdf_p{pageNumber}_decorative{paths.Count + 1}", subpath, geometry, anchor, 0.3, IsFallback: true));
+                return;
+            }
+            label ??= $"Vector node {nodes.Count + 1}";
             nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
-                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), SourceAnchor: anchor));
+                Geometry: geometry, SourceAnchor: anchor));
+        }
+
+        static double LabelScore(Geometry label, Geometry node)
+        {
+            var left = Math.Max(label.X, node.X); var right = Math.Min(label.X + label.Width, node.X + node.Width);
+            var bottom = Math.Max(label.Y, node.Y); var top = Math.Min(label.Y + label.Height, node.Y + node.Height);
+            var overlap = Math.Max(0, right - left) * Math.Max(0, top - bottom);
+            var labelArea = Math.Max(1, label.Width * label.Height);
+            var centerDistance = Math.Sqrt(Math.Pow(label.X + label.Width / 2 - (node.X + node.Width / 2), 2) +
+                Math.Pow(label.Y + label.Height / 2 - (node.Y + node.Height / 2), 2));
+            return overlap / labelArea + 1d / (1d + centerDistance);
+        }
+
+        static double IoU(Geometry? left, Geometry right)
+        {
+            if (left is null) return 0;
+            var intersection = Math.Max(0, Math.Min(left.X + left.Width, right.X + right.Width) - Math.Max(left.X, right.X)) *
+                Math.Max(0, Math.Min(left.Y + left.Height, right.Y + right.Height) - Math.Max(left.Y, right.Y));
+            var union = Math.Max(1, left.Width * left.Height + right.Width * right.Height - intersection);
+            return intersection / union;
+        }
+
+        static bool IsTriangle(IReadOnlyList<VisualPathPoint> points)
+        {
+            var distinct = points.Distinct().Count();
+            // Closed triangles contain the repeated start point, therefore they
+            // have exactly three unique vertices. Rectangles/circles are never
+            // treated as arrowhead evidence merely because they are small.
+            return distinct == 3;
+        }
+
+        static VisualPathPoint ArrowTip(IReadOnlyList<VisualPathPoint> points)
+        {
+            var minX = points.Min(point => point.X); var maxX = points.Max(point => point.X);
+            var minY = points.Min(point => point.Y); var maxY = points.Max(point => point.Y);
+            return points.OrderByDescending(point =>
+                Math.Min(Math.Abs(point.X - minX), Math.Abs(point.X - maxX)) +
+                Math.Min(Math.Abs(point.Y - minY), Math.Abs(point.Y - maxY))).First();
         }
     }
 

@@ -1,10 +1,10 @@
-# v0.1.6 の対応機能
+# v0.1.7 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.1.6 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.1.7 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.1.6での扱い |
+| 機能 | v0.1.7での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート。CLI既定 |
 | `visible`／`complete`／`sanitized` | サポート |
@@ -28,7 +28,7 @@ DocRedock v0.1.6 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX�
 
 次の優先順位で、認識した視覚情報を処理します。
 
-1. topologyが有効ならMermaid等のsemantic projection
+1. 共通validatorに合格したtopologyだけをMermaid等のsemantic projection
 2. 安全に生成できる画像／ページpreview等のvisual fallback
 3. projectionもfallbackもできない場合は明示的なdiagnostic
 
@@ -42,4 +42,4 @@ DOCX drawingとPDF vector topologyは完全復元しません。対応fragment�
 
 閲覧用Markdownは一方向の出力です。`.drmd`と`.drmdpkg`は実験用で、元文書由来の情報を含む可能性があります。元文書を正本として保持してください。
 
-この文書がpublic supportの正本です。コード上の能力は[実装能力表](../FORMAT_CAPABILITY_MATRIX.md)、版ごとの差分は[リリースノート](../../release-docs/RELEASE_NOTES_v0.1.6.md)、公開方針は[PUBLICATION_SCOPE](../../release-docs/PUBLICATION_SCOPE.md)を参照してください。[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。
+この文書がpublic supportの正本です。コード上の能力は[実装能力表](../FORMAT_CAPABILITY_MATRIX.md)、版ごとの差分は[v0.1.7リリースノート](../../release-docs/RELEASE_NOTES_v0.1.7.md)、公開方針は[PUBLICATION_SCOPE](../../release-docs/PUBLICATION_SCOPE.md)を参照してください。[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。

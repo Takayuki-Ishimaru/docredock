@@ -1,7 +1,7 @@
 # Format capability matrix（現行実装）
 
-> **これはコードとして実装されている能力の技術リファレンスです。v0.1.6の公開サポート状況を示す表ではありません。**
-> v0.1.6 Public Betaで利用者向けにサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから閲覧用Markdownへの一方向変換です。CLIのPDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
+> **これはコードとして実装されている能力の技術リファレンスです。v0.1.7の公開サポート状況を示す表ではありません。**
+> v0.1.7 Public Betaで利用者向けにサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから閲覧用Markdownへの一方向変換です。CLIのPDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
 
 記号: ○ = コードとして実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規文書の生成（render）」だけの機能一覧ではなく、主にエクスポートしたDRMD Markdownから元文書を改版する実験エンジンの実装能力を示します。
 
@@ -36,7 +36,7 @@
 | PPTX | ○ process／decision／terminator／data／generic | ○ `stCxn`／`endCxn` | △ 端点とbounding boxから一意の場合 | △ segment近傍で一意の場合 | ○ 有効なflow topology | △ image asset | unresolved／partial diagnostic。SmartArt textは保持 |
 | PDF | ○ native text | △ 単純painted vector pathの一意endpoint | △ 一意なvector endpointのみ | △ 一意な近接labelのみ | △ 有効な単純topologyのみ | △ rasterizer preview、path/page placeholder | vector/path partialと未解決endpointをdiagnostic。任意vector graph完全解析なし |
 
-共通`VisualGraph` modelはnode、edge、vector path、shape kind、geometry、source anchor、group/lane、direction、resolution kind、confidence、diagnosticを表現できます。edgeはdirected/undirectedを明示でき、path/edge accountingはsemantic projectionとsource fallbackの取りこぼしを検出します。ただし、各adapterが全metadataを取得することを意味しません。resolution kindは少なくとも`native-connection`、`geometry-inferred`、`layout-inferred`、`unresolved`を区別します。JSON metadataは端点とnode IDが整合するtopologyだけをMermaidへ投影し、破損・不整合時は元connector/vector fallbackを抑止せずstable diagnosticを残します。
+共通`VisualGraph` modelはnode、edge、vector path、source item ledger、shape kind、geometry、source anchor、group/lane、direction、resolution kind、confidence、diagnosticを表現できます。新規source itemはprojection、fallback、diagnostic、duplicate suppression、または理由付きdecorative dispositionへaccountingし、共通validatorが空label、参照不整合、self edge、低confidence inferenceをMermaid出力前に拒否します。edgeはdirected/undirectedを明示でき、path/edge accountingはsemantic projectionとsource fallbackの取りこぼしを検出します。ただし、各adapterが全metadataを取得することを意味しません。resolution kindは少なくとも`native-connection`、`geometry-inferred`、`layout-inferred`、`unresolved`を区別します。JSON metadataは端点とnode IDが整合するtopologyだけをMermaidへ投影し、破損・不整合時は元connector/vector fallbackを抑止せずstable diagnosticを残します。
 
 PPTXの認識済みconnectorはsemantic projectionまたはexplicit diagnosticへaccountingされます。曖昧なconnectorやedge labelを断定せず、exportがWarningを出す場合はCLI終了コード1の対象です。現行PPTXの代表的なstable codeは`VisualSemanticProjectionPartial`、`VisualConnectorUnresolved`、`VisualEdgeLabelUnresolved`です。その他のcodeは将来のadapter実装で追加され得ます。
 

@@ -6,12 +6,12 @@
 
 ## 最新版
 
-### v0.1.6 Public Beta
+### v0.1.7 Public Beta
 
-- [v0.1.6 リリースノート](RELEASE_NOTES_v0.1.6.md)
-- DOCX AlternateContent 二重抽出と visual Node ID 衝突を修正
-- visual semantics は projection、fallback、または diagnostic で欠落を可視化
-- 6 RIDの配布物をrelease workflowで構築・展開検証し、結果とハッシュをGitHub Releaseへ添付
+- [v0.1.7 リリースノート](RELEASE_NOTES_v0.1.7.md)
+- [v0.1.6 正誤表](ERRATA_v0.1.6.md)
+- Mermaidはvalidator合格時だけ出力し、不確実な視覚情報はfallbackとdiagnosticで保持
+- release workflowはtag由来version、構造smoke、machine-readable evidenceを要求
 
 ## 利用者向け
 
@@ -24,6 +24,6 @@
 
 - [公開範囲](PUBLICATION_SCOPE.md)
 - [リリースチェックリスト](RELEASE_CHECKLIST.md)
-- [公開証跡](RELEASE_NOTES_v0.1.6.md#公開証跡)
+- [公開証跡と構造検証](RELEASE_NOTES_v0.1.7.md)
 - [English publication scope](PUBLICATION_SCOPE.en.md)
 - [English release checklist](RELEASE_CHECKLIST.en.md)

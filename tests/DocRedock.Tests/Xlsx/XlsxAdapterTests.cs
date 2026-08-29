@@ -1,6 +1,9 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocRedock.Api;
+using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Xlsx;
 using DocRedock.Markdown;
 
@@ -299,6 +302,80 @@ public sealed class XlsxAdapterTests
         Assert.Equal(4, shape.Row);
         Assert.Equal(1_000_000, shape.WidthEmu);
         Assert.Equal(500_000, shape.HeightEmu);
+    }
+
+    [Fact]
+    public void Worksheet_metrics_are_exposed_and_convert_excel_dimensions_to_emu()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage()));
+        var metrics = Assert.Single(result.Worksheets).Metrics;
+
+        Assert.NotNull(metrics);
+        Assert.Equal(18.5d, metrics!.ColumnWidth(1));
+        Assert.Equal(24d, metrics.RowHeight(1));
+        Assert.Equal(XlsxWorksheetMetrics.RowHeightToEmu(24), metrics.RowStartEmu(2));
+        Assert.Equal(XlsxWorksheetMetrics.ColumnWidthToEmu(18.5), metrics.ColumnStartEmu(2));
+        Assert.True(XlsxWorksheetMetrics.ColumnWidthToPixels(18.5) > XlsxWorksheetMetrics.ColumnWidthToPixels(8.43));
+    }
+
+    [Fact]
+    public void Absolute_and_two_cell_anchors_expose_deterministic_absolute_bounds()
+    {
+        var worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:absoluteAnchor><xdr:pos x="1234" y="5678"/><xdr:ext cx="9000" cy="8000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="10" name="absolute"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>10</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>20</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>30</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>40</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="11" name="two-cell"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+
+        var shapes = Assert.Single(new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing))).Worksheets).DrawingShapes!;
+        var absolute = Assert.Single(shapes, shape => shape.Id == "10");
+        var twoCell = Assert.Single(shapes, shape => shape.Id == "11");
+        Assert.Equal("absoluteAnchor", absolute.AnchorKind);
+        Assert.Equal(new XlsxDrawingBounds(1234, 5678, 9000, 8000), absolute.AbsoluteBounds);
+        Assert.Equal("twoCellAnchor", twoCell.AnchorKind);
+        Assert.Equal(30, twoCell.ToColumnOffset);
+        Assert.Equal(40, twoCell.ToRowOffset);
+        Assert.True(twoCell.AbsoluteBounds!.WidthEmu > 0);
+        Assert.True(twoCell.AbsoluteBounds.HeightEmu > 0);
+    }
+
+    [Fact]
+    public void Four_flowchart_nodes_and_three_directional_shapes_do_not_skip_intermediate_nodes()
+    {
+        var worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="start"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="process"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_PROCESS</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="decision"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_DECISION</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>12</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="end"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="arrow-1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="arrow-2"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>10</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="7" name="arrow-3"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Flow", worksheet, drawing)));
+        var source = Assert.IsType<DocRedock.Core.Documents.TextNodeContent>(
+            Assert.Single(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Diagram).Content).Text;
+
+        Assert.Equal(4, Regex.Matches(source, "^\\s+N_S_[0-9]+(?:\\(\\[|\\[|\\{)", RegexOptions.Multiline).Count);
+        Assert.Contains("N_S_1 --> N_S_2", source, StringComparison.Ordinal);
+        Assert.Contains("N_S_2 --> N_S_3", source, StringComparison.Ordinal);
+        Assert.Contains("N_S_3 --> N_S_4", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("N_S_1 --> N_S_4", source, StringComparison.Ordinal);
+
+        var visualGraph = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram)
+            .Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var validation = VisualGraphValidator.Validate(visualGraph);
+        Assert.True(validation.IsValidForSemanticProjection);
+        Assert.Equal(7, validation.Accounting.RecognizedSourceItems);
+        Assert.Equal(4, validation.Accounting.ProjectedNodes);
+        Assert.Equal(3, validation.Accounting.ProjectedEdges);
+        Assert.Equal(0, validation.Accounting.Unaccounted);
+        Assert.Equal(0, validation.Accounting.InvalidReferences);
     }
 
     [Fact]

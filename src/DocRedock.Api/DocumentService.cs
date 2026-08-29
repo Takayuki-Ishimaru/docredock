@@ -305,7 +305,8 @@ public sealed class DocumentService
                 options.Title,
                 options.ContentPolicy));
             var markdown = serializer.Serialize(graph);
-            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing => existing.Code != item.Code)))
+            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
+                         existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
                 diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity switch
                 {
                     MarkdownDiagnosticSeverity.Info => DiagnosticSeverity.Information,
@@ -692,7 +693,7 @@ public sealed class DocumentService
                 var diagnostic = enabled
                     ? new OcrDiagnostic(
                         "PdfRasterizerUnavailable",
-                        "This PDF page has no native text. DocRedock v0.1.6 does not include a PDF rasterizer, so OCR could not run for this page.",
+                        "This PDF page has no native text. This build does not include a PDF rasterizer, so OCR could not run for this page.",
                         DiagnosticSeverity.Warning)
                     : new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this textless PDF page.", DiagnosticSeverity.Information);
                 records.Add(new OcrAssetRecord(partition.Id, status, languages, null, [diagnostic]));

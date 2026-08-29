@@ -443,20 +443,46 @@ public sealed class DocxAdapter : IFormatProbe
             .ToArray();
         if (shapeElements.Length == 0 && connectorElements.Length == 0) return null;
 
-        var nodes = shapeElements.Select((shape, index) =>
+        // Build the semantic node set once per unique source shape ID. Duplicate IDs are
+        // preserved in the source ledger as suppressed duplicates rather than becoming
+        // duplicate VisualNode IDs that would invalidate promotion.
+        var shapeRecords = shapeElements.Select((shape, index) =>
         {
             var shapeId = (string?)shape.Attribute("id") ??
                 (string?)shape.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ?? index.ToString();
             var nodeAnchor = anchor with { Locators = [new AnchorLocator("shape_id", shapeId)] };
             var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
-            return (shapeId, Geometry: ReadVisualGeometry(shape),
-                Node: new VisualNode(id, ParagraphText(shape).Trim(), VisualNodeKind.Generic, sourceNodeId,
-                    Geometry: ReadVisualGeometry(shape), SourceAnchor: nodeAnchor,
+            var geometry = ReadVisualGeometry(shape);
+            var label = ParagraphText(shape).Trim();
+            if (label.Length == 0) label = "Shape " + shapeId;
+            return (shapeId, Geometry: geometry,
+                Node: new VisualNode(id, label, VisualNodeKind.Generic, sourceNodeId,
+                    Geometry: geometry, SourceAnchor: nodeAnchor,
                     Group: (string?)shape.Ancestors(A + "grpSp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id") ??
                         (string?)shape.Ancestors(WPG + "wgp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id")));
         }).ToArray();
-        var lookup = nodes.GroupBy(item => item.shapeId, StringComparer.Ordinal)
+        var lookup = shapeRecords.GroupBy(item => item.shapeId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var nodes = new List<VisualNode>();
+        var sourceItems = new List<VisualSourceItem>();
+        var shapeSourceItems = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var record in shapeRecords)
+        {
+            var sourceItemId = "shape:" + record.shapeId;
+            if (shapeSourceItems.TryGetValue(record.shapeId, out var firstSourceItem))
+            {
+                sourceItems.Add(new VisualSourceItem("shape:" + record.shapeId + ":duplicate:" + sourceItems.Count,
+                    VisualSourceItemKind.Shape, VisualDisposition.SuppressedDuplicate,
+                    DuplicateOfSourceItemId: firstSourceItem, Reason: "duplicate source shape ID",
+                    SourceAnchor: record.Node.SourceAnchor));
+                continue;
+            }
+            shapeSourceItems[record.shapeId] = sourceItemId;
+            nodes.Add(record.Node);
+            sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Shape,
+                VisualDisposition.ProjectedNode, ProjectedNodeId: record.Node.Id, SourceAnchor: record.Node.SourceAnchor));
+        }
+
         var edges = new List<VisualEdge>();
         var paths = new List<VisualPath>();
         var diagnostics = new List<VisualDiagnostic>();
@@ -502,6 +528,10 @@ public sealed class DocxAdapter : IFormatProbe
                 ? NormalizeRef((string?)connector.Element.Attribute("to") ?? (string?)connector.Element.Attribute("end"))
                 : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "endCxn")?.Attribute("id"));
             var geometry = ReadVisualGeometry(connector.Element);
+            var connectorObjectId = connector.Vml
+                ? (string?)connector.Element.Attribute("id")
+                : (string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
+            connectorObjectId ??= index.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var points = new[] { PointAt(geometry, false), PointAt(geometry, true) };
             var sourceKey = start is not null && lookup.ContainsKey(start) ? start : null;
             var targetKey = end is not null && lookup.ContainsKey(end) ? end : null;
@@ -510,32 +540,70 @@ public sealed class DocxAdapter : IFormatProbe
             if (targetKey is null) targetKey = Infer(points[1], lookup.Select(item => (item.Key, item.Value.Geometry)), out ambiguousEnd);
             var source = sourceKey is not null ? lookup[sourceKey].Node.Id : null;
             var target = targetKey is not null ? lookup[targetKey].Node.Id : null;
-            if (source is not null && source == target) { source = null; target = null; }
+            var selfEdge = source is not null && source == target;
+            if (selfEdge) { source = null; target = null; }
             var resolved = source is not null && target is not null;
             var resolution = start is not null || end is not null
                 ? (resolved ? VisualEdgeResolution.NativeConnection : VisualEdgeResolution.Unresolved)
                 : (resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved);
             var edgeAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("connector", index.ToString(System.Globalization.CultureInfo.InvariantCulture))]).ToArray() };
             var labelCandidates = paragraph.Descendants(W + "txbxContent")
-                .Select(box => (Text: ParagraphText(box).Trim(), Geometry: ReadVisualGeometry(box.Ancestors().FirstOrDefault(item => item.Name == V + "shape" || item.Name == A + "sp") ?? box)))
+                .Select(box => (Box: box, Text: ParagraphText(box).Trim(), Geometry: ReadVisualGeometry(box.Ancestors().FirstOrDefault(item => item.Name == V + "shape" || item.Name == A + "sp") ?? box)))
                 .Where(item => item.Text.Length != 0 && item.Geometry is not null && !usedLabels.Contains(item.Text))
                 .Where(item => geometry is not null && Distance(new VisualPathPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2), item.Geometry!) < Math.Max(geometry.Width, geometry.Height) * 1.5 + 1)
                 .ToArray();
             var label = labelCandidates.Length == 1 ? labelCandidates[0].Text : null;
-            if (label is not null) usedLabels.Add(label);
+            if (label is not null)
+            {
+                usedLabels.Add(label);
+                var labelShapeId = (string?)labelCandidates[0].Box.Ancestors().FirstOrDefault(item => item.Name == A + "sp" || item.Name == V + "shape")?
+                    .Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
+                var labelSourceId = "label:" + index;
+                if (labelShapeId is not null && shapeSourceItems.TryGetValue(labelShapeId, out var duplicateOf))
+                    sourceItems.Add(new VisualSourceItem(labelSourceId, VisualSourceItemKind.TextLabel,
+                        VisualDisposition.SuppressedDuplicate, DuplicateOfSourceItemId: duplicateOf,
+                        Reason: "attached to connector edge", SourceAnchor: anchor with { Locators = [new AnchorLocator("shape_id", labelShapeId)] }));
+                else
+                    sourceItems.Add(new VisualSourceItem(labelSourceId, VisualSourceItemKind.TextLabel,
+                        VisualDisposition.IgnoredDecorative, Reason: "attached as connector label", SourceAnchor: edgeAnchor));
+            }
+            var diagnosticConfidence = resolved
+                ? resolution == VisualEdgeResolution.NativeConnection ? 1d : 0.8d
+                : 0d;
             if (ambiguousStart || ambiguousEnd)
-                diagnostics.Add(new VisualDiagnostic("VisualConnectorAmbiguous", "DOCX connector endpoint inference was ambiguous.", sourceNodeId));
+                diagnostics.Add(new VisualDiagnostic("VisualConnectorAmbiguous", "DOCX connector endpoint inference was ambiguous.", sourceNodeId,
+                    Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: connectorObjectId,
+                    SourceObjectType: "connector", Confidence: diagnosticConfidence));
             if (!resolved)
-                diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "DOCX connector endpoint could not be resolved.", sourceNodeId));
+                diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved",
+                    selfEdge ? "DOCX connector self-edge was not projected." : "DOCX connector endpoint could not be resolved.", sourceNodeId,
+                    Fallback: "connector retained as visual fallback", Remedy: "snap both connector endpoints to distinct shapes",
+                    Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: connectorObjectId,
+                    SourceObjectType: "connector", Confidence: diagnosticConfidence));
             var pathPoints = points.Where(point => point is not null).Select(point => point!).ToArray();
-            if (geometry is not null) paths.Add(new VisualPath("path_" + index, pathPoints, geometry, edgeAnchor, resolved ? 0.9 : 0.4, !resolved, sourceNodeId));
+            string? pathId = null;
+            if (geometry is not null)
+            {
+                pathId = "path_" + index;
+                paths.Add(new VisualPath(pathId, pathPoints, geometry, edgeAnchor, resolved ? 0.9 : 0.4, !resolved, sourceNodeId));
+            }
+            var connectorSourceId = "connector:" + index;
+            if (resolved)
+                sourceItems.Add(new VisualSourceItem(connectorSourceId, VisualSourceItemKind.Connector,
+                    VisualDisposition.ProjectedEdge, ProjectedEdgeId: "edge_" + index, SourceAnchor: edgeAnchor));
+            else if (pathId is not null)
+                sourceItems.Add(new VisualSourceItem(connectorSourceId, VisualSourceItemKind.Connector,
+                    VisualDisposition.VisualFallback, FallbackPathId: pathId, Reason: "unresolved connector geometry", SourceAnchor: edgeAnchor));
+            else
+                sourceItems.Add(new VisualSourceItem(connectorSourceId, VisualSourceItemKind.Connector,
+                    VisualDisposition.DiagnosticOnly, DiagnosticCode: "VisualConnectorUnresolved", SourceAnchor: edgeAnchor));
             edges.Add(new VisualEdge("edge_" + index, source, target, Label: label,
                 Resolution: resolution, SourceNodeId: sourceNodeId, Direction: "directed",
                 Geometry: geometry, Confidence: resolved ? (resolution == VisualEdgeResolution.NativeConnection ? 1 : 0.8) : 0,
                 Path: pathPoints, SourceAnchor: edgeAnchor, EdgeDirection: VisualEdgeDirection.Directed));
         }
-        var graph = new VisualGraph("docx_visual_" + sourceNodeId, nodes.Select(item => item.Node).ToArray(), edges, diagnostics, "LR", Paths: paths);
-        return graph;
+        return new VisualGraph("docx_visual_" + sourceNodeId, nodes, edges, diagnostics, "LR",
+            Paths: paths, SourceItems: sourceItems);
     }
 
     private static Geometry? ReadVisualGeometry(XElement element)

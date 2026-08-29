@@ -10,7 +10,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.1.6 Public Beta support
+## v0.1.7 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -19,7 +19,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-semantic boundaries. The [implementation capability matrix](docs/FORMAT_CAPABILITY_MATRIX.md) separately describes code-level capabilities. Version-specific changes stay in the [v0.1.6 release notes](release-docs/RELEASE_NOTES_v0.1.6.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-semantic boundaries. The [implementation capability matrix](docs/FORMAT_CAPABILITY_MATRIX.md) separately describes code-level capabilities. Version-specific changes stay in the [v0.1.7 release notes](release-docs/RELEASE_NOTES_v0.1.7.en.md).
 
 ## Use it in 30 seconds
 
@@ -62,7 +62,7 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 ## Important limitations
 
-- v0.1.6 is a Public Beta, not a production-stable release.
+- v0.1.7 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -75,9 +75,9 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.1.6 supported features](docs/en/supported-features.md)
+- [v0.1.7 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.1.6 release notes](release-docs/RELEASE_NOTES_v0.1.6.en.md)
+- [v0.1.7 release notes](release-docs/RELEASE_NOTES_v0.1.7.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

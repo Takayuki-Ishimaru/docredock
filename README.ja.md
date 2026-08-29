@@ -10,7 +10,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.1.6 Public Betaの対応状況
+## v0.1.7 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -19,7 +19,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)、コード上の能力は[実装能力表](docs/FORMAT_CAPABILITY_MATRIX.md)が正本です。版固有の変更は[v0.1.6リリースノート](release-docs/RELEASE_NOTES_v0.1.6.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)、コード上の能力は[実装能力表](docs/FORMAT_CAPABILITY_MATRIX.md)が正本です。版固有の変更は[v0.1.7リリースノート](release-docs/RELEASE_NOTES_v0.1.7.md)へ集約します。
 
 ## 30秒で使う
 
@@ -62,7 +62,7 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 
 ## 主な制約
 
-- v0.1.6はPublic Betaであり、本番向けの安定版ではありません。
+- v0.1.7はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -74,9 +74,9 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.1.6の対応状況](docs/ja/supported-features.md)
+- [v0.1.7の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.1.6リリースノート](release-docs/RELEASE_NOTES_v0.1.6.md)
+- [v0.1.7リリースノート](release-docs/RELEASE_NOTES_v0.1.7.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 
