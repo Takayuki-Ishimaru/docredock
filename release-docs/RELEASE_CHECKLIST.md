@@ -2,20 +2,9 @@
 
 日本語 | [English](RELEASE_CHECKLIST.en.md)
 
-この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。必須の自動検査が一つでも失敗した場合は公開しません。
+この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。Release Owner が証跡と公開判断を所有し、CI/QA Owner が技術ゲートを実行します。必須ゲートが一つでも未完了または失敗している場合は公開しません。
 
-デスクトップGUIのPDF入力はv0.1.5で既定利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元はサポート対象外の実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarization は設定されている場合に適用しますが、証明書がないことだけを理由に Public Beta の配布を停止しません。各配布物には適用状況を記録します。
-
-## 現状監査メモ（2026-08-26）
-
-- 本体ライセンスは MIT License に確定しています。
-- DocRedock.sln はローカルに用意された .NET 10.0.400 SDKで Release ビルドに成功し、警告 0、エラー 0 でした。
-- DocRedock への名称変更は作業ツリー上で完了しています。公開前にパス移動と識別子移行を一つの整合した commit としてレビューする必要があります。
-- output/ と outputs/ には変換結果、視覚回帰、過去出力、元 Office 文書を含む資材があります。一部は現在の Git index で追跡されており、.gitignore だけでは公開を防げません。
-- .codex/、.mcp.json、.tokenlighten/、AGENTS.md、CLAUDE.md、.github/copilot-instructions.md は製品に不要なローカル／AI ツール設定です。個人環境の絶対パスを含むファイルがあります。
-- DOCX/PPTX fixture の README にローカル環境の絶対パスがあります。公開するなら再現可能な相対パスへ書き換え、公開しないなら fixture とともに除外します。
-- CI は tools/conversion-qa/run.py を実行します。QA ハーネスや必要 fixture を非公開にする場合、公開 CI からこの step を外すか、公開可能な合成 fixture だけで動く形へ変更する必要があります。
-- ルートに Office の一時ロックファイルと検証用 workbook が存在します。公開対象へ混入させません。
+デスクトップGUIのPDF入力はv0.1.6で既定利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元は実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
 
 ## P0: 公開ブランチの確定
 
@@ -59,9 +48,20 @@
 - [ ] provenance/ の記録が採用コードと一致する
 - [ ] SBOM に対象 RID、commit、配布物内の実ファイルと SHA-256 を記録し、成果物 provenance／attestation と結び付けた
 
+## P0: v0.1.6 visual semantics
+
+- [ ] DOCX／XLSX／PPTX／PDF の合成 fixture で、認識対象ごとに native projection、semantic projection、visual fallback、明示的診断のいずれかが残る
+- [ ] `recognized = semantic projection + visual fallback + explicitly diagnosed omission` のaccountingを形式別・文書全体で照合した
+- [ ] native connection、geometry inference、unresolved connector、edge label、unsupported visual のstable diagnosticを確認した
+- [ ] 既存のparagraph／list／table／image／OCR出力に回帰がなく、出力markerと順序が決定的である
+- [ ] 公開バイナリのsmokeでexit code、marker、diagnostic、各count、fixture SHA-256、output SHA-256を`RELEASE-EVIDENCE.md`へ保存した
+- [x] DOCX connectorとPDF vector topologyは条件付き対応としてのみ記載し、完全drawing／SmartArt／任意vector graph再構成を対応済みと記載していない
+
 ## ビルドとテスト
 
-クリーン clone と固定 SDK で次を実行します。名称変更完了後の最終パスを使います。
+ローカル事前検証（2026-08-29、.NET 10.0.400）では、main 359件とGUI headless 4件が失敗0／skip 0で成功し、osx-arm64 self-contained CLI／GUI publishと抽出済みbinary smokeも成功しました。これは以下のclean clone、全RID、署名／notarization、公開証跡ゲートを完了扱いにはしません。
+
+クリーン clone と固定 SDK で次を実行します。
 
 ```sh
 dotnet restore DocRedock.sln --locked-mode
@@ -76,6 +76,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] 全テストが成功し、skip の理由をレビューした
 - [ ] 公開 CI に conversion-qa を残す場合、合成 fixture だけで成功した
 - [ ] LicenseAudit が成功し、SBOM を生成した
+- [ ] 同一入力・同一設定で再実行し、期待する出力と診断が決定的である
 - [ ] git status が期待した生成物以外で clean である
 
 ## 配布物
@@ -83,7 +84,8 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で展開し、CLI と GUI バイナリを検証した
 - [ ] headless CI ではパッケージ前にAvalonia headlessでMainWindowを構築し、Windows GUIのPE形式・CPU、macOS GUIのMach-O形式・CPU・実行権限を検証し、LinuxではXvfb上で実配布GUI子プロセスの生存を確認した
-- [ ] CLIのv0.1.5バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した（復元結果は機械的回帰試験のみで、v0.1.5のユーザーサポートを意味しない）
+- [ ] CLIのv0.1.6バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した
+- [ ] 展開後の実バイナリでDOCX／XLSX／PPTX／PDF visual-semantics smokeを実行し、結果をリリース証跡に記録した
 - [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換／復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
 - [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX／PDF入力と閲覧用Markdownの見た目を確認した
 - [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
@@ -92,11 +94,12 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] 配布アーカイブに tests、fixture、output、source document、debug symbol、ローカル設定がない
 - [ ] 各アーカイブの SHA-256 を生成した
 - [ ] 生成したアーカイブを別ディレクトリへ展開し、そこから smoke test した
+- [ ] 公開停止、成果物撤回、旧版へのrollback、修正版再展開の手順と責任者を確認した
 
 ## 文書と公開ページ
 
 - [ ] README の概要、コマンド、対応 OS、ファイル名が最終成果物と一致する
-- [ ] USER_GUIDE.md の GUI/CLI 手順を新規利用者として再実行した
+- [ ] docs/ja/user-guide.md の GUI/CLI 手順を新規利用者として再実行した
 - [ ] 日本語版と英語版のリリース文書が同じ要件を網羅している
 - [ ] FORMAT_CAPABILITY_MATRIX.md が現行実装とテスト結果に一致する
 - [ ] Readable Markdown が復元不可であることを明示した
@@ -104,6 +107,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] OCR、Tesseract、Mermaid、PDF rasterizer の同梱有無を明示した
 - [ ] 既知の制約と破壊的変更をリリースノートへ記載した
 - [ ] CONTRIBUTING.md、CODE_OF_CONDUCT.md、SECURITY.md の公開方針を確定した
+- [ ] `RELEASE-EVIDENCE.md` のworkflow生成者、CI/QA Owner、Release Owner、保存場所、commit、成果物hashを記録した
 
 ## リリース承認
 

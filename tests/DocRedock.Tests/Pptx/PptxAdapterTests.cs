@@ -1,6 +1,8 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using DocRedock.Api;
+using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Pptx;
 using DocRedock.Markdown;
 
@@ -170,9 +172,119 @@ public sealed class PptxAdapterTests
         Assert.Contains("- Intake", markdown, StringComparison.Ordinal);
         Assert.Contains("- Review", markdown, StringComparison.Ordinal);
 
-        // P08: the connector's stCxn/endCxn resolve through the shape-id map to the two shapes'
-        // own text, reconstructing the logical transition a bare cxnSp line cannot show.
-        Assert.Contains("ALPHA → BETA", markdown, StringComparison.Ordinal);
+        // P08 / v0.1.6: the connector's stCxn/endCxn resolve through the shape-id map into a
+        // semantic Mermaid edge, rather than leaving the flow as a textual edge enumeration.
+        Assert.Contains("v_20 --> v_21", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProjectsNativeConnectorAsSemanticMermaidWithStableVisualIds()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGapFeaturesPackage()));
+        var visual = Assert.Single(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("visual_graph") == true);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal(DocRedock.Core.Documents.NodeKind.Diagram, visual.Kind);
+        Assert.Contains("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Contains("flowchart LR", markdown, StringComparison.Ordinal);
+        Assert.Contains("v_20 --> v_21", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("- ALPHA → BETA", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MermaidOmitsUnconnectedTitleShape()
+    {
+        var entries = Entries(CreateGapFeaturesPackage());
+        const string title = "<p:sp><p:nvSpPr><p:cNvPr id=\"19\" name=\"Title\" /><p:nvPr><p:ph type=\"title\" /></p:nvPr></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"200\" /><a:ext cx=\"400\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Unconnected title</a:t></a:r></a:p></p:txBody></p:sp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"])
+            .Replace("<p:spTree>", "<p:spTree>" + title, StringComparison.Ordinal));
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var visual = VisualGraphOf(extraction);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.DoesNotContain(visual.Nodes, node => node.SourceNodeId == "19");
+        Assert.DoesNotContain("v_19[Unconnected title]", markdown, StringComparison.Ordinal);
+        Assert.Contains("## スライド 1 — Unconnected title", markdown, StringComparison.Ordinal);
+        Assert.Contains("v_20 --> v_21", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DisablingDiagramProjectionKeepsConnectorTextFallback()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGapFeaturesPackage()));
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(IncludeDiagrams: false)).Serialize(extraction.Graph);
+
+        Assert.DoesNotContain("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Contains("- ALPHA → BETA", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CorruptVisualGraphKeepsConnectorFallbackAndReportsPartialProjection()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGapFeaturesPackage()));
+        var serializer = new ReadableMarkdownSerializer();
+        var markdown = serializer.Serialize(CorruptVisualGraph(extraction.Graph));
+
+        Assert.DoesNotContain("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Contains("- ALPHA → BETA", markdown, StringComparison.Ordinal);
+        Assert.Contains(serializer.Diagnostics, diagnostic => diagnostic.Code == "VisualSemanticProjectionPartial" &&
+            diagnostic.Message.Contains("fallback was not suppressed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void UnsnappedConnectorUsesUniqueGeometryAndAttachesNearbyEdgeLabel()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage(includeLabel: true)));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.Equal("v_100", edge.SourceId);
+        Assert.Equal("v_101", edge.TargetId);
+        Assert.Equal("YES", edge.Label);
+        Assert.Contains("v_100 -->|YES| v_101", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MermaidEscapesQuotedEdgeLabels()
+    {
+        var entries = Entries(CreateGeometryConnectorPackage(includeLabel: true));
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"])
+            .Replace("<a:t>YES</a:t>", "<a:t>He said \"YES\"</a:t>", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+        var markdown = new ReadableMarkdownSerializer().Serialize(new PptxAdapter().Extract(new MemoryStream(Repack(entries))).Graph);
+
+        Assert.Contains("v_100 -->|He said &quot;YES&quot;| v_101", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("#quot;", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AmbiguousUnsnappedConnectorIsDiagnosedAndNotInvented()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage(ambiguousStart: true)));
+        var visual = VisualGraphOf(extraction);
+
+        Assert.Contains(visual.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved && edge.SourceId is null && edge.TargetId is null);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void TextlessUnresolvedConnectorIsRetainedByStableDiagnostic()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string connector = "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"90\" name=\"Textless arrow\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", connector + "</p:spTree>", StringComparison.Ordinal));
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var serializer = new ReadableMarkdownSerializer();
+        _ = serializer.Serialize(extraction.Graph);
+
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        Assert.Contains(serializer.Diagnostics, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
     }
 
     [Fact]
@@ -233,6 +345,43 @@ public sealed class PptxAdapterTests
             foreach (var part in parts)
             { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
         return output.ToArray();
+    }
+
+    private static byte[] CreateGeometryConnectorPackage(bool ambiguousStart = false, bool includeLabel = false)
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        var shapes =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"Start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"End\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"300\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            (ambiguousStart ? "<p:sp><p:nvSpPr><p:cNvPr id=\"102\" name=\"Competing start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>OTHER</a:t></a:r></a:p></p:txBody></p:sp>" : string.Empty) +
+            (includeLabel ? "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"Decision label\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"190\" y=\"40\" /><a:ext cx=\"40\" cy=\"20\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>YES</a:t></a:r></a:p></p:txBody></p:sp>" : string.Empty) +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"104\" name=\"Unsnapped connector\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"200\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", shapes + "</p:spTree>", StringComparison.Ordinal));
+        return Repack(entries);
+    }
+
+    private static VisualGraph VisualGraphOf(PptxExtractionResult extraction)
+    {
+        var node = Assert.Single(extraction.Graph.Nodes, candidate => candidate.Extensions?.ContainsKey("visual_graph") == true);
+        return node.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+    }
+
+    private static DocumentGraph CorruptVisualGraph(DocumentGraph graph) => graph with
+    {
+        Partitions = graph.Partitions.Select(partition => partition with
+        {
+            Nodes = partition.Nodes.Select(node => node.Extensions?.ContainsKey("visual_graph") == true
+                ? node with { Extensions = ReplaceVisualGraphExtension(node.Extensions!) }
+                : node).ToArray()
+        }).ToArray()
+    };
+
+    private static IReadOnlyDictionary<string, JsonElement> ReplaceVisualGraphExtension(IReadOnlyDictionary<string, JsonElement> extensions)
+    {
+        var copy = extensions.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+        copy["visual_graph"] = JsonSerializer.SerializeToElement("not-a-visual-graph");
+        return copy;
     }
 
     private static byte[] CreatePackage(bool includeRichShape = false, bool includeComplexObjects = false)

@@ -26,7 +26,8 @@ public sealed record PptxShapeRecord(
     IReadOnlyList<string>? DiagramRelationshipIds = null,
     string? ConnectorStartId = null,
     string? ConnectorEndId = null,
-    bool IsHidden = false);
+    bool IsHidden = false,
+    string? ShapePreset = null);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
@@ -55,6 +56,10 @@ public sealed class PptxAdapter
         foreach (var slide in slides)
         {
             var nodes = new List<DocumentNode>(); var order = 0;
+            var visual = BuildVisualGraph(slide, out var visualLabelShapeIds);
+            var visualConnectorShapeIds = visual?.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null)
+                .Select(edge => edge.SourceNodeId).Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal)
+                ?? new HashSet<string>(StringComparer.Ordinal);
             foreach (var shape in slide.Shapes)
             {
                 var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_id"] = JsonSerializer.SerializeToElement(shape.ShapeId), ["shape_name"] = JsonSerializer.SerializeToElement(shape.Name), ["shape_role"] = JsonSerializer.SerializeToElement(shape.Role) };
@@ -64,6 +69,9 @@ public sealed class PptxAdapter
                 if (shape.ParagraphDetails is not null) extension["paragraph_details"] = JsonSerializer.SerializeToElement(shape.ParagraphDetails);
                 if (shape.IsTable) extension["is_table"] = JsonSerializer.SerializeToElement(true);
                 extension["shape_type"] = JsonSerializer.SerializeToElement(shape.ShapeType);
+                if (!string.IsNullOrWhiteSpace(shape.ShapePreset)) extension["shape_preset"] = JsonSerializer.SerializeToElement(shape.ShapePreset);
+                if (visualLabelShapeIds.Contains(shape.ShapeId)) extension["visual_edge_label"] = JsonSerializer.SerializeToElement(true);
+                if (visualConnectorShapeIds.Contains(shape.ShapeId)) extension["visual_graph_edge"] = JsonSerializer.SerializeToElement(true);
                 if (shape.ChartRelationshipIds is { Count: > 0 }) extension["chart_relationships"] = JsonSerializer.SerializeToElement(shape.ChartRelationshipIds);
                 if (shape.ImageRelationshipIds.Count > 0)
                 {
@@ -103,6 +111,17 @@ public sealed class PptxAdapter
                     content, new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", shape.ShapeId)]),
                     Geometry: shape.Geometry, Editability: editability, Extensions: extension));
             }
+            if (visual is not null)
+            {
+                var visualExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                {
+                    ["visual_graph"] = JsonSerializer.SerializeToElement(visual),
+                    ["diagram_language"] = JsonSerializer.SerializeToElement("mermaid")
+                };
+                nodes.Add(new($"n_{Hash(slide.SlideId + ":visual")[..16]}", NodeKind.Diagram, null, order++, ContentLayer.Derived,
+                    new TextNodeContent("Visual flow"), new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("slide_id", slide.SlideId)]),
+                    Editability: NodeEditability.Protected, Extensions: visualExtensions));
+            }
             if (!string.IsNullOrWhiteSpace(slide.NotesText))
             {
                 var notesExtension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -119,7 +138,12 @@ public sealed class PptxAdapter
             partitions.Add(new DocumentPartition(slide.SlideId, partitions.Count, nodes, slide.PartUri));
         }
         var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Pptx, partitions);
-        return new(graph, slides, package.ToDictionary(x => x.Key, x => Hash(x.Value), StringComparer.Ordinal), Array.Empty<string>());
+        var warnings = slides.SelectMany(slide => BuildVisualGraph(slide, out _ )?.Diagnostics ?? [])
+            .Concat(slides.SelectMany(slide => slide.Shapes.Where(shape => shape.DiagramRelationshipIds is { Count: > 0 })
+                .Select(shape => new VisualDiagnostic("VisualSemanticProjectionPartial", "SmartArt text was retained, but no native SmartArt topology was available.", shape.ShapeId, Fallback: "text list retained"))))
+            .Select(d => $"{d.Code}: {d.Message}")
+            .OrderBy(warning => warning, StringComparer.Ordinal).ToArray();
+        return new(graph, slides, package.ToDictionary(x => x.Key, x => Hash(x.Value), StringComparer.Ordinal), warnings);
     }
 
     public PptxPatchPlan CreatePatchPlan(IEnumerable<PptxShapeTextEdit> edits)
@@ -341,7 +365,7 @@ public sealed class PptxAdapter
             if (reader.NodeType != XmlNodeType.Element || reader.LocalName is not ("sp" or "graphicFrame" or "pic" or "cxnSp")) continue;
             var parentTransform = groupStack.Reverse().Aggregate(AffineTransform.Identity, (current, frame) => current * frame.Transform);
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
-            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null;
+            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null; string? shapePreset = null;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
@@ -353,6 +377,7 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ph") { placeholderType = subtree.GetAttribute("type") ?? "body"; placeholderIdx = subtree.GetAttribute("idx"); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "stCxn") connectorStartId = subtree.GetAttribute("id");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "endCxn") connectorEndId = subtree.GetAttribute("id");
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "prstGeom") shapePreset = subtree.GetAttribute("prst");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") tableRow = [];
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
@@ -444,7 +469,7 @@ public sealed class PptxAdapter
             var role = InferRole(placeholderType, name);
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
-                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden));
+                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden, shapePreset));
         }
         if (!result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
@@ -465,7 +490,10 @@ public sealed class PptxAdapter
     private static void ResolveConnectorLabels(List<PptxShapeRecord> shapes)
     {
         if (!shapes.Any(shape => StringComparer.Ordinal.Equals(shape.ShapeType, "connector"))) return;
-        var labels = shapes.ToDictionary(shape => shape.ShapeId, shape => FirstLine(shape.Text), StringComparer.Ordinal);
+        // Malformed presentations can repeat cNvPr ids. Keep the first occurrence instead of
+        // exposing Dictionary's raw duplicate-key exception during ordinary extraction.
+        var labels = shapes.GroupBy(shape => shape.ShapeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => FirstLine(group.First().Text), StringComparer.Ordinal);
         for (var index = 0; index < shapes.Count; index++)
         {
             var shape = shapes[index];
@@ -475,6 +503,116 @@ public sealed class PptxAdapter
             shapes[index] = shape with { Text = $"{start} → {end}" };
         }
     }
+
+    private static VisualGraph? BuildVisualGraph(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds)
+    {
+        var labels = new HashSet<string>(StringComparer.Ordinal);
+        edgeLabelShapeIds = labels;
+        var connectors = slide.Shapes.Where(shape => StringComparer.Ordinal.Equals(shape.ShapeType, "connector")).ToArray();
+        if (connectors.Length == 0) return null;
+        var drawable = slide.Shapes.Where(shape => !StringComparer.Ordinal.Equals(shape.ShapeType, "connector") &&
+                !shape.IsTable && shape.Geometry is not null && !string.IsNullOrWhiteSpace(FirstLine(shape.Text)))
+            .OrderBy(shape => shape.ShapeId, StringComparer.Ordinal).ToArray();
+        var byShapeId = drawable.GroupBy(shape => shape.ShapeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var edges = new List<VisualEdge>(); var diagnostics = new List<VisualDiagnostic>();
+        var connectedShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var connector in connectors.OrderBy(shape => shape.ShapeId, StringComparer.Ordinal))
+        {
+            var start = connector.ConnectorStartId;
+            var end = connector.ConnectorEndId;
+            var resolution = VisualEdgeResolution.NativeConnection;
+            if (start is null || end is null || !byShapeId.ContainsKey(start) || !byShapeId.ContainsKey(end))
+            {
+                var inferred = InferGeometryEndpoints(connector, drawable);
+                if (inferred is { } endpoints)
+                {
+                    start = endpoints.Start.ShapeId; end = endpoints.End.ShapeId; resolution = VisualEdgeResolution.GeometryInferred;
+                }
+                else
+                {
+                    diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "A PPTX connector could not be uniquely associated with source and target shapes.", connector.ShapeId, Fallback: "connector retained as visual fallback", Remedy: "snap both connector endpoints to shapes or make geometry unambiguous"));
+                    edges.Add(new VisualEdge("e_" + SafeVisualId(connector.ShapeId), null, null, null, VisualEdgeResolution.Unresolved, connector.ShapeId));
+                    continue;
+                }
+            }
+            var (label, labelAmbiguous) = FindEdgeLabel(connector, byShapeId[start!], byShapeId[end!], drawable, labels);
+            if (labelAmbiguous) diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved", "Nearby text could not be uniquely assigned to a connector edge.", connector.ShapeId, Fallback: "text retained independently", Remedy: "place the label closer to one connector"));
+            connectedShapeIds.Add(start!);
+            connectedShapeIds.Add(end!);
+            edges.Add(new VisualEdge("e_" + SafeVisualId(connector.ShapeId), "v_" + SafeVisualId(start!), "v_" + SafeVisualId(end!), label, resolution, connector.ShapeId));
+        }
+        if (edges.All(edge => edge.SourceId is null || edge.TargetId is null))
+            diagnostics.Add(new VisualDiagnostic("VisualSemanticProjectionPartial", "Recognized connector relationships could not be projected as a flowchart.", Fallback: "shape text and connector diagnostics retained"));
+        // A slide often contains title, footer, and explanatory text boxes alongside a flow.  Only
+        // shapes that a resolved connector actually references belong to its Mermaid topology.
+        var nodes = byShapeId.Values.Where(shape => connectedShapeIds.Contains(shape.ShapeId) && !labels.Contains(shape.ShapeId))
+            .OrderBy(shape => shape.ShapeId, StringComparer.Ordinal)
+            .Select(shape => new VisualNode("v_" + SafeVisualId(shape.ShapeId), FirstLine(shape.Text), VisualKind(shape.ShapePreset), shape.ShapeId)).ToArray();
+        return new VisualGraph("pptx_" + SafeVisualId(slide.SlideId), nodes, edges, diagnostics, InferDirection(nodes, byShapeId));
+    }
+
+    private static (PptxShapeRecord Start, PptxShapeRecord End)? InferGeometryEndpoints(PptxShapeRecord connector, IReadOnlyList<PptxShapeRecord> candidates)
+    {
+        if (connector.Geometry is not { } line || candidates.Count < 2) return null;
+        var horizontal = line.Width >= line.Height;
+        var a = horizontal ? (line.X, line.Y + line.Height / 2) : (line.X + line.Width / 2, line.Y);
+        var b = horizontal ? (line.X + line.Width, line.Y + line.Height / 2) : (line.X + line.Width / 2, line.Y + line.Height);
+        var start = UniqueNearest(a, candidates); var end = UniqueNearest(b, candidates);
+        return start is null || end is null || StringComparer.Ordinal.Equals(start.ShapeId, end.ShapeId) ? null : (start, end);
+    }
+
+    private static PptxShapeRecord? UniqueNearest((double X, double Y) point, IReadOnlyList<PptxShapeRecord> candidates)
+    {
+        var ranked = candidates.Select(candidate => (Shape: candidate, Distance: DistanceToBox(point, candidate.Geometry!)))
+            .OrderBy(item => item.Distance).ThenBy(item => item.Shape.ShapeId, StringComparer.Ordinal).Take(2).ToArray();
+        if (ranked.Length == 0 || !double.IsFinite(ranked[0].Distance)) return null;
+        // A strict distance gap avoids inventing an edge when overlapping/nearby shapes are ambiguous.
+        if (ranked.Length > 1 && ranked[1].Distance <= ranked[0].Distance + Math.Max(1, ranked[0].Distance * .15)) return null;
+        return ranked[0].Shape;
+    }
+
+    private static double DistanceToBox((double X, double Y) point, Geometry box)
+    {
+        var dx = Math.Max(Math.Max(box.X - point.X, 0), point.X - (box.X + box.Width));
+        var dy = Math.Max(Math.Max(box.Y - point.Y, 0), point.Y - (box.Y + box.Height));
+        return Math.Sqrt(dx * dx + dy * dy);
+    }
+
+    private static (string? Label, bool Ambiguous) FindEdgeLabel(PptxShapeRecord connector, PptxShapeRecord start, PptxShapeRecord end,
+        IReadOnlyList<PptxShapeRecord> candidates, ISet<string> used)
+    {
+        if (connector.Geometry is not { } line) return (null, false);
+        var midpoint = (X: line.X + line.Width / 2, Y: line.Y + line.Height / 2);
+        var nearby = candidates.Where(candidate => candidate.ShapeId != start.ShapeId && candidate.ShapeId != end.ShapeId && !used.Contains(candidate.ShapeId))
+            .Select(candidate => (Shape: candidate, Distance: DistanceToBox(midpoint, candidate.Geometry!)))
+            .OrderBy(item => item.Distance).ThenBy(item => item.Shape.ShapeId, StringComparer.Ordinal).Take(2).ToArray();
+        if (nearby.Length == 0 || nearby[0].Distance > Math.Max(Math.Max(line.Width, line.Height), 1) * .35) return (null, false);
+        if (nearby.Length > 1 && nearby[1].Distance <= nearby[0].Distance + Math.Max(1, nearby[0].Distance * .15)) return (null, true);
+        var label = FirstLine(nearby[0].Shape.Text);
+        if (label.Length == 0 || label.Length > 80) return (null, false);
+        used.Add(nearby[0].Shape.ShapeId);
+        return (label, false);
+    }
+
+    private static VisualNodeKind VisualKind(string? preset) => preset?.ToLowerInvariant() switch
+    {
+        "rect" or "flowchartprocess" => VisualNodeKind.Process,
+        "roundrect" or "flowchartterminator" => VisualNodeKind.Terminator,
+        "diamond" or "flowchartdecision" => VisualNodeKind.Decision,
+        "parallelogram" or "flowchartdata" => VisualNodeKind.Data,
+        "ellipse" => VisualNodeKind.Terminator,
+        _ => VisualNodeKind.Generic,
+    };
+    private static string InferDirection(IReadOnlyList<VisualNode> nodes, IReadOnlyDictionary<string, PptxShapeRecord> byShapeId)
+    {
+        var geometries = nodes.Select(node => byShapeId.TryGetValue(node.SourceNodeId ?? "", out var shape) ? shape.Geometry : null).Where(geometry => geometry is not null).Cast<Geometry>().ToArray();
+        if (geometries.Length < 2) return "LR";
+        var x = geometries.Max(item => item.X) - geometries.Min(item => item.X);
+        var y = geometries.Max(item => item.Y) - geometries.Min(item => item.Y);
+        return y > x ? "TD" : "LR";
+    }
+    private static string SafeVisualId(string value) => new string(value.Select(character => char.IsLetterOrDigit(character) ? character : '_').ToArray());
 
     private static string FirstLine(string text)
     {
