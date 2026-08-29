@@ -270,6 +270,62 @@ public sealed class PptxAdapterTests
 
         Assert.Contains(visual.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved && edge.SourceId is null && edge.TargetId is null);
         Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualConnectorUnresolved");
+        Assert.Equal("pptx", diagnostic.Format);
+        Assert.Equal("ppt/slides/slide1.xml", diagnostic.PartUri);
+        Assert.Equal("slide1", diagnostic.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.SourceObjectId));
+        Assert.Equal("connector", diagnostic.SourceObjectType);
+        Assert.Equal(0d, diagnostic.Confidence);
+        Assert.NotNull(diagnostic.LocationSummary);
+        Assert.Contains("format=pptx", diagnostic.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("part=ppt/slides/slide1.xml", diagnostic.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("source_type=connector", diagnostic.LocationSummary!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Self_edge_connector_remains_unresolved_without_null_reference()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string selfEdge =
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"99\" name=\"Self edge\" /><a:stCxn id=\"2\" /><a:endCxn id=\"2\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"640000\" y=\"320000\" /><a:ext cx=\"100000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", selfEdge + "</p:spTree>", StringComparison.Ordinal));
+
+        var visual = VisualGraphOf(new PptxAdapter().Extract(new MemoryStream(Repack(entries))));
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.False(visual.HasTopology);
+    }
+
+    [Fact]
+    public void Reserves_all_connector_endpoints_before_assigning_edge_labels()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string topology =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"First start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FIRST START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"First end\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1000\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FIRST END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"102\" name=\"Second start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"550\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>SECOND START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"Second end\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1600\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>SECOND END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"200\" name=\"First connector\" /><a:stCxn id=\"100\" /><a:endCxn id=\"101\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"1000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"201\" name=\"Second connector\" /><a:stCxn id=\"102\" /><a:endCxn id=\"103\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"650\" y=\"50\" /><a:ext cx=\"1000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", topology + "</p:spTree>", StringComparison.Ordinal));
+
+        var visual = VisualGraphOf(new PptxAdapter().Extract(new MemoryStream(Repack(entries))));
+
+        Assert.Equal(2, visual.Edges.Count);
+        Assert.All(visual.Edges, edge =>
+        {
+            Assert.NotNull(edge.SourceId);
+            Assert.NotNull(edge.TargetId);
+        });
+        Assert.Contains(visual.Nodes, node => node.SourceNodeId == "102");
+        Assert.DoesNotContain(visual.Edges, edge => string.Equals(edge.Label, "SECOND START", StringComparison.Ordinal));
     }
 
     [Fact]

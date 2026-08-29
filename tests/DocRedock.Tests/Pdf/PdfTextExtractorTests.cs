@@ -311,6 +311,8 @@ public sealed class PdfTextExtractorTests
         Assert.Contains("[PDF visual content:", result.Text, StringComparison.Ordinal);
         Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
         Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved" &&
+            diagnostic.Format == "pdf" && diagnostic.PartUri == "pdf:page:1" && diagnostic.PartitionId == "page-1");
     }
 
     [Fact]
@@ -344,5 +346,34 @@ public sealed class PdfTextExtractorTests
         var pdf = Encoding.Latin1.GetBytes($"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 30 >> stream\n0 0 m 20 0 l 20 20 l {paint}\nendstream\n%%EOF");
         var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
         Assert.Contains(graph.Nodes, node => node.Geometry is not null);
+    }
+
+    [Fact]
+    public void Closed_path_boxes_are_canonicalized_and_triangle_arrowhead_promotes_shaft_to_directed()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 300 >> stream
+            BT 1 0 0 1 10 20 Tm (PDF_FLOW_START) Tj ET
+            0 0 100 50 re S 0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (PDF_FLOW_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Equal(2, graph.Nodes.Count);
+        Assert.Single(graph.Nodes, node => node.Label == "PDF_FLOW_START");
+        Assert.Single(graph.Nodes, node => node.Label == "PDF_FLOW_DONE");
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
+        Assert.Equal("directed", edge.Direction);
+        Assert.Contains(graph.SourceItems!, item => item.Disposition == VisualDisposition.SuppressedDuplicate);
+        Assert.True(graph.HasTopology);
     }
 }

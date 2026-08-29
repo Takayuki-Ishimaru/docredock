@@ -336,8 +336,21 @@ public sealed class DocxAdapterTests
         Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
         Assert.Null(edge.SourceId);
         Assert.NotNull(edge.TargetId);
-        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorAmbiguous");
-        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        var ambiguous = Assert.Single(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorAmbiguous");
+        var unresolved = Assert.Single(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.Equal("docx", ambiguous.Format);
+        Assert.Equal("/word/document.xml", ambiguous.PartUri);
+        Assert.Equal("part-0001", ambiguous.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(ambiguous.SourceObjectId));
+        Assert.Equal("connector", ambiguous.SourceObjectType);
+        Assert.Equal(0d, ambiguous.Confidence);
+        Assert.NotNull(ambiguous.LocationSummary);
+        Assert.Contains("format=docx", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("part=/word/document.xml", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("source_type=connector", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Equal("docx", unresolved.Format);
+        Assert.Equal("part-0001", unresolved.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(unresolved.SourceObjectId));
         Assert.False(visual.HasTopology);
         Assert.True(visual.Accounting.IsConsistent);
     }

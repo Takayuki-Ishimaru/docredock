@@ -2,6 +2,19 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.1.7] - 2026-08-29
+
+Visual-semantics correctness hotfix.
+
+- Added source-level visual accounting and a shared validator; Mermaid is rejected for blank labels, invalid references, self edges, and low-confidence inferred edges.
+- Kept user-disabled diagrams distinct from invalid topology and retained resolved connections as readable fallback.
+- Added structured Mermaid assertions, tag-derived release-version smoke checks, and JSON visual-semantics evidence.
+- Documented the v0.1.6 errata and the conditional visual-support boundary.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.1.7.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.7.md)
+- [v0.1.6 errata](release-docs/ERRATA_v0.1.6.en.md)
+
 ## [0.1.6] - 2026-08-29
 
 Visual-semantics reliability update. Local pre-release verification completed 359 main tests, 4 GUI headless tests, and an osx-arm64 extracted-binary smoke. The GitHub release workflow builds and smoke-tests six RID-specific self-contained distributions and publishes checksums, SBOMs, provenance, attestations, signing status, and release evidence.
@@ -78,6 +91,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.1.7]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.4

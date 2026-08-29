@@ -22,7 +22,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+TOOLS_ROOT = Path(__file__).resolve().parents[1]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
 from generate_complex_xlsx import generate_complex_xlsx
+from visual_semantics_assertions import evaluate as evaluate_mermaid_graph
 
 try:
     from PIL import Image
@@ -43,7 +48,7 @@ GENERATED_XLSX_EXPECTATIONS = REPO_ROOT / "tools" / "conversion-qa" / "fixtures"
 EXPORT_TIMEOUT_SEC = 180
 RENDER_TIMEOUT_SEC = 120
 
-VALID_TYPES = {"contains", "not_contains", "unique", "regex", "count"}
+VALID_TYPES = {"contains", "not_contains", "unique", "regex", "count", "mermaid_graph"}
 VALID_SEVERITIES = {"guard", "goal"}
 
 # --------------------------------------------------------------------------
@@ -230,6 +235,10 @@ def evaluate_item(md_text: str, item: dict) -> dict:
             if max_v is not None and count > max_v:
                 ok = False
             detail = f"count={count} (min={min_v}, max={max_v})"
+        elif item_type == "mermaid_graph":
+            result = evaluate_mermaid_graph(md_text, item)
+            ok = result["pass"]
+            detail = result["detail"]
         else:
             detail = f"unknown type '{item_type}'"
     except re.error as exc:

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Smoke-test an extracted DocRedock v0.1.6 distribution, including visual-semantics preservation paths."""
+"""Smoke-test an extracted DocRedock distribution, including structural visual-semantics checks."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +14,8 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+
+from visual_semantics_assertions import assert_expectation
 
 
 HIDDEN_SENTINELS = {
@@ -106,11 +109,23 @@ def exercise_visual_semantics(root: Path, cli: Path) -> None:
             if markdown.count("ChoiceNode") != 1 or "FallbackNode" in markdown or "-->" not in markdown or "Start" not in markdown or "End" not in markdown:
                 raise RuntimeError("DOCX AlternateContent Choice/Fallback projection is incorrect")
         elif filename.endswith(".pptx"):
-            if mermaid not in markdown or "v_2 --> v_3" not in markdown:
-                raise RuntimeError("PPTX fixture did not preserve native connector Mermaid topology")
+            ok, detail = assert_expectation(markdown, {
+                "node_labels": ["Start", "End"],
+                "edges": [{"from": "Start", "to": "End", "direction": "directed"}],
+                "exact_node_count": 2, "exact_edge_count": 1,
+                "no_blank_labels": True, "allow_unexpected_edges": False,
+            })
+            if not ok:
+                raise RuntimeError("PPTX fixture did not preserve native connector Mermaid topology: " + detail)
         elif filename.endswith(".xlsx"):
-            if mermaid not in markdown or "ProcessNode" not in markdown or "DecisionNode" not in markdown or "N_S_2 --> N_S_3" not in markdown:
-                raise RuntimeError("XLSX DrawingML flowChart fixture did not preserve Mermaid nodes/labels")
+            ok, detail = assert_expectation(markdown, {
+                "node_labels": ["ProcessNode", "DecisionNode"],
+                "edges": [{"from": "ProcessNode", "to": "DecisionNode", "direction": "directed"}],
+                "exact_node_count": 2, "exact_edge_count": 1,
+                "no_blank_labels": True, "allow_unexpected_edges": False,
+            })
+            if not ok:
+                raise RuntimeError("XLSX DrawingML flowChart fixture did not preserve Mermaid nodes/labels: " + detail)
 
 
 def digest(path: Path) -> str:
@@ -345,7 +360,7 @@ def exercise_gui(gui: Path) -> None:
 FONT_SUFFIXES = {".ttf", ".ttc", ".otf", ".otc", ".woff", ".woff2"}
 
 
-def inspect_distribution(root: Path) -> str:
+def inspect_distribution(root: Path, *, require_checksum: bool = True) -> str | None:
     font_files = [
         path.relative_to(root).as_posix()
         for path in root.rglob("*")
@@ -356,7 +371,9 @@ def inspect_distribution(root: Path) -> str:
 
     checksum_file = root / "BINARY-SHA256SUMS"
     if not checksum_file.is_file():
-        raise RuntimeError("release package is missing BINARY-SHA256SUMS")
+        if require_checksum:
+            raise RuntimeError("release package is missing BINARY-SHA256SUMS")
+        return None
     root_resolved = root.resolve()
     checked = 0
     for line in checksum_file.read_text(encoding="utf-8").splitlines():
@@ -459,15 +476,32 @@ def main() -> int:
     parser.add_argument("--cli", required=True, type=Path)
     parser.add_argument("--gui", required=True, type=Path)
     parser.add_argument("--gui-mode", choices=("startup", "binary"), default="startup")
+    parser.add_argument("--expected-version", required=True, help="release version without the v prefix")
+    parser.add_argument("--evidence-json", type=Path, default=Path("artifacts/visual-semantics-evidence.json"))
     args = parser.parse_args()
     cli = args.cli.resolve()
     gui = args.gui.resolve()
     if not cli.is_file() or not gui.is_file():
         raise SystemExit("extracted GUI and CLI executables are required")
 
-    package_checksum = inspect_distribution(cli.parent)
+    repository_root = Path(__file__).resolve().parents[1]
+    direct_cli_root = (repository_root / "artifacts" / "cli").resolve()
+    direct_gui_root = (repository_root / "artifacts" / "gui").resolve()
+    direct_publish = (
+        cli.parent.parent == direct_cli_root
+        and gui.parent.parent == direct_gui_root
+        and cli.parent.name == gui.parent.name
+    )
+    if direct_publish:
+        inspect_distribution(cli.parent, require_checksum=False)
+        inspect_distribution(gui.parent, require_checksum=False)
+        package_checksum = None
+        distribution_kind = "direct-publish"
+    else:
+        package_checksum = inspect_distribution(cli.parent)
+        distribution_kind = "extracted-package"
     version = invoke(cli, ["--version"])
-    if not version.stdout.strip().startswith("DocRedock 0.1.6"):
+    if not version.stdout.strip().startswith(f"DocRedock {args.expected_version}"):
         raise RuntimeError(f"unexpected CLI version: {version.stdout.strip()}")
     blocked = invoke(cli, ["restore", "missing.md"], allowed=(4,))
     if "DOCREDOCK_ENABLE_EXPERIMENTAL=1" not in blocked.stdout:
@@ -486,8 +520,28 @@ def main() -> int:
             exercise_gui(gui)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
-    print(f"Release smoke test passed for v0.1.6 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, visual-semantics PDF fallback/diagnostics, empty merged-DOCX diff, F0/F1 restore, Japanese PDF rendering, package checksums/font exclusion, pack/unpack, tamper rejection, and {gui_result}.")
-    print(f"Verified package checksum manifest SHA-256: {package_checksum}")
+    evidence = {
+        "target_version": args.expected_version,
+        "commit": os.environ.get("GITHUB_SHA", "local"),
+        "rid": os.environ.get("RUNNER_ARCH", "unknown"),
+        "distribution_kind": distribution_kind,
+        "package_checksum_sha256": package_checksum,
+        "visual_semantics": {
+            "fixture_families": ["docx", "xlsx", "pptx", "pdf"],
+            "assertion": "structured Mermaid graph smoke plus fallback diagnostics",
+            "status": "passed",
+        },
+        "status": "passed",
+    }
+    args.evidence_json.parent.mkdir(parents=True, exist_ok=True)
+    args.evidence_json.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    distribution_result = "package checksums/font exclusion" if package_checksum is not None else "direct-publish font exclusion"
+    print(f"Release smoke test passed for v{args.expected_version} versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, structured visual-semantics smoke, F0/F1 restore, Japanese PDF rendering, {distribution_result}, pack/unpack, tamper rejection, and {gui_result}.")
+    if package_checksum is not None:
+        print(f"Verified package checksum manifest SHA-256: {package_checksum}")
+    else:
+        print("Direct publish outputs checked; checksum verification remains mandatory for extracted-package smoke.")
+    print(f"Visual semantics evidence: {args.evidence_json}")
     return 0
 
 

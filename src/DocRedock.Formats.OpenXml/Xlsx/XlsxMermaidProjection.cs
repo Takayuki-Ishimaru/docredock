@@ -41,6 +41,8 @@ internal static class XlsxMermaidProjection
             ["diagram_min_row"] = JsonSerializer.SerializeToElement(projection.MinRow),
             ["diagram_max_row"] = JsonSerializer.SerializeToElement(projection.MaxRow)
         };
+        if (projection.VisualGraph is { } visualGraph)
+            extensions["visual_graph"] = JsonSerializer.SerializeToElement(visualGraph);
         return new DocumentNode(
             "n_" + Hash(worksheet.Name + "!mermaid")[..16],
             NodeKind.Diagram,
@@ -151,7 +153,7 @@ internal static class XlsxMermaidProjection
             .OrderBy(cell => cell.RowIndex)
             .ThenBy(cell => cell.ColumnIndex)
             .ToArray();
-        var arrowAssignments = MatchSequenceArrows(messageCells, worksheet.DrawingShapes ?? []);
+        var arrowAssignments = MatchSequenceArrows(messageCells, worksheet.DrawingShapes ?? [], worksheet.Metrics);
         var messages = messageCells
             .Select(cell => new SequenceLine(
                 cell.RowIndex,
@@ -166,11 +168,11 @@ internal static class XlsxMermaidProjection
             output.Append("    participant P").Append(index + 1).Append(" as ").AppendLine(Label(actors[index].Value));
         var notes = regions.Where(region => region.MinRow > actorRow.Row && IsNote(region.Value))
             .OrderBy(region => region.MinRow).ThenBy(region => region.MinColumn).ToArray();
-        AppendSequenceTimeline(output, actors, regions, messages, notes, worksheet.DrawingShapes ?? []);
+        AppendSequenceTimeline(output, actors, regions, messages, notes, worksheet.DrawingShapes ?? [], worksheet.Metrics);
         var maxRow = messageCells.Select(cell => cell.RowIndex)
             .Concat(notes.Select(note => note.MaxRow))
-            .Concat(ReadSequenceFragments(regions, worksheet.DrawingShapes ?? []).Select(fragment => fragment.EndRow))
-            .Concat((worksheet.DrawingShapes ?? []).Where(IsActivationShape).Select(shape => (int)Math.Ceiling(ShapeBounds(shape).MaxRow)))
+            .Concat(ReadSequenceFragments(regions, worksheet.DrawingShapes ?? [], worksheet.Metrics).Select(fragment => fragment.EndRow))
+            .Concat((worksheet.DrawingShapes ?? []).Where(IsActivationShape).Select(shape => (int)Math.Ceiling(ShapeBounds(shape, worksheet.Metrics).MaxRow)))
             .DefaultIfEmpty(actorRow.Row).Max();
         return new DiagramProjection("sequence", output.ToString().TrimEnd(), Math.Max(1, actorRow.Row - 2), maxRow,
             worksheet.DrawingShapes is { Count: > 0 } ? "xlsx-drawingml+cell-layout" : "xlsx-cell-layout");
@@ -241,10 +243,11 @@ internal static class XlsxMermaidProjection
         IReadOnlyList<Region> regions,
         IReadOnlyList<SequenceLine> messages,
         IReadOnlyList<Region> notes,
-        IReadOnlyList<XlsxDrawingShapeRecord> shapes)
+        IReadOnlyList<XlsxDrawingShapeRecord> shapes,
+        XlsxWorksheetMetrics? metrics)
     {
         var events = new List<SequenceEvent>();
-        var fragments = ReadSequenceFragments(regions, shapes);
+        var fragments = ReadSequenceFragments(regions, shapes, metrics);
         foreach (var fragment in fragments)
         {
             events.Add(new SequenceEvent(fragment.EndRow, 0, "end"));
@@ -268,7 +271,7 @@ internal static class XlsxMermaidProjection
 
         foreach (var shape in shapes.Where(IsActivationShape))
         {
-            var bounds = ShapeBounds(shape);
+            var bounds = ShapeBounds(shape, metrics);
             var actor = NearestActor(actors, bounds.CenterColumn) + 1;
             events.Add(new SequenceEvent((int)Math.Floor(bounds.MinRow), 3, $"activate P{actor}"));
             events.Add(new SequenceEvent((int)Math.Ceiling(bounds.MaxRow), 8, $"deactivate P{actor}"));
@@ -284,7 +287,8 @@ internal static class XlsxMermaidProjection
 
     private static IReadOnlyList<SequenceFragment> ReadSequenceFragments(
         IReadOnlyList<Region> regions,
-        IReadOnlyList<XlsxDrawingShapeRecord> shapes)
+        IReadOnlyList<XlsxDrawingShapeRecord> shapes,
+        XlsxWorksheetMetrics? metrics)
     {
         var markers = regions
             .Select(region => (Region: region, Match: FragmentRegex().Match(region.Value.Trim())))
@@ -296,7 +300,7 @@ internal static class XlsxMermaidProjection
         {
             var frame = shapes.Where(shape => !shape.IsConnector &&
                                               StringComparer.OrdinalIgnoreCase.Equals(shape.Geometry, "rect"))
-                .Select(shape => ShapeBounds(shape))
+                .Select(shape => ShapeBounds(shape, null))
                 .Where(bounds => bounds.MinRow <= marker.Region.MinRow + 0.5 &&
                                  bounds.MaxRow >= marker.Region.MaxRow &&
                                  bounds.MinColumn <= marker.Region.MinColumn + 0.5 &&
@@ -360,9 +364,10 @@ internal static class XlsxMermaidProjection
 
     private static IReadOnlyDictionary<XlsxCellRecord, DrawingArrow> MatchSequenceArrows(
         IReadOnlyList<XlsxCellRecord> messages,
-        IReadOnlyList<XlsxDrawingShapeRecord> shapes)
+        IReadOnlyList<XlsxDrawingShapeRecord> shapes,
+        XlsxWorksheetMetrics? metrics)
     {
-        var available = ReadDrawingArrows(shapes)
+        var available = ReadDrawingArrows(shapes, metrics)
             .Where(arrow => arrow.Direction is Direction.Left or Direction.Right)
             .OrderBy(arrow => arrow.CenterRow).ThenBy(arrow => arrow.MinColumn).ToList();
         var result = new Dictionary<XlsxCellRecord, DrawingArrow>();
@@ -385,19 +390,19 @@ internal static class XlsxMermaidProjection
         shapes.Any(shape => StringComparer.OrdinalIgnoreCase.Equals(shape.Geometry, "foldedCorner") &&
                             Math.Abs(shape.Row - cell.RowIndex) <= 3 && Math.Abs(shape.Column - cell.ColumnIndex) <= 4);
 
-    private static IReadOnlyList<DrawingArrow> ReadDrawingArrows(IReadOnlyList<XlsxDrawingShapeRecord> shapes)
+    private static IReadOnlyList<DrawingArrow> ReadDrawingArrows(IReadOnlyList<XlsxDrawingShapeRecord> shapes, XlsxWorksheetMetrics? metrics)
     {
         var result = new List<DrawingArrow>();
         foreach (var shape in shapes)
         {
             if (!TryArrowDirection(shape, out var direction)) continue;
-            var bounds = ShapeBounds(shape);
+            var bounds = ShapeBounds(shape, metrics);
             var horizontal = direction is Direction.Left or Direction.Right;
             var primarySpan = horizontal ? bounds.MaxColumn - bounds.MinColumn : bounds.MaxRow - bounds.MinRow;
             if (primarySpan < 2)
             {
                 var line = shapes.Where(candidate => StringComparer.OrdinalIgnoreCase.Equals(candidate.Geometry, "line"))
-                    .Select(candidate => (Shape: candidate, Bounds: ShapeBounds(candidate)))
+                    .Select(candidate => (Shape: candidate, Bounds: ShapeBounds(candidate, metrics)))
                     .Where(item => horizontal
                         ? item.Bounds.MaxColumn - item.Bounds.MinColumn >= 2 && Math.Abs(item.Bounds.CenterRow - bounds.CenterRow) <= 1.5 &&
                           Math.Min(Math.Abs(item.Bounds.MinColumn - bounds.CenterColumn), Math.Abs(item.Bounds.MaxColumn - bounds.CenterColumn)) <= 2
@@ -414,13 +419,21 @@ internal static class XlsxMermaidProjection
                         Math.Max(bounds.MaxColumn, line.Bounds.MaxColumn),
                         Math.Max(bounds.MaxRow, line.Bounds.MaxRow));
             }
-            result.Add(new DrawingArrow(bounds.MinColumn, bounds.MinRow, bounds.MaxColumn, bounds.MaxRow, direction));
+            result.Add(new DrawingArrow(bounds.MinColumn, bounds.MinRow, bounds.MaxColumn, bounds.MaxRow, direction, shape.Id));
         }
         return result;
     }
 
-    private static DrawingBounds ShapeBounds(XlsxDrawingShapeRecord shape)
+    private static DrawingBounds ShapeBounds(XlsxDrawingShapeRecord shape, XlsxWorksheetMetrics? metrics = null)
     {
+        if (shape.AbsoluteBounds is { } absolute && metrics is not null)
+        {
+            var absoluteMinColumn = metrics.ColumnFromEmu(absolute.XEmu);
+            var absoluteMinRow = metrics.RowFromEmu(absolute.YEmu);
+            var absoluteMaxColumn = metrics.ColumnFromEmu(absolute.RightEmu);
+            var absoluteMaxRow = metrics.RowFromEmu(absolute.BottomEmu);
+            return new DrawingBounds(absoluteMinColumn, absoluteMinRow, Math.Max(absoluteMinColumn + 0.01, absoluteMaxColumn), Math.Max(absoluteMinRow + 0.01, absoluteMaxRow));
+        }
         const double defaultColumnEmu = 171_450d;
         const double defaultRowEmu = 190_500d;
         var minColumn = shape.Column + shape.ColumnOffset / defaultColumnEmu;
@@ -535,7 +548,7 @@ internal static class XlsxMermaidProjection
         var matched = new List<(XlsxDrawingShapeRecord Shape, Region Region)>();
         foreach (var shape in shapes.Where(IsSemanticShape))
         {
-            var bounds = ShapeBounds(shape);
+            var bounds = ShapeBounds(shape, worksheet.Metrics);
             var shapeText = shape.Text?.Trim();
             if (string.IsNullOrWhiteSpace(shapeText) &&
                 (bounds.MaxColumn - bounds.MinColumn > 20 || bounds.MaxRow - bounds.MinRow > 20)) continue;
@@ -587,6 +600,10 @@ internal static class XlsxMermaidProjection
         }
 
         var edges = new HashSet<string>(StringComparer.Ordinal);
+        var visualEdges = new List<VisualEdge>();
+        var visualEdgeSourceIds = new Dictionary<string, string>(StringComparer.Ordinal);
+        var visualDiagnostics = new List<VisualDiagnostic>();
+        var visualLabels = new List<(string Id, string Value, SourceAnchor Anchor)>();
         var nodesByShapeId = nodes.Where(node => node.ShapeId is not null)
             .ToDictionary(node => node.ShapeId!, StringComparer.Ordinal);
         foreach (var connector in shapes.Where(shape => shape.IsConnector &&
@@ -595,12 +612,26 @@ internal static class XlsxMermaidProjection
         {
             if (nodesByShapeId.TryGetValue(connector.StartConnectionId!, out var source) &&
                 nodesByShapeId.TryGetValue(connector.EndConnectionId!, out var target) && source.Id != target.Id)
-                AppendEdge(source, target, connector.Text?.Trim() ?? string.Empty);
+                AppendEdge(source, target, connector.Text?.Trim() ?? string.Empty, connector, VisualEdgeResolution.NativeConnection);
+            else
+            {
+                var edgeId = "e_" + visualEdges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                visualEdges.Add(new VisualEdge(edgeId, null, null, connector.Text?.Trim(),
+                    VisualEdgeResolution.Unresolved, connector.Id, Direction: "directed", Confidence: 0,
+                    SourceAnchor: ShapeAnchor(worksheet, connector), EdgeDirection: VisualEdgeDirection.Directed));
+                visualEdgeSourceIds[connector.Id] = edgeId;
+                visualDiagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved",
+                    "An XLSX connector could not be uniquely associated with source and target shapes.", connector.Id,
+                    Fallback: "connector retained as diagnostic-only source item",
+                    Remedy: "connect the connector to two distinct shapes", Format: "xlsx",
+                    PartUri: worksheet.PartUri, PartitionId: worksheet.Name,
+                    SourceObjectId: connector.Id, SourceObjectType: "connector", Confidence: 0));
+            }
         }
         foreach (var edge in ReadInterfaceEdges(cells, nodes))
-            AppendEdge(edge.Source, edge.Target, edge.Label);
+            AppendEdge(edge.Source, edge.Target, edge.Label, null, VisualEdgeResolution.LayoutInferred);
 
-        var drawingArrows = ReadDrawingArrows(shapes).OrderBy(arrow => arrow.MinRow).ThenBy(arrow => arrow.MinColumn).ToArray();
+        var drawingArrows = ReadDrawingArrows(shapes, worksheet.Metrics).OrderBy(arrow => arrow.MinRow).ThenBy(arrow => arrow.MinColumn).ToArray();
         foreach (var arrow in drawingArrows)
         {
             var region = new Region(
@@ -613,7 +644,8 @@ internal static class XlsxMermaidProjection
             var target = FindDirectionalNode(nodes, region, arrow.Direction, source: false);
             if (source is null || target is null || source.Id == target.Id) continue;
             var edgeLabel = FindEdgeLabel(regions, nodes, lanes, source, target, region, arrow.Direction);
-            AppendEdge(source, target, edgeLabel);
+            var arrowShape = shapes.FirstOrDefault(shape => StringComparer.Ordinal.Equals(shape.Id, arrow.SourceShapeId));
+            AppendEdge(source, target, edgeLabel, arrowShape, VisualEdgeResolution.LayoutInferred);
         }
         if (useLanes)
         {
@@ -630,7 +662,7 @@ internal static class XlsxMermaidProjection
                                                     Math.Abs(region.CenterColumn - ordered[1].CenterColumn) <= 8)
                     .OrderBy(region => Math.Abs(region.CenterRow - ordered[1].CenterRow) + Math.Abs(region.CenterColumn - ordered[1].CenterColumn))
                     .Select(region => region.Value.Trim()).FirstOrDefault() ?? connectorGroup.Key;
-                AppendEdge(source, target, label);
+                AppendEdge(source, target, label, null, VisualEdgeResolution.LayoutInferred);
             }
         }
         if (edges.Count == 0) return null;
@@ -638,16 +670,156 @@ internal static class XlsxMermaidProjection
         var minRow = useLanes ? lanes.Min(lane => lane.MinRow) : nodes.Min(node => node.Region.MinRow);
         var maxRow = nodes.Max(node => node.Region.MaxRow);
         var type = useLanes ? "flowchart" : "architecture";
-        return new DiagramProjection(type, output.ToString().TrimEnd(), minRow, maxRow, "xlsx-drawingml+cell-layout");
+        var visualGraph = BuildDrawingVisualGraph(worksheet, shapes, nodes, visualEdges, visualEdgeSourceIds,
+            visualDiagnostics, visualLabels);
+        return new DiagramProjection(type, output.ToString().TrimEnd(), minRow, maxRow, "xlsx-drawingml+cell-layout", visualGraph);
 
-        void AppendEdge(FlowNode source, FlowNode target, string edgeLabel)
+        void AppendEdge(FlowNode source, FlowNode target, string edgeLabel, XlsxDrawingShapeRecord? sourceShape,
+            VisualEdgeResolution resolution)
         {
             var edgeKey = source.Id + "\0" + target.Id + "\0" + edgeLabel;
             if (!edges.Add(edgeKey)) return;
             output.Append("    ").Append(source.Id).Append(" -->");
             if (edgeLabel.Length > 0) output.Append('|').Append(Label(edgeLabel)).Append('|');
             output.Append(' ').AppendLine(target.Id);
+            var edgeId = "e_" + visualEdges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            visualEdges.Add(new VisualEdge(edgeId, source.Id, target.Id,
+                string.IsNullOrWhiteSpace(edgeLabel) ? null : edgeLabel, resolution,
+                sourceShape?.Id, Direction: "directed",
+                Confidence: resolution == VisualEdgeResolution.NativeConnection ? 1d : 0.9d,
+                SourceAnchor: sourceShape is null ? null : ShapeAnchor(worksheet, sourceShape),
+                EdgeDirection: VisualEdgeDirection.Directed));
+            if (sourceShape is not null)
+                visualEdgeSourceIds[sourceShape.Id] = edgeId;
+            if (!string.IsNullOrWhiteSpace(edgeLabel))
+                visualLabels.Add(("label:" + visualLabels.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), edgeLabel,
+                    sourceShape is null ? new SourceAnchor("xlsx", worksheet.PartUri,
+                        [new AnchorLocator("diagram_edge_label", visualLabels.Count.ToString(System.Globalization.CultureInfo.InvariantCulture))])
+                        : ShapeAnchor(worksheet, sourceShape)));
         }
+    }
+
+    private static SourceAnchor ShapeAnchor(XlsxWorksheetRecord worksheet, XlsxDrawingShapeRecord shape) =>
+        new("xlsx", shape.DrawingPartUri ?? worksheet.PartUri,
+            [new AnchorLocator("shape_id", shape.Id), new AnchorLocator("anchor_index", shape.AnchorIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))]);
+
+    private static string SafeVisualId(string value)
+    {
+        var normalized = Regex.Replace(value, "[^A-Za-z0-9_]", "_");
+        return normalized.Length == 0 ? "shape" : normalized;
+    }
+
+    private static Geometry? ShapeGeometry(XlsxDrawingShapeRecord? shape)
+    {
+        if (shape?.AbsoluteBounds is not { } bounds) return null;
+        return new Geometry("xlsx-emu", bounds.XEmu, bounds.YEmu, bounds.WidthEmu, bounds.HeightEmu);
+    }
+
+    private static IReadOnlyList<VisualPathPoint> RectanglePath(Geometry geometry) =>
+        [new(geometry.X, geometry.Y), new(geometry.X + geometry.Width, geometry.Y),
+         new(geometry.X + geometry.Width, geometry.Y + geometry.Height), new(geometry.X, geometry.Y + geometry.Height)];
+
+    private static VisualGraph? BuildDrawingVisualGraph(
+        XlsxWorksheetRecord worksheet,
+        IReadOnlyList<XlsxDrawingShapeRecord> shapes,
+        IReadOnlyList<FlowNode> nodes,
+        IReadOnlyList<VisualEdge> edges,
+        IReadOnlyDictionary<string, string> edgeSourceIds,
+        List<VisualDiagnostic> diagnostics,
+        IReadOnlyList<(string Id, string Value, SourceAnchor Anchor)> labels)
+    {
+        var nodeIds = nodes.Select(node => node.Id).ToArray();
+        if (nodeIds.Length == 0 || nodeIds.Distinct(StringComparer.Ordinal).Count() != nodeIds.Length)
+            return null;
+        var visualNodes = nodes.Select(node =>
+        {
+            var shape = shapes.FirstOrDefault(candidate => StringComparer.Ordinal.Equals(candidate.Id, node.ShapeId));
+            return new VisualNode(node.Id, node.Region.Value, VisualKind(shape?.Geometry), node.ShapeId,
+                ShapeGeometry(shape), shape is null ? null : ShapeAnchor(worksheet, shape));
+        }).ToArray();
+        var visualPaths = new List<VisualPath>();
+        var sourceItems = new List<VisualSourceItem>();
+        var nodeByShapeId = nodes.Where(node => node.ShapeId is not null)
+            .GroupBy(node => node.ShapeId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var edgeById = edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+        foreach (var (shape, index) in shapes.Select((shape, index) => (shape, index)))
+        {
+            var sourceItemId = "shape:" + SafeVisualId(shape.Id) + ":" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var anchor = ShapeAnchor(worksheet, shape);
+            if (nodeByShapeId.TryGetValue(shape.Id, out var node))
+            {
+                sourceItems.Add(new VisualSourceItem(sourceItemId,
+                    VisualSourceItemKind.Shape, VisualDisposition.ProjectedNode,
+                    ProjectedNodeId: node.Id, SourceAnchor: anchor));
+                continue;
+            }
+            if (shape.IsConnector)
+            {
+                if (edgeSourceIds.TryGetValue(shape.Id, out var connectorEdgeId) && edgeById.TryGetValue(connectorEdgeId, out var connectorEdge) &&
+                    connectorEdge.SourceId is not null && connectorEdge.TargetId is not null)
+                {
+                    sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Connector,
+                        VisualDisposition.ProjectedEdge, ProjectedEdgeId: connectorEdge.Id, SourceAnchor: anchor));
+                }
+                else
+                {
+                    const string code = "VisualConnectorUnresolved";
+                    if (!diagnostics.Any(diagnostic => diagnostic.Code == code && diagnostic.SourceObjectId == shape.Id))
+                        diagnostics.Add(new VisualDiagnostic(code,
+                            "An XLSX connector could not be uniquely associated with source and target shapes.", shape.Id,
+                            Fallback: "connector retained as diagnostic-only source item",
+                            Remedy: "connect the connector to two distinct shapes", Format: "xlsx",
+                            PartUri: worksheet.PartUri, PartitionId: worksheet.Name,
+                            SourceObjectId: shape.Id, SourceObjectType: "connector", Confidence: 0));
+                    sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Connector,
+                        VisualDisposition.DiagnosticOnly, DiagnosticCode: code,
+                        Reason: "connector endpoints unresolved", SourceAnchor: anchor));
+                }
+                continue;
+            }
+            if (TryArrowDirection(shape, out var direction))
+            {
+                if (edgeSourceIds.TryGetValue(shape.Id, out var arrowEdgeId) && edgeById.TryGetValue(arrowEdgeId, out var arrowEdge) &&
+                    arrowEdge.SourceId is not null && arrowEdge.TargetId is not null)
+                {
+                    sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.DirectionalShape,
+                        VisualDisposition.ProjectedEdge, ProjectedEdgeId: arrowEdge.Id, SourceAnchor: anchor));
+                }
+                else if (ShapeGeometry(shape) is { } geometry)
+                {
+                    var pathId = "path_" + SafeVisualId(shape.Id) + "_" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    visualPaths.Add(new VisualPath(pathId, RectanglePath(geometry), geometry, anchor,
+                        Confidence: 0.4, IsFallback: true, SourceNodeId: shape.Id));
+                    sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.DirectionalShape,
+                        VisualDisposition.VisualFallback, FallbackPathId: pathId,
+                        Reason: "directional shape endpoints unresolved", SourceAnchor: anchor));
+                }
+                else
+                {
+                    sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.DirectionalShape,
+                        VisualDisposition.IgnoredDecorative, Reason: "directional shape has no usable geometry", SourceAnchor: anchor));
+                }
+                continue;
+            }
+            sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Shape,
+                VisualDisposition.IgnoredDecorative, Reason: "non-semantic drawing shape", SourceAnchor: anchor));
+        }
+        foreach (var label in labels)
+            sourceItems.Add(new VisualSourceItem(label.Id, VisualSourceItemKind.TextLabel,
+                VisualDisposition.IgnoredDecorative, Reason: "attached to projected edge label", SourceAnchor: label.Anchor));
+        return new VisualGraph("xlsx-visual-" + SafeVisualId(worksheet.Name), visualNodes, edges, diagnostics,
+            "LR", Paths: visualPaths, SourceItems: sourceItems);
+
+        static VisualNodeKind VisualKind(string? geometry) => geometry?.ToLowerInvariant() switch
+        {
+            "flowchartterminator" or "roundrect" or "ellipse" => VisualNodeKind.Terminator,
+            "flowchartdecision" or "diamond" => VisualNodeKind.Decision,
+            "flowchartdata" or "flowchartmanualinput" or "parallelogram" => VisualNodeKind.Data,
+            "flowchartprocess" or "flowchartdocument" or "rect" or "can" => VisualNodeKind.Process,
+            _ => VisualNodeKind.Generic
+        };
+
     }
 
     private static IReadOnlyList<InterfaceEdge> ReadInterfaceEdges(
@@ -786,7 +958,7 @@ internal static class XlsxMermaidProjection
 
     private static FlowNode? FindDirectionalNode(IReadOnlyList<FlowNode> nodes, Region arrow, Direction direction, bool source)
     {
-        IEnumerable<FlowNode> candidates = direction switch
+        var candidates = (direction switch
         {
             Direction.Right when source => nodes.Where(node => node.Region.MaxColumn <= arrow.MinColumn + 2),
             Direction.Right => nodes.Where(node => node.Region.MinColumn >= arrow.MaxColumn - 2),
@@ -796,8 +968,48 @@ internal static class XlsxMermaidProjection
             Direction.Up => nodes.Where(node => node.Region.MaxRow <= arrow.MinRow + 2),
             Direction.Down when source => nodes.Where(node => node.Region.MaxRow <= arrow.MinRow + 2),
             _ => nodes.Where(node => node.Region.MinRow >= arrow.MaxRow - 3),
-        };
-        return candidates.OrderBy(node => DirectionalScore(node.Region, arrow, direction, source)).FirstOrDefault();
+        }).Where(node => HasPerpendicularOverlap(node.Region, arrow, direction))
+         .Where(node => PrimaryGap(node.Region, arrow, direction, source) <= 12)
+         .Where(node => PrimaryGap(node.Region, arrow, direction, source) >= -1.5)
+         .Where(node => !SkipsCloserNode(node, nodes, arrow, direction, source))
+         .Select(node => new DirectionalCandidate(node, DirectionalScore(node.Region, arrow, direction, source)))
+         .OrderBy(candidate => candidate.Score)
+         .ToArray();
+        if (candidates.Length == 0) return null;
+        if (candidates.Length > 1 && candidates[1].Score - candidates[0].Score < 0.75) return null;
+        return candidates[0].Node;
+    }
+
+    private static bool HasPerpendicularOverlap(Region node, Region arrow, Direction direction)
+    {
+        var vertical = direction is Direction.Up or Direction.Down;
+        var nodeMin = vertical ? node.MinColumn : node.MinRow;
+        var nodeMax = vertical ? node.MaxColumn : node.MaxRow;
+        var arrowMin = vertical ? arrow.MinColumn : arrow.MinRow;
+        var arrowMax = vertical ? arrow.MaxColumn : arrow.MaxRow;
+        var overlap = Math.Min(nodeMax, arrowMax) - Math.Max(nodeMin, arrowMin);
+        return overlap >= 0 || Math.Min(Math.Abs(nodeMin - arrowMax), Math.Abs(arrowMin - nodeMax)) <= 1.5;
+    }
+
+    private static double PrimaryGap(Region node, Region arrow, Direction direction, bool source) => direction switch
+    {
+        Direction.Right when source => arrow.MinColumn - node.MaxColumn,
+        Direction.Right => node.MinColumn - arrow.MaxColumn,
+        Direction.Left when source => node.MinColumn - arrow.MaxColumn,
+        Direction.Left => arrow.MinColumn - node.MaxColumn,
+        Direction.Up when source => node.MinRow - arrow.MaxRow,
+        Direction.Up => arrow.MinRow - node.MaxRow,
+        Direction.Down when source => arrow.MinRow - node.MaxRow,
+        _ => node.MinRow - arrow.MaxRow,
+    };
+
+    private static bool SkipsCloserNode(FlowNode candidate, IReadOnlyList<FlowNode> nodes, Region arrow, Direction direction, bool source)
+    {
+        var candidateGap = PrimaryGap(candidate.Region, arrow, direction, source);
+        return nodes.Any(other => other.Id != candidate.Id &&
+            HasPerpendicularOverlap(other.Region, arrow, direction) &&
+            PrimaryGap(other.Region, arrow, direction, source) >= -1.5 &&
+            PrimaryGap(other.Region, arrow, direction, source) < candidateGap);
     }
 
     private static double DirectionalScore(Region node, Region arrow, Direction direction, bool source)
@@ -819,6 +1031,8 @@ internal static class XlsxMermaidProjection
             : Math.Abs(node.CenterRow - arrow.CenterRow);
         return perpendicular * 100 + primaryGap;
     }
+
+    private sealed record DirectionalCandidate(FlowNode Node, double Score);
 
     private static IReadOnlyList<Region> ReadRegions(XlsxWorksheetRecord worksheet, IReadOnlyList<XlsxCellRecord> cells)
     {
@@ -868,7 +1082,7 @@ internal static class XlsxMermaidProjection
                                    TryArrowDirection(shape, out var direction) && direction is Direction.Left or Direction.Right);
         var lifelines = values.Count(IsLifeline) + (worksheet.DrawingShapes ?? []).Count(shape =>
         {
-            var bounds = ShapeBounds(shape);
+            var bounds = ShapeBounds(shape, worksheet.Metrics);
             return StringComparer.OrdinalIgnoreCase.Equals(shape.Geometry, "line") &&
                    bounds.MaxRow - bounds.MinRow >= 5 && bounds.MaxRow - bounds.MinRow >= (bounds.MaxColumn - bounds.MinColumn) * 3;
         });
@@ -940,7 +1154,8 @@ internal static class XlsxMermaidProjection
     }
 
     private enum Direction { Left, Right, Up, Down }
-    private sealed record DiagramProjection(string Type, string Mermaid, int MinRow, int MaxRow, string Source);
+    private sealed record DiagramProjection(string Type, string Mermaid, int MinRow, int MaxRow, string Source,
+        VisualGraph? VisualGraph = null);
     private sealed record StateTransition(string Source, string Target, string Event, string Guard);
     private sealed record InterfaceEdge(FlowNode Source, FlowNode Target, string Label);
     private sealed record SequenceLine(int Row, int Column, string? Text);
@@ -954,7 +1169,8 @@ internal static class XlsxMermaidProjection
         int MinColumn,
         int MaxColumn,
         IReadOnlyList<FragmentBranch> Branches);
-    private sealed record DrawingArrow(double MinColumn, double MinRow, double MaxColumn, double MaxRow, Direction Direction)
+    private sealed record DrawingArrow(double MinColumn, double MinRow, double MaxColumn, double MaxRow, Direction Direction,
+        string SourceShapeId)
     {
         public double CenterColumn => (MinColumn + MaxColumn) / 2d;
         public double CenterRow => (MinRow + MaxRow) / 2d;

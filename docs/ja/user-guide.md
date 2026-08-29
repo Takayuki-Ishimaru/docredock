@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.1.6 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.1.7 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -30,7 +30,7 @@ docredock export input.docx --content-policy visible --output input.md
 
 ## 3. 生成されるファイル
 
-| 生成物 | 内容 | v0.1.6での利用 |
+| 生成物 | 内容 | 現行での利用 |
 | --- | --- | --- |
 | `.md` | 本文、見出し、リスト、表、図のsemantic projection／注記／placeholder | 使用する |
 | `.assets/` | Markdownから参照する画像、preview等のvisual fallback | 生成された場合に使用する |
@@ -38,7 +38,7 @@ docredock export input.docx --content-policy visible --output input.md
 | `.drmd` | 元文書／復元用サイドカー | 実験用。元文書と同じ機密区分で扱う |
 | `.drmdpkg` | Markdownと復元情報のパッケージ | 実験用。元文書と同じ機密区分で扱う |
 
-認識した図は、(1) Mermaid等のsemantic projection、(2) 画像／page preview等のvisual fallback、(3) 明示的なdiagnosticの順で扱います。図形テキストがあることだけでは、接続関係や分岐まで完全に保持したことにはなりません。
+Mermaidは共通validatorに合格した場合だけ出力します。認識した図は、(1) Mermaid等のsemantic projection、(2) 画像／page preview等のvisual fallback、(3) 明示的なdiagnosticの順で扱います。図形テキストがあることだけでは、接続関係や分岐まで完全に保持したことにはなりません。
 
 ## 4. 内容ポリシーを選ぶ
 

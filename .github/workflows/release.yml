@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.6
+        default: v0.1.7
 
 permissions:
   contents: read
@@ -323,7 +323,7 @@ jobs:
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
           $root = "artifacts/smoke"
-          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary
+          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary --expected-version "$($env:RELEASE_TAG.Substring(1))" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
         shell: bash
@@ -333,7 +333,7 @@ jobs:
           mkdir -p artifacts/smoke
           ditto -x -k "release/$name.zip" artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
         shell: bash
@@ -345,12 +345,14 @@ jobs:
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Upload packaged application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-${{ matrix.rid }}
-          path: release/*
+          path: |
+            release/*
+            artifacts/visual-semantics-evidence-${{ matrix.rid }}.json
           if-no-files-found: error
           retention-days: 7
 

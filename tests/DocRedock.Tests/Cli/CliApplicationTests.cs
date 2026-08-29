@@ -93,10 +93,13 @@ public sealed class CliApplicationTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter());
+        var version = typeof(CliApplication).Assembly.GetName().Version
+            ?? throw new InvalidOperationException("CLI assembly version is missing.");
+        var expectedVersion = $"DocRedock {version.Major}.{version.Minor}.{version.Build}";
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["help"]));
 
-        Assert.Contains("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains(expectedVersion, stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
@@ -109,9 +112,12 @@ public sealed class CliApplicationTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter());
+        var version = typeof(CliApplication).Assembly.GetName().Version
+            ?? throw new InvalidOperationException("CLI assembly version is missing.");
+        var expectedVersion = $"DocRedock {version.Major}.{version.Minor}.{version.Build}";
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["--version"]));
-        Assert.StartsWith("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith(expectedVersion, stdout.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]

@@ -1,10 +1,10 @@
-# v0.1.6 Supported Features
+# v0.1.7 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.1.6 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
+DocRedock v0.1.7 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
 
-| Feature | v0.1.6 status |
+| Feature | v0.1.7 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta; CLI default |
 | `visible`, `complete`, `sanitized` content policies | Supported |
@@ -42,4 +42,4 @@ DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It con
 
 Readable Markdown is one-way output. `.drmd` and `.drmdpkg` are experimental and may contain source-derived information. Keep the source document as the authoritative copy.
 
-This document is the canonical public-support statement. See the [implementation capability matrix](../FORMAT_CAPABILITY_MATRIX.md) for code-level capability, the [v0.1.6 release notes](../../release-docs/RELEASE_NOTES_v0.1.6.en.md) for release deltas, and [PUBLICATION_SCOPE](../../release-docs/PUBLICATION_SCOPE.en.md) for publication policy. Also see the [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
+This document is the canonical public-support statement. See the [implementation capability matrix](../FORMAT_CAPABILITY_MATRIX.md) for code-level capability, the [v0.1.7 release notes](../../release-docs/RELEASE_NOTES_v0.1.7.en.md) for release deltas, and [PUBLICATION_SCOPE](../../release-docs/PUBLICATION_SCOPE.en.md) for publication policy. Also see the [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
