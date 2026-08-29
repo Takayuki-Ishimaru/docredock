@@ -96,7 +96,7 @@ public sealed class CliApplicationTests : IDisposable
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["help"]));
 
-        Assert.Contains("DocRedock 0.1.5", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
@@ -111,7 +111,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, new StringWriter());
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["--version"]));
-        Assert.StartsWith("DocRedock 0.1.5", stdout.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]

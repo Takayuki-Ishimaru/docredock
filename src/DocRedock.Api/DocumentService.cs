@@ -119,7 +119,7 @@ public sealed class DocumentService
                     graph = extraction.Graph;
                     AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics);
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
-                        new Diagnostic("XlsxProjectionWarning", warning, DiagnosticSeverity.Warning)));
+                        AdapterWarningDiagnostics.Create("XlsxProjectionWarning", warning)));
                 }
                 break;
             case DocumentFormatKind.Pptx:
@@ -127,12 +127,16 @@ public sealed class DocumentService
                 {
                     var extraction = pptx.Extract(stream);
                     graph = extraction.Graph;
-                    diagnostics.AddRange(extraction.Warnings.Select(warning => new Diagnostic("PptxWarning", warning, DiagnosticSeverity.Warning)));
+                    diagnostics.AddRange(extraction.Warnings.Select(warning => AdapterWarningDiagnostics.Create("PptxWarning", warning)));
                 }
                 break;
             case DocumentFormatKind.Pdf:
-                graph = PdfGraph(source);
-                break;
+                {
+                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: false);
+                    graph = pdf.Graph;
+                    diagnostics.AddRange(pdf.Diagnostics);
+                    break;
+                }
             default: throw UnsupportedSourceFormat(source);
         }
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
@@ -344,7 +348,7 @@ public sealed class DocumentService
                     graph = extraction.Graph;
                     AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics);
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
-                        new Diagnostic("XlsxProjectionWarning", warning, DiagnosticSeverity.Warning)));
+                        AdapterWarningDiagnostics.Create("XlsxProjectionWarning", warning)));
                 }
                 break;
             case DocumentFormatKind.Pptx:
@@ -353,12 +357,16 @@ public sealed class DocumentService
                     var extraction = pptx.Extract(stream);
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
-                        new Diagnostic("PptxWarning", warning, DiagnosticSeverity.Warning)));
+                        AdapterWarningDiagnostics.Create("PptxWarning", warning)));
                 }
                 break;
             case DocumentFormatKind.Pdf:
-                graph = PdfGraph(source);
-                break;
+                {
+                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: true);
+                    graph = pdf.Graph;
+                    diagnostics.AddRange(pdf.Diagnostics);
+                    break;
+                }
             default:
                 throw UnsupportedSourceFormat(source);
         }
@@ -545,7 +553,7 @@ public sealed class DocumentService
                             [new("UnplannedXlsxChange", "The XLSX DirtySet could not be represented by the cell patch planner.", DiagnosticSeverity.Error)], lease));
                     var result = xlsx.Restore(input, plan);
                     await WriteNewAsync(output, result.Bytes, cancellationToken).ConfigureAwait(false);
-                    var diagnostics = result.Warnings.Select(w => new Diagnostic("XlsxWarning", w, DiagnosticSeverity.Warning)).ToArray();
+                    var diagnostics = result.Warnings.Select(w => AdapterWarningDiagnostics.Create("XlsxWarning", w)).ToArray();
                     await workspace.WriteReportAsync("restore-service-report.json", new FidelityReport(FidelityLevel.F1, PackagePreservationLevel.PartPayloadIdentical, diagnostics,
                         plan.Edits.Select(edit => edit.SheetName + "!" + edit.CellReference).ToArray()), cancellationToken).ConfigureAwait(false);
                     return new(output, FidelityLevel.F1, true, AddSidecarDiagnostics(diagnostics, lease));
@@ -563,7 +571,7 @@ public sealed class DocumentService
                             [new("UnplannedPptxChange", "The PPTX DirtySet could not be represented by the shape patch planner.", DiagnosticSeverity.Error)], lease));
                     var result = pptx.Restore(input, plan);
                     await WriteNewAsync(output, result.Bytes, cancellationToken).ConfigureAwait(false);
-                    var diagnostics = result.Warnings.Select(w => new Diagnostic("PptxWarning", w, DiagnosticSeverity.Warning)).ToArray();
+                    var diagnostics = result.Warnings.Select(w => AdapterWarningDiagnostics.Create("PptxWarning", w)).ToArray();
                     await workspace.WriteReportAsync("restore-service-report.json", new FidelityReport(FidelityLevel.F1, PackagePreservationLevel.PartPayloadIdentical, diagnostics,
                         plan.Edits.Select(edit => edit.SlideId + ":" + edit.ShapeId).ToArray()), cancellationToken).ConfigureAwait(false);
                     return new(output, FidelityLevel.F1, true, AddSidecarDiagnostics(diagnostics, lease));
@@ -618,7 +626,7 @@ public sealed class DocumentService
         };
     }
 
-    private static DocumentGraph PdfGraph(string path)
+    private static (DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics) PdfGraph(string path, bool includeTextlessPlaceholderNodes)
     {
         PdfExtractionResult extraction;
         try { extraction = PdfTextExtractor.Extract(path); }
@@ -626,14 +634,8 @@ public sealed class DocumentService
         {
             throw new InvalidDataException($"PDF text extraction failed: {exception.Message}", exception);
         }
-        var partitions = extraction.Pages.Select(page => new DocumentPartition($"page-{page.PageNumber:D4}", page.PageNumber - 1,
-            page.Regions.Select(region => new DocumentNode(
-                "n_" + Hash($"{path}:{page.PageNumber}:{region.ReadingOrder}")[..16], NodeKind.Paragraph, null, region.ReadingOrder,
-                ContentLayer.Body, new TextNodeContent(region.Text),
-                new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString())]),
-                Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly, Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)])).ToArray(),
-            $"pdf:page:{page.PageNumber}")).ToArray();
-        return new(DocumentGraph.CurrentSchemaVersion, "doc_" + HashFile(path)[..16], DocumentFormatKind.Pdf, partitions);
+        var sourceHash = HashFile(path);
+        return (PdfDocumentGraphProjection.CreateGraph(extraction, sourceHash, includeTextlessPlaceholderNodes), PdfDocumentGraphProjection.Diagnostics(extraction));
     }
 
     private static ProviderSet ProvidersFor(DocumentFormatKind format, ProviderDescriptor? ocrDescriptor) => new()
@@ -690,11 +692,16 @@ public sealed class DocumentService
                 var diagnostic = enabled
                     ? new OcrDiagnostic(
                         "PdfRasterizerUnavailable",
-                        "This PDF page has no native text. DocRedock v0.1.5 does not include a PDF rasterizer, so OCR could not run for this page.",
+                        "This PDF page has no native text. DocRedock v0.1.6 does not include a PDF rasterizer, so OCR could not run for this page.",
                         DiagnosticSeverity.Warning)
                     : new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this textless PDF page.", DiagnosticSeverity.Information);
                 records.Add(new OcrAssetRecord(partition.Id, status, languages, null, [diagnostic]));
-                diagnostics.Add(new Diagnostic(diagnostic.Code, diagnostic.Message, diagnostic.Severity, partition.Id, partition.SourcePartUri));
+                // Extraction has already reported the rasterizer limitation for a textless
+                // page. Keep that stable diagnostic rather than emitting a duplicate from OCR.
+                var pageNumber = partition.Order + 1;
+                if (!diagnostics.Any(item => item.Code == diagnostic.Code &&
+                        item.Message.Contains($"PDF page {pageNumber}", StringComparison.Ordinal)))
+                    diagnostics.Add(new Diagnostic(diagnostic.Code, diagnostic.Message, diagnostic.Severity, partition.Id, partition.SourcePartUri));
             }
         }
         return records;
@@ -706,7 +713,8 @@ public sealed class DocumentService
         ICollection<Diagnostic> diagnostics,
         CancellationToken cancellationToken)
     {
-        var pages = graph.Partitions.Where(partition => partition.Nodes.Count == 0)
+        var pages = graph.Partitions.Where(partition => partition.Nodes.Count == 0 ||
+                partition.Nodes.Any(node => node.Content is TextNodeContent text && text.Text.StartsWith("[PDF page ", StringComparison.Ordinal)))
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
             .ToArray();
         if (pages.Length == 0 || pdfRasterizer is null) return [];

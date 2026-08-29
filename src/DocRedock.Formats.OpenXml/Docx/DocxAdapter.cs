@@ -23,6 +23,13 @@ public sealed class DocxAdapter : IFormatProbe
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
     private static readonly XNamespace V = "urn:schemas-microsoft-com:vml";
     private static readonly XNamespace W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
+    private static readonly XNamespace WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
+    private static readonly XNamespace WPG = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    private static readonly XNamespace MC = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    private static readonly HashSet<string> SupportedMarkupNamespaces = new(StringComparer.Ordinal)
+    {
+        W.NamespaceName, A.NamespaceName, WP.NamespaceName, V.NamespaceName, W14.NamespaceName, WPS.NamespaceName, WPG.NamespaceName,
+    };
 
     public ProviderDescriptor Descriptor { get; } = new(
         "docredock.docx.openxml", new Version(0, 2, 0), 1,
@@ -76,27 +83,40 @@ public sealed class DocxAdapter : IFormatProbe
         var sliceMap = new Dictionary<string, RawSliceRef>(StringComparer.Ordinal);
         var runMaps = new Dictionary<string, DocxRunCharacterMap>(StringComparer.Ordinal);
         var ordinal = 0;
-        var bodyElements = doc.Root?.Element(W + "body")?.Elements().ToArray() ?? Array.Empty<XElement>();
+        var originalBodyElements = (doc.Root?.Element(W + "body")?.Elements() ?? Enumerable.Empty<XElement>()).ToArray();
         var blockByOrdinal = slices.Blocks.OrderBy(slice => slice.Start).ToArray();
-        var blockIndex = 0;
+        var sourceBlockIndex = 0;
+        var bodyEntries = new List<(XElement Element, RawSliceRef? Slice)>();
+        foreach (var originalElement in originalBodyElements)
+        {
+            var slice = originalElement.Name is var name && (name == W + "p" || name == W + "tbl")
+                ? blockByOrdinal.ElementAtOrDefault(sourceBlockIndex++)?.Reference
+                : null;
+            var selected = SelectSupportedAlternateContentBlocks(originalElement).ToArray();
+            for (var selectedIndex = 0; selectedIndex < selected.Length; selectedIndex++)
+                bodyEntries.Add((selected[selectedIndex], selectedIndex == 0 ? slice : null));
+        }
+        var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
         var landscapeSectionStarts = FindLandscapeSectionStarts(doc, bodyElements);
         for (var elementIndex = 0; elementIndex < bodyElements.Length; elementIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (landscapeSectionStarts.Contains(elementIndex))
                 AddSectionOrientationMarker(nodes, "/word/document.xml", ordinal++, "landscape");
-            var element = bodyElements[elementIndex];
+            // Resolve Markup Compatibility once at the block boundary. A supported Choice
+            // replaces the AlternateContent container; its Fallback is never traversed too,
+            // preventing duplicate DrawingML/VML textbox and image projections.
+            var entry = bodyEntries[elementIndex];
+            var element = entry.Element;
             if (element.Name == W + "p")
             {
-                var slice = blockByOrdinal.ElementAtOrDefault(blockIndex++);
                 var paragraphOrder = ordinal++;
-                AddParagraph(element, "/word/document.xml", slice?.Reference, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters);
+                AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters);
             }
             else if (element.Name == W + "tbl")
             {
-                var slice = blockByOrdinal.ElementAtOrDefault(blockIndex++);
                 var tableOrder = ordinal++;
-                AddTable(element, "/word/document.xml", slice?.Reference, tableOrder, nodes, sliceMap, ref ordinal);
+                AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal);
             }
         }
         if (options.IncludeFurniture)
@@ -280,11 +300,11 @@ public sealed class DocxAdapter : IFormatProbe
             nodes.Add(new(linkId, NodeKind.Link, id, order, layer, new ReferenceNodeContent(target, ParagraphText(link)), linkAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
-        foreach (var blip in paragraph.Descendants(A + "blip"))
+        foreach (var (blip, visualIndex) in paragraph.Descendants(A + "blip").Select((item, index) => (item, index)))
         {
             var relationshipId = (string?)blip.Attribute(R + "embed");
             if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var target)) continue;
-            var imageAnchor = anchor with { Locators = [new("image_relationship", relationshipId)] };
+            var imageAnchor = anchor with { Locators = [new("image_relationship", relationshipId), new("visual_index", visualIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))] };
             var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
             var docPr = blip.Ancestors().SelectMany(ancestor => ancestor.Elements(WP + "docPr")).FirstOrDefault()
                 ?? blip.Ancestors().Descendants(WP + "docPr").FirstOrDefault();
@@ -293,11 +313,11 @@ public sealed class DocxAdapter : IFormatProbe
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer, new ReferenceNodeContent(target, description), imageAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
-        foreach (var imageData in paragraph.Descendants(V + "imagedata"))
+        foreach (var (imageData, visualIndex) in paragraph.Descendants(V + "imagedata").Select((item, index) => (item, index)))
         {
             var relationshipId = (string?)imageData.Attribute(R + "id");
             if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var target)) continue;
-            var imageAnchor = anchor with { Locators = [new("vml_image_relationship", relationshipId)] };
+            var imageAnchor = anchor with { Locators = [new("vml_image_relationship", relationshipId), new("visual_index", visualIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))] };
             var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
             var shape = imageData.Ancestors(V + "shape").FirstOrDefault();
             var description = FirstNonEmptyAttribute(shape, "alt", "title", "id");
@@ -313,12 +333,45 @@ public sealed class DocxAdapter : IFormatProbe
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
                 Extensions: imageExtensions));
         }
-        foreach (var textBox in paragraph.Descendants(W + "txbxContent"))
+        foreach (var (textBox, textboxIndex) in paragraph.Descendants(W + "txbxContent").Select((item, index) => (item, index)))
         {
-            var boxAnchor = anchor with { Locators = [new("textbox", textBox.Ancestors().Count().ToString(System.Globalization.CultureInfo.InvariantCulture))] };
+            // The ancestor depth is not an identity: sibling textboxes have the same depth.
+            // Use the source-order index so repeated visual objects receive stable unique IDs.
+            var boxAnchor = anchor with { Locators = [new("textbox", textboxIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))] };
             var boxId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, boxAnchor);
             nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(ParagraphText(textBox)), boxAnchor,
                 Editability: NodeEditability.EditableWithConstraints, Provenance: [new(EvidenceKind.Native)]));
+        }
+        if (BuildDocxVisualGraph(paragraph, anchor, id) is { } visualGraph)
+        {
+            // Mark source textboxes only when the connector topology is valid; unresolved
+            // visual fragments remain ordinary projections and are not hidden by serializers.
+            if (visualGraph.HasTopology && nodes is List<DocumentNode> nodeList)
+            {
+                for (var nodeIndex = 0; nodeIndex < nodeList.Count; nodeIndex++)
+                {
+                    var source = nodeList[nodeIndex];
+                    if (source.ParentId != id || source.Kind != NodeKind.TextBox) continue;
+                    var textboxText = source.Content is TextNodeContent textContent ? textContent.Text : string.Empty;
+                    if (!visualGraph.Edges.Any(edge => string.Equals(edge.Label?.Trim(), textboxText.Trim(), StringComparison.Ordinal))) continue;
+                    var memberExtensions = source.Extensions is null
+                        ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                        : new Dictionary<string, JsonElement>(source.Extensions, StringComparer.Ordinal);
+                    memberExtensions["visual_graph_member"] = JsonSerializer.SerializeToElement(true);
+                    nodeList[nodeIndex] = source with { Extensions = memberExtensions };
+                }
+            }
+            var diagramAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("visual_graph", "0")]).ToArray() };
+            var diagramId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, diagramAnchor);
+            var diagramExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(visualGraph) };
+            if (visualGraph.HasTopology)
+            {
+                diagramExtensions["visual_fallback_suppressed"] = JsonSerializer.SerializeToElement(true);
+                // The derived Diagram node is the stable DocumentNode anchor for connector
+                // sources, which have no standalone WordprocessingML node projection.
+            }
+            nodes.Add(new(diagramId, NodeKind.Diagram, id, order, ContentLayer.Derived, new TextNodeContent("DOCX visual graph"), diagramAnchor,
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: diagramExtensions));
         }
         // D18: an explicit page break (w:br type="page") gets its own PageBreak marker node so
         // readable can render a chapter separator (---) instead. ParagraphText/ExtractRichTextRuns/
@@ -335,6 +388,182 @@ public sealed class DocxAdapter : IFormatProbe
             nodes.Add(new(breakId, NodeKind.PageBreak, id, order, layer, new TextNodeContent("page-break"), breakAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
+    }
+
+    private static IReadOnlyList<XElement> SelectSupportedAlternateContentBlocks(XElement source)
+    {
+        var clone = new XElement(source);
+        if (clone.Name == MC + "AlternateContent")
+        {
+            var selected = SelectMarkupChoice(clone);
+            return selected is null ? Array.Empty<XElement>()
+                : selected.Elements().SelectMany(SelectSupportedAlternateContentBlocks).ToArray();
+        }
+        while (clone.Descendants(MC + "AlternateContent").FirstOrDefault() is { } alternate)
+        {
+            var selected = SelectMarkupChoice(alternate);
+            if (selected is null) { alternate.Remove(); continue; }
+            alternate.ReplaceWith(selected.Nodes().Select(node => node is XElement element ? new XElement(element) : node));
+        }
+        return [clone];
+
+        static XElement? SelectMarkupChoice(XElement alternate)
+        {
+            return alternate.Elements(MC + "Choice").FirstOrDefault(item =>
+            {
+                var requires = ((string?)item.Attribute("Requires") ?? string.Empty)
+                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                return requires.All(prefix =>
+                {
+                    var ns = item.GetNamespaceOfPrefix(prefix);
+                    return ns is not null && SupportedMarkupNamespaces.Contains(ns.NamespaceName);
+                });
+            }) ?? alternate.Element(MC + "Fallback");
+        }
+    }
+
+    private static VisualGraph? BuildDocxVisualGraph(XElement paragraph, SourceAnchor anchor, string sourceNodeId)
+    {
+        static bool IsVmlConnector(XElement item)
+        {
+            if (item.Name != V + "shape") return false;
+            var type = ((string?)item.Attribute("type") ?? string.Empty).ToLowerInvariant();
+            return type.Contains("line") || item.Attribute("from") is not null || item.Attribute("to") is not null;
+        }
+
+        var shapeElements = paragraph.Descendants().Where(item =>
+            item.Name == A + "sp" || item.Name == WPS + "wsp" ||
+            (item.Name == V + "shape" && !IsVmlConnector(item))).ToArray();
+        var connectorElements = paragraph.Descendants(A + "cxnSp")
+            .Select(item => (Element: item, Vml: false))
+            .Concat(paragraph.Descendants(WPS + "wsp")
+                .Where(item => string.Equals((string?)item.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst"), "line", StringComparison.OrdinalIgnoreCase))
+                .Select(item => (Element: item, Vml: false)))
+            .Concat(paragraph.Descendants(V + "shape").Where(IsVmlConnector).Select(item => (Element: item, Vml: true)))
+            .ToArray();
+        if (shapeElements.Length == 0 && connectorElements.Length == 0) return null;
+
+        var nodes = shapeElements.Select((shape, index) =>
+        {
+            var shapeId = (string?)shape.Attribute("id") ??
+                (string?)shape.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ?? index.ToString();
+            var nodeAnchor = anchor with { Locators = [new AnchorLocator("shape_id", shapeId)] };
+            var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
+            return (shapeId, Geometry: ReadVisualGeometry(shape),
+                Node: new VisualNode(id, ParagraphText(shape).Trim(), VisualNodeKind.Generic, sourceNodeId,
+                    Geometry: ReadVisualGeometry(shape), SourceAnchor: nodeAnchor,
+                    Group: (string?)shape.Ancestors(A + "grpSp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id") ??
+                        (string?)shape.Ancestors(WPG + "wgp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id")));
+        }).ToArray();
+        var lookup = nodes.GroupBy(item => item.shapeId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+        var edges = new List<VisualEdge>();
+        var paths = new List<VisualPath>();
+        var diagnostics = new List<VisualDiagnostic>();
+        var usedLabels = new HashSet<string>(StringComparer.Ordinal);
+
+        static double Distance(VisualPathPoint point, Geometry geometry)
+        {
+            var cx = geometry.X + geometry.Width / 2;
+            var cy = geometry.Y + geometry.Height / 2;
+            return Math.Sqrt(Math.Pow(point.X - cx, 2) + Math.Pow(point.Y - cy, 2));
+        }
+        static VisualPathPoint? PointAt(Geometry? geometry, bool end)
+        {
+            if (geometry is null || (geometry.Width == 0 && geometry.Height == 0)) return null;
+            return new VisualPathPoint(end ? geometry.X + geometry.Width : geometry.X,
+                end ? geometry.Y + geometry.Height : geometry.Y);
+        }
+        static string? Infer(VisualPathPoint? point, IEnumerable<(string shapeId, Geometry? Geometry)> candidates,
+            out bool ambiguous)
+        {
+            ambiguous = false;
+            if (point is null) return null;
+            var ranked = candidates.Where(item => item.Geometry is not null)
+                .Select(item => (item.shapeId, Distance(point, item.Geometry!)))
+                .OrderBy(item => item.Item2).ToArray();
+            if (ranked.Length == 0) return null;
+            if (ranked.Length > 1 && ranked[1].Item2 <= ranked[0].Item2 * 1.2 + 0.001)
+            {
+                ambiguous = true;
+                return null;
+            }
+            return ranked[0].shapeId;
+        }
+
+        foreach (var (connector, index) in connectorElements.Select((item, index) => (item, index)))
+        {
+            static string? NormalizeRef(string? value) =>
+                string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimStart('#');
+            var start = connector.Vml
+                ? NormalizeRef((string?)connector.Element.Attribute("from") ?? (string?)connector.Element.Attribute("start"))
+                : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "stCxn")?.Attribute("id"));
+            var end = connector.Vml
+                ? NormalizeRef((string?)connector.Element.Attribute("to") ?? (string?)connector.Element.Attribute("end"))
+                : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "endCxn")?.Attribute("id"));
+            var geometry = ReadVisualGeometry(connector.Element);
+            var points = new[] { PointAt(geometry, false), PointAt(geometry, true) };
+            var sourceKey = start is not null && lookup.ContainsKey(start) ? start : null;
+            var targetKey = end is not null && lookup.ContainsKey(end) ? end : null;
+            var ambiguousStart = false; var ambiguousEnd = false;
+            if (sourceKey is null) sourceKey = Infer(points[0], lookup.Select(item => (item.Key, item.Value.Geometry)), out ambiguousStart);
+            if (targetKey is null) targetKey = Infer(points[1], lookup.Select(item => (item.Key, item.Value.Geometry)), out ambiguousEnd);
+            var source = sourceKey is not null ? lookup[sourceKey].Node.Id : null;
+            var target = targetKey is not null ? lookup[targetKey].Node.Id : null;
+            if (source is not null && source == target) { source = null; target = null; }
+            var resolved = source is not null && target is not null;
+            var resolution = start is not null || end is not null
+                ? (resolved ? VisualEdgeResolution.NativeConnection : VisualEdgeResolution.Unresolved)
+                : (resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved);
+            var edgeAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("connector", index.ToString(System.Globalization.CultureInfo.InvariantCulture))]).ToArray() };
+            var labelCandidates = paragraph.Descendants(W + "txbxContent")
+                .Select(box => (Text: ParagraphText(box).Trim(), Geometry: ReadVisualGeometry(box.Ancestors().FirstOrDefault(item => item.Name == V + "shape" || item.Name == A + "sp") ?? box)))
+                .Where(item => item.Text.Length != 0 && item.Geometry is not null && !usedLabels.Contains(item.Text))
+                .Where(item => geometry is not null && Distance(new VisualPathPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2), item.Geometry!) < Math.Max(geometry.Width, geometry.Height) * 1.5 + 1)
+                .ToArray();
+            var label = labelCandidates.Length == 1 ? labelCandidates[0].Text : null;
+            if (label is not null) usedLabels.Add(label);
+            if (ambiguousStart || ambiguousEnd)
+                diagnostics.Add(new VisualDiagnostic("VisualConnectorAmbiguous", "DOCX connector endpoint inference was ambiguous.", sourceNodeId));
+            if (!resolved)
+                diagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "DOCX connector endpoint could not be resolved.", sourceNodeId));
+            var pathPoints = points.Where(point => point is not null).Select(point => point!).ToArray();
+            if (geometry is not null) paths.Add(new VisualPath("path_" + index, pathPoints, geometry, edgeAnchor, resolved ? 0.9 : 0.4, !resolved, sourceNodeId));
+            edges.Add(new VisualEdge("edge_" + index, source, target, Label: label,
+                Resolution: resolution, SourceNodeId: sourceNodeId, Direction: "directed",
+                Geometry: geometry, Confidence: resolved ? (resolution == VisualEdgeResolution.NativeConnection ? 1 : 0.8) : 0,
+                Path: pathPoints, SourceAnchor: edgeAnchor, EdgeDirection: VisualEdgeDirection.Directed));
+        }
+        var graph = new VisualGraph("docx_visual_" + sourceNodeId, nodes.Select(item => item.Node).ToArray(), edges, diagnostics, "LR", Paths: paths);
+        return graph;
+    }
+
+    private static Geometry? ReadVisualGeometry(XElement element)
+    {
+        var extent = element.Descendants(WP + "extent").FirstOrDefault();
+        var xfrm = element.Descendants(A + "xfrm").FirstOrDefault();
+        var off = xfrm?.Element(A + "off");
+        var ext = xfrm?.Element(A + "ext");
+        var style = (string?)element.Attribute("style");
+        double Parse(string? value) => double.TryParse(value?.TrimEnd('p','t','x','m'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        var x = Parse((string?)off?.Attribute("x"));
+        var y = Parse((string?)off?.Attribute("y"));
+        var width = Parse((string?)ext?.Attribute("cx"));
+        var height = Parse((string?)ext?.Attribute("cy"));
+        if (extent is not null) { width = Parse((string?)extent.Attribute("cx")); height = Parse((string?)extent.Attribute("cy")); }
+        if (style is not null)
+        {
+            foreach (var token in style.Split(';', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var pair = token.Split(':', 2); if (pair.Length != 2) continue;
+                var value = Parse(pair[1]);
+                if (pair[0].Trim().Equals("margin-left", StringComparison.OrdinalIgnoreCase)) x = value;
+                else if (pair[0].Trim().Equals("margin-top", StringComparison.OrdinalIgnoreCase)) y = value;
+                else if (pair[0].Trim().Equals("width", StringComparison.OrdinalIgnoreCase)) width = value;
+                else if (pair[0].Trim().Equals("height", StringComparison.OrdinalIgnoreCase)) height = value;
+            }
+        }
+        return width > 0 || height > 0 ? new Geometry("ooxml", x, y, width, height) : null;
     }
 
     private static string? FirstNonEmptyAttribute(XElement? element, params string[] names)

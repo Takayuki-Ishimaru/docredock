@@ -200,6 +200,10 @@ public sealed partial class ReadableMarkdownSerializer
                 WriteHeading(output, 2, titleText.Length == 0 ? label : $"{label} — {titleText}");
                 previousWasListItem = false;
             }
+            // Do not suppress the original connector/label fallback when this projection does
+            // not render the derived visual graph (for example sanitized policy or
+            // IncludeDiagrams=false). Otherwise the graph would be silently lost.
+            var rendersVisualGraph = options.IncludeDiagrams && partition.Nodes.Any(TryGetRenderableVisualGraph);
             foreach (var node in isPptx
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
@@ -208,6 +212,8 @@ public sealed partial class ReadableMarkdownSerializer
                 var text = NodeText(node).Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
                 if (isPptx && (IsPresentationFurniture(node) || IsRepeatedPresentationFooter(partitions, node))) continue;
+                if (rendersVisualGraph && (ExtensionBool(node, "visual_graph_member") ||
+                    (isPptx && (ExtensionBool(node, "visual_edge_label") || ExtensionBool(node, "visual_graph_edge"))))) continue;
                 if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title")) continue;
                 if (node.Kind == NodeKind.Link) continue; // D12: already inlined as [text](url) by the owning paragraph's rich text.
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
@@ -321,6 +327,9 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Chart when HasExtension(node, "chart_series"):
                         WriteChart(output, node);
                         break;
+                    case NodeKind.Diagram when HasExtension(node, "visual_graph"):
+                        WriteVisualGraph(output, node);
+                        break;
                     case NodeKind.Diagram when HasExtension(node, "diagram_items"):
                         WriteDiagram(output, node);
                         break;
@@ -382,7 +391,9 @@ public sealed partial class ReadableMarkdownSerializer
             .OrderBy(node => node.Geometry?.Y ?? double.MaxValue).ThenBy(node => node.Geometry?.X ?? double.MaxValue)
             .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
         var notes = nodes.Where(node => node.Kind == NodeKind.SpeakerNotes).OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
-        return titleNodes.Concat(bodyNodes).Concat(connectors).Concat(notes);
+        var visualGraphs = nodes.Where(node => node.Kind == NodeKind.Diagram && HasExtension(node, "visual_graph"))
+            .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal);
+        return titleNodes.Concat(visualGraphs).Concat(bodyNodes.Where(node => !HasExtension(node, "visual_graph"))).Concat(connectors).Concat(notes);
     }
 
     private static IEnumerable<DocumentNode> PresentationBodyReadingOrder(IReadOnlyList<DocumentNode> nodes)
@@ -1305,6 +1316,66 @@ public sealed partial class ReadableMarkdownSerializer
         }
         output.AppendLine();
     }
+
+    private void WriteVisualGraph(StringBuilder output, DocumentNode node)
+    {
+        if (!TryGetVisualGraph(node, out var graph)) return;
+        if (graph is null)
+        {
+            AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial", "The visual graph metadata could not be read; connector and label fallback was not suppressed.", MarkdownDiagnosticSeverity.Warning, node.Id));
+            return;
+        }
+        foreach (var diagnostic in (graph.Diagnostics ?? []).Where(diagnostic => diagnostic is not null))
+            AddDiagnostic(new MarkdownDiagnostic(diagnostic.Code, diagnostic.Message, MarkdownDiagnosticSeverity.Warning, diagnostic.SourceNodeId ?? node.Id));
+        if (!options.IncludeDiagrams || !graph.HasTopology)
+        {
+            if ((graph.Edges?.Count > 0 || graph.Paths is { Count: > 0 }) && !(graph.Diagnostics ?? []).Any(diagnostic =>
+                    diagnostic is not null && string.Equals(diagnostic.Code, "VisualSemanticProjectionPartial", StringComparison.Ordinal)))
+                AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
+                    "Visual metadata did not contain a valid semantic topology; the source connector or vector fallback was retained.",
+                    MarkdownDiagnosticSeverity.Warning, node.Id));
+            return;
+        }
+        output.AppendLine("```mermaid").Append("flowchart ").Append(graph.Direction is "TD" ? "TD" : "LR").AppendLine();
+        foreach (var visualNode in graph.Nodes.OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var label = MermaidText(visualNode.Label);
+            var rendered = visualNode.Kind switch
+            {
+                VisualNodeKind.Decision => "{" + label + "}",
+                VisualNodeKind.Terminator => "([" + label + "])",
+                VisualNodeKind.Data => "[/" + label + "/]",
+                VisualNodeKind.Process => "[" + label + "]",
+                _ => "[" + label + "]",
+            };
+            output.Append("    ").Append(visualNode.Id).Append(rendered).AppendLine();
+        }
+        foreach (var edge in graph.Edges.Where(item => item.SourceId is not null && item.TargetId is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var arrow = edge.IsUndirected
+                ? string.IsNullOrWhiteSpace(edge.Label) ? " --- " : " ---|" + MermaidText(edge.Label!) + "| "
+                : string.IsNullOrWhiteSpace(edge.Label) ? " --> " : " -->|" + MermaidText(edge.Label!) + "| ";
+            output.Append("    ").Append(edge.SourceId).Append(arrow).Append(edge.TargetId).AppendLine();
+        }
+        output.AppendLine("```").AppendLine();
+    }
+
+    private static bool TryGetRenderableVisualGraph(DocumentNode node) => TryGetVisualGraph(node, out var graph) && graph?.HasTopology == true;
+
+    /// <summary>Returns true when visual_graph metadata exists; a null graph means it was malformed.</summary>
+    private static bool TryGetVisualGraph(DocumentNode node, out VisualGraph? graph)
+    {
+        graph = null;
+        if (node.Kind != NodeKind.Diagram || node.Extensions is null || !node.Extensions.TryGetValue("visual_graph", out var raw)) return false;
+        try { graph = raw.Deserialize<VisualGraph>(); }
+        catch (JsonException) { }
+        return true;
+    }
+
+    private static string MermaidText(string value) => value.Replace("&", "&amp;", StringComparison.Ordinal)
+        .Replace("\"", "&quot;", StringComparison.Ordinal).Replace("<", "&lt;", StringComparison.Ordinal).Replace(">", "&gt;", StringComparison.Ordinal)
+        .Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal)
+        .Replace("|", "&#124;", StringComparison.Ordinal).Replace("[", "&#91;", StringComparison.Ordinal).Replace("]", "&#93;", StringComparison.Ordinal);
 
     private void WriteMermaid(StringBuilder output, string mermaid)
     {

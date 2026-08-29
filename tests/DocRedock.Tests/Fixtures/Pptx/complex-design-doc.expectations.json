@@ -124,10 +124,10 @@
     },
     {
       "id": "P08-3",
-      "desc": "コネクタの論理接続（stCxn/endCxn）が遷移として復元される（現状はシェイプが独立テキストとして並ぶだけ）",
+      "desc": "コネクタの論理接続（stCxn/endCxn）がDRAFTからSUBMITTEDへのMermaid遷移として復元される",
       "severity": "guard",
-      "type": "contains",
-      "value": "DRAFT → SUBMITTED"
+      "type": "regex",
+      "value": "(?s)(v_[A-Za-z0-9_]+)\\(\\[DRAFT\\]\\).*?(v_[A-Za-z0-9_]+)\\(\\[SUBMITTED\\]\\).*?\\1\\s*-->[^\\n]*\\2"
     },
     {
       "id": "P09-1",

@@ -1,7 +1,7 @@
 # Format capability matrix（現行実装）
 
-> **これはコードとして実装されている能力の技術リファレンスです。v0.1.5の公開サポート状況を示す表ではありません。**
-> v0.1.5 Public Betaで利用者向けにサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから閲覧用Markdownへの一方向変換です。CLIのPDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
+> **これはコードとして実装されている能力の技術リファレンスです。v0.1.6の公開サポート状況を示す表ではありません。**
+> v0.1.6 Public Betaで利用者向けにサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから閲覧用Markdownへの一方向変換です。CLIのPDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
 
 記号: ○ = コードとして実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規文書の生成（render）」だけの機能一覧ではなく、主にエクスポートしたDRMD Markdownから元文書を改版する実験エンジンの実装能力を示します。
 
@@ -23,28 +23,28 @@
 
 `readable`の既定ポリシーは`visible`で、認識できるOfficeの非表示情報を除外します。`complete`は警告付きで非表示／メタデータを含み、`sanitized`はメタデータ、派生情報、文書付帯要素をさらに除外します。
 
-`readable` は復元用の座標・sidecarを持たない一方向出力です。見出し、
-表の境界、数値表示、XLSX DrawingML の図はセル位置・結合・スタイルから
-推定されるため、横並び領域や装飾のない表では曖昧になり得ます。数式は
-評価せず、保存済みの計算値がある場合だけ表示します。数式そのものは
-明示オプションで表示できます。図は既定で標準 Mermaid fence として出力し、
-大きな inline SVG は明示オプション時だけ追加します。XLSXの埋め込み画像は
-DrawingML anchorの行位置へ投影し、位置のない画像は埋め込み画像節へまとめます。
-PNG/JPEG/GIF/WebP/BMP/SVGは通常の画像リンク、TIFF/EMF/WMFは資産を保持したうえで
-Markdown previewでは表示できない旨のプレースホルダーと診断を出します。PDF は ToUnicode の
-`bfchar` / `bfrange` を持つ Type0/CID フォントを解決しますが、CMap のない
-フォント、object stream の構成、スキャン PDF では文字欠落・失敗があり得ます。
-出力時の diagnostics と生成ファイルを確認してください。
+`readable` は復元用の座標・sidecarを持たない一方向出力です。見出し、表の境界、数値表示、XLSX DrawingML の図はセル位置・結合・スタイルから推定されるため、横並び領域や装飾のない表では曖昧になり得ます。数式は評価せず、保存済みの計算値がある場合だけ表示します。数式そのものは明示オプションで表示できます。XLSXの埋め込み画像はDrawingML anchorの行位置へ投影し、位置のない画像は埋め込み画像節へまとめます。PNG/JPEG/GIF/WebP/BMP/SVGは通常の画像リンク、TIFF/EMF/WMFは資産を保持したうえでMarkdown previewでは表示できない旨のプレースホルダーと診断を出します。PDF は ToUnicode の`bfchar` / `bfrange` を持つ Type0/CID フォントを解決しますが、CMap のないフォント、object stream の構成、スキャン PDF では文字欠落・失敗があり得ます。出力時の diagnostics と生成ファイルを確認してください。
 
-`roundtrip`のXLSX画像もsheet tableとアンカー行順に並び、同じ行の画像は列順に横並びになります。
-DrawingML寸法は96 DPIでHTML `img`の`width`/`height`へ換算し、狭いpreviewでは最大49%幅へ縮小します。
-これは画像のcrop・rotation・z-orderやExcelセル装飾まで再現する完全な紙面rendererではありません。
+## Visual Semantics（Readable projection）
 
-## 共通の非対応・拒否対象
+この節は実装能力の正本です。public supportの保証範囲は日英のsupported-featuresを正本とし、roundtrip capabilityとは混同しません。
+
+| 形式 | native shape text | native connection | inferred connection | edge label | Mermaid semantic projection | fallback | unsupported時 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| DOCX | ○ DrawingML／VML textbox | △ 対応fragment内のnative／一意geometry endpoint | △ 一意な端点のみ | △ 一意な近接labelのみ | △ 有効topologyのみ | △ 埋め込みimage保持とsource text fallback | unresolved／partialをstable diagnostic。完全drawing復元は対象外 |
+| XLSX | ○ 一般図形＋標準／未知`flowChart*` label | ○ connected connector | △ cell-layout／geometry | △ projectionが解決可能な場合 | ○ 有効なflow topology | △ image asset | 未知presetはgeneric nodeとしてlabel保持。未解決／非対応shapeのstable diagnosticは断定しない |
+| PPTX | ○ process／decision／terminator／data／generic | ○ `stCxn`／`endCxn` | △ 端点とbounding boxから一意の場合 | △ segment近傍で一意の場合 | ○ 有効なflow topology | △ image asset | unresolved／partial diagnostic。SmartArt textは保持 |
+| PDF | ○ native text | △ 単純painted vector pathの一意endpoint | △ 一意なvector endpointのみ | △ 一意な近接labelのみ | △ 有効な単純topologyのみ | △ rasterizer preview、path/page placeholder | vector/path partialと未解決endpointをdiagnostic。任意vector graph完全解析なし |
+
+共通`VisualGraph` modelはnode、edge、vector path、shape kind、geometry、source anchor、group/lane、direction、resolution kind、confidence、diagnosticを表現できます。edgeはdirected/undirectedを明示でき、path/edge accountingはsemantic projectionとsource fallbackの取りこぼしを検出します。ただし、各adapterが全metadataを取得することを意味しません。resolution kindは少なくとも`native-connection`、`geometry-inferred`、`layout-inferred`、`unresolved`を区別します。JSON metadataは端点とnode IDが整合するtopologyだけをMermaidへ投影し、破損・不整合時は元connector/vector fallbackを抑止せずstable diagnosticを残します。
+
+PPTXの認識済みconnectorはsemantic projectionまたはexplicit diagnosticへaccountingされます。曖昧なconnectorやedge labelを断定せず、exportがWarningを出す場合はCLI終了コード1の対象です。現行PPTXの代表的なstable codeは`VisualSemanticProjectionPartial`、`VisualConnectorUnresolved`、`VisualEdgeLabelUnresolved`です。その他のcodeは将来のadapter実装で追加され得ます。
+
+## Roundtripとrenderの境界
+
+`roundtrip`のXLSX画像はsheet tableとアンカー行順に並び、同じ行の画像は列順に横並びになります。DrawingML寸法は96 DPIでHTML `img`の`width`/`height`へ換算し、狭いpreviewでは最大49%幅へ縮小します。これは画像のcrop・rotation・z-orderやExcelセル装飾まで再現する完全な紙面rendererではありません。
 
 unsupported/protected Office structureは、内容を黙ってflattenせず拒否されます。代表例は、macro-enabled package、署名・暗号化・protection、保護されたfield boundary、XLSXの構造編集、PPTXのnotes/table/image編集、未対応のpackage contentです。実際の可否はmanifestのcapabilities、restore結果のdiagnostics、`diff`で確認してください。
-
-## 表現上の注意
 
 Markdownは人間が読める自然な投影ですが、Markdownの全機能が元formatの機能へ写像されるわけではありません。font名、文字サイズ、色、余白、座標などはMarkdown本文へ露出させず、元Office packageを復元時の書式正本として扱います。DOCXの`rich-text=inline-v1` blockでは、太字、斜体、下線、取消線、inline code、改行、tabを構造化して往復し、それ以外の元run propertyは同じ文字領域へ引き継ぎます。任意の新規Word文字装飾、hyperlink、field、revision、drawingを含むRich Text編集は保証せず、安全に適用できないものは拒否します。
 

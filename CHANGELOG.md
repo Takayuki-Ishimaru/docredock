@@ -2,6 +2,23 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.1.6] - 2026-08-29
+
+Visual-semantics reliability update. Local pre-release verification completed 359 main tests, 4 GUI headless tests, and an osx-arm64 extracted-binary smoke. The GitHub release workflow builds and smoke-tests six RID-specific self-contained distributions and publishes checksums, SBOMs, provenance, attestations, signing status, and release evidence.
+
+- Added a format-neutral visual graph and semantic Mermaid projection for resolvable PPTX connector flows, including native connections, conservative geometry inference, edge labels, and explicit unresolved diagnostics.
+- Made visual warning codes stable across the public service and adapter catalog.
+- Added DOCX Markup Compatibility Choice/Fallback exclusivity, stable visual anchors, and conditional DrawingML/WPS/VML connector topology with native or uniquely inferred endpoints, labels, and explicit unresolved fallback.
+- Added XLSX `flowChart*` preset mapping while retaining unknown preset labels.
+- Kept PDF native text while reconstructing supported vector paths into conditional node/edge topology, retaining curves, unresolved paths, and image-only content as explicit fallback diagnostics.
+- Normalized duplicate or empty DocumentGraph node IDs deterministically and retained parent references.
+- Updated bilingual support guidance, release notes, checklists, and extracted-distribution smoke coverage for v0.1.6.
+
+The user-supported scope remains one-way DOCX/XLSX/PPTX/PDF → Readable Markdown conversion in the desktop GUI. CLI PDF conversion, round-trip editing, restoration, and new-document generation remain experimental.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.1.6.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.6.md)
+
 ## [0.1.5] - 2026-08-28
 
 Public Beta reliability hotfix.
@@ -61,6 +78,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.1.6]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.5
 [0.1.4]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.4
 [0.1.3]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.3

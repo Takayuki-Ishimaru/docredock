@@ -7,14 +7,14 @@ Choose documentation by audience. The current release support status is separate
 Japanese:
 
 - [30-second quick start and user guide](ja/user-guide.md)
-- [v0.1.5の対応機能](ja/supported-features.md)
+- [v0.1.6の対応機能](ja/supported-features.md)
 - [Experimental features](ja/experimental-features.md)
 - [Security and privacy](ja/security-and-privacy.md)
 
 English:
 
 - [30-second quick start and user guide](en/user-guide.md)
-- [v0.1.5 supported features](en/supported-features.md)
+- [v0.1.6 supported features](en/supported-features.md)
 - [Experimental features](en/experimental-features.md)
 - [Security and privacy](en/security-and-privacy.md)
 
@@ -25,7 +25,7 @@ English:
 - [DRMD Markdown specification](DRMD_MARKDOWN_SPEC.md)
 - [AI editing rules](DRMD_AI_EDITING_RULES.md)
 
-Reference documents may describe experimental capabilities implemented in code. They do not override the v0.1.5 user-facing support table.
+Reference documents may describe experimental capabilities implemented in code. They do not override the v0.1.6 user-facing support table.
 
 ## Benchmarks
 
