@@ -346,13 +346,14 @@ jobs:
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
           python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
+      - name: Stage visual semantics evidence with package
+        shell: bash
+        run: cp "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json" release/
       - name: Upload packaged application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-${{ matrix.rid }}
-          path: |
-            release/*
-            artifacts/visual-semantics-evidence-${{ matrix.rid }}.json
+          path: release/*
           if-no-files-found: error
           retention-days: 7
 
@@ -365,6 +366,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -418,15 +420,11 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-path: |
-            release-files/*.zip
-            release-files/*.tar.gz
+          subject-path: 'release-files/DocRedock-*'
       - name: Attest release SBOM
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-path: |
-            release-files/*.zip
-            release-files/*.tar.gz
+          subject-path: 'release-files/DocRedock-*'
           sbom-path: release-files/sbom.cdx.json
       - name: Build bilingual release body
         shell: bash
