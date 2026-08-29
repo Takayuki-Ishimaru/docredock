@@ -81,6 +81,60 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
+    public void Visual_graph_renders_undirected_escaped_edges_and_retains_invalid_topology_fallback()
+    {
+        var visual = new VisualGraph("vector-flow",
+            [new VisualNode("v_a", "A[&\""), new VisualNode("v_b", "B")],
+            [new VisualEdge("e_1", "v_a", "v_b", "YES|NO", EdgeDirection: VisualEdgeDirection.Undirected)]);
+        var visualNode = new DocumentNode("visual", NodeKind.Diagram, null, 0, ContentLayer.Derived, new TextNodeContent("Visual flow"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(visual) });
+        var connector = new DocumentNode("connector", NodeKind.Connector, null, 1, ContentLayer.Body, new TextNodeContent("A → B"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph_edge"] = JsonSerializer.SerializeToElement(true) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "visual", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [visualNode, connector])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("v_a[A&#91;&amp;&quot;]", markdown, StringComparison.Ordinal);
+        Assert.Contains("v_a ---|YES&#124;NO| v_b", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("- A → B", markdown, StringComparison.Ordinal);
+
+        var invalid = visual with { Edges = [new VisualEdge("dangling", "v_a", "missing")] };
+        var invalidNode = visualNode with { Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(invalid) } };
+        var fallbackSerializer = new ReadableMarkdownSerializer();
+        var fallback = fallbackSerializer.Serialize(graph with { Partitions = [new DocumentPartition("slide1", 0, [invalidNode, connector])] });
+
+        Assert.DoesNotContain("```mermaid", fallback, StringComparison.Ordinal);
+        Assert.Contains("- A → B", fallback, StringComparison.Ordinal);
+        Assert.Contains(fallbackSerializer.Diagnostics, diagnostic => diagnostic.Code == "VisualSemanticProjectionPartial");
+    }
+
+    [Fact]
+    public void Visual_graph_member_marker_suppresses_only_a_renderable_docx_graph()
+    {
+        var visual = new VisualGraph("docx-flow", [new VisualNode("a", "Start"), new VisualNode("b", "End")], [new VisualEdge("edge", "a", "b")]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived, new TextNodeContent("DOCX visual graph"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(visual) });
+        var member = new DocumentNode("member", NodeKind.TextBox, null, 1, ContentLayer.Body, new TextNodeContent("Start"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph_member"] = JsonSerializer.SerializeToElement(true) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "docx-flow", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [diagram, member])]);
+
+        var rendered = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("a --> b", rendered, StringComparison.Ordinal);
+        Assert.DoesNotContain("Start\n", rendered, StringComparison.Ordinal);
+
+        var disabled = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(IncludeDiagrams: false)).Serialize(graph);
+        Assert.DoesNotContain("```mermaid", disabled, StringComparison.Ordinal);
+        Assert.Contains("Start", disabled, StringComparison.Ordinal);
+
+        var invalidDiagram = diagram with { Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        { ["visual_graph"] = JsonSerializer.SerializeToElement(visual with { Edges = [new VisualEdge("bad", "a", "missing")] }) } };
+        var invalid = new ReadableMarkdownSerializer().Serialize(graph with { Partitions = [new DocumentPartition("document", 0, [invalidDiagram, member])] });
+        Assert.Contains("Start", invalid, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Workbook_is_reconstructed_as_headings_metadata_and_named_tables()
     {
         var nodes = new[]

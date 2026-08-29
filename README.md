@@ -10,7 +10,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.1.5 Public Beta support
+## v0.1.6 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -19,7 +19,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [release support table](docs/en/supported-features.md) is authoritative for user-facing availability. The [implementation capability matrix](docs/FORMAT_CAPABILITY_MATRIX.md) separately describes code-level capabilities.
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-semantic boundaries. The [implementation capability matrix](docs/FORMAT_CAPABILITY_MATRIX.md) separately describes code-level capabilities. Version-specific changes stay in the [v0.1.6 release notes](release-docs/RELEASE_NOTES_v0.1.6.en.md).
 
 ## Use it in 30 seconds
 
@@ -27,7 +27,7 @@ The [release support table](docs/en/supported-features.md) is authoritative for 
 2. Start DocRedock.
 3. Drop a DOCX, XLSX, PPTX, or PDF file.
 4. Select **Readable Markdown** and keep **Visible content only (recommended)**.
-5. Convert, review the Markdown and diagnostics, then use the result with your AI tool.
+5. Convert, then review the Markdown, diagnostics, and any generated assets before using the result with an AI tool.
 
 A document containing images normally produces:
 
@@ -38,24 +38,21 @@ input.md
 input.assets/
 ```
 
-The CLI now defaults to Readable Markdown, so `--profile readable` is optional:
+The CLI defaults to Readable Markdown, so `--profile readable` is optional:
 
 ```sh
 docredock export input.xlsx --content-policy visible --output input.md
 ```
 
-## v0.1.5 reliability improvements
+## Visual meaning and fallback
 
-- OCR evidence stays with its parent image or PDF page partition; unresolved evidence is isolated in `derived-assets` with a diagnostic.
-- Horizontally and vertically merged tables use blank Markdown continuation cells and reject continuation/shape edits during round-trip processing.
-- Experimental PDF rendering no longer ships or assumes a bundled Japanese font. ASCII-only PDFs use Base14 Helvetica; non-ASCII output resolves an embeddable TrueType face from `--font-path`, environment variables, then installed system fonts.
-- PDF rendering reports selected-font and coverage information separately from actionable omission/truncation warnings. CLI render exits with code 1 when warnings exist.
-- PPTX literal bullet glyphs, including emphasized bullets, are normalized to Markdown list items.
-- Conversion QA now requires DOCX, XLSX, and PPTX coverage, and package smoke tests verify checksums and reject bundled font binaries.
+When DocRedock recognizes a supported PPTX flow, it prefers a semantic Mermaid projection. If topology cannot be reconstructed safely, it retains the available text/fallback and emits an explicit diagnostic. PPTX native and geometry-inferred connections remain distinguishable, and ambiguous connectors are reported instead of guessed.
+
+This is not pixel-perfect reconstruction. SmartArt and DOCX/PDF vector topology can remain partial; PDF may use a page preview or placeholder. A warning means the Markdown alone may omit meaning—review the diagnostics/report, generated assets, and source document.
 
 ## Content policy
 
-Readable export has three policies in both the GUI and CLI. They filter the Markdown projection; the external `.assets/` directory contains only image assets referenced by nodes included under the selected policy. Review both outputs before sharing.
+Readable export has three policies in both the GUI and CLI. They filter the Markdown projection; the external `.assets/` directory contains only image assets referenced by nodes included under the selected policy.
 
 | Policy | Behavior |
 | --- | --- |
@@ -65,12 +62,12 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 ## Important limitations
 
-- v0.1.5 is a Public Beta, not a production-stable release.
-- Always review generated Markdown and images before sharing. Office visibility metadata is complex and third-party producers may encode content differently.
-- Readable Markdown is one-way output. Keep the original Office file as the authoritative source.
-- Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export (conversion), round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
-- The desktop GUI accepts DOCX, XLSX, PPTX, and PDF input by default. PDF OCR still needs a configured rasterizer and OCR provider; if either is unavailable, review the emitted diagnostics.
-- DocRedock does not bundle a Japanese PDF font or download one. The user is responsible for installing/selecting a font and complying with its embedding license.
+- v0.1.6 is a Public Beta, not a production-stable release.
+- Readable Markdown is one-way output. Keep the original document as the authoritative source.
+- Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
+- Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
+- PDF OCR and visual fallback may require a configured rasterizer and OCR provider. If unavailable, review the page placeholder and warning.
+- DocRedock does not bundle or download a Japanese PDF font. The user is responsible for selecting a font and complying with its embedding license.
 - The GUI may query the public GitHub Releases API for update metadata. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable this request.
 - Verify the published SHA-256 checksum and signing/notarization status for each package.
 
@@ -78,9 +75,9 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.1.5 supported features](docs/en/supported-features.md)
+- [v0.1.6 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.1.5 release notes](release-docs/RELEASE_NOTES_v0.1.5.en.md)
+- [v0.1.6 release notes](release-docs/RELEASE_NOTES_v0.1.6.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

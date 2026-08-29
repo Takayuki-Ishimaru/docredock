@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.IO.Compression;
+using System.Text;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
@@ -10,6 +11,20 @@ namespace DocRedock.Tests.Api;
 
 public sealed class DocumentServiceTests
 {
+    [Fact]
+    public async Task Pdf_vector_visual_graph_is_available_to_readable_markdown()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "vector.pdf");
+        var markdown = Path.Combine(root, "vector.md");
+        await File.WriteAllBytesAsync(source, Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 145 >> stream\nBT 1 0 0 1 0 0 Tm (Start) Tj 100 100 Td (End) Tj ET\n0 0 20 20 re 100 100 20 20 re 0 0 m 100 100 l S\nendstream\n%%EOF"));
+
+        var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown));
+
+        Assert.Contains(exported.Graph.Nodes, node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        Assert.Contains("```mermaid", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Readable_export_writes_only_a_plain_markdown_file()
     {

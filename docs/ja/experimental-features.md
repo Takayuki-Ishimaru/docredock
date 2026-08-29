@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/experimental-features.md)
 
-> v0.1.5では、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
+> v0.1.6では、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
 
 CLIを起動する前に環境変数を設定します。
 
@@ -20,7 +20,7 @@ $env:DOCREDOCK_ENABLE_EXPERIMENTAL = "1"
 
 ## PDF入力とOCR
 
-PDF抽出はネイティブテキストをページpartitionに保持します。文字のないページでOCRするには、PDF rasterizerとOCR providerの明示的な構成が必要です。v0.1.5はPDF rasterizerを同梱せず、利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
+PDF抽出はネイティブテキストをページpartitionに保持します。文字のないページでOCRするには、PDF rasterizerとOCR providerの明示的な構成が必要です。v0.1.6はPDF rasterizerを同梱せず、利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
 
 ## PDF生成とフォント
 

@@ -749,8 +749,9 @@ internal static class XlsxMermaidProjection
         .FirstOrDefault();
 
     private static bool IsSemanticShape(XlsxDrawingShapeRecord shape) =>
-        !shape.IsConnector && shape.WidthEmu >= 250_000 && shape.HeightEmu >= 200_000 && shape.Geometry.ToLowerInvariant() is
-            "rect" or "roundrect" or "parallelogram" or "diamond" or "can" or "ellipse";
+        !shape.IsConnector && shape.WidthEmu >= 250_000 && shape.HeightEmu >= 200_000 &&
+        (shape.Geometry.StartsWith("flowChart", StringComparison.OrdinalIgnoreCase) || shape.Geometry.ToLowerInvariant() is
+            "rect" or "roundrect" or "parallelogram" or "diamond" or "can" or "ellipse");
 
     private static string ShapeNodeId(XlsxDrawingShapeRecord shape)
     {
@@ -763,8 +764,17 @@ internal static class XlsxMermaidProjection
     private static string DrawingFlowShape(string value, string geometry)
     {
         var quoted = "\"" + Label(value) + "\"";
-        return geometry.ToLowerInvariant() switch
+        var preset = geometry.ToLowerInvariant();
+        // Preserve Excel flowChart presets as semantic Mermaid node shapes;
+        // unknown flowChart* values intentionally fall through to generic labels.
+        return preset switch
         {
+            "flowchartterminator" => "([" + quoted + "])",
+            "flowchartprocess" or "flowchartdocument" => "[" + quoted + "]",
+            "flowchartdecision" => "{" + quoted + "}",
+            "flowchartdata" or "flowchartmanualinput" => "[/" + quoted + "/]",
+            "flowchartpredefinedprocess" or "flowchartconnector" or "flowchartoffpageconnector" => "[[" + quoted + "]]",
+            "flowchartpreparation" => "{{" + quoted + "}}",
             "diamond" => "{" + quoted + "}",
             "roundrect" => "([" + quoted + "])",
             "ellipse" => "((" + quoted + "))",

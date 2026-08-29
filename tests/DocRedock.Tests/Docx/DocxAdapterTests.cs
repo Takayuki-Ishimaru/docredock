@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Core.Diff;
 using DocRedock.Core.Documents;
@@ -26,6 +27,22 @@ public sealed class DocxAdapterTests
         Assert.Contains(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
         Assert.True(result.Succeeded);
         Assert.Equal(Hash(source), Hash(output));
+    }
+
+    [Fact]
+    public async Task AlternateContent_extracts_only_supported_choice_and_assigns_unique_visual_ids()
+    {
+        var source = await CreateAlternateContentDocxAsync();
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var boxes = export.Graph.Nodes.Where(node => node.Kind == NodeKind.TextBox).ToArray();
+
+        Assert.Equal(4, boxes.Length);
+        Assert.Single(boxes, node => Text(node) == "Choice textbox");
+        Assert.Single(boxes, node => Text(node) == "Top-level fallback textbox");
+        Assert.DoesNotContain(boxes, node => Text(node) == "Fallback textbox");
+        Assert.DoesNotContain(boxes, node => Text(node) == "Unsupported top-level choice");
+        Assert.Equal(boxes.Length, boxes.Select(node => node.Id).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(boxes.Length, boxes.Select(node => node.Source).Distinct().Count());
     }
 
     [Fact]
@@ -266,6 +283,134 @@ public sealed class DocxAdapterTests
         Assert.Equal("Inner value", inner.Rows[0][1].Text);
     }
 
+    [Fact]
+    public async Task Wps_drawingml_native_connector_projects_a_visual_graph_and_mermaid_edge()
+    {
+        var source = await CreateVisualTopologyDocxAsync(WpsShape("start", "START", 0, 0) +
+            WpsShape("end", "END", 100, 0) + WpsConnector("native", 0, 0, 100, 0, "start", "end"));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        var edge = Assert.Single(visual.Edges);
+        Assert.Equal(VisualEdgeResolution.NativeConnection, edge.Resolution);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+        Assert.True(visual.HasTopology);
+        Assert.True(visual.Accounting.IsConsistent);
+        Assert.Contains("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Contains(" --> ", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Geometry_connector_attaches_unique_label_and_keeps_unadopted_textbox()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
+            DrawingShape("end", "END", 100, 0) +
+            DrawingTextBox("label", "YES", 50, 0) + DrawingTextBox("note", "Explanation remains", 500, 0) +
+            DrawingConnector("inferred", 10, 10, 100, 10));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+        var labelNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.TextBox && Text(node) == "YES");
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.Equal("YES", edge.Label);
+        Assert.True(labelNode.Extensions?.TryGetValue("visual_graph_member", out var marker) == true && marker.GetBoolean());
+        Assert.Contains(" -->|YES| ", markdown, StringComparison.Ordinal);
+        Assert.Contains("Explanation remains", markdown, StringComparison.Ordinal);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public async Task Ambiguous_geometry_connector_is_diagnosed_without_inventing_an_edge()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("first", "FIRST", 0, 0) +
+            DrawingShape("competing", "COMPETING", 0, 0) + DrawingShape("end", "END", 100, 0) +
+            DrawingConnector("ambiguous", 10, 10, 100, 10));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorAmbiguous");
+        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.False(visual.HasTopology);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public async Task Vml_line_from_to_projects_native_topology()
+    {
+        var source = await CreateVisualTopologyDocxAsync(VmlShape("left", "LEFT", 0, 0) + VmlShape("right", "RIGHT", 100, 0) +
+            "<v:shape id=\"line\" type=\"#line\" from=\"#left\" to=\"#right\" style=\"margin-left:0pt;margin-top:10pt;width:100pt;height:1pt\" />");
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.NativeConnection, edge.Resolution);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+        Assert.True(visual.HasTopology);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public async Task Duplicate_visual_ids_do_not_throw_and_leave_invalid_topology_unsuppressed()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("same", "FIRST", 0, 0) + DrawingShape("same", "SECOND", 100, 0) +
+            DrawingConnector("duplicate", 0, 0, 100, 0, "same", "same"));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+
+        Assert.False(visual.HasTopology);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    private static VisualGraph VisualGraphOf(DocxExtractionResult extraction)
+    {
+        var node = Assert.Single(extraction.Graph.Nodes, candidate => candidate.Kind == NodeKind.Diagram && candidate.Extensions?.ContainsKey("visual_graph") == true);
+        return node.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+    }
+
+    private static string DrawingShape(string id, string text, int x, int y) =>
+        $"<a:sp><a:nvSpPr><a:cNvPr id=\"{id}\" /></a:nvSpPr><a:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm></a:spPr><w:r><w:t>{text}</w:t></w:r></a:sp>";
+
+    private static string DrawingTextBox(string id, string text, int x, int y) =>
+        $"<a:sp><a:nvSpPr><a:cNvPr id=\"{id}\" /></a:nvSpPr><a:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm></a:spPr><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></a:sp>";
+
+    private static string WpsShape(string id, string text, int x, int y) =>
+        $"<wps:wsp><a:cNvPr id=\"{id}\" /><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:wsp>";
+
+    private static string WpsConnector(string id, int x, int y, int width, int height, string start, string end) =>
+        $"<wps:wsp><a:cNvPr id=\"{id}\" /><a:prstGeom prst=\"line\" /><a:stCxn id=\"{start}\" /><a:endCxn id=\"{end}\" /><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"{width}\" cy=\"{height}\" /></a:xfrm></wps:wsp>";
+
+    private static string DrawingConnector(string id, int x, int y, int width, int height, string? start = null, string? end = null)
+    {
+        var connections = (start is null ? string.Empty : $"<a:stCxn id=\"{start}\" />") +
+            (end is null ? string.Empty : $"<a:endCxn id=\"{end}\" />");
+        return $"<a:cxnSp><a:nvCxnSpPr><a:cNvPr id=\"{id}\" /><a:cNvCxnSpPr>{connections}</a:cNvCxnSpPr></a:nvCxnSpPr><a:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"{width}\" cy=\"{height}\" /></a:xfrm></a:spPr></a:cxnSp>";
+    }
+
+    private static string VmlShape(string id, string text, int x, int y) =>
+        $"<v:shape id=\"{id}\" style=\"margin-left:{x}pt;margin-top:{y}pt;width:20pt;height:20pt\"><v:textbox><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>";
+
+    private static async Task<string> CreateVisualTopologyDocxAsync(string visualContent)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "visual-topology.docx");
+        await using var file = File.Create(path);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
+        await Write(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+        await Write(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        await Write(zip, "word/document.xml", $"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" xmlns:v=\"urn:schemas-microsoft-com:vml\"><w:body><w:p w14:paraId=\"AA\"><w:r><w:drawing>{visualContent}</w:drawing></w:r></w:p></w:body></w:document>");
+        return path;
+    }
+
     private static async Task<string> CreateMergedTableDocxAsync()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
@@ -402,6 +547,29 @@ public sealed class DocxAdapterTests
         using var archive = ZipFile.OpenRead(path);
         using var reader = new StreamReader(archive.GetEntry("word/document.xml")!.Open(), Encoding.UTF8);
         return reader.ReadToEnd();
+    }
+
+    private static async Task<string> CreateAlternateContentDocxAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "alternate-content.docx");
+        await using var file = File.Create(path);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
+        await Write(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+        await Write(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        await Write(zip, "word/document.xml", """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+              xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:foo="urn:docredock:test:unsupported"><w:body>
+              <w:p><mc:AlternateContent><mc:Choice Requires="foo"><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Unsupported top-level choice</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r></mc:Choice><mc:Fallback><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Top-level fallback textbox</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r></mc:Fallback></mc:AlternateContent></w:p>
+              <w:p><mc:AlternateContent><mc:Choice Requires="w14" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Choice textbox</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r></mc:Choice><mc:Fallback><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Fallback textbox</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r></mc:Fallback></mc:AlternateContent></w:p>
+              <w:p><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Sibling one</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r><w:r><w:drawing><a:sp><w:txbxContent><w:p><w:r><w:t>Sibling two</w:t></w:r></w:p></w:txbxContent></a:sp></w:drawing></w:r></w:p>
+              </w:body></w:document>
+            """);
+        return path;
     }
 
     private static async Task<string> CreateDocxAsync()

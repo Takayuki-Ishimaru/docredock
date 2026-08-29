@@ -1,4 +1,6 @@
 using System.Text;
+using DocRedock.Api;
+using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.Pdf;
 
@@ -168,5 +170,179 @@ public sealed class PdfTextExtractorTests
         var result = PdfTextExtractor.Extract(pdf);
 
         Assert.Equal("日本", result.Text);
+    }
+
+    [Fact]
+    public void Vector_only_page_is_retained_with_explicit_visual_diagnostic()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 24 >> stream\n0 0 m 100 100 l S\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.True(result.Pages[0].HasVectorContent);
+        Assert.Contains("vector drawing", result.Text, StringComparison.Ordinal);
+        Assert.NotNull(result.VisualGraphs);
+        Assert.Contains(1, result.VisualGraphs!.Keys);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Vector_and_text_page_reports_partial_visual_projection()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 42 >> stream\nBT 1 0 0 1 72 700 Tm (Hello) Tj ET 0 0 m 100 100 l S\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.True(result.Pages[0].HasVectorContent);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Image_xobject_only_page_is_image_only_and_rasterizer_diagnostic()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 8 >> stream\n/Im1 Do\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.True(result.Pages[0].IsImageOnly);
+        Assert.False(result.Pages[0].HasVectorContent);
+        Assert.Contains("image-only content", result.Text, StringComparison.Ordinal);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Image_xobject_with_native_text_is_not_image_only()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 37 >> stream\nBT (Hello) Tj ET /Im1 Do\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.False(result.Pages[0].IsImageOnly);
+        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Image_only_page_keeps_placeholder_and_export_diagnostic()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n%%EOF");
+        var extraction = PdfTextExtractor.Extract(pdf);
+
+        Assert.True(extraction.Pages[0].IsImageOnly);
+        Assert.Contains("image-only content", extraction.Text, StringComparison.Ordinal);
+        Assert.Contains(extraction.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+
+        var root = Path.Combine(Path.GetTempPath(), "docredock-pdf-image-only-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "image-only.pdf");
+            var output = Path.Combine(root, "image-only.md");
+            await File.WriteAllBytesAsync(source, pdf);
+            var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PdfRasterizerUnavailable");
+            Assert.Contains("image-only content", await File.ReadAllTextAsync(output), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Multiple_content_streams_on_one_page_share_page_number_and_diagnostics()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page /Contents [2 0 R 3 0 R] >> endobj\n2 0 obj << /Length 16 >> stream\nBT (Hello) Tj ET\nendstream endobj\n3 0 obj << /Length 16 >> stream\n0 0 m 10 10 l S\nendstream endobj\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Single(result.Pages);
+        Assert.Equal(1, result.Pages[0].PageNumber);
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.True(result.Pages[0].HasVectorContent);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("page 1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Operator_words_inside_pdf_strings_do_not_trigger_visual_detection()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 48 >> stream\nBT (S m l Do) Tj ET\n/S /Do\n% m l S Do\n<0044> Tj\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Contains("S m l Do", result.Text, StringComparison.Ordinal);
+        Assert.False(result.Pages[0].HasVectorContent);
+        Assert.False(result.Pages[0].IsImageOnly);
+        Assert.Empty(result.Diagnostics!);
+    }
+
+    [Fact]
+    public void Vector_paths_apply_cm_inside_q_Q_and_project_rectangles()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 48 >> stream\nq 2 0 0 2 10 20 cm 0 0 20 10 re S Q\nendstream\n%%EOF");
+        var result = PdfTextExtractor.Extract(pdf);
+        var graph = result.VisualGraphs![1];
+        Assert.DoesNotContain("unavailable", result.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
+        Assert.Single(graph.Nodes);
+        Assert.Equal(10d, graph.Nodes[0].Geometry!.X);
+        Assert.Equal(20d, graph.Nodes[0].Geometry!.Y);
+        Assert.Equal(40d, graph.Nodes[0].Geometry!.Width);
+    }
+
+    [Fact]
+    public void Curve_paths_are_retained_as_fallback_visual_paths()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 56 >> stream\n0 0 m 10 10 20 0 30 10 c S\nendstream\n%%EOF");
+        var result = PdfTextExtractor.Extract(pdf);
+        var graph = result.VisualGraphs![1];
+        Assert.Contains(graph.Paths!, path => path.IsFallback && path.Points!.Count >= 4);
+        Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualPathPartial");
+    }
+
+    [Fact]
+    public void Ambiguous_open_path_remains_unresolved()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 42 >> stream\n0 0 m 100 100 l S\nendstream\n%%EOF");
+        var result = PdfTextExtractor.Extract(pdf);
+        var graph = result.VisualGraphs![1];
+        Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved);
+        Assert.Contains("[PDF visual content:", result.Text, StringComparison.Ordinal);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
+        Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+    }
+
+    [Fact]
+    public void Implicit_close_paints_closed_path_and_keeps_multiple_subpaths()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 58 >> stream\n0 0 m 20 0 l 20 20 l b 30 30 m 40 40 l S\nendstream\n%%EOF");
+        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+        Assert.Contains(graph.Nodes, node => node.Geometry!.Width == 20);
+        Assert.True(graph.Paths!.Count >= 2);
+    }
+
+    [Fact]
+    public void Stroke_before_rectangle_is_resolved_in_second_pass()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 110 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\nendstream\n%%EOF");
+        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+        Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.GeometryInferred);
+    }
+
+    [Theory]
+    [InlineData("s")]
+    [InlineData("b")]
+    [InlineData("b*")]
+    [InlineData("f")]
+    [InlineData("F")]
+    [InlineData("f*")]
+    [InlineData("B")]
+    [InlineData("B*")]
+    public void Pdf_implicit_close_paint_operators_create_closed_nodes(string paint)
+    {
+        var pdf = Encoding.Latin1.GetBytes($"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 30 >> stream\n0 0 m 20 0 l 20 20 l {paint}\nendstream\n%%EOF");
+        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+        Assert.Contains(graph.Nodes, node => node.Geometry is not null);
     }
 }

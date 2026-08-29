@@ -558,6 +558,26 @@ public sealed class XlsxAdapterTests
         Assert.Equal(["12", "18"], Assert.Single(Assert.Single(result.Worksheets).Charts!).Series[0].Values);
     }
 
+    [Fact]
+    public void Flowchart_presets_map_to_semantic_mermaid_shapes_and_unknown_presets_keep_labels()
+    {
+        var worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="start"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>Start</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="decision"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>Approve?</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>11</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="unknown"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartCustomFuture"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>Custom node</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="400000" cy="10000"/><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="4" name="edge"/><xdr:cNvCxnSpPr><a:stCxn id="1" idx="0"/><a:endCxn id="2" idx="0"/></xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Flow", worksheet, drawing)));
+        var source = Assert.IsType<DocRedock.Core.Documents.TextNodeContent>(
+            Assert.Single(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Diagram).Content).Text;
+
+        Assert.Contains("N_S_1([\"Start\"])", source, StringComparison.Ordinal);
+        Assert.Contains("N_S_2{\"Approve?\"}", source, StringComparison.Ordinal);        Assert.Contains("N_S_3[\"Custom node\"]", source, StringComparison.Ordinal);
+    }
+
     private static byte[] CreateChartPackage(
         bool hideValueColumn = false,
         bool oversizedHiddenColumn = false,

@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.5
+        default: v0.1.6
 
 permissions:
   contents: read
@@ -393,9 +393,11 @@ jobs:
           - [x] License allowlist check passed
           - [x] Six RID-specific self-contained packages were built
           - [x] Every archive was extracted before testing
-          - [x] Extracted CLI passed DOCX/XLSX/PPTX readable export
+          - [x] Extracted CLI passed DOCX/XLSX/PPTX/PDF readable export with the documented PDF experimental gate
+          - [x] DOCX/XLSX/PPTX/PDF visual-semantics smoke passed, including resolved connector/vector topology and explicit partial-path fallback diagnostics
           - [x] Extracted CLI passed DOCX/XLSX/PPTX F0 SHA-256 equality
           - [x] Extracted CLI passed DOCX/XLSX/PPTX F1 edits
+          - [x] Every package checksum manifest was verified before smoke testing; release-wide SHA-256 values are attached in SHA256SUMS
           - [x] Pack/unpack and tamper rejection passed
           - [x] Avalonia headless MainWindow construction passed before packaging
           - [x] Extracted GUI binary format and CPU architecture passed on every target runner; the actual packaged Linux GUI child process stayed alive under Xvfb

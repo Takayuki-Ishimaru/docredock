@@ -115,7 +115,7 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
                     await WriteNewAsync(request.DestinationPath, result.Bytes, cancellationToken).ConfigureAwait(false);
                     return new(request.DestinationPath,
                         new FidelityReport(FidelityLevel.F1, PackagePreservationLevel.PartPayloadIdentical,
-                            result.Warnings.Select(message => new Diagnostic("XlsxWarning", message, DiagnosticSeverity.Warning)).ToArray()),
+                            result.Warnings.Select(message => AdapterWarningDiagnostics.Create("XlsxWarning", message)).ToArray()),
                         plan.DirtyPartGraph.DirtyParts, new HashSet<string>());
                 }
             case DocumentFormatKind.Pptx:
@@ -126,7 +126,7 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
                     await WriteNewAsync(request.DestinationPath, result.Bytes, cancellationToken).ConfigureAwait(false);
                     return new(request.DestinationPath,
                         new FidelityReport(FidelityLevel.F1, PackagePreservationLevel.PartPayloadIdentical,
-                            result.Warnings.Select(message => new Diagnostic("PptxWarning", message, DiagnosticSeverity.Warning)).ToArray()),
+                            result.Warnings.Select(message => AdapterWarningDiagnostics.Create("PptxWarning", message)).ToArray()),
                         plan.DirtyParts, new HashSet<string>());
                 }
             case DocumentFormatKind.Pdf:
@@ -150,29 +150,22 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
         var result = xlsx.Extract(stream);
         return new(result.Graph, [], result.FormulaDiagnostics.Select(item => new Diagnostic(
             "XlsxFormula" + item.Safety, item.Reason ?? "Formula classified without evaluation.",
-            item.Safety == XlsxFormulaSafety.Safe ? DiagnosticSeverity.Information : DiagnosticSeverity.Warning)).ToArray());
+            item.Safety == XlsxFormulaSafety.Safe ? DiagnosticSeverity.Information : DiagnosticSeverity.Warning))
+            .Concat(result.Warnings.Select(item => AdapterWarningDiagnostics.Create("XlsxProjectionWarning", item))).ToArray());
     }
 
     private AdapterExtraction ExtractPptx(string path)
     {
         using var stream = File.OpenRead(path);
         var result = pptx.Extract(stream);
-        return new(result.Graph, [], result.Warnings.Select(item => new Diagnostic("PptxWarning", item, DiagnosticSeverity.Warning)).ToArray());
+        return new(result.Graph, [], result.Warnings.Select(item => AdapterWarningDiagnostics.Create("PptxWarning", item)).ToArray());
     }
 
     private static AdapterExtraction ExtractPdf(string path)
     {
         var sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
         var result = PdfTextExtractor.Extract(path);
-        var partitions = result.Pages.Select(page => new DocumentPartition($"page-{page.PageNumber:D4}", page.PageNumber - 1,
-            page.Regions.Select(region => new DocumentNode(
-                $"n_{sourceHash[..8]}_{page.PageNumber}_{region.ReadingOrder}", NodeKind.Paragraph, null, region.ReadingOrder,
-                ContentLayer.Body, new TextNodeContent(region.Text),
-                new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString())]),
-                Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
-                Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)])).ToArray(),
-            $"pdf:page:{page.PageNumber}")).ToArray();
-        return new AdapterExtraction(new DocumentGraph("1.1", "doc_" + sourceHash[..16], DocumentFormatKind.Pdf, partitions), [], []);
+        return new AdapterExtraction(PdfDocumentGraphProjection.CreateGraph(result, sourceHash), [], PdfDocumentGraphProjection.Diagnostics(result));
     }
 
     private void EnsureFormat(AdapterInput input)

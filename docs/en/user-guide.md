@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.1.5 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.1.6 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -14,13 +14,13 @@ Download the package for your OS/CPU from GitHub Releases and verify the publish
 2. Select or drop a DOCX, XLSX, PPTX, or PDF file.
 3. Select **Readable Markdown**.
 4. Keep **Visible content only (recommended)** unless you intentionally need another policy.
-5. Choose an output location, convert, then review the Markdown and diagnostics.
+5. Choose an output location, convert, then review the Markdown, diagnostics, and assets.
 
-The desktop GUI accepts PDF by default. It extracts native PDF text; textless-page OCR still requires a configured rasterizer and OCR provider, and reports a diagnostic when either is unavailable.
+The desktop GUI accepts PDF by default. It extracts native PDF text; textless-page OCR and previews for diagram-like pages may require a configured rasterizer/OCR provider. When unavailable, review the page placeholder and diagnostic.
 
-CLI PDF export (conversion), restoration, and rendering remain experimental and require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`, like other experimental CLI workflows. Read-only `docredock inspect <file.pdf>` remains available without the flag.
+CLI PDF export, restoration, and rendering remain experimental and require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`, like other experimental CLI workflows. Read-only `docredock inspect <file.pdf>` remains available without the flag.
 
-CLI export also defaults to Readable Markdown:
+CLI export defaults to Readable Markdown:
 
 ```sh
 docredock export input.docx --content-policy visible --output input.md
@@ -30,12 +30,15 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## 3. Generated files
 
-| Output | Contents | v0.1.5 use |
+| Output | Contents | v0.1.6 use |
 | --- | --- | --- |
-| `.md` | Readable body text, headings, lists, tables, and supported visual descriptions | Use |
-| `.assets/` | Images referenced by Markdown | Use when needed |
+| `.md` | Body text, headings, lists, tables, visual semantic projections, notes, and placeholders | Use |
+| `.assets/` | Images and previews referenced by Markdown as visual fallback | Use when generated |
+| Report/diagnostics | Unresolved connectors, partial projection, fallback, and omission reasons | Always review when warnings exist |
 | `.drmd` | Source/restoration sidecar | Experimental; treat like the source document |
 | `.drmdpkg` | Markdown and restoration data package | Experimental; treat like the source document |
+
+Recognized visuals follow this order: (1) semantic projection such as Mermaid, (2) a visual fallback such as an image or page preview, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
 
 ## 4. Choose a content policy
 
@@ -47,7 +50,18 @@ OCR text inherits its parent image's visibility. If DocRedock cannot resolve the
 
 ## 5. Review the result
 
-Check heading hierarchy, list nesting, merged-table blanks, spreadsheet formula-cache warnings, slide boundaries, images, OCR, and diagnostics. Keep the source Office document as the authoritative copy. Readable output cannot be restored.
+For documents with visuals, check these in addition to normal text and table content:
+
+- heading hierarchy, nested lists, merged-table blanks, formula-cache warnings, and slide boundaries;
+- flow node labels, connection directions, branches, and edge labels such as YES/NO;
+- the report distinction between `native-connection` and `geometry-inferred`;
+- diagnostics such as `VisualConnectorUnresolved`, `VisualEdgeLabelUnresolved`, and `VisualSemanticProjectionPartial`;
+- every referenced asset/page preview/placeholder against the corresponding source page, slide, or sheet;
+- that text boxes and AlternateContent fallbacks are not duplicated.
+
+When a Warning is present, giving an AI only the Markdown may conceal missing meaning. Review the diagnostics/report and assets together, and consult the source document when necessary. A semantic omission or partial projection at Warning severity makes the CLI return exit code 1.
+
+Readable output is not pixel-perfect reconstruction and does not guarantee restoration to original Office drawing objects. Keep the source document as the authoritative copy. See [Supported features](supported-features.md) for format-specific boundaries.
 
 ## 6. Experimental PDF rendering
 

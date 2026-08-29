@@ -7,11 +7,19 @@ using DocRedock.Core.Reporting;
 namespace DocRedock.Formats.Pdf;
 
 public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int ReadingOrder);
-public sealed record PdfPageText(int PageNumber, IReadOnlyList<PdfTextRegion> Regions)
+public sealed record PdfPageText(
+    int PageNumber,
+    IReadOnlyList<PdfTextRegion> Regions,
+    bool HasVectorContent = false,
+    bool IsImageOnly = false)
 {
     public string Text => string.Join("\n", Regions.OrderByDescending(region => region.BoundingBox.Y).ThenBy(region => region.BoundingBox.X).Select(region => region.Text));
 }
-public sealed record PdfExtractionResult(int PageCount, IReadOnlyList<PdfPageText> Pages)
+public sealed record PdfExtractionResult(
+    int PageCount,
+    IReadOnlyList<PdfPageText> Pages,
+    IReadOnlyList<string>? Diagnostics = null,
+    IReadOnlyDictionary<int, VisualGraph>? VisualGraphs = null)
 {
     public string Text => string.Join("\n\n", Pages.Select(page => page.Text));
 }
@@ -88,18 +96,241 @@ public static class PdfTextExtractor
         try { fontMaps = ReadFontMaps(raw, latin, structure, options); }
         catch (RegexMatchTimeoutException exception) { throw new PdfExtractionException("PDF font encoding matching exceeded its time limit.", exception); }
         var streams = ReadStreams(raw, latin, options, contentObjectIds).ToArray();
+        var pageMap = ReadContentObjectPages(structure, options.EffectiveRegexTimeout);
         var pages = new List<PdfPageText>();
+        var diagnostics = new List<string>();
+        var visualGraphs = new Dictionary<int, VisualGraph>();
         var streamPage = 1;
-        foreach (var stream in streams)
+        foreach (var pageGroup in streams.GroupBy(stream => pageMap.TryGetValue(stream.ObjectId ?? -1, out var mapped) ? mapped : streamPage++).OrderBy(group => group.Key))
         {
+            var stream = string.Join("\n", pageGroup.Select(item => item.Payload));
             var regions = ParseOperators(stream, options, fontMaps);
-            if (regions.Count == 0) continue;
-            pages.Add(new PdfPageText(Math.Min(streamPage++, pageCount), SortReadingOrder(regions)));
+            var vector = ContainsVectorOperators(stream);
+            var image = ContainsImageOperator(stream);
+            var pageNumber = Math.Min(pageGroup.Key, pageCount);
+            var imageOnly = image && regions.Count == 0;
+            if (!imageOnly && regions.Count == 0 && !vector) continue;
+            var vectorPlaceholder = false;
+            if (vector && regions.Count == 0)
+            {
+                regions.Add(new PdfTextRegion("[PDF visual content: vector drawing; semantic reconstruction unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
+                vectorPlaceholder = true;
+            }
+            if (imageOnly)
+            {
+                diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} contains image-only content; rasterizer/OCR may be required.");
+                regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
+            }
+            VisualGraph? visualGraph = vector ? BuildVisualGraph(pageNumber, stream, regions, diagnostics) : null;
+            if (vector && visualGraph is not null)
+            {
+                var accounting = visualGraph.Accounting;
+                var partial = accounting.UnresolvedEdges > 0 || accounting.FallbackPaths > 0 || accounting.Diagnostics > 0;
+                if (vectorPlaceholder && !partial)
+                    regions.RemoveAll(region => region.Text.StartsWith("[PDF visual content:", StringComparison.Ordinal));
+                if (partial)
+                    diagnostics.Add($"VisualSemanticProjectionUnavailable: PDF page {pageNumber} contains partial vector topology.");
+                visualGraphs[pageNumber] = visualGraph;
+            }
+            pages.Add(new PdfPageText(pageNumber, SortReadingOrder(regions), vector, imageOnly));
         }
-        if (pages.Count == 0) pages.Add(new PdfPageText(1, Array.Empty<PdfTextRegion>()));
-        while (pages.Count < pageCount) pages.Add(new PdfPageText(pages.Count + 1, Array.Empty<PdfTextRegion>()));
-        return new PdfExtractionResult(pageCount, pages);
+        if (pages.Count == 0)
+        {
+            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1 has no native text. DocRedock v0.1.6 does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
+        }
+        for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
+        {
+            if (pages.Any(page => page.PageNumber == pageNumber)) continue;
+            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} has no native text. DocRedock v0.1.6 does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
+        }
+        pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
+        return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs);
     }
+
+    private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions, List<string> diagnostics)
+    {
+        var nodes = new List<VisualNode>();
+        var edges = new List<VisualEdge>();
+        var paths = new List<VisualPath>();
+        var graphDiagnostics = new List<VisualDiagnostic>();
+        var state = new Stack<(double A, double B, double C, double D, double E, double F)>();
+        var ctm = (A: 1d, B: 0d, C: 0d, D: 1d, E: 0d, F: 0d);
+        var operands = new List<double>();
+        var current = new List<VisualPathPoint>();
+        var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
+        var closed = false;
+        var curveSeen = false;
+        var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString())]);
+
+        foreach (var token in Tokens(content))
+        {
+            if (double.TryParse(token, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number))
+            {
+                operands.Add(number);
+                continue;
+            }
+            switch (token)
+            {
+                case "q": state.Push(ctm); operands.Clear(); break;
+                case "Q": if (state.Count > 0) ctm = state.Pop(); operands.Clear(); break;
+                case "cm":
+                    if (operands.Count >= 6)
+                    {
+                        var m = (A: operands[^6], B: operands[^5], C: operands[^4], D: operands[^3], E: operands[^2], F: operands[^1]);
+                        ctm = (ctm.A * m.A + ctm.C * m.B, ctm.B * m.A + ctm.D * m.B,
+                            ctm.A * m.C + ctm.C * m.D, ctm.B * m.C + ctm.D * m.D,
+                            ctm.A * m.E + ctm.C * m.F + ctm.E, ctm.B * m.E + ctm.D * m.F + ctm.F);
+                    }
+                    break;
+                case "m" when operands.Count >= 2:
+                    if (current.Count > 1)
+                    {
+                        if (closed) pendingClosedSubpaths.Add(current.ToArray());
+                        else RetainSubpath();
+                    }
+                    current.Clear(); current.Add(Transform(operands[^2], operands[^1])); closed = false; curveSeen = false; break;
+                case "l" when operands.Count >= 2:
+                    current.Add(Transform(operands[^2], operands[^1])); break;
+                case "c" when operands.Count >= 6:
+                    current.Add(Transform(operands[^6], operands[^5])); current.Add(Transform(operands[^4], operands[^3]));
+                    current.Add(Transform(operands[^2], operands[^1])); curveSeen = true; break;
+                case "v" when operands.Count >= 4:
+                    current.Add(Transform(operands[^4], operands[^3])); current.Add(Transform(operands[^2], operands[^1])); curveSeen = true; break;
+                case "y" when operands.Count >= 4:
+                    current.Add(Transform(operands[^4], operands[^3])); current.Add(Transform(operands[^2], operands[^1]));
+                    current.Add(Transform(operands[^2], operands[^1])); curveSeen = true; break;
+                case "re" when operands.Count >= 4:
+                    if (current.Count > 1)
+                    {
+                        if (closed) pendingClosedSubpaths.Add(current.ToArray());
+                        else RetainSubpath();
+                    }
+                    var x = operands[^4]; var y = operands[^3]; var w = operands[^2]; var h = operands[^1];
+                    current.Clear(); current.Add(Transform(x, y)); current.Add(Transform(x + w, y));
+                    current.Add(Transform(x + w, y + h)); current.Add(Transform(x, y + h)); current.Add(Transform(x, y)); closed = true; break;
+                case "h": if (current.Count > 1) { current.Add(current[0]); closed = true; } break;
+                case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "n":
+                    if (current.Count > 1)
+                    {
+                        // `re` starts a new subpath; promote prior closed rectangles only when the
+                        // following paint operator confirms that the compound path is painted.
+                        foreach (var subpath in pendingClosedSubpaths)
+                            AddClosedNode(subpath);
+                        pendingClosedSubpaths.Clear();
+                        var points = current.ToArray();
+                        var isClosed = closed || token is "s" or "b" or "b*" or "f" or "F" or "f*" or "B" or "B*" ||
+                            (points[0].X == points[^1].X && points[0].Y == points[^1].Y);
+                        var painted = token is not "n";
+                        var isStroke = token is "S" or "s" or "B" or "B*" or "b" or "b*";
+                        var minX = points.Min(point => point.X); var minY = points.Min(point => point.Y);
+                        var maxX = points.Max(point => point.X); var maxY = points.Max(point => point.Y);
+                        var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
+                        paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
+                            curveSeen ? 0.45 : 0.9, curveSeen || !isClosed || !painted, SourceNodeId: null));
+                        if (isClosed && painted)
+                        {
+                            var id = $"pdf_p{pageNumber}_n{nodes.Count + 1}";
+                            var label = regions.Where(region => region.BoundingBox.X >= minX - 24 && region.BoundingBox.X <= maxX + 24 &&
+                                region.BoundingBox.Y >= minY - 24 && region.BoundingBox.Y <= maxY + 24)
+                                .Select(region => region.Text).FirstOrDefault() ?? $"Vector node {nodes.Count + 1}";
+                            nodes.Add(new VisualNode(id, label, VisualNodeKind.Generic, Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), SourceAnchor: anchor));
+                        }
+                        else if (isStroke)
+                        {
+                            var start = points[0]; var end = points[^1];
+                            var source = nodes.Where(node => Near(node.Geometry, start)).ToArray();
+                            var target = nodes.Where(node => Near(node.Geometry, end)).ToArray();
+                            var resolved = source.Length == 1 && target.Length == 1 && source[0].Id != target[0].Id;
+                            var label = regions.Where(region => Between(region.BoundingBox.X, minX, maxX) && Between(region.BoundingBox.Y, minY, maxY))
+                                .Select(region => region.Text).Distinct(StringComparer.Ordinal).ToArray();
+                            var edgeLabel = label.Length == 1 ? label[0] : null;
+                            if (label.Length > 1) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge label is ambiguous."); graphDiagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "Edge label is ambiguous.")); }
+                            edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", resolved ? source[0].Id : null, resolved ? target[0].Id : null,
+                                edgeLabel, resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved, Direction: "undirected",
+                                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: resolved ? 0.85 : 0.2,
+                                Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
+                            if (!resolved) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous."); graphDiagnostics.Add(new VisualDiagnostic("VisualConnectorUnresolved", "Edge endpoint is ambiguous.")); }
+                        }
+                        if (curveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Curve path retained as fallback.")); }
+                    }
+                    current.Clear(); operands.Clear(); closed = false; curveSeen = false; break;
+                default: operands.Clear(); break;
+            }
+        }
+        foreach (var subpath in pendingClosedSubpaths)
+            RetainClosedSubpath(subpath);
+        // Resolve endpoints after all paths have been visited; PDF producers may paint
+        // connectors before the rectangles that define their endpoints.
+        for (var edgeIndex = 0; edgeIndex < edges.Count; edgeIndex++)
+        {
+            var edge = edges[edgeIndex];
+            if (edge.SourceId is not null && edge.TargetId is not null || edge.Path is null || edge.Path.Count < 2) continue;
+            var startCandidates = nodes.Where(node => Near(node.Geometry, edge.Path[0])).ToArray();
+            var endCandidates = nodes.Where(node => Near(node.Geometry, edge.Path[^1])).ToArray();
+            if (startCandidates.Length != 1 || endCandidates.Length != 1 || startCandidates[0].Id == endCandidates[0].Id) continue;
+            edges[edgeIndex] = edge with { SourceId = startCandidates[0].Id, TargetId = endCandidates[0].Id,
+                Resolution = VisualEdgeResolution.GeometryInferred, Confidence = 0.75 };
+            var deferredDiagnostic = graphDiagnostics.FindIndex(item => item.Code == "VisualConnectorUnresolved");
+            if (deferredDiagnostic >= 0) graphDiagnostics.RemoveAt(deferredDiagnostic);
+            var deferredGlobal = diagnostics.FindIndex(message =>
+                message.StartsWith($"VisualConnectorUnresolved: PDF page {pageNumber}", StringComparison.Ordinal));
+            if (deferredGlobal >= 0) diagnostics.RemoveAt(deferredGlobal);
+        }
+        return new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths);
+
+        IEnumerable<string> Tokens(string value)
+        {
+            for (var i = 0; i < value.Length;)
+            {
+                if (value[i] == '%') { while (i < value.Length && value[i] is not '\r' and not '\n') i++; continue; }
+                if (value[i] == '(') { var depth = 1; i++; while (i < value.Length && depth > 0) { if (value[i] == '\\') i += Math.Min(2, value.Length - i); else if (value[i++] == '(') depth++; else if (value[i - 1] == ')') depth--; } continue; }
+                if (value[i] == '<') { i++; if (i < value.Length && value[i] == '<') { i++; continue; } while (i < value.Length && value[i++] != '>') { } continue; }
+                if (value[i] == '/') { i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) i++; continue; }
+                if (char.IsWhiteSpace(value[i])) { i++; continue; }
+                var start = i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) i++;
+                yield return value[start..i];
+            }
+        }
+        VisualPathPoint Transform(double x, double y) => new(ctm.A * x + ctm.C * y + ctm.E, ctm.B * x + ctm.D * y + ctm.F);
+        static bool Between(double value, double min, double max) => value >= min - 24 && value <= max + 24;
+        static bool Near(Geometry? geometry, VisualPathPoint point) => geometry is not null &&
+            (Between(point.X, geometry.X, geometry.X + geometry.Width) || Between(point.X, geometry.X + geometry.Width, geometry.X)) &&
+            (Between(point.Y, geometry.Y, geometry.Y + geometry.Height) || Between(point.Y, geometry.Y + geometry.Height, geometry.Y));
+
+        void RetainSubpath()
+        {
+            var minX = current.Min(point => point.X); var minY = current.Min(point => point.Y);
+            var maxX = current.Max(point => point.X); var maxY = current.Max(point => point.Y);
+            paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", current.ToArray(),
+                new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
+                curveSeen ? 0.25 : 0.35, IsFallback: true, SourceNodeId: null));
+            graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Unpainted PDF subpath retained as fallback."));
+        }
+
+        void RetainClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
+        {
+            var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
+            var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
+            paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", subpath,
+                new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
+                0.35, IsFallback: true, SourceNodeId: null));
+            graphDiagnostics.Add(new VisualDiagnostic("VisualPathPartial", "Unpainted PDF subpath retained as fallback."));
+        }
+
+        void AddClosedNode(IReadOnlyList<VisualPathPoint> subpath)
+        {
+            var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
+            var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
+            var label = regions.Where(region => region.BoundingBox.X >= minX - 24 && region.BoundingBox.X <= maxX + 24 &&
+                    region.BoundingBox.Y >= minY - 24 && region.BoundingBox.Y <= maxY + 24)
+                .Select(region => region.Text).FirstOrDefault() ?? $"Vector node {nodes.Count + 1}";
+            nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
+                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), SourceAnchor: anchor));
+        }
+    }
+
 
     private static string StripStreamPayloads(string value)
     {
@@ -121,6 +352,24 @@ public static class PdfTextExtractor
         return output.ToString();
     }
 
+    private static IReadOnlyDictionary<int, int> ReadContentObjectPages(string structure, TimeSpan timeout)
+    {
+        var result = new Dictionary<int, int>();
+        var pageNumber = 0;
+        foreach (Match page in Regex.Matches(structure, @"(?<pageId>\d+)\s+\d+\s+obj\b(?<body>.*?)(?=\bendobj\b)", RegexOptions.Singleline, timeout))
+        {
+            var body = page.Groups["body"].Value;
+            if (!Regex.IsMatch(body, @"/Type\s*/Page\b", RegexOptions.None, timeout)) continue;
+            pageNumber++;
+            foreach (Match scalar in Regex.Matches(body, @"/Contents\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
+                if (int.TryParse(scalar.Groups["id"].Value, out var id)) result[id] = pageNumber;
+            foreach (Match array in Regex.Matches(body, @"/Contents\s*\[(?<refs>[^\]]*)\]", RegexOptions.None, timeout))
+                foreach (Match reference in Regex.Matches(array.Groups["refs"].Value, @"(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
+                    if (int.TryParse(reference.Groups["id"].Value, out var id)) result[id] = pageNumber;
+        }
+        return result;
+    }
+
     private static IReadOnlySet<int> ReadContentObjectIds(string structure, TimeSpan timeout)
     {
         var ids = new HashSet<int>();
@@ -132,7 +381,7 @@ public static class PdfTextExtractor
         return ids;
     }
 
-    private static IEnumerable<string> ReadStreams(byte[] bytes, string latin, PdfExtractionOptions options, IReadOnlySet<int> contentObjectIds)
+    private static IEnumerable<(int? ObjectId, string Payload)> ReadStreams(byte[] bytes, string latin, PdfExtractionOptions options, IReadOnlySet<int> contentObjectIds)
     {
         var marker = Encoding.ASCII.GetBytes("stream");
         var endMarker = Encoding.ASCII.GetBytes("endstream");
@@ -147,13 +396,16 @@ public static class PdfTextExtractor
             var payload = bytes[start..end];
             while (payload.Length > 0 && (payload[^1] == '\r' || payload[^1] == '\n')) payload = payload[..^1];
             var header = ReadContainingObjectHeader(latin, offset, 2048);
-            if (contentObjectIds.Count > 0 && (!TryReadContainingObjectId(header, options.EffectiveRegexTimeout, out var objectId) || !contentObjectIds.Contains(objectId)))
+            int? objectId = TryReadContainingObjectId(header, options.EffectiveRegexTimeout, out var parsedObjectId)
+                ? parsedObjectId
+                : null;
+            if (contentObjectIds.Count > 0 && (objectId is null || !contentObjectIds.Contains(objectId.Value)))
             {
                 offset = end + endMarker.Length;
                 continue;
             }
             payload = DecodeFilteredStream(payload, header, options.MaxExpandedStreamBytes);
-            yield return Encoding.Latin1.GetString(payload);
+            yield return (objectId, Encoding.Latin1.GetString(payload));
             offset = end + endMarker.Length;
         }
     }
@@ -163,6 +415,58 @@ public static class PdfTextExtractor
         objectId = 0;
         var matches = Regex.Matches(header, @"(?<id>\d+)\s+\d+\s+obj\b", RegexOptions.None, timeout);
         return matches.Count > 0 && int.TryParse(matches[^1].Groups["id"].Value, out objectId);
+    }
+
+    private static bool ContainsVectorOperators(string content) =>
+        ContainsOperatorToken(content, static token => token is "m" or "l" or "c" or "v" or "y" or "re" or "S" or "s" or "f" or "F" or "B" or "b");
+
+    private static bool ContainsImageOperator(string content) =>
+        ContainsOperatorToken(content, static token => token == "Do");
+
+    private static bool ContainsOperatorToken(string content, Func<string, bool> predicate)
+    {
+        for (var index = 0; index < content.Length;)
+        {
+            if (content[index] == '%')
+            {
+                while (index < content.Length && content[index] is not '\r' and not '\n') index++;
+                continue;
+            }
+            if (content[index] == '(')
+            {
+                var depth = 1;
+                index++;
+                while (index < content.Length && depth > 0)
+                {
+                    if (content[index] == '\\') index += Math.Min(2, content.Length - index);
+                    else if (content[index++] == '(') depth++;
+                    else if (content[index - 1] == ')') depth--;
+                }
+                continue;
+            }
+            if (content[index] == '<')
+            {
+                index++;
+                if (index < content.Length && content[index] == '<') { index++; continue; }
+                while (index < content.Length && content[index++] != '>') { }
+                continue;
+            }
+            if (content[index] == '/')
+            {
+                index++;
+                while (index < content.Length && !char.IsWhiteSpace(content[index]) && !"()<>[]{}/%".Contains(content[index])) index++;
+                continue;
+            }
+            if (char.IsLetter(content[index]))
+            {
+                var start = index++;
+                while (index < content.Length && char.IsLetter(content[index])) index++;
+                if (predicate(content[start..index])) return true;
+                continue;
+            }
+            index++;
+        }
+        return false;
     }
 
     private static List<PdfTextRegion> ParseOperators(string content, PdfExtractionOptions options,

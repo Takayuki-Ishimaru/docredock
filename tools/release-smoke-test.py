@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke-test an extracted DocRedock v0.1.5 distribution across supported paths."""
+"""Smoke-test an extracted DocRedock v0.1.6 distribution, including visual-semantics preservation paths."""
 
 from __future__ import annotations
 
@@ -24,8 +24,11 @@ HIDDEN_SENTINELS = {
 
 def write_zip(path: Path, parts: dict[str, str]) -> None:
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, value in parts.items():
-            archive.writestr(name, value.encode("utf-8"))
+        for name, value in sorted(parts.items()):
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 0
+            archive.writestr(info, value.encode("utf-8"))
 
 
 def create_docx(path: Path) -> None:
@@ -69,6 +72,45 @@ def create_pptx(path: Path) -> None:
             "ppt/slides/slide1.xml": f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Before</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Hidden" hidden="1"/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{HIDDEN_SENTINELS["pptx"]}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>',
         },
     )
+
+
+def exercise_visual_semantics(root: Path, cli: Path) -> None:
+    fixtures = {
+        "visual.docx": {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            "word/document.xml": '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><mc:AlternateContent><mc:Choice Requires="w14" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:r><w:t>ChoiceNode</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>FallbackNode</w:t></w:r></mc:Fallback></mc:AlternateContent><w:r><w:drawing><wps:wsp><a:cNvPr id="start"/><a:xfrm><a:off x="0" y="0"/><a:ext cx="20" cy="20"/></a:xfrm><w:txbxContent><w:p><w:r><w:t>Start</w:t></w:r></w:p></w:txbxContent></wps:wsp><wps:wsp><a:cNvPr id="end"/><a:xfrm><a:off x="100" y="0"/><a:ext cx="20" cy="20"/></a:xfrm><w:txbxContent><w:p><w:r><w:t>End</w:t></w:r></w:p></w:txbxContent></wps:wsp><wps:wsp><a:cNvPr id="connector"/><a:prstGeom prst="line"/><a:stCxn id="start"/><a:endCxn id="end"/><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="0"/></a:xfrm></wps:wsp></w:drawing></w:r></w:p></w:body></w:document>',
+        },
+        "visual.pptx": {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            "ppt/presentation.xml": '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+            "ppt/_rels/presentation.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="slide" Target="slides/slide1.xml"/></Relationships>',
+            "ppt/slides/slide1.xml": '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Start"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="roundRect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Start</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="End"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="300" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>End</a:t></a:r></a:p></p:txBody></p:sp><p:cxnSp><p:nvCxnSpPr><p:cNvPr id="4" name="edge"/><p:cNvCxnSpPr><a:stCxn id="2" idx="0"/><a:endCxn id="3" idx="0"/></p:cNvCxnSpPr><p:nvPr/></p:nvCxnSpPr><p:spPr><a:prstGeom prst="line"/></p:spPr></p:cxnSp></p:spTree></p:cSld></p:sld>',
+        },
+        "visual.xlsx": {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+            "_rels/.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdWorkbook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
+            "xl/workbook.xml": '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Flow" sheetId="1" r:id="rId1"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+            "xl/worksheets/sheet1.xml": '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rDrawing"/></worksheet>',
+            "xl/worksheets/_rels/sheet1.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="/xl/drawings/drawing1.xml"/></Relationships>',
+            "xl/drawings/drawing1.xml": '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="ProcessNode"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>ProcessNode</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor><xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="DecisionNode"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>DecisionNode</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor><xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="400000" cy="10000"/><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="4" name="edge"/><xdr:cNvCxnSpPr><a:stCxn id="2" idx="0"/><a:endCxn id="3" idx="0"/></xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>',        },
+    }
+    mermaid = chr(96) * 3 + "mermaid"
+    for filename, parts in fixtures.items():
+        source = root / filename
+        write_zip(source, parts)
+        output = root / (filename + ".visual.md")
+        invoke(cli, ["export", str(source), "--profile", "readable", "--output", str(output), "--ocr", "off"], allowed=(0, 1), experimental=True)
+        markdown = output.read_text(encoding="utf-8")
+        if filename.endswith(".docx"):
+            if markdown.count("ChoiceNode") != 1 or "FallbackNode" in markdown or "-->" not in markdown or "Start" not in markdown or "End" not in markdown:
+                raise RuntimeError("DOCX AlternateContent Choice/Fallback projection is incorrect")
+        elif filename.endswith(".pptx"):
+            if mermaid not in markdown or "v_2 --> v_3" not in markdown:
+                raise RuntimeError("PPTX fixture did not preserve native connector Mermaid topology")
+        elif filename.endswith(".xlsx"):
+            if mermaid not in markdown or "ProcessNode" not in markdown or "DecisionNode" not in markdown or "N_S_2 --> N_S_3" not in markdown:
+                raise RuntimeError("XLSX DrawingML flowChart fixture did not preserve Mermaid nodes/labels")
 
 
 def digest(path: Path) -> str:
@@ -362,6 +404,55 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
     if sentinel not in extracted.read_text(encoding="utf-8"):
         raise RuntimeError("Japanese PDF re-extraction did not preserve the sentinel")
 
+    vector_pdf = root / "vector-pdf.pdf"
+    vector_extracted = root / "vector-pdf-extracted.md"
+    # Two painted rectangles plus one open stroked path form a uniquely resolvable,
+    # deliberately undirected vector edge. Native labels exercise the graph-to-Mermaid path.
+    vector_pdf.write_bytes(
+        b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n"
+        b"2 0 obj << /Length 145 >> stream\n"
+        b"BT 1 0 0 1 0 0 Tm (Start) Tj 100 100 Td (End) Tj ET\n"
+        b"0 0 20 20 re S 100 100 20 20 re S 0 0 m 100 100 l S\n"
+        b"endstream\n%%EOF"
+    )
+    vector_result = invoke(
+        cli,
+        ["export", str(vector_pdf), "--profile", "readable", "--output", str(vector_extracted), "--ocr", "off"],
+        allowed=(0, 1),
+        experimental=True,
+    )
+    if not vector_extracted.is_file():
+        raise RuntimeError("vector PDF smoke export did not create Markdown")
+    vector_markdown = vector_extracted.read_text(encoding="utf-8")
+    if "Start" not in vector_markdown or "End" not in vector_markdown:
+        raise RuntimeError("vector PDF smoke export lost native text labels")
+    mermaid = chr(96) * 3 + "mermaid"
+    if mermaid not in vector_markdown or " ---" not in vector_markdown:
+        raise RuntimeError("vector PDF smoke did not project a resolved undirected Mermaid edge")
+    stable_visual_codes = ("VisualSemanticProjectionUnavailable", "VisualSemanticProjectionPartial", "VisualVectorUnresolved")
+    if "VisualConnectorUnresolved" in vector_result.stdout or "[PDF visual content:" in vector_markdown:
+        raise RuntimeError("resolved vector PDF smoke unexpectedly emitted connector fallback")
+
+    partial_pdf = root / "partial-vector-pdf.pdf"
+    partial_extracted = root / "partial-vector-pdf-extracted.md"
+    partial_pdf.write_bytes(
+        b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n"
+        b"2 0 obj << /Length 56 >> stream\n"
+        b"0 0 m 10 10 20 0 30 10 c S\n"
+        b"endstream\n%%EOF"
+    )
+    partial_result = invoke(
+        cli,
+        ["export", str(partial_pdf), "--profile", "readable", "--output", str(partial_extracted), "--ocr", "off"],
+        allowed=(0, 1),
+        experimental=True,
+    )
+    partial_markdown = partial_extracted.read_text(encoding="utf-8")
+    if not any(code in partial_result.stdout for code in stable_visual_codes) and "[PDF visual content:" not in partial_markdown:
+        raise RuntimeError("partial vector PDF smoke did not retain diagnostic or source fallback")
+
+
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -376,7 +467,7 @@ def main() -> int:
 
     package_checksum = inspect_distribution(cli.parent)
     version = invoke(cli, ["--version"])
-    if not version.stdout.strip().startswith("DocRedock 0.1.5"):
+    if not version.stdout.strip().startswith("DocRedock 0.1.6"):
         raise RuntimeError(f"unexpected CLI version: {version.stdout.strip()}")
     blocked = invoke(cli, ["restore", "missing.md"], allowed=(4,))
     if "DOCREDOCK_ENABLE_EXPERIMENTAL=1" not in blocked.stdout:
@@ -387,6 +478,7 @@ def main() -> int:
         docx_projection = exercise_format(root, cli, "docx", "word/document.xml", create_docx)
         exercise_format(root, cli, "xlsx", "xl/worksheets/sheet1.xml", create_xlsx)
         exercise_format(root, cli, "pptx", "ppt/slides/slide1.xml", create_pptx)
+        exercise_visual_semantics(root, cli)
         exercise_pdf_render(root, cli)
         exercise_pack_and_tamper(root, cli, docx_projection)
         inspect_gui_binary(gui)
@@ -394,7 +486,7 @@ def main() -> int:
             exercise_gui(gui)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
-    print(f"Release smoke test passed for v0.1.5 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, empty merged-DOCX diff, F0/F1 restore, Japanese PDF rendering, package checksums/font exclusion, pack/unpack, tamper rejection, and {gui_result}.")
+    print(f"Release smoke test passed for v0.1.6 versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, visual-semantics PDF fallback/diagnostics, empty merged-DOCX diff, F0/F1 restore, Japanese PDF rendering, package checksums/font exclusion, pack/unpack, tamper rejection, and {gui_result}.")
     print(f"Verified package checksum manifest SHA-256: {package_checksum}")
     return 0
 

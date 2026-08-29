@@ -2,27 +2,28 @@
 
 日本語 | [English](README.en.md)
 
-このディレクトリには、バージョン別リリースノートと保守者向けの公開手順を置いています。利用者向けの入口はルートの[README.ja.md](../README.ja.md)です。
+版ごとのリリースノートと版に依存しない公開手順です。利用者向け入口は [README.ja.md](../README.ja.md) です。
 
-## v0.1.5 Public Beta
+## 最新版
 
-- サポート: DOCX／XLSX／PPTXから閲覧用Markdownへのローカル変換。デスクトップGUIではPDF入力も既定で利用できます。
-- 安全な既定値: `visible`。`complete`は非表示情報を警告付きで含み、`sanitized`はより強く除外。
-- 実験機能: GUIの往復編集／復元は明示ラベルの選択でセッション単位にopt-inします。CLIの往復編集、復元、生成、パッケージ操作とPDFの変換／復元／生成には`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。
+### v0.1.6 Public Beta
+
+- [v0.1.6 リリースノート](RELEASE_NOTES_v0.1.6.md)
+- DOCX AlternateContent 二重抽出と visual Node ID 衝突を修正
+- visual semantics は projection、fallback、または diagnostic で欠落を可視化
+- 6 RIDの配布物をrelease workflowで構築・展開検証し、結果とハッシュをGitHub Releaseへ添付
 
 ## 利用者向け
 
 - [利用ガイド](../docs/ja/user-guide.md)
-- [v0.1.5の対応状況](../docs/ja/supported-features.md)
+- [対応機能](../docs/ja/supported-features.md)
 - [実験機能](../docs/ja/experimental-features.md)
 - [セキュリティとプライバシー](../docs/ja/security-and-privacy.md)
-- [v0.1.5リリースノート](RELEASE_NOTES_v0.1.5.md)
 
 ## 保守者向け
 
 - [公開範囲](PUBLICATION_SCOPE.md)
 - [リリースチェックリスト](RELEASE_CHECKLIST.md)
+- [公開証跡](RELEASE_NOTES_v0.1.6.md#公開証跡)
 - [English publication scope](PUBLICATION_SCOPE.en.md)
 - [English release checklist](RELEASE_CHECKLIST.en.md)
-
-過去リリースの利用者向け履歴はGitHub Releasesを正本とし、旧リリースノートは参照用に保持します。

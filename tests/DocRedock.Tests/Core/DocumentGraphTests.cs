@@ -100,6 +100,89 @@ public sealed class DocumentGraphTests
         Assert.Equal(6, Enum.GetValues<OcrProcessingStatus>().Length);
     }
 
+    [Fact]
+    public void Graph_construction_normalizes_duplicate_node_ids_without_dictionary_failure()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("first", 0, [Node("duplicate", "one")]),
+            new DocumentPartition("second", 1, [Node("duplicate", "two"), Node("", "three")])
+        ]);
+
+        Assert.Equal(["duplicate", "duplicate__2", "node_2_2"], graph.Nodes.Select(node => node.Id));
+        Assert.Equal(3, graph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal).Count);
+        Assert.Equal("duplicate__2", graph.FindNode("duplicate__2")!.Id);
+    }
+
+    [Fact]
+    public void Graph_with_normalizes_empty_and_duplicate_ids_without_raw_dictionary_failure()
+    {
+        var graph = Graph(Node("stable", "one")) with
+        {
+            Partitions = [new DocumentPartition("part", 0, [Node("", "empty"), Node("stable", "one"), Node("stable", "duplicate")])]
+        };
+
+        Assert.Equal(["node_1_1", "stable", "stable__2"], graph.Nodes.Select(node => node.Id));
+        Assert.Equal(graph.Nodes.Count(), graph.Nodes.Select(node => node.Id).Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    public void Graph_normalization_keeps_duplicate_parent_references_bound_to_first_source_node()
+    {
+        var parent = Node("duplicate", "parent");
+        var duplicate = Node("duplicate", "second parent");
+        var child = Node("child", "child") with { ParentId = "duplicate" };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc", DocumentFormatKind.Docx,
+            [new DocumentPartition("part", 0, [parent, duplicate, child])]);
+
+        Assert.Equal("duplicate", graph.FindNode("child")!.ParentId);
+        Assert.NotNull(graph.FindNode(graph.FindNode("child")!.ParentId!));
+    }
+
+    [Fact]
+    public void Visual_graph_exposes_compatible_metadata_and_consistent_accounting()
+    {
+        var anchor = new SourceAnchor("pptx", "ppt/slides/slide1.xml", [new("shape_id", "1")]);
+        var graph = new VisualGraph("flow", [new VisualNode("a", "Start", Geometry: new Geometry("pptx-emu", 0, 0, 1, 1), SourceAnchor: anchor, Group: "g", Lane: "main")],
+            [new VisualEdge("resolved", "a", "a", Direction: "forward", Confidence: 1, Path: [new(0, 0), new(1, 1)], SourceAnchor: anchor), new VisualEdge("unresolved", null, null, Resolution: VisualEdgeResolution.Unresolved)],
+            [new VisualDiagnostic("VisualConnectorUnresolved", "unresolved")], Groups: [new VisualGroup("g", "Main", ["a"], "main")],
+            Paths: [new VisualPath("fallback-vector", [new(2, 2)], SourceAnchor: anchor)]);
+
+        Assert.Equal(1, graph.Accounting.RecognizedNodes);
+        Assert.Equal(2, graph.Accounting.RecognizedEdges);
+        Assert.Equal(1, graph.Accounting.ResolvedEdges);
+        Assert.Equal(1, graph.Accounting.UnresolvedEdges);
+        Assert.Equal(1, graph.Accounting.RecognizedPaths);
+        Assert.Equal(1, graph.Accounting.FallbackPaths);
+        Assert.True(graph.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Visual_graph_rejects_dangling_or_duplicate_node_topology()
+    {
+        var dangling = new VisualGraph("flow", [new VisualNode("a", "A")], [new VisualEdge("edge", "a", "missing")]);
+        var duplicate = new VisualGraph("flow", [new VisualNode("a", "A"), new VisualNode("a", "Again")], [new VisualEdge("edge", "a", "a")]);
+        var malformed = new VisualGraph("flow", [null!], [null!]);
+
+        Assert.False(dangling.HasTopology);
+        Assert.False(duplicate.HasTopology);
+        Assert.False(malformed.HasTopology);
+        Assert.True(malformed.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Legacy_json_with_null_partitions_deserializes_as_empty_graph()
+    {
+        const string legacyJson = """{"schema_version":"1.0","document_id":"legacy","format":"docx","partitions":null}""";
+
+        var graph = DeterministicJson.Deserialize<DocumentGraph>(legacyJson);
+
+        Assert.NotNull(graph);
+        Assert.Empty(graph!.Partitions);
+        Assert.Equal("legacy", graph.DocumentId);
+        Assert.Equal(DocumentFormatKind.Docx, graph.Format);
+    }
+
     private static DocumentGraph Graph(params DocumentNode[] nodes) => new(DocumentGraph.CurrentSchemaVersion, "doc", DocumentFormatKind.Docx, [new("part-0001", 0, nodes)]);
     private static DocumentNode Node(string id, string text, ContentLayer layer = ContentLayer.Body, NodeEditability editability = NodeEditability.EditableInPlace) =>
         new(id, NodeKind.Paragraph, null, 0, layer, new TextNodeContent(text), new SourceAnchor("docx", "/word/document.xml", [new("w14_para_id", id)]), Editability: editability);
