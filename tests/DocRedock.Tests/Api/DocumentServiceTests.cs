@@ -1,11 +1,13 @@
 using System.Security.Cryptography;
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Providers.Abstractions.Providers;
 using DocRedock.Render;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.Api;
 
@@ -21,8 +23,31 @@ public sealed class DocumentServiceTests
 
         var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown));
 
-        Assert.Contains(exported.Graph.Nodes, node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        var diagram = Assert.Single(exported.Graph.Nodes, node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        var visualGraph = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var validation = VisualGraphValidator.Validate(visualGraph);
+        Assert.True(validation.IsValidForSemanticProjection,
+            string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
         Assert.Contains("```mermaid", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Native_only_mode_reaches_pdf_adapter_and_keeps_geometry_relation_unresolved()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "vector-native-only.pdf");
+        var markdown = Path.Combine(root, "vector-native-only.md");
+        await File.WriteAllBytesAsync(source, Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 145 >> stream\nBT 1 0 0 1 0 0 Tm (Start) Tj 100 100 Td (End) Tj ET\n0 0 20 20 re 100 100 20 20 re 0 0 m 100 100 l S\nendstream\n%%EOF"));
+
+        var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, InferenceMode: VisualInferenceMode.NativeOnly));
+        var diagram = Assert.Single(exported.Graph.Nodes,
+            node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        var visualGraph = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+
+        Assert.All(visualGraph.Edges, edge => Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution));
+        Assert.Equal(VisualGraphQuality.FallbackOnly, visualGraph.Quality);
+        Assert.DoesNotContain("```mermaid", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
     }
 
     [Fact]

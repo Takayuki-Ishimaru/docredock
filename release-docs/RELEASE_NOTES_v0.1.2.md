@@ -43,12 +43,9 @@ GitHub Releases から OS と CPU に合うファイルを選んでください�
 
 各パッケージには GUI、CLI、日英クイックスタート／セキュリティ文書、ライセンス、成果物ファイルのチェックサム、実ファイルへ紐づく SBOM、provenance、署名状況が含まれます。.NET SDK の別途インストールは不要です。
 
-## 検証
+## 品質確認
 
-- Release 構成の全 259 テストに合格しました。
-- 複雑な実 XLSX／PPTX と 15 スライドの合成 PPTX で readable／roundtrip 出力を確認しました。
-- 検証対象の XLSX／PPTX は、未編集の F0 復元で元ファイルと同一ハッシュになりました。この確認は機械的回帰試験であり、roundtrip／restoreの利用を意味しません。
-- リリースワークフローでは locked restore、Release build、全テスト、conversion QA、LicenseAudit、6 RID の展開後 smoke test を必須とします。
+複雑なXLSX／PPTXと複数スライドのPPTXで閲覧用出力を確認しました。往復編集と復元の確認は、これらを利用者向けサポート対象にするものではありません。
 
 ## 既知の制約
 
@@ -59,14 +56,9 @@ GitHub Releases から OS と CPU に合うファイルを選んでください�
 - マクロ、署名、暗号化、保護、危険または未対応の package 構造は拒否される場合があります。
 - Windows 署名と macOS signing/notarization は資格情報が設定されている場合のみ適用し、各パッケージに状態を記録します。
 
-## Experimental engine changes — not supported in v0.1.2
+## 実験機能
 
-以下は実装・回帰検証に含まれる変更ですが、v0.1.2の利用者向けサポート範囲ではありません。
-
-- roundtripプレビュー、`.drmd`／`.drmdpkg`、`verify`、`diff`、`restore`の経路を維持・改善しました。
-- PPTXのネストしたグループについて、`off/ext/chOff/chExt`、回転、反転、異方スケールを合成して座標を求め、欠損値やゼロサイズでも非有限座標を避けます。
-- relationship XML、ZIPの展開サイズ・圧縮率、グラフの疎な点数に上限を設けます。複数出力の確定後にバックアップ削除が失敗しても、確定済み出力を巻き戻さず、可能なロールバック処理を継続して報告します。
-- `render`のMermaid図、Office template、PDF fallback、および元形式への反映は実験用エンジンの機能です。利用者向けサポート対象ではありません。
+往復編集、`.drmd`／`.drmdpkg`、`verify`、`diff`、`restore`、Mermaid図を含む新規文書生成、Office template、PDF fallbackは、v0.1.2の利用者向けサポート対象外です。大きいまたは不正な入力には安全上の制限が適用されます。
 
 詳細は [利用ガイド](../docs/ja/user-guide.md)、[対応形式一覧](../docs/ja/supported-features.md)、[セキュリティとプライバシー](../docs/ja/security-and-privacy.md)を参照してください。
 

@@ -93,10 +93,13 @@ public sealed class CliApplicationTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter());
+        var version = typeof(CliApplication).Assembly.GetName().Version
+            ?? throw new InvalidOperationException("CLI assembly version is missing.");
+        var expectedVersion = $"DocRedock {version.Major}.{version.Minor}.{version.Build}";
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["help"]));
 
-        Assert.Contains("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains(expectedVersion, stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
@@ -109,9 +112,12 @@ public sealed class CliApplicationTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter());
+        var version = typeof(CliApplication).Assembly.GetName().Version
+            ?? throw new InvalidOperationException("CLI assembly version is missing.");
+        var expectedVersion = $"DocRedock {version.Major}.{version.Minor}.{version.Build}";
 
         Assert.Equal((int)ExitCode.Success, await app.RunAsync(["--version"]));
-        Assert.StartsWith("DocRedock 0.1.6", stdout.ToString(), StringComparison.Ordinal);
+        Assert.StartsWith(expectedVersion, stdout.ToString(), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -163,6 +169,22 @@ public sealed class CliApplicationTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("native-only")]
+    [InlineData("safe")]
+    [InlineData("balanced")]
+    public async Task Export_accepts_each_visual_inference_mode_and_reports_it(string mode)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var output = new StringWriter();
+        var result = await new CliApplication(output, new StringWriter()).RunAsync(
+            ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--visual-inference", mode]);
+
+        Assert.InRange(result, (int)ExitCode.Success, (int)ExitCode.SuccessWithWarnings);
+        Assert.Contains($"Visual inference: {mode}", output.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Cli_pdf_export_requires_explicit_environment_opt_in_but_read_only_inspection_is_available()
     {
@@ -184,6 +206,7 @@ public sealed class CliApplicationTests : IDisposable
 
             Assert.Equal((int)ExitCode.Success, inspect);
             Assert.Contains("Format: pdf", inspectOutput.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Visual summary: diagrams=", inspectOutput.ToString(), StringComparison.Ordinal);
         }
         finally
         {

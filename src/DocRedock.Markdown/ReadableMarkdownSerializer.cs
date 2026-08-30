@@ -200,10 +200,13 @@ public sealed partial class ReadableMarkdownSerializer
                 WriteHeading(output, 2, titleText.Length == 0 ? label : $"{label} — {titleText}");
                 previousWasListItem = false;
             }
-            // Do not suppress the original connector/label fallback when this projection does
-            // not render the derived visual graph (for example sanitized policy or
-            // IncludeDiagrams=false). Otherwise the graph would be silently lost.
-            var rendersVisualGraph = options.IncludeDiagrams && partition.Nodes.Any(TryGetRenderableVisualGraph);
+            var visualGraphNodes = partition.Nodes
+                .Where(node => node.Kind == NodeKind.Diagram && HasVisualGraph(node)).ToArray();
+            // Suppress source members only when a validated graph can represent them. Invalid
+            // metadata must retain its original connector/label fallback for diagnostics.
+            var suppressVisualGraphMembers = visualGraphNodes.Any(TryGetRenderableVisualGraph);
+            var consumedVisualShapeIds = visualGraphNodes
+                .SelectMany(VisualGraphMemberShapeIds).ToHashSet(StringComparer.Ordinal);
             foreach (var node in isPptx
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
@@ -212,8 +215,10 @@ public sealed partial class ReadableMarkdownSerializer
                 var text = NodeText(node).Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
                 if (isPptx && (IsPresentationFurniture(node) || IsRepeatedPresentationFooter(partitions, node))) continue;
-                if (rendersVisualGraph && (ExtensionBool(node, "visual_graph_member") ||
-                    (isPptx && (ExtensionBool(node, "visual_edge_label") || ExtensionBool(node, "visual_graph_edge"))))) continue;
+                if (suppressVisualGraphMembers && (ExtensionBool(node, "visual_graph_member") ||
+                    ExtensionBool(node, "visual_edge_label") || ExtensionBool(node, "visual_graph_edge") ||
+                    (ExtensionBool(node, "visual_graph_node") &&
+                        ExtensionString(node, "shape_id") is { Length: > 0 } shapeId && consumedVisualShapeIds.Contains(shapeId)))) continue;
                 if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title")) continue;
                 if (node.Kind == NodeKind.Link) continue; // D12: already inlined as [text](url) by the owning paragraph's rich text.
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
@@ -600,8 +605,31 @@ public sealed partial class ReadableMarkdownSerializer
                 WriteOcrDetails(output, NodeText(textNode).Trim());
     }
 
+    private static string VisualDiagnosticBlockId(string fallbackBlockId, VisualDiagnostic diagnostic)
+    {
+        var location = new[]
+        {
+            diagnostic.Format,
+            diagnostic.PartUri,
+            diagnostic.PartitionId,
+            diagnostic.SourceObjectId,
+            diagnostic.SourceObjectType,
+            diagnostic.Fallback,
+            diagnostic.Remedy,
+        }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+        return location.Length == 0
+            ? diagnostic.SourceNodeId ?? fallbackBlockId
+            : string.Join("\u001f", new[] { diagnostic.SourceNodeId ?? fallbackBlockId }.Concat(location));
+    }
+
     private void AddDiagnostic(MarkdownDiagnostic diagnostic)
     {
+        // Adapters and graph validation can report the same issue at the same structured
+        // location; keep one stable user-facing diagnostic per code/location in the projection.
+        if (Diagnostics.Any(existing =>
+                string.Equals(existing.Code, diagnostic.Code, StringComparison.Ordinal) &&
+                string.Equals(existing.BlockId, diagnostic.BlockId, StringComparison.Ordinal)))
+            return;
         Diagnostics = Diagnostics.Concat([diagnostic]).ToArray();
     }
 
@@ -1326,14 +1354,60 @@ public sealed partial class ReadableMarkdownSerializer
             return;
         }
         foreach (var diagnostic in (graph.Diagnostics ?? []).Where(diagnostic => diagnostic is not null))
-            AddDiagnostic(new MarkdownDiagnostic(diagnostic.Code, diagnostic.Message, MarkdownDiagnosticSeverity.Warning, diagnostic.SourceNodeId ?? node.Id));
-        if (!options.IncludeDiagrams || !graph.HasTopology)
         {
+            var message = diagnostic.LocationSummary is { Length: > 0 } location
+                ? diagnostic.Message + " (" + location + ")"
+                : diagnostic.Message;
+            AddDiagnostic(new MarkdownDiagnostic(diagnostic.Code, message, MarkdownDiagnosticSeverity.Warning,
+                VisualDiagnosticBlockId(node.Id, diagnostic)));
+        }
+        var validation = VisualGraphValidator.Validate(graph);
+        foreach (var warning in validation.Warnings)
+            AddDiagnostic(new MarkdownDiagnostic(warning.Code, warning.Message, MarkdownDiagnosticSeverity.Warning, warning.SourceNodeId ?? node.Id));
+        var hasMediumConfidence = validation.Warnings.Any(warning => warning.Code == "VisualInferenceMediumConfidence");
+        if (hasMediumConfidence)
+        {
+            const string contract = "一部の接続は図形配置から推定されています。診断を確認してください。";
+            output.AppendLine("> ").AppendLine(contract).AppendLine();
+            AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial", contract,
+                MarkdownDiagnosticSeverity.Warning, node.Id + "\u001eMediumConfidence"));
+        }
+        // Validation is authoritative: a malformed graph must reach the Invalid branch even
+        // when the serialized Quality field is absent or stale.
+        var quality = validation.Quality;
+        if (quality is VisualGraphQuality.FallbackOnly or VisualGraphQuality.Invalid)
+        {
+            AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionFallback",
+                quality == VisualGraphQuality.Invalid
+                    ? "Visual graph is invalid; semantic Mermaid was omitted and source fallback is shown."
+                    : "Visual graph is fallback-only; semantic Mermaid was omitted and source fallback is shown.",
+                quality == VisualGraphQuality.Invalid ? MarkdownDiagnosticSeverity.Error : MarkdownDiagnosticSeverity.Warning, node.Id));
+            if (quality == VisualGraphQuality.Invalid)
+                AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
+                    "Visual graph validation failed; the source connector or vector fallback was retained.",
+                    MarkdownDiagnosticSeverity.Warning, node.Id));
+            WriteVisualGraphFallbackDetails(output, graph);
+            return;
+        }
+        if (!options.IncludeDiagrams)
+        {
+            WriteVisualEdgeFallback(output, graph);
+            AddDiagnostic(new MarkdownDiagnostic("VisualDiagramRenderingDisabled",
+                "Visual diagram rendering was disabled by the caller; resolved connections were retained as readable fallback.",
+                MarkdownDiagnosticSeverity.Info, node.Id));
+            return;
+        }
+        if (!validation.IsValidForSemanticProjection ||
+            !(graph.Edges ?? []).Any(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null))
+        {
+            foreach (var issue in validation.Errors)
+                AddDiagnostic(new MarkdownDiagnostic(issue.Code, issue.Message, MarkdownDiagnosticSeverity.Warning, issue.SourceNodeId ?? node.Id));
             if ((graph.Edges?.Count > 0 || graph.Paths is { Count: > 0 }) && !(graph.Diagnostics ?? []).Any(diagnostic =>
                     diagnostic is not null && string.Equals(diagnostic.Code, "VisualSemanticProjectionPartial", StringComparison.Ordinal)))
                 AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
                     "Visual metadata did not contain a valid semantic topology; the source connector or vector fallback was retained.",
                     MarkdownDiagnosticSeverity.Warning, node.Id));
+            WriteVisualEdgeFallback(output, graph);
             return;
         }
         output.AppendLine("```mermaid").Append("flowchart ").Append(graph.Direction is "TD" ? "TD" : "LR").AppendLine();
@@ -1350,7 +1424,7 @@ public sealed partial class ReadableMarkdownSerializer
             };
             output.Append("    ").Append(visualNode.Id).Append(rendered).AppendLine();
         }
-        foreach (var edge in graph.Edges.Where(item => item.SourceId is not null && item.TargetId is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
+        foreach (var edge in (graph.Edges ?? []).Where(item => item.SourceId is not null && item.TargetId is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             var arrow = edge.IsUndirected
                 ? string.IsNullOrWhiteSpace(edge.Label) ? " --- " : " ---|" + MermaidText(edge.Label!) + "| "
@@ -1358,9 +1432,81 @@ public sealed partial class ReadableMarkdownSerializer
             output.Append("    ").Append(edge.SourceId).Append(arrow).Append(edge.TargetId).AppendLine();
         }
         output.AppendLine("```").AppendLine();
+        if (quality == VisualGraphQuality.Partial)
+            WritePartialVisualDetails(output, graph);
+        else if (quality == VisualGraphQuality.HighConfidenceInferred)
+        {
+            output.AppendLine("> 視覚構造は配置情報から推定されたものであり、内容の意味を保証するものではありません。").AppendLine();
+        }
     }
 
-    private static bool TryGetRenderableVisualGraph(DocumentNode node) => TryGetVisualGraph(node, out var graph) && graph?.HasTopology == true;
+    private static void WritePartialVisualDetails(StringBuilder output, VisualGraph graph)
+    {
+        var unresolved = (graph.Diagnostics ?? []).Where(item => item is not null).ToArray();
+        output.AppendLine("#### 未解決の視覚接続").AppendLine();
+        output.AppendLine("以下の接続は抽出結果に基づく未解決・推定情報であり、確定的な意味として解釈しないでください。").AppendLine();
+        if (unresolved.Length == 0)
+        {
+            output.AppendLine("- 未解決のコネクター情報はありません。").AppendLine();
+            return;
+        }
+        foreach (var diagnostic in unresolved)
+        {
+            var location = diagnostic.LocationSummary is { Length: > 0 } value ? $"（{value}）" : string.Empty;
+            output.Append("- ").Append(InlineText(diagnostic.Message)).Append(location).AppendLine();
+        }
+        output.AppendLine();
+    }
+
+    private static void WriteVisualGraphFallbackDetails(StringBuilder output, VisualGraph graph)
+    {
+        output.AppendLine("### 図の抽出結果（フォールバック）").AppendLine();
+        foreach (var item in (graph.Nodes ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
+            output.Append("- ノード: ").Append(InlineText(string.IsNullOrWhiteSpace(item.Label) ? item.Id : item.Label)).AppendLine();
+        foreach (var item in (graph.SourceItems ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
+            output.Append("- ソース項目: ").Append(item.Id).Append("（").Append(item.Disposition).Append("）").AppendLine();
+        foreach (var path in (graph.Paths ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
+            output.Append("- パス: ").Append(path.Id).AppendLine();
+        foreach (var diagnostic in (graph.Diagnostics ?? []).Where(item => item is not null))
+            output.Append("- 診断: ").Append(diagnostic.Code).Append(" — ").AppendLine(InlineText(diagnostic.Message));
+        output.AppendLine();
+    }
+
+    private static void WriteVisualEdgeFallback(StringBuilder output, VisualGraph graph)
+    {
+        var labels = (graph.Nodes ?? []).Where(node => node is not null)
+            .ToDictionary(node => node.Id, node => string.IsNullOrWhiteSpace(node.Label) ? "[unlabeled shape: " + node.Id + "]" : node.Label,
+                StringComparer.Ordinal);
+        var edges = (graph.Edges ?? []).Where(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null)
+            .OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray();
+        if (edges.Length == 0) return;
+        output.AppendLine("### 図の接続関係").AppendLine();
+        foreach (var edge in edges)
+        {
+            var source = labels.TryGetValue(edge.SourceId!, out var sourceLabel) ? sourceLabel : edge.SourceId!;
+            var target = labels.TryGetValue(edge.TargetId!, out var targetLabel) ? targetLabel : edge.TargetId!;
+            output.Append("- ").Append(InlineText(source)).Append(edge.IsUndirected ? " — " : " → ").Append(InlineText(target));
+            if (!string.IsNullOrWhiteSpace(edge.Label)) output.Append("（").Append(InlineText(edge.Label!)).Append("）");
+            output.AppendLine();
+        }
+        output.AppendLine();
+    }
+
+    private static IEnumerable<string> VisualGraphMemberShapeIds(DocumentNode diagram)
+    {
+        if (diagram.Extensions is null || !diagram.Extensions.TryGetValue("visual_graph_member_shape_ids", out var raw) ||
+            raw.ValueKind != JsonValueKind.Array) return [];
+        return raw.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString()).Where(value => !string.IsNullOrWhiteSpace(value)).Cast<string>();
+    }
+
+    private static bool HasVisualGraph(DocumentNode node) =>
+        TryGetVisualGraph(node, out var graph) && graph is not null;
+
+    private static bool TryGetRenderableVisualGraph(DocumentNode node) =>
+        TryGetVisualGraph(node, out var graph) && graph is not null &&
+        VisualGraphValidator.Validate(graph).IsValidForSemanticProjection &&
+        (graph.Edges ?? []).Any(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null);
 
     /// <summary>Returns true when visual_graph metadata exists; a null graph means it was malformed.</summary>
     private static bool TryGetVisualGraph(DocumentNode node, out VisualGraph? graph)

@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.1.6 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.2.0 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -14,7 +14,8 @@ GitHub ReleasesからOS／CPUに合うパッケージを取得し、公開され
 2. DOCX、XLSX、PPTX、PDFのいずれかを選択またはドロップします。
 3. **閲覧用Markdown**を選びます。
 4. 特別な目的がなければ**表示中の内容のみ（推奨）**のままにします。
-5. 出力先を選んで変換し、Markdown、診断、assetを確認します。
+5. 図の接続推定は、特別な目的がなければ**Safe（推奨）**のままにします。
+6. 出力先を選んで変換し、Markdown、診断、assetを確認します。
 
 デスクトップGUIはPDFを既定で受け付けます。ネイティブPDFテキストを抽出し、文字のないページのOCRや図的ページのpreviewにはrasterizer／OCR providerの構成が必要な場合があります。利用できない場合もpage placeholderと診断を確認してください。
 
@@ -23,14 +24,16 @@ CLIのPDF変換（export）・復元・生成（render）は、他の実験的CL
 CLIの既定も閲覧用Markdownです。
 
 ```sh
-docredock export input.docx --content-policy visible --output input.md
+docredock export input.docx --content-policy visible --visual-inference safe --output input.md
 ```
+
+`native-only`は元形式に明示された接続だけを使います。`safe`は一意なhigh-confidence geometry割当を昇格します。`balanced`はmedium-confidence割当も対象にできますが、同率・矛盾・graph全体で曖昧な関係は引き続き未解決にします。
 
 実験的なサイドカー往復処理を使う場合だけ`--profile roundtrip`を明示します。
 
 ## 3. 生成されるファイル
 
-| 生成物 | 内容 | v0.1.6での利用 |
+| 生成物 | 内容 | 現行での利用 |
 | --- | --- | --- |
 | `.md` | 本文、見出し、リスト、表、図のsemantic projection／注記／placeholder | 使用する |
 | `.assets/` | Markdownから参照する画像、preview等のvisual fallback | 生成された場合に使用する |
@@ -38,7 +41,7 @@ docredock export input.docx --content-policy visible --output input.md
 | `.drmd` | 元文書／復元用サイドカー | 実験用。元文書と同じ機密区分で扱う |
 | `.drmdpkg` | Markdownと復元情報のパッケージ | 実験用。元文書と同じ機密区分で扱う |
 
-認識した図は、(1) Mermaid等のsemantic projection、(2) 画像／page preview等のvisual fallback、(3) 明示的なdiagnosticの順で扱います。図形テキストがあることだけでは、接続関係や分岐まで完全に保持したことにはなりません。
+Mermaidは、接続関係が明確で矛盾しない場合だけ出力します。認識した図は、(1) Mermaid、(2) 画像／ページプレビュー等の代替表示、(3) 明示的な診断の順で、利用可能な形を残します。図形テキストがあることだけでは、接続関係や分岐まで完全に保持したことにはなりません。
 
 ## 4. 内容ポリシーを選ぶ
 

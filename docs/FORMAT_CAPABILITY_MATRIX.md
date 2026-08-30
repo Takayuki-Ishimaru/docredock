@@ -1,61 +1,55 @@
-# Format capability matrix（現行実装）
+# 形式別の技術的な対応範囲
 
-> **これはコードとして実装されている能力の技術リファレンスです。v0.1.6の公開サポート状況を示す表ではありません。**
-> v0.1.6 Public Betaで利用者向けにサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから閲覧用Markdownへの一方向変換です。CLIのPDF変換、往復編集、元形式への反映、新規文書の生成は`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要な実験機能です。[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md)
+> **この文書は、各形式で利用できる操作と制約を説明する技術リファレンスです。**
+> v0.2.0 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
 
-記号: ○ = コードとして実装が対象にしている、△ = 条件付き・限定的、× = 安全な往復編集の対象外。これは「新規文書の生成（render）」だけの機能一覧ではなく、主にエクスポートしたDRMD Markdownから元文書を改版する実験エンジンの実装能力を示します。
+記号: ○ = 対応、△ = 条件付き・限定的、× = 非対応。
 
 | 操作 | DOCX | XLSX | PPTX | PDF |
 | --- | ---: | ---: | ---: | ---: |
-| 元バイナリを変更せず保持（F0 baseline） | ○ | ○ | ○ | ○ |
-| 既存本文/テキストの限定編集（F1） | ○ 段落・見出し・list・対応Rich Text | ○ 既存cell値/数式 | ○ 既存shapeのtitle/subtitle/body text | △ 抽出中心 |
-| 元のfont・文字style・layoutを保持した本文差替え | ○ 元run/style、段落・page/table layoutを保持 | ○ cell style ID、row/column、page setupを保持 | ○ run font、theme、shape geometryを保持 | — |
-| 同じ形状の表/cell編集 | ○ table cell | ○ 座標付きsheet table内の既存cell | × slide table編集は対象外 | × |
-| 明示的delete | ○ 対象nodeがeditableの場合 | × Markdown restoreでは非対応 | × Markdown restoreでは非対応 | × package restore非対応 |
-| Markdownからの構造追加 | △ paragraph/heading/list-item | × address/source anchorを指定不可 | × shape追加なし | × |
-| 新規文書のrender（F3等） | ○ | ○ | ○ | ○ ASCIIはBase14、非ASCIIは解決したTrueTypeを埋め込む |
-| 新規renderでのMermaid図埋め込み | ○ PNG/DrawingML | ○ PNG/one-cell anchor | ○ PNG/picture | ○ PNG/Image XObject |
-| Office template付きrenderでのMermaid図埋め込み（F2） | ○ 関係/画像を衝突回避merge | ○ worksheet→drawing→画像を衝突回避merge | ○ 関係/画像を衝突回避merge | × PDF template非対応 |
-| 埋め込み画像のMarkdown投影 | ○ alt付き | ○ DrawingML anchor行・同一行の列順・表示寸法付き | ○ alt付き | △ rasterizer利用時 |
-| 編集済みPDFのrestore render fallback | × | × | × | △ `--allow-render-fallback`必須、F3報告 |
+| 元ファイルを変更せず保持 | ○ | ○ | ○ | ○ |
+| 既存本文の限定編集 | ○ 段落・見出し・リスト・対応Rich Text | ○ 既存セル値・数式 | ○ 既存図形のテキスト | △ 抽出中心 |
+| 元の書式・レイアウトを保った本文差し替え | ○ | ○ | ○ | — |
+| 同じ形状の表／セル編集 | ○ 表セル | ○ 既存セル | × | × |
+| 明示的な削除 | △ 編集可能な本文 | × | × | × |
+| Markdownからの構造追加 | △ 段落・見出し・リスト | × | × | × |
+| 新規文書の生成 | ○ | ○ | ○ | ○ 条件に合うフォントが必要 |
+| Mermaid図の画像埋め込み | ○ | ○ | ○ | ○ |
+| テンプレートを使う新規生成 | ○ | ○ | ○ | × |
+| 埋め込み画像のMarkdown表示 | ○ | ○ 位置・表示寸法を反映 | ○ | △ rasterizer利用時 |
+| 編集済みPDFの代替生成 | × | × | × | △ `--allow-render-fallback`が必要 |
 
-## Readable Markdown（read-only projection）
+## Readable Markdown
 
-`readable`の既定ポリシーは`visible`で、認識できるOfficeの非表示情報を除外します。`complete`は警告付きで非表示／メタデータを含み、`sanitized`はメタデータ、派生情報、文書付帯要素をさらに除外します。
+`readable`の既定ポリシーは`visible`です。`complete`は警告付きで非表示情報とメタデータを含み、`sanitized`はプライバシーに関わる情報をさらに除外します。
 
-`readable` は復元用の座標・sidecarを持たない一方向出力です。見出し、表の境界、数値表示、XLSX DrawingML の図はセル位置・結合・スタイルから推定されるため、横並び領域や装飾のない表では曖昧になり得ます。数式は評価せず、保存済みの計算値がある場合だけ表示します。数式そのものは明示オプションで表示できます。XLSXの埋め込み画像はDrawingML anchorの行位置へ投影し、位置のない画像は埋め込み画像節へまとめます。PNG/JPEG/GIF/WebP/BMP/SVGは通常の画像リンク、TIFF/EMF/WMFは資産を保持したうえでMarkdown previewでは表示できない旨のプレースホルダーと診断を出します。PDF は ToUnicode の`bfchar` / `bfrange` を持つ Type0/CID フォントを解決しますが、CMap のないフォント、object stream の構成、スキャン PDF では文字欠落・失敗があり得ます。出力時の diagnostics と生成ファイルを確認してください。
+Readable Markdown は復元情報を持たない一方向出力です。XLSX の表や図はセル位置、結合、スタイルから判断するため、横並び領域や装飾のない表では曖昧になることがあります。数式は評価せず、保存済みの計算値がある場合だけ表示します。埋め込み画像は可能な範囲で元の位置へ配置し、位置が分からない画像は専用の節へまとめます。
 
-## Visual Semantics（Readable projection）
+PNG、JPEG、GIF、WebP、BMP、SVG は通常の画像リンクとして表示します。TIFF、EMF、WMF は資産を保持し、Markdownプレビューで直接表示できない旨を示します。PDF は埋め込まれた文字情報を利用しますが、文字マップのないフォント、スキャンPDF、複雑な内部構造では文字欠落や失敗があり得ます。診断と生成ファイルを確認してください。
 
-この節は実装能力の正本です。public supportの保証範囲は日英のsupported-featuresを正本とし、roundtrip capabilityとは混同しません。
+## 図・フローの接続
 
-| 形式 | native shape text | native connection | inferred connection | edge label | Mermaid semantic projection | fallback | unsupported時 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| DOCX | ○ DrawingML／VML textbox | △ 対応fragment内のnative／一意geometry endpoint | △ 一意な端点のみ | △ 一意な近接labelのみ | △ 有効topologyのみ | △ 埋め込みimage保持とsource text fallback | unresolved／partialをstable diagnostic。完全drawing復元は対象外 |
-| XLSX | ○ 一般図形＋標準／未知`flowChart*` label | ○ connected connector | △ cell-layout／geometry | △ projectionが解決可能な場合 | ○ 有効なflow topology | △ image asset | 未知presetはgeneric nodeとしてlabel保持。未解決／非対応shapeのstable diagnosticは断定しない |
-| PPTX | ○ process／decision／terminator／data／generic | ○ `stCxn`／`endCxn` | △ 端点とbounding boxから一意の場合 | △ segment近傍で一意の場合 | ○ 有効なflow topology | △ image asset | unresolved／partial diagnostic。SmartArt textは保持 |
-| PDF | ○ native text | △ 単純painted vector pathの一意endpoint | △ 一意なvector endpointのみ | △ 一意な近接labelのみ | △ 有効な単純topologyのみ | △ rasterizer preview、path/page placeholder | vector/path partialと未解決endpointをdiagnostic。任意vector graph完全解析なし |
+| 形式 | 明示された接続 | 配置からの推定 | 矢印・ラベル | 複数図 | 不明確な場合 | 対応レベル |
+| --- | --- | --- | --- | --- | --- | --- |
+| DOCX | △ 対応するDrawingML／VML内 | △ 一意な端点のみ | △ 一意な近接ラベル | ○ | 元テキスト、画像、診断を保持 | Public Beta・条件付き |
+| XLSX | ○ 接続済みコネクタ | △ セル配置または一意な端点 | △ 一意な割り当てのみ | △ シート単位 | ラベルや画像を保持し、関係は確定しない | Public Beta |
+| PPTX | ○ 接続済みコネクタ | △ 一意な端点のみ | △ 分離した矢印先端は厳格な条件付き | ○ | 本文、画像、診断を保持 | Public Beta・条件付き |
+| PDF | — | △ 単純なベクターパスのみ | △ 一意な近接ラベルのみ | △ ページ単位 | ページプレビューまたはプレースホルダー | Public Beta（GUI）／Experimental（CLI） |
 
-共通`VisualGraph` modelはnode、edge、vector path、shape kind、geometry、source anchor、group/lane、direction、resolution kind、confidence、diagnosticを表現できます。edgeはdirected/undirectedを明示でき、path/edge accountingはsemantic projectionとsource fallbackの取りこぼしを検出します。ただし、各adapterが全metadataを取得することを意味しません。resolution kindは少なくとも`native-connection`、`geometry-inferred`、`layout-inferred`、`unresolved`を区別します。JSON metadataは端点とnode IDが整合するtopologyだけをMermaidへ投影し、破損・不整合時は元connector/vector fallbackを抑止せずstable diagnosticを残します。
+`safe`が既定です。`native-only`は元形式に明示された接続だけを使い、`balanced`は追加の推定候補を扱います。曖昧、矛盾、重複、または確度不足の関係は Mermaid として確定しません。Warning が出た場合、CLI は終了コード1を返します。
 
-PPTXの認識済みconnectorはsemantic projectionまたはexplicit diagnosticへaccountingされます。曖昧なconnectorやedge labelを断定せず、exportがWarningを出す場合はCLI終了コード1の対象です。現行PPTXの代表的なstable codeは`VisualSemanticProjectionPartial`、`VisualConnectorUnresolved`、`VisualEdgeLabelUnresolved`です。その他のcodeは将来のadapter実装で追加され得ます。
+認識した図は、明確な関係の Mermaid、画像・ページ等の代替表示、診断の順で可能な形を残します。診断コードは対応範囲の拡張に伴って追加されることがあります。
 
-## Roundtripとrenderの境界
+### DOCXの座標制約
 
-`roundtrip`のXLSX画像はsheet tableとアンカー行順に並び、同じ行の画像は列順に横並びになります。DrawingML寸法は96 DPIでHTML `img`の`width`/`height`へ換算し、狭いpreviewでは最大49%幅へ縮小します。これは画像のcrop・rotation・z-orderやExcelセル装飾まで再現する完全な紙面rendererではありません。
+Word図形の座標基準がページ／余白と文字位置で混在する場合や、絶対位置を決められない場合は、別の図を同じ接続関係として扱いません。接続は未解決のまま、元テキストまたは画像と診断を残します。これは誤った関係を避けるための制約です。
 
-unsupported/protected Office structureは、内容を黙ってflattenせず拒否されます。代表例は、macro-enabled package、署名・暗号化・protection、保護されたfield boundary、XLSXの構造編集、PPTXのnotes/table/image編集、未対応のpackage contentです。実際の可否はmanifestのcapabilities、restore結果のdiagnostics、`diff`で確認してください。
+## 往復編集と新規生成
 
-Markdownは人間が読める自然な投影ですが、Markdownの全機能が元formatの機能へ写像されるわけではありません。font名、文字サイズ、色、余白、座標などはMarkdown本文へ露出させず、元Office packageを復元時の書式正本として扱います。DOCXの`rich-text=inline-v1` blockでは、太字、斜体、下線、取消線、inline code、改行、tabを構造化して往復し、それ以外の元run propertyは同じ文字領域へ引き継ぎます。任意の新規Word文字装飾、hyperlink、field、revision、drawingを含むRich Text編集は保証せず、安全に適用できないものは拒否します。
+往復編集では、元文書の書式とレイアウトを正本として扱います。Markdown本文へフォント名、文字サイズ、色、余白、座標を書き足しても、それらを変更する契約にはなりません。マクロ、署名、暗号化、保護、フィールド境界、未対応の構造は安全のため編集を拒否することがあります。
 
-`render`へ渡す通常Markdownの`mermaid` code fenceは、明示的なローカル`mmdc`実行でPNGへ変換し、DOCX/PPTX/XLSX/PDFへ画像として埋め込みます。XLSXでは既存の表・テキスト範囲の下に1行空け、図ごとに高さを確保した行へone-cell DrawingML anchorで縦に配置します。DOCX/PPTX/XLSXのOffice templateと併用する場合は、テンプレート既存partを保持し、衝突しないrelationship IDとpart名を割り当て、PNG・DrawingML・relationship・`[Content_Types].xml`を形式別にmergeします。これはF2の新規文書生成であり、既存Office drawingをMermaidへ逆変換したり、`restore`で図を追加・置換したりする契約ではありません。PDF templateは引き続き非対応です。
+DOCX の `rich-text=inline-v1` では、太字、斜体、下線、取消線、インラインコード、改行、タブを扱います。XLSX の表は既存セルだけを編集でき、新しいセルの追加に必要な元座標を指定できないため、セル追加はサポートしません。PPTX は既存図形のテキストだけを編集します。
 
-XLSX adapter自体にはcell additionのpatch能力がありますが、現行のMarkdown sheet tableからはcell address/source anchorを新規生成しないため、AI編集契約では新規cellを許可しません。XLSXのGFM表は行番号とExcel列名を本文へ表示せず、`source-rows`と`source-columns`の非表示marker属性に保持します。表の行列数・順序・range・座標メタデータ・空き座標を変更せず、既存cellだけを編集します。数式はcode spanになります。PPTXはslide partitionの中で既存shapeを`role=title|subtitle|body|other`として表現し、本文の複数段落は改行で保持します。PDFはページ単位の抽出が保守的で、スキャンページOCRは注釈由来のderived evidenceです。新規PDF renderはフォントを同梱せず、ASCIIはBase14 Helvetica、非ASCIIは明示パス・環境変数・システムの順に全グリフを持つ埋め込み可能なTrueTypeを解決します。
+通常のMarkdownにある `mermaid` コードブロックは、新規文書生成時にローカルの `mmdc` で画像化できます。これは既存Office図形をMermaidへ逆変換したり、往復編集で図を追加・置換したりする機能ではありません。
 
-## F-levelの意味
-
-- F0: 元bytesを変更せず保持。OCR補正などderived-only変更もF0。
-- F1: Office packageをpatchし、未変更partsを保持。
-- F2: 検証済みtemplateから新規文書をrender。
-- F3: 標準layoutの新規文書、または明示opt-inしたPDF restore fallback。
-- FX: 安全に適用できず、出力を成功扱いしない。
+PDF の新規生成はフォントを同梱しません。ASCII以外の文字には、全グリフを含み埋め込み可能なTrueTypeフォントが必要です。

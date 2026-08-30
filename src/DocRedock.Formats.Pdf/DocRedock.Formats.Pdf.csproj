@@ -3,6 +3,7 @@
   <ItemGroup>
     <ProjectReference Include="..\DocRedock.Core\DocRedock.Core.csproj" />
     <ProjectReference Include="..\DocRedock.Providers.Abstractions\DocRedock.Providers.Abstractions.csproj" />
+    <ProjectReference Include="..\DocRedock.VisualInference\DocRedock.VisualInference.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

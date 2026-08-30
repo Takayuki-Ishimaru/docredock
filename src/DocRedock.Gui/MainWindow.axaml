@@ -243,6 +243,16 @@
                   <TextBox x:Name="OcrLanguagesTextBox" Grid.Column="1" Text="jpn+eng" IsEnabled="False" PlaceholderText="例: jpn+eng" MaxLength="80" />
                 </Grid>
                 <StackPanel x:Name="ReadableOptionsPanel" Spacing="8">
+                  <TextBlock Text="接続推定" Classes="muted caption" />
+                  <ComboBox x:Name="VisualInferenceModeComboBox" SelectedIndex="1" SelectionChanged="OnSettingsChanged"
+                            AutomationProperties.Name="視覚接続の推定モード">
+                    <ComboBoxItem Content="接続推定なし（native only）" Tag="native-only" />
+                    <ComboBoxItem Content="安全優先（safe・推奨）" Tag="safe" />
+                    <ComboBoxItem Content="復元優先（balanced）" Tag="balanced" />
+                  </ComboBox>
+                  <TextBlock Text="曖昧な接続は未解決としてsource text／fallback／diagnosticに残ります。" Classes="muted caption" TextWrapping="Wrap" />
+                  <TextBlock x:Name="BalancedInferenceWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
+                             Text="注意: 復元優先（balanced）の出力には、図形配置から推定した接続が含まれる可能性があります。診断を確認してください。" />
                   <TextBlock Text="Markdownに含める内容" Classes="muted caption" />
                   <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
                             AutomationProperties.Name="内容の公開範囲">

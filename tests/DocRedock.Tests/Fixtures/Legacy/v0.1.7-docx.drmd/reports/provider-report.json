@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "operation": "providers",
+  "success": true,
+  "fidelity_level": "F0",
+  "package_preservation_level": "byte-identical",
+  "summary": "Provider execution details are recorded by the orchestrator.",
+  "warnings": [],
+  "diagnostics": []
+}

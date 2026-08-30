@@ -1,13 +1,60 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocRedock.Api;
+using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Xlsx;
 using DocRedock.Markdown;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.Xlsx;
 
 public sealed class XlsxAdapterTests
 {
+    [Fact]
+    public void Shared_safe_engine_rejects_equal_candidates_without_false_edge()
+    {
+        var anchor = new SourceAnchor("xlsx", "worksheet", [new AnchorLocator("test", "equal")]);
+        var nodes = new VisualPrimitive[]
+        {
+            new VisualNodePrimitive("left", "sheet", anchor, new VisualRect(0, 0, 2, 2)),
+            new VisualNodePrimitive("right", "sheet", anchor, new VisualRect(0, 0, 2, 2)),
+            new VisualConnectorPrimitive("arrow", "sheet", anchor,
+                new VisualConnectorPath([new VisualPoint(1, 1), new VisualPoint(10, 1)])),
+        };
+        var result = new SoftConnectionEngine().Infer(new VisualPrimitiveDocument(
+            "equal", DocumentFormatKind.Xlsx,
+            [new VisualCanvas("sheet", "worksheet", null, 20, 10, "cells")], nodes),
+            options: new SoftConnectionOptions(VisualInferenceMode.Safe));
+        var unresolved = Assert.Single(result.Unresolved);
+        Assert.Null(unresolved.SourceId);
+        Assert.Null(unresolved.TargetId);
+        Assert.Empty(result.Resolved);
+    }
+
+    [Fact]
+    public void Shared_safe_engine_rejects_long_edge_with_intermediate_node()
+    {
+        var anchor = new SourceAnchor("xlsx", "worksheet", [new AnchorLocator("test", "intermediate")]);
+        var nodes = new VisualPrimitive[]
+        {
+            new VisualNodePrimitive("start", "sheet", anchor, new VisualRect(0, 0, 2, 2)),
+            new VisualNodePrimitive("middle", "sheet", anchor, new VisualRect(5, 0, 2, 2)),
+            new VisualNodePrimitive("end", "sheet", anchor, new VisualRect(10, 0, 2, 2)),
+            new VisualConnectorPrimitive("arrow", "sheet", anchor,
+                new VisualConnectorPath([new VisualPoint(1, 1), new VisualPoint(11, 1)])),
+        };
+        var result = new SoftConnectionEngine().Infer(new VisualPrimitiveDocument(
+            "intermediate", DocumentFormatKind.Xlsx,
+            [new VisualCanvas("sheet", "worksheet", null, 20, 10, "cells")], nodes),
+            options: new SoftConnectionOptions(VisualInferenceMode.Safe));
+        var unresolved = Assert.Single(result.Unresolved);
+        Assert.Null(unresolved.SourceId);
+        Assert.Null(unresolved.TargetId);
+        Assert.Empty(result.Resolved);
+    }
+
     [Fact]
     public void ExtractsSharedStringFormulaAndClassifiesWithoutExecuting()
     {
@@ -299,6 +346,207 @@ public sealed class XlsxAdapterTests
         Assert.Equal(4, shape.Row);
         Assert.Equal(1_000_000, shape.WidthEmu);
         Assert.Equal(500_000, shape.HeightEmu);
+    }
+
+    [Fact]
+    public void Worksheet_metrics_are_exposed_and_convert_excel_dimensions_to_emu()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage()));
+        var metrics = Assert.Single(result.Worksheets).Metrics;
+
+        Assert.NotNull(metrics);
+        Assert.Equal(18.5d, metrics!.ColumnWidth(1));
+        Assert.Equal(24d, metrics.RowHeight(1));
+        Assert.Equal(XlsxWorksheetMetrics.RowHeightToEmu(24), metrics.RowStartEmu(2));
+        Assert.Equal(XlsxWorksheetMetrics.ColumnWidthToEmu(18.5), metrics.ColumnStartEmu(2));
+        Assert.True(XlsxWorksheetMetrics.ColumnWidthToPixels(18.5) > XlsxWorksheetMetrics.ColumnWidthToPixels(8.43));
+    }
+
+    [Fact]
+    public void Absolute_and_two_cell_anchors_expose_deterministic_absolute_bounds()
+    {
+        var worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:absoluteAnchor><xdr:pos x="1234" y="5678"/><xdr:ext cx="9000" cy="8000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="10" name="absolute"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:colOff>10</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>20</xdr:rowOff></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:colOff>30</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>40</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="11" name="two-cell"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+
+        var shapes = Assert.Single(new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing))).Worksheets).DrawingShapes!;
+        var absolute = Assert.Single(shapes, shape => shape.Id == "10");
+        var twoCell = Assert.Single(shapes, shape => shape.Id == "11");
+        Assert.Equal("absoluteAnchor", absolute.AnchorKind);
+        Assert.Equal(new XlsxDrawingBounds(1234, 5678, 9000, 8000), absolute.AbsoluteBounds);
+        Assert.Equal("twoCellAnchor", twoCell.AnchorKind);
+        Assert.Equal(30, twoCell.ToColumnOffset);
+        Assert.Equal(40, twoCell.ToRowOffset);
+        Assert.True(twoCell.AbsoluteBounds!.WidthEmu > 0);
+        Assert.True(twoCell.AbsoluteBounds.HeightEmu > 0);
+    }
+
+    [Fact]
+    public void Four_flowchart_nodes_and_three_directional_shapes_do_not_skip_intermediate_nodes()
+    {
+        var worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="start"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="process"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_PROCESS</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="decision"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_DECISION</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>12</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="end"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>XLS_PRESET_END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="arrow-1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="arrow-2"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>10</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="7" name="arrow-3"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Flow", worksheet, drawing)));
+        var source = Assert.IsType<DocRedock.Core.Documents.TextNodeContent>(
+            Assert.Single(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Diagram).Content).Text;
+
+        Assert.Equal(4, Regex.Matches(source, "^\\s+N_S_[0-9]+(?:\\(\\[|\\[|\\{)", RegexOptions.Multiline).Count);
+        Assert.Contains("N_S_1 --> N_S_2", source, StringComparison.Ordinal);
+        Assert.Contains("N_S_2 --> N_S_3", source, StringComparison.Ordinal);
+        Assert.Contains("N_S_3 --> N_S_4", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("N_S_1 --> N_S_4", source, StringComparison.Ordinal);
+
+        var visualGraph = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram)
+            .Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var validation = VisualGraphValidator.Validate(visualGraph);
+        Assert.True(validation.IsValidForSemanticProjection, string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
+        Assert.Equal(7, validation.Accounting.RecognizedSourceItems);
+        Assert.Equal(4, validation.Accounting.ProjectedNodes);
+        Assert.Equal(3, validation.Accounting.ProjectedEdges);
+        Assert.Equal(0, validation.Accounting.Unaccounted);
+        Assert.Equal(0, validation.Accounting.InvalidReferences);
+    }
+
+    [Fact]
+    public void R0_FIX06_independent_textless_right_arrow_chain_preserves_nodes_and_only_adjacent_edges()
+    {
+        const string worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/spreadsheetml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S1" name="step-one"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>STEP_ONE</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S2" name="step-two"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>STEP_TWO</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S3" name="step-three"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>STEP_THREE</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>9</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S4" name="step-four"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>STEP_FOUR</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A1" name="arrow-one"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A2" name="arrow-two"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A3" name="arrow-three"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+        var source = Assert.IsType<TextNodeContent>(Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram).Content).Text;
+        var markdown = new DocRedockMarkdownSerializer().Serialize(extraction.Graph).Markdown;
+        var visual = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram).Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        Assert.Equal(4, visual.Nodes.Count);
+        var labelsById = visual.Nodes.ToDictionary(node => node.Id, node => node.Label, StringComparer.Ordinal);
+        var edgeLabels = visual.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null)
+            .Select(edge => $"{labelsById[edge.SourceId!]}->{labelsById[edge.TargetId!]}").ToHashSet(StringComparer.Ordinal);
+        Assert.Equal(new HashSet<string>(["STEP_ONE->STEP_TWO", "STEP_TWO->STEP_THREE", "STEP_THREE->STEP_FOUR"], StringComparer.Ordinal), edgeLabels);
+        Assert.Equal(3, visual.Edges.Count(edge => edge.SourceId is not null && edge.TargetId is not null));
+        foreach (var label in new[] { "STEP_ONE", "STEP_TWO", "STEP_THREE", "STEP_FOUR" })
+            Assert.Contains(label, source, StringComparison.Ordinal);
+        Assert.Equal(3, Regex.Matches(source, "-->" ).Count);
+        // Regression guard for the actual far/skip edge: STEP_ONE -> STEP_FOUR must never appear,
+        // only the three adjacent hops above. The node IDs are read back from the visual graph
+        // (ShapeNodeId turns raw shape id "S1".."S4" into "N_S1".."N_S4" here -- no leading digit,
+        // so no "S_" infix is inserted) rather than hard-coded, so this stays correct even if the
+        // ID-generation rule changes.
+        var farEdgeSourceId = visual.Nodes.Single(node => node.Label == "STEP_ONE").Id;
+        var farEdgeTargetId = visual.Nodes.Single(node => node.Label == "STEP_FOUR").Id;
+        Assert.DoesNotContain($"{farEdgeSourceId} --> {farEdgeTargetId}", source, StringComparison.Ordinal);
+        Assert.Contains("STEP_ONE", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void R0_FIX06_ambiguous_textless_right_arrow_keeps_nodes_and_reports_unresolved_without_far_edge()
+    {
+        const string worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        const string drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/spreadsheetml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S1" name="left-a"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>AMBIG_A</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S2" name="right-b"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>AMBIG_B</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A1" name="ambiguous-arrow"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+        var source = Assert.IsType<TextNodeContent>(Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram).Content).Text;
+        var markdown = new DocRedockMarkdownSerializer().Serialize(extraction.Graph).Markdown;
+        var visual = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram).Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        Assert.Equal(2, visual.Nodes.Count);
+        Assert.Equal(new[] { "AMBIG_A", "AMBIG_B" }, visual.Nodes.Select(node => node.Label).OrderBy(label => label, StringComparer.Ordinal));
+        Assert.Equal(0, visual.Edges.Count(edge => edge.SourceId is not null && edge.TargetId is not null));
+        Assert.Contains(visual.Diagnostics ?? [], diagnostic => diagnostic.Code.Contains("Unresolved", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("AMBIG_A", source, StringComparison.Ordinal);
+        Assert.Contains("AMBIG_B", source, StringComparison.Ordinal);
+        Assert.Contains("AMBIG_A", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("AMBIG_A --> AMBIG_B", source, StringComparison.Ordinal);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Visual_inference_timeout_returns_directional_shape_fallback_without_partial_topology()
+    {
+        const string worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        const string drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S1" name="left"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>LEFT</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S2" name="right"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>RIGHT</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A1" name="arrow"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter { VisualInferenceTimeout = TimeSpan.Zero }
+            .Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+        var visual = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram)
+            .Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+
+        Assert.DoesNotContain(visual.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
+        Assert.Contains(visual.SourceItems!, item => item.Disposition == VisualDisposition.VisualFallback);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void R4_two_independent_drawing_clusters_emit_separate_visual_diagrams_without_cross_edges()
+    {
+        const string worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        const string drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="a1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CLUSTER_A_START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="a2"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CLUSTER_A_END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="a-arrow"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>20</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="b1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CLUSTER_B_START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>23</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="b2"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CLUSTER_B_END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>22</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="500000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="b-arrow"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+        var diagrams = extraction.Graph.Nodes.Where(node => node.Kind == NodeKind.Diagram).ToArray();
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+        Assert.Equal(2, diagrams.Length);
+        Assert.Contains(diagrams, node => node.Content is TextNodeContent text && text.Text.Contains("CLUSTER_A_START", StringComparison.Ordinal) && !text.Text.Contains("CLUSTER_B_START", StringComparison.Ordinal));
+        Assert.Contains(diagrams, node => node.Content is TextNodeContent text && text.Text.Contains("CLUSTER_B_START", StringComparison.Ordinal) && !text.Text.Contains("CLUSTER_A_START", StringComparison.Ordinal));
+        Assert.Contains("CLUSTER_A_START", markdown, StringComparison.Ordinal);
+        Assert.Contains("CLUSTER_A_END", markdown, StringComparison.Ordinal);
+        Assert.Contains("CLUSTER_B_START", markdown, StringComparison.Ordinal);
+        Assert.Contains("CLUSTER_B_END", markdown, StringComparison.Ordinal);
+        foreach (var diagram in diagrams)
+        {
+            var graph = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+            Assert.Equal(1, graph.Edges.Count(edge => edge.SourceId is not null && edge.TargetId is not null));
+            var validation = VisualGraphValidator.Validate(graph);
+            Assert.True(validation.IsValidForSemanticProjection,
+                string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
+            Assert.True(validation.Accounting.IsConsistent);
+            Assert.DoesNotContain(graph.Edges, edge => edge.SourceId is not null && edge.TargetId is not null &&
+                graph.Nodes.Single(node => node.Id == edge.SourceId).Label.Contains("CLUSTER_A", StringComparison.Ordinal) !=
+                graph.Nodes.Single(node => node.Id == edge.TargetId).Label.Contains("CLUSTER_A", StringComparison.Ordinal));
+        }
     }
 
     [Fact]

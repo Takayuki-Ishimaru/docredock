@@ -80,9 +80,9 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
         return format switch
         {
             DocumentFormatKind.Docx => await ExtractDocxAsync(input.Path, cancellationToken).ConfigureAwait(false),
-            DocumentFormatKind.Xlsx => ExtractXlsx(input.Path),
-            DocumentFormatKind.Pptx => ExtractPptx(input.Path),
-            DocumentFormatKind.Pdf => ExtractPdf(input.Path),
+            DocumentFormatKind.Xlsx => ExtractXlsx(input.Path, cancellationToken),
+            DocumentFormatKind.Pptx => ExtractPptx(input.Path, cancellationToken),
+            DocumentFormatKind.Pdf => ExtractPdf(input.Path, cancellationToken),
             _ => throw new NotSupportedException(),
         };
     }
@@ -144,27 +144,27 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
         return new(result.Graph, [], result.Diagnostics);
     }
 
-    private AdapterExtraction ExtractXlsx(string path)
+    private AdapterExtraction ExtractXlsx(string path, CancellationToken cancellationToken)
     {
         using var stream = File.OpenRead(path);
-        var result = xlsx.Extract(stream);
+        var result = xlsx.Extract(stream, cancellationToken);
         return new(result.Graph, [], result.FormulaDiagnostics.Select(item => new Diagnostic(
             "XlsxFormula" + item.Safety, item.Reason ?? "Formula classified without evaluation.",
             item.Safety == XlsxFormulaSafety.Safe ? DiagnosticSeverity.Information : DiagnosticSeverity.Warning))
             .Concat(result.Warnings.Select(item => AdapterWarningDiagnostics.Create("XlsxProjectionWarning", item))).ToArray());
     }
 
-    private AdapterExtraction ExtractPptx(string path)
+    private AdapterExtraction ExtractPptx(string path, CancellationToken cancellationToken)
     {
         using var stream = File.OpenRead(path);
-        var result = pptx.Extract(stream);
+        var result = pptx.Extract(stream, cancellationToken);
         return new(result.Graph, [], result.Warnings.Select(item => AdapterWarningDiagnostics.Create("PptxWarning", item)).ToArray());
     }
 
-    private static AdapterExtraction ExtractPdf(string path)
+    private static AdapterExtraction ExtractPdf(string path, CancellationToken cancellationToken)
     {
         var sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
-        var result = PdfTextExtractor.Extract(path);
+        var result = PdfTextExtractor.Extract(path, cancellationToken: cancellationToken);
         return new AdapterExtraction(PdfDocumentGraphProjection.CreateGraph(result, sourceHash), [], PdfDocumentGraphProjection.Diagnostics(result));
     }
 

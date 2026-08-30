@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DocRedock.Core\DocRedock.Core.csproj" />
+    <ProjectReference Include="..\..\src\DocRedock.VisualInference\DocRedock.VisualInference.csproj" />
     <ProjectReference Include="..\..\src\DocRedock.Providers.Abstractions\DocRedock.Providers.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\DocRedock.Markdown\DocRedock.Markdown.csproj" />
     <ProjectReference Include="..\..\src\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />

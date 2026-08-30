@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.1.6 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.0 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -14,7 +14,8 @@ Download the package for your OS/CPU from GitHub Releases and verify the publish
 2. Select or drop a DOCX, XLSX, PPTX, or PDF file.
 3. Select **Readable Markdown**.
 4. Keep **Visible content only (recommended)** unless you intentionally need another policy.
-5. Choose an output location, convert, then review the Markdown, diagnostics, and assets.
+5. Keep visual inference at **Safe (recommended)** unless you specifically need native-only or balanced behavior.
+6. Choose an output location, convert, then review the Markdown, diagnostics, and assets.
 
 The desktop GUI accepts PDF by default. It extracts native PDF text; textless-page OCR and previews for diagram-like pages may require a configured rasterizer/OCR provider. When unavailable, review the page placeholder and diagnostic.
 
@@ -23,14 +24,16 @@ CLI PDF export, restoration, and rendering remain experimental and require `DOCR
 CLI export defaults to Readable Markdown:
 
 ```sh
-docredock export input.docx --content-policy visible --output input.md
+docredock export input.docx --content-policy visible --visual-inference safe --output input.md
 ```
+
+`native-only` accepts explicit source-format connections only. `safe` promotes unique high-confidence geometry assignments. `balanced` may additionally promote medium-confidence assignments, but it still leaves ties and contradictory or globally ambiguous relations unresolved.
 
 Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## 3. Generated files
 
-| Output | Contents | v0.1.6 use |
+| Output | Contents | Current use |
 | --- | --- | --- |
 | `.md` | Body text, headings, lists, tables, visual semantic projections, notes, and placeholders | Use |
 | `.assets/` | Images and previews referenced by Markdown as visual fallback | Use when generated |
@@ -38,7 +41,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 | `.drmd` | Source/restoration sidecar | Experimental; treat like the source document |
 | `.drmdpkg` | Markdown and restoration data package | Experimental; treat like the source document |
 
-Recognized visuals follow this order: (1) semantic projection such as Mermaid, (2) a visual fallback such as an image or page preview, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
+Mermaid is emitted only when connections are clear and consistent. Recognized visuals retain the best available form in this order: (1) Mermaid, (2) an image or page-preview fallback, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
 
 ## 4. Choose a content policy
 

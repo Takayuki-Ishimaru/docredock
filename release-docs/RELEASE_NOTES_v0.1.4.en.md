@@ -6,8 +6,8 @@ DocRedock v0.1.4 is a quality and startup-reliability update based on an indepen
 
 ## Highlights
 
-- Fixed a fatal GUI startup crash caused by an early content-policy selection event during XAML initialization.
-- Added two pre-release GUI gates: a dedicated Avalonia headless `MainWindow` construction test and a packaged Linux startup check that requires the actual DocRedock GUI child process to stay alive under Xvfb.
+- Fixed a desktop GUI crash during startup.
+- Strengthened startup checks for distributed GUI packages.
 - Corrected XLSX native-chart visibility so unrelated hidden workbook content no longer hides visible charts.
 - Improved DOCX, XLSX, PPTX, and experimental HTML readability for every issue reported by the independent review.
 
@@ -50,15 +50,9 @@ DocRedock v0.1.4 is a quality and startup-reliability update based on an indepen
 
 PDF conversion, round-trip editing, restoration, rendering/new-document generation, and package workflows remain experimental. Distributed GUI/CLI entry points require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Experimental artifacts such as `.drmd` and `.drmdpkg` may contain source-derived or restoration data.
 
-## Distribution and verification
+## Distribution
 
-The release workflow builds self-contained packages for:
-
-- Windows x64 and ARM64
-- macOS x64 and ARM64
-- Linux x64 and ARM64
-
-Before publication, locked restore, Release build, the regular regression suite, the dedicated GUI construction test, conversion QA, license audit, package extraction, CLI smoke tests, binary architecture checks, and Linux packaged-GUI startup must pass. Each release includes checksums, SBOM/provenance, signing status, and release evidence.
+Self-contained packages are available for Windows x64/ARM64, macOS x64/ARM64, and Linux x64/ARM64. Published packages include checksums, SBOM/provenance, and signing status.
 
 ## Upgrade
 

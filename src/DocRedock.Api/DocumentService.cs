@@ -16,6 +16,7 @@ using DocRedock.Ocr.Tesseract;
 using DocRedock.Providers.Abstractions.Providers;
 using DocRedock.Render;
 using DocRedock.RoundTrip;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Api;
 
@@ -27,8 +28,9 @@ public sealed record DocumentExportOptions(
     IReadOnlyList<string>? OcrLanguages = null,
     string ContentPolicy = "visible",
     string? DocumentId = null,
-    string Profile = "roundtrip");
-public sealed record DocumentExportResult(string MarkdownPath, RoundTripWorkspace Workspace, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics);
+    string Profile = "roundtrip",
+    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+public sealed record DocumentExportResult(string MarkdownPath, RoundTripWorkspace Workspace, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
 public sealed record ReadableDocumentExportOptions(
     string SourcePath,
     string MarkdownPath,
@@ -40,8 +42,9 @@ public sealed record ReadableDocumentExportOptions(
     bool IncludeDiagrams = true,
     IReadOnlyList<string>? Sheets = null,
     string? Title = null,
-    bool EmbedImages = false);
-public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics);
+    bool EmbedImages = false,
+    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentRestoreOptions(string WorkspacePath, string OutputPath, string? MarkdownPath = null, bool AllowRenderFallback = false);
 public sealed record DocumentRestoreResult(string OutputPath, FidelityLevel Fidelity, bool Succeeded, IReadOnlyList<Diagnostic> Diagnostics);
@@ -96,6 +99,7 @@ public sealed class DocumentService
     public async Task<DocumentExportResult> ExportAsync(DocumentExportOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        using var inferenceScope = VisualInferenceContext.Push(options.InferenceMode);
         var source = Path.GetFullPath(options.SourcePath);
         var format = await DetectFormatAsync(source, cancellationToken).ConfigureAwait(false);
         var diagnostics = new List<Diagnostic>();
@@ -115,7 +119,7 @@ public sealed class DocumentService
             case DocumentFormatKind.Xlsx:
                 await using (var stream = File.OpenRead(source))
                 {
-                    var extraction = xlsx.Extract(stream);
+                    var extraction = xlsx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
                     AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics);
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
@@ -125,14 +129,14 @@ public sealed class DocumentService
             case DocumentFormatKind.Pptx:
                 await using (var stream = File.OpenRead(source))
                 {
-                    var extraction = pptx.Extract(stream);
+                    var extraction = pptx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Warnings.Select(warning => AdapterWarningDiagnostics.Create("PptxWarning", warning)));
                 }
                 break;
             case DocumentFormatKind.Pdf:
                 {
-                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: false);
+                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: false, cancellationToken);
                     graph = pdf.Graph;
                     diagnostics.AddRange(pdf.Diagnostics);
                     break;
@@ -215,7 +219,7 @@ public sealed class DocumentService
             foreach (var item in ocrResults)
                 await workspace.WriteDerivedOcrAsync(item.AssetId, item, cancellationToken).ConfigureAwait(false);
             await workspace.WriteReportAsync("export-service-report.json", new FidelityReport(FidelityLevel.F0, PackagePreservationLevel.ByteIdentical, diagnostics), cancellationToken).ConfigureAwait(false);
-            return new(markdownPath, workspace, graph, diagnostics);
+            return new(markdownPath, workspace, graph, diagnostics, options.InferenceMode);
         }
         catch
         {
@@ -234,6 +238,7 @@ public sealed class DocumentService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        using var inferenceScope = VisualInferenceContext.Push(options.InferenceMode);
         var markdownPath = Path.GetFullPath(options.MarkdownPath);
         if (File.Exists(markdownPath)) throw new IOException("Output already exists; refusing to overwrite it.");
         var assetDirectoryPath = Path.Combine(Path.GetDirectoryName(markdownPath)!,
@@ -305,7 +310,8 @@ public sealed class DocumentService
                 options.Title,
                 options.ContentPolicy));
             var markdown = serializer.Serialize(graph);
-            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing => existing.Code != item.Code)))
+            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
+                         existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
                 diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity switch
                 {
                     MarkdownDiagnosticSeverity.Info => DiagnosticSeverity.Information,
@@ -313,7 +319,7 @@ public sealed class DocumentService
                     _ => DiagnosticSeverity.Warning,
                 }, NodeId: item.BlockId));
             await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
-            return new ReadableDocumentExportResult(markdownPath, graph, diagnostics);
+            return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode);
         }
         catch
         {
@@ -344,7 +350,7 @@ public sealed class DocumentService
             case DocumentFormatKind.Xlsx:
                 await using (var stream = File.OpenRead(source))
                 {
-                    var extraction = xlsx.Extract(stream);
+                    var extraction = xlsx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
                     AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics);
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
@@ -354,7 +360,7 @@ public sealed class DocumentService
             case DocumentFormatKind.Pptx:
                 await using (var stream = File.OpenRead(source))
                 {
-                    var extraction = pptx.Extract(stream);
+                    var extraction = pptx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Warnings.Select(warning =>
                         AdapterWarningDiagnostics.Create("PptxWarning", warning)));
@@ -362,7 +368,7 @@ public sealed class DocumentService
                 break;
             case DocumentFormatKind.Pdf:
                 {
-                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: true);
+                    var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: true, cancellationToken);
                     graph = pdf.Graph;
                     diagnostics.AddRange(pdf.Diagnostics);
                     break;
@@ -626,10 +632,11 @@ public sealed class DocumentService
         };
     }
 
-    private static (DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics) PdfGraph(string path, bool includeTextlessPlaceholderNodes)
+    private static (DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics) PdfGraph(string path,
+        bool includeTextlessPlaceholderNodes, CancellationToken cancellationToken)
     {
         PdfExtractionResult extraction;
-        try { extraction = PdfTextExtractor.Extract(path); }
+        try { extraction = PdfTextExtractor.Extract(path, cancellationToken: cancellationToken); }
         catch (PdfExtractionException exception)
         {
             throw new InvalidDataException($"PDF text extraction failed: {exception.Message}", exception);
@@ -692,7 +699,7 @@ public sealed class DocumentService
                 var diagnostic = enabled
                     ? new OcrDiagnostic(
                         "PdfRasterizerUnavailable",
-                        "This PDF page has no native text. DocRedock v0.1.6 does not include a PDF rasterizer, so OCR could not run for this page.",
+                        "This PDF page has no native text. This build does not include a PDF rasterizer, so OCR could not run for this page.",
                         DiagnosticSeverity.Warning)
                     : new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this textless PDF page.", DiagnosticSeverity.Information);
                 records.Add(new OcrAssetRecord(partition.Id, status, languages, null, [diagnostic]));

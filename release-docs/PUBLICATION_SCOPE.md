@@ -44,6 +44,7 @@
 | パス／種類 | 公開条件 |
 | --- | --- |
 | tests/DocRedock.Tests/Fixtures の Office/PDF バイナリ | 完全に合成され、個人・顧客情報がなく、フォント・画像を含む全素材の再配布権が明確で、テストに不可欠 |
+| tests/DocRedock.Tests/Fixtures/Legacy/v0.1.7-docx.drmd | v0.1.7互換性テストに必要な最小合成fixture。生成元、内容、ライセンス、SHA-256を同階層のREADMEへ記録する |
 | fixture 生成スクリプトと expectations | 固定された依存で再生成でき、絶対パスやローカル環境情報を除去済み |
 | tools/conversion-qa | 公開 CI で使う場合は公開。内部だけで使うなら CI からも外す |
 | docs/BRAND_DESIGN_GUIDELINES.md | 第三者による名称・ロゴ利用条件を明確にしたうえで公開 |
