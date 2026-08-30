@@ -7,7 +7,7 @@ DocRedock v0.1.5 is a reliability hotfix for the Public Beta. The supported user
 ## Highlights
 
 - CLI `export` now defaults to the one-way `readable` profile. Existing round-trip automation must pass `--profile roundtrip` explicitly.
-- OCR evidence stays in the partition containing its parent image or PDF page. Unresolved evidence is isolated in `derived-assets` with a diagnostic.
+- OCR text stays with its image or PDF page; content with no clear parent is separated with a diagnostic.
 - Horizontally and vertically merged tables render with blank continuation cells and reject continuation/shape edits during round-trip processing.
 - Experimental PDF rendering no longer bundles or assumes a Japanese font.
 - The desktop GUI accepts PDF input by default. Native text is extracted directly; textless-page OCR still requires a configured rasterizer and OCR provider.
@@ -21,25 +21,21 @@ ASCII-only PDFs use Base14 Helvetica without embedding a font program. Non-ASCII
 2. `DOCREDOCK_PDF_FONT_PATH` and optional `DOCREDOCK_PDF_FONT_FACE_INDEX`
 3. installed system fonts
 
-The resolver validates SFNT/TTC structure, extracts the selected collection face, checks TrueType outlines, OS/2 embedding permission, and required glyph coverage. CFF/CFF2, invalid or oversized fonts, restricted embedding, and missing glyphs fail with actionable diagnostics. DocRedock never downloads a font; users are responsible for the selected font's license.
+DocRedock checks the selected TrueType font for embedding permission and required characters. Invalid, oversized, restricted, or incomplete fonts are rejected with diagnostics. DocRedock never downloads a font; users are responsible for the selected font's license.
 
 Font selection and coverage are informational. Omissions and truncation are warnings. CLI render returns exit code 1 when warnings exist; `--quiet` suppresses informational lines, while `--verbose` includes the selected font path.
 
 ## OCR, tables, and conversion quality
 
-- OCR nodes inherit the parent image's partition and hidden/metadata layer.
-- Rasterized PDF page assets stay with their page partition; a missing rasterizer produces `PdfRasterizerUnavailable`.
-- DRMD editing rules 1.1 preserve compatibility with 1.0 while adding merged-table continuation and shape checks.
-- Readable merged tables emit blank Markdown continuation cells for row/column spans.
-- PPTX literal bullets, including bold bullet runs, become clean Markdown list markers.
-- Empty GUI projections produce an explicit `EmptyProjection` result.
+- OCR text follows the same visibility policy as its image or PDF page.
+- PDF page previews stay with their page; a missing rasterizer produces a diagnostic.
+- Readable merged tables use blank Markdown continuation cells for row and column spans.
+- PPTX literal bullets, including emphasized bullet glyphs, become clean Markdown list markers.
+- An empty conversion result is reported explicitly.
 
-## Distribution and verification
+## Distribution
 
-- Conversion QA deterministically generates a complex XLSX with metadata, formulas, hidden rows/columns/sheets, chart references, images, and merged cells.
-- `--all` QA must execute DOCX, XLSX, and PPTX and fails with `ConversionQaCoverageTooLow` when coverage drops.
-- Release smoke tests verify `BINARY-SHA256SUMS`, reject unexpected font binaries, exercise readable/roundtrip exports, verify an immediate zero-operation diff, and render/extract a Japanese PDF sentinel.
-- Linux CI/release jobs install an explicit Japanese system font for PDF coverage; packages remain font-free.
+Published packages remain font-free and can be verified with their checksums.
 
 ## Safety and compatibility
 

@@ -180,10 +180,40 @@ public sealed class RoundTripWorkspaceTests
         Assert.False(Directory.Exists(output));
     }
 
+    [Fact]
+    public async Task V0_1_7_generated_sidecar_and_graph_remain_readable()
+    {
+        var legacyRoot = LegacyFixturePath("v0.1.7-docx.drmd");
+        var markdownPath = LegacyFixturePath("v0.1.7-docx.md");
+        var workspace = await RoundTripWorkspace.OpenAsync(legacyRoot);
+        var verification = await workspace.VerifyAsync(markdownPath, requireUnchangedProjection: true);
+        var graphJson = await File.ReadAllTextAsync(Path.Combine(legacyRoot, "graph", "index.json"));
+        var graph = DeterministicJson.Deserialize<DocumentGraph>(graphJson);
+
+        Assert.Equal("1.1", workspace.Manifest.SchemaVersion);
+        Assert.True(verification.IsValid, string.Join(Environment.NewLine, verification.Issues.Select(issue => $"{issue.Code}: {issue.Message}")));
+        Assert.NotNull(graph);
+        Assert.Equal("1.1", graph!.SchemaVersion);
+        Assert.Equal(DocumentFormatKind.Docx, graph.Format);
+        Assert.Contains(graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "v0.1.7 compatibility fixture");
+    }
+
     private static string Hash(string path)
     {
         using var stream = File.OpenRead(path);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static string LegacyFixturePath(string name)
+    {
+        for (var current = new DirectoryInfo(AppContext.BaseDirectory); current is not null; current = current.Parent)
+        {
+            var candidate = Path.Combine(current.FullName, "tests", "DocRedock.Tests", "Fixtures", "Legacy", name);
+            if (File.Exists(candidate) || Directory.Exists(candidate)) return candidate;
+        }
+        var workingCandidate = Path.GetFullPath(Path.Combine("tests", "DocRedock.Tests", "Fixtures", "Legacy", name));
+        Assert.True(File.Exists(workingCandidate) || Directory.Exists(workingCandidate), $"Missing checked-in legacy fixture: {workingCandidate}");
+        return workingCandidate;
     }
 
     private sealed class Fixture : IDisposable

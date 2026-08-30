@@ -13,7 +13,7 @@ public sealed record VisualEdge(string Id, string? SourceId, string? TargetId, s
     VisualEdgeResolution Resolution = VisualEdgeResolution.NativeConnection, string? SourceNodeId = null,
     string? Direction = null, Geometry? Geometry = null, double? Confidence = null,
     IReadOnlyList<VisualPathPoint>? Path = null, SourceAnchor? SourceAnchor = null,
-    VisualEdgeDirection? EdgeDirection = null)
+    VisualEdgeDirection? EdgeDirection = null, VisualConnectionEvidence? Evidence = null)
 {
     [JsonIgnore]
     public bool IsUndirected => EdgeDirection == VisualEdgeDirection.Undirected ||
@@ -21,6 +21,12 @@ public sealed record VisualEdge(string Id, string? SourceId, string? TargetId, s
 }
 /// <summary>A point in an adapter-native visual path. <see cref="Geometry.CoordinateSpace"/> describes its units.</summary>
 public sealed record VisualPathPoint(double X, double Y);
+public sealed record VisualConnectionEvidence(string Method, string ConfidenceBand, double Score,
+    double? SecondBestScore = null, double? CandidateMargin = null, double? BoundaryDistanceNormalized = null,
+    bool? RayIntersects = null, bool? RayFirstHit = null, double? AngularDeviationDegrees = null,
+    double? PerpendicularOffsetNormalized = null, int IntermediateNodeCount = 0, string? ArrowheadEvidence = null,
+    string? ClusterId = null, IReadOnlyList<string>? EvidenceCodes = null, IReadOnlyList<string>? RejectedCandidateIds = null);
+public enum VisualGraphQuality { ExactNative, HighConfidenceInferred, Partial, FallbackOnly, Invalid }
 /// <summary>A recognized vector/path which could not necessarily be promoted to a semantic edge.</summary>
 public sealed record VisualPath(string Id, IReadOnlyList<VisualPathPoint>? Points = null, Geometry? Geometry = null,
     SourceAnchor? SourceAnchor = null, double? Confidence = null, bool IsFallback = true, string? SourceNodeId = null);
@@ -39,6 +45,9 @@ public sealed record VisualDiagnostic(string Code, string Message, string? Sourc
         code = candidate; message = warning[(separator + 1)..].TrimStart();
         return true;
     }
+
+    /// <summary>Formats this diagnostic in the stable adapter-warning syntax consumed by <see cref="TryParseWarning"/>.</summary>
+    public string ToWarning() => Code + ": " + Message;
 
     /// <summary>A stable, compact source location suitable for verbose CLI and JSON reports.</summary>
     public string? LocationSummary
@@ -102,7 +111,8 @@ public sealed record VisualGraph(
     string Direction = "LR",
     IReadOnlyList<VisualGroup>? Groups = null,
     IReadOnlyList<VisualPath>? Paths = null,
-    IReadOnlyList<VisualSourceItem>? SourceItems = null)
+    IReadOnlyList<VisualSourceItem>? SourceItems = null,
+    VisualGraphQuality? Quality = null)
 {
     [JsonIgnore]
     public bool HasTopology

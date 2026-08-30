@@ -2,13 +2,23 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.2.0] - 2026-08-30
+
+- Public Beta visual inference modes: native-only, safe (default), and balanced.
+- Ambiguous connections remain unresolved with fallback assets/source text and stable diagnostics.
+- Improved conditional flow handling across DOCX, XLSX, PPTX, and PDF while retaining readable fallback for unresolved content.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.0.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.0.md)
+- [v0.1.7 errata](release-docs/ERRATA_v0.1.7.en.md)
+
 ## [0.1.7] - 2026-08-29
 
 Visual-semantics correctness hotfix.
 
-- Added source-level visual accounting and a shared validator; Mermaid is rejected for blank labels, invalid references, self edges, and low-confidence inferred edges.
-- Kept user-disabled diagrams distinct from invalid topology and retained resolved connections as readable fallback.
-- Added structured Mermaid assertions, tag-derived release-version smoke checks, and JSON visual-semantics evidence.
+- Improved diagram checks so malformed or low-confidence relationships are not presented as confirmed Mermaid.
+- Retained resolved connections as readable fallback when diagrams are disabled.
+- Added clearer diagnostics for incomplete visual conversion.
 - Documented the v0.1.6 errata and the conditional visual-support boundary.
 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.7.en.md)
@@ -17,15 +27,14 @@ Visual-semantics correctness hotfix.
 
 ## [0.1.6] - 2026-08-29
 
-Visual-semantics reliability update. Local pre-release verification completed 359 main tests, 4 GUI headless tests, and an osx-arm64 extracted-binary smoke. The GitHub release workflow builds and smoke-tests six RID-specific self-contained distributions and publishes checksums, SBOMs, provenance, attestations, signing status, and release evidence.
+Visual-semantics reliability update.
 
-- Added a format-neutral visual graph and semantic Mermaid projection for resolvable PPTX connector flows, including native connections, conservative geometry inference, edge labels, and explicit unresolved diagnostics.
-- Made visual warning codes stable across the public service and adapter catalog.
-- Added DOCX Markup Compatibility Choice/Fallback exclusivity, stable visual anchors, and conditional DrawingML/WPS/VML connector topology with native or uniquely inferred endpoints, labels, and explicit unresolved fallback.
-- Added XLSX `flowChart*` preset mapping while retaining unknown preset labels.
-- Kept PDF native text while reconstructing supported vector paths into conditional node/edge topology, retaining curves, unresolved paths, and image-only content as explicit fallback diagnostics.
-- Normalized duplicate or empty DocumentGraph node IDs deterministically and retained parent references.
-- Updated bilingual support guidance, release notes, checklists, and extracted-distribution smoke coverage for v0.1.6.
+- Improved preservation of resolvable PPTX connector flows, including labels and explicit unresolved diagnostics.
+- Made visual warnings consistent across supported formats.
+- Improved conditional handling of DOCX DrawingML/WPS/VML connectors while retaining text or image fallback when endpoints cannot be resolved.
+- Added XLSX `flowChart*` preset recognition while retaining labels for unknown presets.
+- Kept PDF native text and supported simple vector flows while retaining unresolved paths and image-only content as explicit fallback.
+- Improved stability when source identifiers are duplicated or missing.
 
 The user-supported scope remains one-way DOCX/XLSX/PPTX/PDF → Readable Markdown conversion in the desktop GUI. CLI PDF conversion, round-trip editing, restoration, and new-document generation remain experimental.
 
@@ -43,7 +52,7 @@ Public Beta reliability hotfix.
 - Separated render information/coverage from omission and truncation warnings; warning-producing CLI renders return exit code 1.
 - Enabled PDF input by default in the desktop GUI while keeping CLI PDF conversion behind the experimental gate.
 - Fixed PPTX literal bullet normalization, including emphasized bullet glyphs.
-- Added deterministic complex XLSX conversion QA, three-format coverage enforcement, package checksum verification, Japanese PDF smoke coverage, and rejection of bundled font binaries.
+- Expanded release checks for complex XLSX output, package checksums, and Japanese PDF output.
 - Updated release packaging and documentation for v0.1.5.
 
 The user-supported scope remains one-way DOCX/XLSX/PPTX/PDF → Readable Markdown conversion in the desktop GUI. CLI PDF conversion, round-trip editing, restoration, and new-document generation remain experimental.
@@ -55,10 +64,8 @@ The user-supported scope remains one-way DOCX/XLSX/PPTX/PDF → Readable Markdow
 
 Public Beta quality and startup reliability update based on the independent v0.1.3 review.
 
-- Fixed the GUI startup crash caused by an early content-policy selection event during XAML initialization.
-- Added a dedicated Avalonia headless `MainWindow` construction test and strengthened the packaged Linux GUI smoke test.
+- Fixed a desktop application startup crash when the content policy initialized.
 - Improved DOCX, XLSX, PPTX, and experimental HTML readability.
-- Added focused regression coverage for every reviewed conversion issue.
 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.4.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.4.md)
@@ -69,7 +76,7 @@ Public Beta security and readability update.
 
 - Added shared `visible`, `complete`, and `sanitized` content policies.
 - Centralized experimental workflow opt-in with `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.
-- Strengthened unchanged F0 restoration and release smoke coverage.
+- Strengthened protection against unintended changes during restoration.
 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.3.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.3.md)
@@ -91,6 +98,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.2.0]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.0
 [0.1.7]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.6
 [0.1.5]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.5

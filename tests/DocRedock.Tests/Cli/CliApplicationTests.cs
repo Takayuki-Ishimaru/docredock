@@ -169,6 +169,22 @@ public sealed class CliApplicationTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData("native-only")]
+    [InlineData("safe")]
+    [InlineData("balanced")]
+    public async Task Export_accepts_each_visual_inference_mode_and_reports_it(string mode)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var output = new StringWriter();
+        var result = await new CliApplication(output, new StringWriter()).RunAsync(
+            ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--visual-inference", mode]);
+
+        Assert.InRange(result, (int)ExitCode.Success, (int)ExitCode.SuccessWithWarnings);
+        Assert.Contains($"Visual inference: {mode}", output.ToString(), StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task Cli_pdf_export_requires_explicit_environment_opt_in_but_read_only_inspection_is_available()
     {
@@ -190,6 +206,7 @@ public sealed class CliApplicationTests : IDisposable
 
             Assert.Equal((int)ExitCode.Success, inspect);
             Assert.Contains("Format: pdf", inspectOutput.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Visual summary: diagrams=", inspectOutput.ToString(), StringComparison.Ordinal);
         }
         finally
         {

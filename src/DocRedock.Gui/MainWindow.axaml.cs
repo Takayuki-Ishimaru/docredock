@@ -10,6 +10,7 @@ using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.Pdf;
 using DocRedock.RoundTrip;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Gui;
 
@@ -79,6 +80,7 @@ public partial class MainWindow : Window
         PdfFallbackPanel.IsVisible = true;
         PdfSourceChip.IsVisible = true;
         UpdateContentPolicyWarning();
+        UpdateInferenceModeWarning();
         UpdateExportSelection();
         UpdateRestoreSelection();
         UpdateButtons();
@@ -168,6 +170,7 @@ public partial class MainWindow : Window
 
     private void OnModeChanged(object? sender, RoutedEventArgs e)
     {
+        if (!_componentsInitialized) return;
         var restore = sender == RestoreModeRadio
             ? RestoreModeRadio.IsChecked == true
             : sender == ExportModeRadio
@@ -186,6 +189,7 @@ public partial class MainWindow : Window
 
     private void OnWindowSizeChanged(object? sender, SizeChangedEventArgs e)
     {
+        if (!_componentsInitialized) return;
         var narrow = e.NewSize.Width < 880;
         ExportWorkspace.ColumnDefinitions = new ColumnDefinitions(narrow ? "*" : "1.15*,*");
         RestoreWorkspace.ColumnDefinitions = new ColumnDefinitions(narrow ? "*" : "1.15*,*");
@@ -199,6 +203,7 @@ public partial class MainWindow : Window
 
     private void OnOcrChanged(object? sender, RoutedEventArgs e)
     {
+        if (!_componentsInitialized) return;
         OcrLanguagesTextBox.IsEnabled = OcrToggle.IsChecked == true;
         OcrLanguagesPanel.IsVisible = OcrToggle.IsChecked == true;
         SaveSettings();
@@ -206,6 +211,7 @@ public partial class MainWindow : Window
 
     private void OnReadableChanged(object? sender, RoutedEventArgs e)
     {
+        if (!_componentsInitialized) return;
         if (sender is RadioButton radio && radio.IsChecked == true)
             ReadableExportToggle.IsChecked = radio != RoundTripExportRadio;
 
@@ -218,7 +224,12 @@ public partial class MainWindow : Window
         UpdateButtons();
     }
 
-    private void OnSettingsChanged(object? sender, RoutedEventArgs e) => SaveSettings();
+    private void OnSettingsChanged(object? sender, RoutedEventArgs e)
+    {
+        if (!_componentsInitialized) return;
+        UpdateInferenceModeWarning();
+        SaveSettings();
+    }
 
     private void OnContentPolicyChanged(object? sender, SelectionChangedEventArgs e)
     {
@@ -230,8 +241,19 @@ public partial class MainWindow : Window
     private string SelectedContentPolicy() =>
         (ContentPolicyComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() is { Length: > 0 } policy ? policy : "visible";
 
+    private VisualInferenceMode SelectedInferenceMode() =>
+        (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() switch
+        {
+            "native-only" => VisualInferenceMode.NativeOnly,
+            "balanced" => VisualInferenceMode.Balanced,
+            _ => VisualInferenceMode.Safe,
+        };
+
     private void UpdateContentPolicyWarning() =>
         CompletePolicyWarning.IsVisible = StringComparer.Ordinal.Equals(SelectedContentPolicy(), "complete");
+
+    private void UpdateInferenceModeWarning() =>
+        BalancedInferenceWarning.IsVisible = SelectedInferenceMode() == VisualInferenceMode.Balanced;
 
     private async void OnExport(object? sender, RoutedEventArgs e)
     {
@@ -268,7 +290,8 @@ public partial class MainWindow : Window
                     includeDiagrams: IncludeDiagramsCheckBox.IsChecked == true,
                     embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true,
                     zipSidecar: ZipSidecarCheckBox.IsChecked == true,
-                    contentPolicy: SelectedContentPolicy()));
+                    contentPolicy: SelectedContentPolicy(),
+                    inferenceMode: SelectedInferenceMode()));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -278,8 +301,8 @@ public partial class MainWindow : Window
                 success: true,
                 title: results.Count == 1 ? "書き出しが完了しました" : $"{results.Count}件の書き出しが完了しました",
                 message: string.Join(Environment.NewLine, results.Select(result => result.IsReadable
-                    ? $"Markdown: {result.MarkdownPath}"
-                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}）")),
+                    ? $"Markdown: {result.MarkdownPath}（推定: {result.InferenceMode}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}"
+                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}） 推定: {result.InferenceMode}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}")),
                 fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? results[0].Fidelity : "複数形式",
                 diagnostics: results.SelectMany(result => result.Diagnostics).ToArray());
         }
@@ -838,6 +861,7 @@ public partial class MainWindow : Window
             if (settings.EmbedReadableImages is not null) EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
             if (settings.ZipSidecar is not null) ZipSidecarCheckBox.IsChecked = settings.ZipSidecar;
             ContentPolicyComboBox.SelectedIndex = settings.ContentPolicy switch { "complete" => 1, "sanitized" => 2, _ => 0 };
+            VisualInferenceModeComboBox.SelectedIndex = settings.InferenceMode switch { "native-only" => 0, "balanced" => 2, _ => 1 };
             ExportFolderText.Text = OutputFolderLabel(_exportDirectory);
             RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
             OcrLanguagesTextBox.IsEnabled = OcrToggle.IsChecked == true;
@@ -858,7 +882,8 @@ public partial class MainWindow : Window
             File.WriteAllText(path, JsonSerializer.Serialize(new GuiSettings(_exportDirectory, _restoreDirectory,
                 ReadableExportToggle.IsChecked, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
-                EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy())));
+                EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
+                (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe")));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -878,7 +903,8 @@ public partial class MainWindow : Window
         bool? IncludeDiagrams = null,
         bool? EmbedReadableImages = null,
         bool? ZipSidecar = null,
-        string? ContentPolicy = null);
+        string? ContentPolicy = null,
+        string? InferenceMode = null);
 
     private static void ShowError(TextBlock control, string message)
     {

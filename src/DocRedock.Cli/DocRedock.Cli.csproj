@@ -6,6 +6,7 @@
     <ProjectReference Include="..\DocRedock.Markdown\DocRedock.Markdown.csproj" />
     <ProjectReference Include="..\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
     <ProjectReference Include="..\DocRedock.Api\DocRedock.Api.csproj" />
+    <ProjectReference Include="..\DocRedock.VisualInference\DocRedock.VisualInference.csproj" />
   </ItemGroup>
 
   <ItemGroup>

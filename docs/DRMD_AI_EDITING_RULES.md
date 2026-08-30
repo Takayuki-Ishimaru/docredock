@@ -1,51 +1,51 @@
 # DRMD Markdown AI編集ルール
 
-この資料は、DRMD MarkdownをAIへ入力して編集させる際の短い運用契約です。AIは文書本文を改善してよい一方、DRMDの識別・復元情報を変更してはいけません。
+この資料は、DRMD MarkdownをAIで編集する際の運用契約です。AIは本文を改善できますが、識別・復元情報を変更してはいけません。
 
-CLIを利用できる環境では、`docredock rules`でこの正本と同じ内容を標準出力へ取得できます。正規DRMD Markdownとこの出力を同じAIコンテキストへ入力してください。
+CLIを利用できる場合は`docredock rules`で同じ内容を取得できます。DRMD Markdownとルールを同じAIコンテキストへ入力してください。
 
 ## 必須ルール（MUST）
 
-1. 編集前にfront matter、すべての`drmd:*`コメント、既存のblock ID、partition構造を読み、制御領域を変更しない。
-2. 変更対象は既存blockの本文だけにする。`id`、`kind`、`editability`、`operations`、`constraints`、`rich-text`、`role`、`range`、`source-columns`、`source-rows`、partition ID、`baseline_nodes`、`document-end`を変更しない。
-3. 既存blockを消しただけでは削除しない。削除が明示された場合だけ`<!--drmd:delete id=...-->`を追加する。
-4. Markdown内に存在しないbaseline nodeは、意図的な削除指示がない限り保持される前提で編集する（missing preserve）。
-5. partitionをまたぐ移動・並べ替え、markerの複製、IDの新規発明、既存IDの再利用をしない。
-6. `roundtrip_store`で示された`.drmd`サイドカーを保持し、Markdown単体でrestoreしない。
-7. 保存後は必ず`verify`、`diff`を実行し、診断と差分を確認する。問題がなければ既存Officeの改版は`restore`、新規Office/PDFの生成は`render`を使う。
-8. `restore`の出力を顧客へ渡す前に、対象Officeアプリケーションで開けることと、変更箇所を目視確認する。
-9. font名、文字サイズ、色、余白、列幅、shape座標等をMarkdown本文へ書き足さない。これらは元Office側から復元されるため、AIは本文と許可されたinline装飾だけを編集する。
+1. 編集前にfront matter、すべての`drmd:*`コメント、既存block ID、partition構造を読み、制御領域を変更しない。
+2. 既存blockでは本文だけを変更する。`id`、`kind`、`editability`、`operations`、`constraints`、`rich-text`、`role`、`range`、`source-columns`、`source-rows`、partition ID、`baseline_nodes`、`document-end`を変更しない。
+3. 削除が明示された場合だけ`<!--drmd:delete id=...-->`を追加する。本文やmarkerを消すだけでは削除にならない。
+4. Markdownに見えない元内容も、削除指示がない限り保持される前提で編集する。
+5. partitionをまたぐ移動・並べ替え、markerの複製、新しいIDの作成、既存IDの再利用をしない。
+6. `roundtrip_store`で指定された`.drmd`サイドカーを保持し、Markdown単体でrestoreしない。
+7. 保存後は`verify`と`diff`を実行し、診断と差分を確認する。既存Officeの改版には`restore`、新規Office／PDFの生成には`render`を使う。
+8. 出力を共有する前に対象アプリケーションで開き、変更箇所を目視確認する。
+9. フォント、文字サイズ、色、余白、列幅、図形座標をMarkdown本文へ書き足さない。AIは本文と許可されたインライン装飾だけを編集する。
 
-現行parser/editorは`kind`変更、partition移動、不正なpartition構造などを検出します。ただし、format adapter固有のすべての制約をMarkdown parse時点で判定するわけではありません。AI側でmarkerの能力属性を守り、`diff`とrestore diagnosticsで確認します。
+DocRedockは基本的な構造違反を検出しますが、元形式固有の制約は`verify`、`diff`、restore時の診断でも確認してください。
 
 ## してはいけない編集（MUST NOT）
 
-- front matterやDRMDコメントを削除・翻訳・整形する。
-- `<!--drmd:block ...-->`のID/kindを書き換える。
-- document-endの後ろに説明や追記を書く。
-- `id`が分からないblockを既存nodeとして作る。
-- 参照先URL、asset path、数式、セルアドレスを、依頼と対象formatの能力確認なしに変更する。
-- `rich-text=inline-v1`のないblockへ、Office装飾になると推測して`**太字**`やHTMLを追加する。
-- `rich-text=inline-v1` blockで、対応外HTML、field、hyperlink、revision、drawing相当の構文を追加する。対応する強調記号は必ず閉じ、既存の意味を保つ。
-- restoreで新規文書を作ろうとする。新規文書は`render --format ...`の責務である。
+- front matterやDRMDコメントを削除、翻訳、整形する。
+- blockのID／kindを書き換える。
+- document-endの後ろに追記する。
+- IDが分からないblockを既存内容として作る。
+- 依頼と対応範囲を確認せず、URL、asset path、数式、セルアドレスを変更する。
+- `rich-text=inline-v1`のないblockへ、Office装飾になると推測して強調記号やHTMLを追加する。
+- 対応外のHTML、フィールド、リンク、変更履歴、描画オブジェクト相当の構文をRich Textへ追加する。
+- `restore`で新規文書を作ろうとする。新規文書には`render --format ...`を使う。
 
 ## 追加block
 
-追加は明示的に依頼された場合だけ、次の形式で行います。
+追加が明示された場合だけ、次の形式を使います。
 
 ```md
 <!--drmd:new kind=paragraph-->
 追加本文
 ```
 
-現行editorは追加blockを、このmarkerが置かれたpartitionへ追加します。ただし、built-in Markdown経路で安全に追加できるのは主にDOCXのparagraph/heading/list-itemです。XLSX cell追加にはaddress/source anchorが必要で、PPTX shape追加は未対応です。能力属性またはformat表で追加が許可されていなければ追加しません。
+安全に追加できるのは主にDOCXのparagraph、heading、list-itemです。XLSXセルとPPTX図形の追加は対応していません。markerの能力属性または対応表で許可されていなければ追加しません。
 
-## format別の最小注意
+## 形式別の最小注意
 
-- DOCX: 既存の段落・見出し・list item・同じ形状のtable cell等を編集できる。`rich-text=inline-v1`では`**bold**`、`_italic_`、`<u>underline</u>`、`~~strike~~`、inline code、`<br>`、`&#9;`のsubsetだけを使う。元runのfont/size/colorと段落・page layoutはrestoreが保持するので、Markdownへfont指定を追加しない。保護境界、macro、署名、protection、field、hyperlink、revision、drawing/objectを含むRich Textは変更しない。
-- XLSX: 同一sheetに複数ある場合を含め、`drmd:sheet-table`内の既存cellの値・数式だけを編集する。表自体と`range`、`source-columns`、`source-rows`、`baseline_nodes`、行列数・順序、表示されていない空き座標は変更しない。行番号とExcel列名は非表示メタデータであり、本文へ追加しない。cellを新規追加せず、sheet、row/column、merge、style等の構造も変更しない。不審・危険な数式を追加しない。
-- PPTX: `role=title|subtitle|body|other`を維持し、既存shape textだけを編集する。bodyの各`- `行は既存shape内の段落になる。notes、table、image、shape追加・削除・移動はしない。
-- PDF: 抽出は保守的。通常の編集restoreはF0/F1 Officeと同じではなく、編集済みPDFのrestore fallbackは`--allow-render-fallback`が必要でF3になる。
+- DOCX: 既存の段落、見出し、リスト、対応する表セルを編集できます。`rich-text=inline-v1`では太字、斜体、下線、取消線、インラインコード、改行、タブだけを使います。保護、マクロ、署名、フィールド、リンク、変更履歴、描画オブジェクトを含む対応外のRich Textは変更しません。
+- XLSX: `drmd:sheet-table`内の既存セル値・数式だけを編集します。表の範囲、行列数・順序、空き座標、シート構造、結合、書式を変更せず、危険な数式を追加しません。
+- PPTX: `role=title|subtitle|body|other`を維持し、既存図形のテキストだけを編集します。ノート、表、画像、図形の追加・削除・移動はしません。
+- PDF: 抽出と編集は限定的です。編集済みPDFの代替生成には`--allow-render-fallback`が必要です。
 
 ## 推奨手順
 
@@ -53,4 +53,4 @@ CLIを利用できる環境では、`docredock rules`でこの正本と同じ内
 export -> 内容確認 -> AI編集 -> verify -> diff -> (restore または render) -> 出力確認
 ```
 
-`diff`で意図しないnode、delete、format変更が出たら処理を止め、Markdownを修正する。`verify`が失敗した状態でrestore/renderを納品用途に使わない。
+`diff`に意図しないblock、削除、レイアウト変更があれば処理を止めてMarkdownを修正します。`verify`が失敗した状態の出力を納品用途に使わないでください。

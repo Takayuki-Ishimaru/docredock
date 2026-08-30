@@ -8,6 +8,7 @@ using DocRedock.Markdown;
 using DocRedock.Ocr.Tesseract;
 using DocRedock.Render;
 using DocRedock.RoundTrip;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Cli;
 
@@ -78,6 +79,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var markdown = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(source, ".md"));
         var ocrMode = (args.Option("ocr") ?? "auto").ToLowerInvariant();
         if (ocrMode is not ("auto" or "on" or "off")) return Invalid("--ocr must be auto, on, or off.");
+        var visualInference = (args.Option("visual-inference") ?? "safe").ToLowerInvariant();
+        if (visualInference is not ("native-only" or "safe" or "balanced"))
+            return Invalid("--visual-inference must be native-only, safe, or balanced.");
         var contentPolicy = (args.Option("content-policy") ?? "visible").ToLowerInvariant();
         if (contentPolicy is not ("visible" or "complete" or "sanitized"))
             return Invalid("--content-policy must be visible, complete, or sanitized.");
@@ -90,6 +94,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (sidecarForm is not ("dir" or "zip")) return Invalid("--sidecar must be dir or zip.");
         if (profile == "readable")
         {
+            var inferenceMode = ParseInferenceMode(visualInference);
             var embedImages = args.HasFlag("embed-images");
             var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
             using var stagedOutputs = embedImages
@@ -104,11 +109,17 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 IncludeDiagrams: !args.HasFlag("no-diagrams"),
                 Sheets: sheets,
                 Title: args.Option("title"),
-                EmbedImages: embedImages), token);
+                EmbedImages: embedImages,
+                InferenceMode: inferenceMode), token);
             stagedOutputs.Commit();
             await output.WriteLineAsync($"Exported: {markdown}");
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
             await output.WriteLineAsync("Mode:     Readable Markdown (one-way; no sidecar)");
+            await output.WriteLineAsync($"Visual inference: {visualInference} (ambiguous relations remain unresolved)");
+            await output.WriteLineAsync(VisualInferenceSummary(readable.Graph));
+            if (args.HasFlag("verbose"))
+                foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
+                    await output.WriteLineAsync(VisualEvidence(edge));
             foreach (var item in readable.Diagnostics.Where(item => !quiet || item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information))
                 await output.WriteLineAsync($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}");
             if (!readable.Graph.Nodes.Any())
@@ -124,7 +135,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var stagedRoundTripMarkdown = stagedRoundTrip.PathFor(markdown);
         var stagedSidecar = stagedRoundTrip.PathFor(sidecarPath);
         var result = await Service.ExportAsync(new DocumentExportOptions(source, stagedSidecar, stagedRoundTripMarkdown,
-            ocrMode != "off", languages, contentPolicy, Profile: profile), token);
+            ocrMode != "off", languages, contentPolicy, Profile: profile,
+            InferenceMode: ParseInferenceMode(visualInference)), token);
         if (sidecarForm == "zip")
             await SidecarContainer.PackInPlaceAsync(result.Workspace.RootPath, stagedRoundTripMarkdown, token);
         stagedRoundTrip.Commit();
@@ -139,6 +151,13 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return 1; }
         return result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
     }
+
+    private static VisualInferenceMode ParseInferenceMode(string value) => value switch
+    {
+        "native-only" => VisualInferenceMode.NativeOnly,
+        "balanced" => VisualInferenceMode.Balanced,
+        _ => VisualInferenceMode.Safe,
+    };
 
     private async Task<int> RestoreAsync(Arguments args, CancellationToken token)
     {
@@ -220,6 +239,16 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             await output.WriteLineAsync($"Byte restore: {workspace.Manifest.Capabilities.ByteRestore.ToString().ToLowerInvariant()}");
             await output.WriteLineAsync($"Editable restore: {workspace.Manifest.Capabilities.EditableRestore.ToString().ToLowerInvariant()}");
             await output.WriteLineAsync($"OCR completed/unavailable/failed: {workspace.Manifest.Ocr.StatusSummary.Completed}/{workspace.Manifest.Ocr.StatusSummary.Unavailable}/{workspace.Manifest.Ocr.StatusSummary.Failed}");
+            var graphPath = Path.Combine(workspace.RootPath, "graph", "index.json");
+            if (File.Exists(graphPath))
+            {
+                try
+                {
+                    var visualGraph = DeterministicJson.Deserialize<DocumentGraph>(await File.ReadAllTextAsync(graphPath, token));
+                    if (visualGraph is not null) await output.WriteLineAsync(VisualInferenceSummary(visualGraph));
+                }
+                catch (JsonException) { /* integrity verification above remains the source of truth */ }
+            }
             return report.IsValid ? 0 : 3;
         }
         var format = await DocumentService.DetectFormatAsync(path, token);
@@ -233,6 +262,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             await output.WriteLineAsync($"Embedded media: {archive.Entries.Count(entry => entry.FullName.Contains("/media/", StringComparison.OrdinalIgnoreCase))}");
         }
         await output.WriteLineAsync(format == DocumentFormatKind.Pdf ? "Restore: F0; edited content requires explicit F3 render fallback" : "Restore: F0/F1 after export");
+        await WriteSourceVisualInferenceSummaryAsync(path, token);
         return 0;
     }
 
@@ -457,7 +487,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
           docredock --version
-          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--force] [--quiet]
+          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
@@ -475,10 +505,52 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         Experimental commands and PDF export require DOCREDOCK_ENABLE_EXPERIMENTAL=1.
         """);
 
+    private static IEnumerable<VisualGraph> VisualGraphs(DocumentGraph graph) => graph.Nodes
+        .Where(node => node.Extensions?.TryGetValue("visual_graph", out _) == true)
+        .Select(node => node.Extensions!["visual_graph"].Deserialize<VisualGraph>())
+        .OfType<VisualGraph>();
+
+    private static string VisualInferenceSummary(DocumentGraph graph)
+    {
+        var visual = VisualGraphs(graph).ToArray();
+        var edges = visual.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
+        var fallback = visual.Sum(item => item.SourceItems is { Count: > 0 }
+            ? item.SourceItems.Count(source => source?.Disposition == VisualDisposition.VisualFallback)
+            : (item.Paths ?? []).Count(path => path?.IsFallback == true));
+        var rejected = visual.Sum(item => VisualGraphValidator.Validate(item).Errors.Count);
+        return $"Visual summary: diagrams={visual.Length}; native={edges.Count(edge => edge.Resolution == VisualEdgeResolution.NativeConnection)}; high={edges.Count(edge => edge.Evidence?.ConfidenceBand.Equals("High", StringComparison.OrdinalIgnoreCase) == true)}; medium={edges.Count(edge => edge.Evidence?.ConfidenceBand.Equals("Medium", StringComparison.OrdinalIgnoreCase) == true)}; unresolved={edges.Count(edge => edge.SourceId is null || edge.TargetId is null)}; fallback={fallback}; rejected={rejected}";
+    }
+
+    private static string VisualEvidence(VisualEdge edge)
+    {
+        var evidence = edge.Evidence;
+        return $"Visual edge {edge.Id}: method={evidence?.Method ?? "none"}; confidence={evidence?.ConfidenceBand ?? edge.Confidence?.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) ?? "unknown"}; boundary={evidence?.BoundaryDistanceNormalized?.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) ?? "n/a"}; ray_first_hit={evidence?.RayFirstHit?.ToString().ToLowerInvariant() ?? "n/a"}; angle={evidence?.AngularDeviationDegrees?.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) ?? "n/a"}; margin={evidence?.CandidateMargin?.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) ?? "n/a"}; intermediate={evidence?.IntermediateNodeCount.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "0"}";
+    }
+
+    private async Task WriteSourceVisualInferenceSummaryAsync(string sourcePath, CancellationToken token)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "docredock-inspect-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var result = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
+                sourcePath, Path.Combine(root, "projection.md"), EnableOcr: false, ContentPolicy: "visible"), token);
+            await output.WriteLineAsync(VisualInferenceSummary(result.Graph));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            await output.WriteLineAsync("Visual summary: unavailable");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "content-policy", "ocr", "ocr-lang", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "allow-render-fallback", "json", "verify", "force", "quiet", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

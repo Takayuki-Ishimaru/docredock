@@ -15,8 +15,16 @@ import time
 import zipfile
 from pathlib import Path
 
-from visual_semantics_assertions import assert_expectation
+from visual_semantics_assertions import assert_expectation, parse_markdown
+from visual_semantics_qa import (
+    CliRunResult,
+    build_evidence,
+    generate_perturbation_corpus,
+    run_materialized_corpus,
+)
 
+
+INFERENCE_MODES = ("native-only", "safe", "balanced")
 
 HIDDEN_SENTINELS = {
     "docx": "DOCREDOCK_RELEASE_HIDDEN_DOCX",
@@ -77,56 +85,61 @@ def create_pptx(path: Path) -> None:
     )
 
 
-def exercise_visual_semantics(root: Path, cli: Path) -> None:
-    fixtures = {
-        "visual.docx": {
-            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
-            "word/document.xml": '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body><w:p><mc:AlternateContent><mc:Choice Requires="w14" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:r><w:t>ChoiceNode</w:t></w:r></mc:Choice><mc:Fallback><w:r><w:t>FallbackNode</w:t></w:r></mc:Fallback></mc:AlternateContent><w:r><w:drawing><wps:wsp><a:cNvPr id="start"/><a:xfrm><a:off x="0" y="0"/><a:ext cx="20" cy="20"/></a:xfrm><w:txbxContent><w:p><w:r><w:t>Start</w:t></w:r></w:p></w:txbxContent></wps:wsp><wps:wsp><a:cNvPr id="end"/><a:xfrm><a:off x="100" y="0"/><a:ext cx="20" cy="20"/></a:xfrm><w:txbxContent><w:p><w:r><w:t>End</w:t></w:r></w:p></w:txbxContent></wps:wsp><wps:wsp><a:cNvPr id="connector"/><a:prstGeom prst="line"/><a:stCxn id="start"/><a:endCxn id="end"/><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="0"/></a:xfrm></wps:wsp></w:drawing></w:r></w:p></w:body></w:document>',
-        },
-        "visual.pptx": {
-            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
-            "ppt/presentation.xml": '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
-            "ppt/_rels/presentation.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="slide" Target="slides/slide1.xml"/></Relationships>',
-            "ppt/slides/slide1.xml": '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Start"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="roundRect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>Start</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="End"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="300" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:prstGeom prst="rect"/></p:spPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>End</a:t></a:r></a:p></p:txBody></p:sp><p:cxnSp><p:nvCxnSpPr><p:cNvPr id="4" name="edge"/><p:cNvCxnSpPr><a:stCxn id="2" idx="0"/><a:endCxn id="3" idx="0"/></p:cNvCxnSpPr><p:nvPr/></p:nvCxnSpPr><p:spPr><a:prstGeom prst="line"/></p:spPr></p:cxnSp></p:spTree></p:cSld></p:sld>',
-        },
-        "visual.xlsx": {
-            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
-            "_rels/.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdWorkbook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>',
-            "xl/workbook.xml": '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Flow" sheetId="1" r:id="rId1"/></sheets></workbook>',
-            "xl/_rels/workbook.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
-            "xl/worksheets/sheet1.xml": '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rDrawing"/></worksheet>',
-            "xl/worksheets/_rels/sheet1.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="/xl/drawings/drawing1.xml"/></Relationships>',
-            "xl/drawings/drawing1.xml": '<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="ProcessNode"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>ProcessNode</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor><xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>0</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="DecisionNode"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:bodyPr/><a:p><a:r><a:t>DecisionNode</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor><xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>1</xdr:row></xdr:from><xdr:ext cx="400000" cy="10000"/><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="4" name="edge"/><xdr:cNvCxnSpPr><a:stCxn id="2" idx="0"/><a:endCxn id="3" idx="0"/></xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:oneCellAnchor></xdr:wsDr>',        },
-    }
-    mermaid = chr(96) * 3 + "mermaid"
-    for filename, parts in fixtures.items():
-        source = root / filename
-        write_zip(source, parts)
-        output = root / (filename + ".visual.md")
-        invoke(cli, ["export", str(source), "--profile", "readable", "--output", str(output), "--ocr", "off"], allowed=(0, 1), experimental=True)
-        markdown = output.read_text(encoding="utf-8")
-        if filename.endswith(".docx"):
-            if markdown.count("ChoiceNode") != 1 or "FallbackNode" in markdown or "-->" not in markdown or "Start" not in markdown or "End" not in markdown:
-                raise RuntimeError("DOCX AlternateContent Choice/Fallback projection is incorrect")
-        elif filename.endswith(".pptx"):
-            ok, detail = assert_expectation(markdown, {
-                "node_labels": ["Start", "End"],
-                "edges": [{"from": "Start", "to": "End", "direction": "directed"}],
-                "exact_node_count": 2, "exact_edge_count": 1,
-                "no_blank_labels": True, "allow_unexpected_edges": False,
-            })
-            if not ok:
-                raise RuntimeError("PPTX fixture did not preserve native connector Mermaid topology: " + detail)
-        elif filename.endswith(".xlsx"):
-            ok, detail = assert_expectation(markdown, {
-                "node_labels": ["ProcessNode", "DecisionNode"],
-                "edges": [{"from": "ProcessNode", "to": "DecisionNode", "direction": "directed"}],
-                "exact_node_count": 2, "exact_edge_count": 1,
-                "no_blank_labels": True, "allow_unexpected_edges": False,
-            })
-            if not ok:
-                raise RuntimeError("XLSX DrawingML flowChart fixture did not preserve Mermaid nodes/labels: " + detail)
+def exercise_visual_semantics(root: Path, cli: Path) -> dict:
+    corpus = generate_perturbation_corpus()
+    output_root = root / "materialized-visual-semantics-output"
+    output_root.mkdir(parents=True, exist_ok=True)
 
+    def cli_runner(spec, fixture: Path, mode: str) -> CliRunResult:
+        output = output_root / f"{spec.case_id}.{mode}.md"
+        result = invoke(
+            cli,
+            ["export", str(fixture), "--profile", "readable", "--output", str(output),
+             "--ocr", "off", "--visual-inference", mode],
+            allowed=(0, 1),
+            experimental=True,
+        )
+        if not output.is_file():
+            raise RuntimeError(f"CLI did not create Markdown for {spec.case_id}")
+        repeated = output_root / ".determinism" / output.name
+        repeated.parent.mkdir(parents=True, exist_ok=True)
+        repeated_result = invoke(
+            cli,
+            ["export", str(fixture), "--profile", "readable", "--output", str(repeated),
+             "--ocr", "off", "--visual-inference", mode],
+            allowed=(0, 1),
+            experimental=True,
+        )
+        if not repeated.is_file():
+            raise RuntimeError(f"CLI did not create repeated Markdown for {spec.case_id}")
+        output_sha256 = digest(output)
+        repeat_output_sha256 = digest(repeated)
+        return CliRunResult(markdown=output.read_text(encoding="utf-8"),
+                            diagnostics=result.stdout,
+                            exit_code=result.returncode,
+                            output_sha256=output_sha256,
+                            repeat_output_sha256=repeat_output_sha256,
+                            deterministic=(result.returncode == repeated_result.returncode
+                                           and output_sha256 == repeat_output_sha256))
+
+    metric_cases, records = run_materialized_corpus(
+        root / "materialized-visual-semantics", corpus, cli_runner, parse_markdown
+    )
+    if len(records) != len(corpus):
+        raise RuntimeError("materialized perturbation corpus did not execute every case")
+    determinism_failures = [record["case_id"] for record in records
+                            if record.get("deterministic") is False]
+    tier_metrics = {
+        tier: {
+            "pass": sum(record["status"] == "passed" for record in records if record["tier"] == tier),
+            "total": sum(record["tier"] == tier for record in records),
+            "fail": sum(record["status"] != "passed" for record in records if record["tier"] == tier),
+        }
+        for tier in ("A", "B", "C")
+    }
+    return {"relation_assertions": list(records), "tier_metrics": tier_metrics,
+            "determinism_failures": determinism_failures,
+            "metric_cases": list(metric_cases), "materialized_records": list(records)}
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -512,7 +525,7 @@ def main() -> int:
         docx_projection = exercise_format(root, cli, "docx", "word/document.xml", create_docx)
         exercise_format(root, cli, "xlsx", "xl/worksheets/sheet1.xml", create_xlsx)
         exercise_format(root, cli, "pptx", "ppt/slides/slide1.xml", create_pptx)
-        exercise_visual_semantics(root, cli)
+        visual_evidence = exercise_visual_semantics(root, cli)
         exercise_pdf_render(root, cli)
         exercise_pack_and_tamper(root, cli, docx_projection)
         inspect_gui_binary(gui)
@@ -520,21 +533,57 @@ def main() -> int:
             exercise_gui(gui)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
+    qa_evidence = build_evidence(
+        tag=f"v{args.expected_version}",
+        version=args.expected_version,
+        cases=visual_evidence["metric_cases"],
+        corpus=generate_perturbation_corpus(),
+    )
+    failed_tiers = [tier for tier, item in qa_evidence["tiers"].items() if not item["gate"]["passed"]]
+    determinism_failures = visual_evidence["determinism_failures"]
+    qa_status = "failed" if failed_tiers or determinism_failures else "passed"
     evidence = {
+        "tag": qa_evidence["tag"],
+        "version": qa_evidence["version"],
+        "schema_version": qa_evidence["schema_version"],
+        "metrics": qa_evidence["metrics"],
+        "tiers": qa_evidence["tiers"],
+        "formats": qa_evidence["formats"],
+        "execution": qa_evidence["execution"],
+        "perturbation_corpus": qa_evidence["perturbation_corpus"],
         "target_version": args.expected_version,
         "commit": os.environ.get("GITHUB_SHA", "local"),
+        "product_source_commit": os.environ.get("PRODUCT_SOURCE_COMMIT", os.environ.get("GITHUB_SHA", "local")),
+        "release_workflow_commit": os.environ.get("RELEASE_WORKFLOW_COMMIT", os.environ.get("GITHUB_SHA", "local")),
         "rid": os.environ.get("RUNNER_ARCH", "unknown"),
         "distribution_kind": distribution_kind,
         "package_checksum_sha256": package_checksum,
         "visual_semantics": {
             "fixture_families": ["docx", "xlsx", "pptx", "pdf"],
             "assertion": "structured Mermaid graph smoke plus fallback diagnostics",
-            "status": "passed",
+            "inference_modes": list(INFERENCE_MODES),
+            "relation_assertions": visual_evidence["relation_assertions"],
+            "mode_checks": visual_evidence["tier_metrics"],
+            "determinism_failures": determinism_failures,
+            "metrics": qa_evidence["metrics"],
+            "tiers": qa_evidence["tiers"],
+            "formats": qa_evidence["formats"],
+            "execution": qa_evidence["execution"],
+            "status": qa_status,
         },
-        "status": "passed",
+        "status": qa_status,
     }
     args.evidence_json.parent.mkdir(parents=True, exist_ok=True)
     args.evidence_json.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if failed_tiers or determinism_failures:
+        print(f"Visual semantics evidence: {args.evidence_json}")
+        reasons = []
+        if failed_tiers:
+            reasons.append("metric gates failed: " + ", ".join(failed_tiers))
+        if determinism_failures:
+            reasons.append("non-deterministic cases: " + ", ".join(determinism_failures))
+        raise RuntimeError("visual semantics " + "; ".join(reasons)
+                           + f"; failed evidence written to {args.evidence_json}")
     distribution_result = "package checksums/font exclusion" if package_checksum is not None else "direct-publish font exclusion"
     print(f"Release smoke test passed for v{args.expected_version} versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, structured visual-semantics smoke, F0/F1 restore, Japanese PDF rendering, {distribution_result}, pack/unpack, tamper rejection, and {gui_result}.")
     if package_checksum is not None:

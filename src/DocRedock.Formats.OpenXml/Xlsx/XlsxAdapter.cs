@@ -233,6 +233,7 @@ public sealed class XlsxAdapter
     private const int MaxExcelRows = 1_048_576;
     private const int MaxExcelColumns = 16_384;
     private const long MaxChartResolutionCells = 100_000;
+    public TimeSpan? VisualInferenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     private static readonly Regex ChartCellReference = new(
         @"^(?:(?:'(?<quoted>(?:[^']|'')+)'|(?<plain>[^!]+))!)?\$?(?<startColumn>[A-Za-z]{1,3})\$?(?<startRow>\d+)(?::\$?(?<endColumn>[A-Za-z]{1,3})\$?(?<endRow>\d+))?$",
@@ -246,9 +247,10 @@ public sealed class XlsxAdapter
         MaxCharactersFromEntities = 0
     };
 
-    public XlsxExtractionResult Extract(Stream source)
+    public XlsxExtractionResult Extract(Stream source, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        cancellationToken.ThrowIfCancellationRequested();
         var bytes = ReadAll(source);
         var package = Open(bytes);
         var shared = ReadSharedStrings(package);
@@ -267,6 +269,7 @@ public sealed class XlsxAdapter
             StringComparer.OrdinalIgnoreCase);
         foreach (var sheet in workbook.Sheets)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
             var mergedRanges = ReadMergedRanges(xml);
             var hiddenRows = ReadHiddenRows(xml);
@@ -283,7 +286,23 @@ public sealed class XlsxAdapter
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
                 .Select((cell, index) => ToNode(cell, sheet.PartUri, index))
                 .ToList();
-            if (XlsxMermaidProjection.TryCreate(worksheet, nodes.Count) is { } diagram) nodes.Add(diagram);
+            var diagrams = XlsxMermaidProjection.TryCreateAll(worksheet, nodes.Count, VisualInferenceTimeout, cancellationToken);
+            if (diagrams.Count > 0)
+            {
+                nodes.AddRange(diagrams);
+                foreach (var diagram in diagrams)
+                {
+                    if (diagram.Extensions is null || !diagram.Extensions.TryGetValue("visual_graph", out var raw)) continue;
+                    VisualGraph? visualGraph;
+                    try { visualGraph = raw.Deserialize<VisualGraph>(); }
+                    catch (JsonException) { continue; }
+                    foreach (var diagnostic in visualGraph?.Diagnostics ?? [])
+                    {
+                        var warning = diagnostic.ToWarning();
+                        if (!warnings.Contains(warning, StringComparer.Ordinal)) warnings.Add(warning);
+                    }
+                }
+            }
             else if (drawingShapes.Count > 0)
                 warnings.Add($"{sheet.Name}: {drawingShapes.Count} DrawingML shape(s) were retained but not projected as a diagram.");
             foreach (var picture in pictures)
