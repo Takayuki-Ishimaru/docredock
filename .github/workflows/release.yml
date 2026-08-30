@@ -416,16 +416,17 @@ jobs:
       - name: Write checked release evidence
         shell: bash
         run: |
+          set -euo pipefail
           commit=$(git rev-parse HEAD)
           test -f release-conversion-qa/summary.md
           cp release-conversion-qa/summary.md release-files/CONVERSION-QA-EVIDENCE.md
           cat > release-files/RELEASE-EVIDENCE.md <<EOF
           # Release evidence: $RELEASE_TAG
 
-          - [x] Product source commit: `$commit`
-          - [x] Release workflow commit: `${{ github.workflow_sha }}`
+          - [x] Product source commit: \`$commit\`
+          - [x] Release workflow commit: \`${{ github.workflow_sha }}\`
           - [x] Locked restore, Release build, unit tests, and conversion QA passed
-          - [x] Conversion-QA evidence is attached as `CONVERSION-QA-EVIDENCE.md` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
+          - [x] Conversion-QA evidence is attached as \`CONVERSION-QA-EVIDENCE.md\` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
           - [x] License allowlist check passed
           - [x] Six RID-specific self-contained packages were built
           - [x] Every archive was extracted before testing
@@ -444,6 +445,9 @@ jobs:
 
           Workflow evidence: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
+          grep -F -- "\`$commit\`" release-files/RELEASE-EVIDENCE.md
+          grep -F -- "\`${{ github.workflow_sha }}\`" release-files/RELEASE-EVIDENCE.md
+          grep -F -- '`CONVERSION-QA-EVIDENCE.md`' release-files/RELEASE-EVIDENCE.md
       - name: Generate release SBOM, provenance, and checksums
         shell: bash
         run: |
@@ -461,6 +465,7 @@ jobs:
       - name: Build bilingual release body
         shell: bash
         run: |
+          set -euo pipefail
           {
             cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
             printf '\n---\n\n'
@@ -468,6 +473,17 @@ jobs:
             printf '\n---\n\n'
             cat release-files/RELEASE-EVIDENCE.md
           } > release-body.md
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("release-body.md")
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['RELEASE_TAG']}"
+          body = path.read_text(encoding="utf-8")
+          body = body.replace("](../docs/", f"]({base}/docs/")
+          body = body.replace("](ERRATA_", f"]({base}/release-docs/ERRATA_")
+          path.write_text(body, encoding="utf-8")
+          PY
       - name: Create new GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}

@@ -9,6 +9,7 @@
 ### v0.2.0 Public Beta
 
 - [v0.2.0 リリースノート](RELEASE_NOTES_v0.2.0.md)
+- [リリース証跡の訂正](RELEASE_EVIDENCE_CORRECTION_v0.2.0.md)
 - 視覚接続の推定は安全優先（safe）を既定とし、未解決の関係は fallback と診断に残す
 - [v0.1.7 正誤表](ERRATA_v0.1.7.md)
 

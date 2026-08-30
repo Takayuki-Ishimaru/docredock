@@ -9,6 +9,7 @@ Versioned release notes and version-independent publication procedures. The user
 ### v0.2.0 Public Beta
 
 - [v0.2.0 release notes](RELEASE_NOTES_v0.2.0.en.md)
+- [Release evidence correction](RELEASE_EVIDENCE_CORRECTION_v0.2.0.md)
 - Visual inference defaults to safe mode; unresolved relations remain visible as fallback and diagnostics
 - [v0.1.7 errata](ERRATA_v0.1.7.en.md)
 
