@@ -1,0 +1,16 @@
+{
+  "assets/index.json": "5d7572aea12757f02e262b10a65d217103152bd1e6ffe835a2347c2fceb251a1",
+  "derived/chunks/default.jsonl": "23c94cabc78887f3f5f989aaa01878e172c1a3298e42599eb6c4d9e3bbc97e01",
+  "graph/index.json": "c955d1bb55f546925ea15b24a2bceb355de22d1655b2b004e6a7a2bf6224be2f",
+  "manifest.json": "f71b91979a12d85706b1296c4e212781c1c114a5611fcd3c0cb1991328f83b9a",
+  "maps/anchor-map.jsonl": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "maps/projection-map.jsonl": "fa579b593fbe54d552577736ca9a3136c7810d5e376cc9697a0d4526b3cd9181",
+  "reports/export-report.json": "94c09814c4a0a2908de6af1314bb23b79b0e53bdee8017e4b3f3fb7711a3935d",
+  "reports/export-report.md": "8fa410e19aa657d560822c73779dff7c961cf73495a28e0ac97f3ec4250b6913",
+  "reports/export-service-report.json": "e6fbe1dd33fbc8fba0b635066e080ceec2f002066a2f274e6551aa13daec43c6",
+  "reports/provider-report.json": "70238de7777fe9bddaf5d0bbccd37051f9659014ddf31b04b4552a260bb0891d",
+  "source/indexes/package-index.json": "b6e412d456811807e8cc8a6f274e51f706b9fea93937ababc8c14c58c2ad2871",
+  "source/indexes/relationship-graph.json": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+  "source/indexes/xml-slices.jsonl": "6b0b639962168220d9aafeb930851950a0f6f942c6462a6a9d0ef18f1b1c823d",
+  "source/original.docx": "0d2384d39556b99f7c8321cb390a94aaf842204b04fa558628faddc07a9c8051"
+}

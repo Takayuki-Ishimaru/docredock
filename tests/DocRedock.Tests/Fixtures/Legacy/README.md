@@ -8,3 +8,5 @@ DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock export legacy.docx \
 ```
 
 The baseline CLI identified itself as `DocRedock 0.1.7-public-beta+8181785…`. The source package is retained inside the generated sidecar as `source/original.docx`; checksums and the generated graph are unmodified release-output bytes. Tests must read these files in place and must not regenerate them with the current implementation.
+
+This fixture is intentionally tracked despite the repository-wide `.drmd` exclusion. Its source is a 635-byte synthetic DOCX containing only the text `v0.1.7 compatibility fixture`; it contains no images, fonts, external links, personal data, or customer data. The source SHA-256 is `0d2384d39556b99f7c8321cb390a94aaf842204b04fa558628faddc07a9c8051`, and member hashes are recorded in `v0.1.7-docx.drmd/checksums.json`. The fixture is distributed under the repository's MIT license.

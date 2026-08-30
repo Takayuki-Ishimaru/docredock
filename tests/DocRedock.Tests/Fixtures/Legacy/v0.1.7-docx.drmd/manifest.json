@@ -1,0 +1,87 @@
+{
+  "schema_version": "1.1",
+  "document_id": "doc_0d2384d39556b99f",
+  "generator": {
+    "name": "docredock",
+    "version": "0.2.0"
+  },
+  "source": {
+    "file_name": "legacy.docx",
+    "format": "docx",
+    "sha256": "0d2384d39556b99f7c8321cb390a94aaf842204b04fa558628faddc07a9c8051",
+    "source_revision_id": "rev_0d2384d39556b99f",
+    "size": 635,
+    "macro_enabled": false,
+    "encrypted": false,
+    "signed": false
+  },
+  "providers": {
+    "format_adapter": {
+      "id": "docredock.docx.openxml",
+      "version": "0.2.0",
+      "interface_version": 1,
+      "engine_version": null,
+      "sha256": "built-in"
+    },
+    "markdown": {
+      "id": "docredock.markdown.default",
+      "version": "0.2.0",
+      "interface_version": 1,
+      "engine_version": null,
+      "sha256": "built-in"
+    },
+    "ocr": {
+      "id": "docredock.ocr.none",
+      "version": "0.2.0",
+      "interface_version": 1,
+      "engine_version": null,
+      "sha256": "built-in"
+    }
+  },
+  "projection": {
+    "file_name": "legacy.md",
+    "profile": "roundtrip",
+    "projection_id": "proj_62991c062c3f8991",
+    "content_policy": "visible",
+    "encoding": "utf-8",
+    "line_endings": "lf",
+    "partitioned": false,
+    "contributor_map_schema": "1.0"
+  },
+  "ocr": {
+    "enabled": false,
+    "languages": [
+      "jpn",
+      "eng"
+    ],
+    "derived_schema": "1.1",
+    "status_summary": {
+      "completed": 0,
+      "not_required": 0,
+      "skipped_by_policy": 0,
+      "skipped_by_budget": 0,
+      "unavailable": 0,
+      "failed": 0
+    }
+  },
+  "preservation": {
+    "f0_byte_restore": true,
+    "f1_target": "slice-preserving",
+    "raw_zip_entry_copy_supported": false,
+    "original_slice_indexed": true
+  },
+  "capabilities": {
+    "byte_restore": true,
+    "editable_restore": true,
+    "render": true,
+    "graph_chunks": true
+  },
+  "integrity": {
+    "baseline_graph_sha256": "c955d1bb55f546925ea15b24a2bceb355de22d1655b2b004e6a7a2bf6224be2f",
+    "projection_map_sha256": "fa579b593fbe54d552577736ca9a3136c7810d5e376cc9697a0d4526b3cd9181",
+    "raw_slice_index_sha256": "6b0b639962168220d9aafeb930851950a0f6f942c6462a6a9d0ef18f1b1c823d",
+    "asset_index_sha256": "5d7572aea12757f02e262b10a65d217103152bd1e6ffe835a2347c2fceb251a1",
+    "markdown_baseline_sha256": "62991c062c3f89911fd8e23edd2f21db364bb5dd83f4a7945a0a80fea864def1"
+  },
+  "license_profile": "enterprise-permissive"
+}

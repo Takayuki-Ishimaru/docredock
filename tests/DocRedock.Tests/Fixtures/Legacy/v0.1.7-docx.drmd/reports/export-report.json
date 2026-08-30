@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "operation": "export",
+  "success": true,
+  "fidelity_level": "F0",
+  "package_preservation_level": "byte-identical",
+  "summary": "Round-trip workspace baseline created",
+  "warnings": [],
+  "diagnostics": []
+}
