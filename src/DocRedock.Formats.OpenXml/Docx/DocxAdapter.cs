@@ -8,6 +8,7 @@ using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.OpenXml.Common;
 using DocRedock.Providers.Abstractions.Providers;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Formats.OpenXml.Docx;
 
@@ -17,6 +18,9 @@ namespace DocRedock.Formats.OpenXml.Docx;
 /// </summary>
 public sealed class DocxAdapter : IFormatProbe
 {
+    /// <summary>Optional wall-clock budget for the DOCX visual inference pass.</summary>
+    public TimeSpan? VisualInferenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
     private static readonly XNamespace W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
@@ -30,6 +34,15 @@ public sealed class DocxAdapter : IFormatProbe
     {
         W.NamespaceName, A.NamespaceName, WP.NamespaceName, V.NamespaceName, W14.NamespaceName, WPS.NamespaceName, WPG.NamespaceName,
     };
+
+    // See BuildDocxVisualGraph's orphan-shape label demotion pass: a shape absent from the
+    // engine's Candidates (never a plausible connector endpoint) is treated as a possible
+    // mislabeled edge-label shape when it sits within this many multiples of the node
+    // minor-axis median of a resolved connector's segment. 1.0x is calibrated to accept the
+    // contract regression fixture's YES label (~0.55x away) while rejecting R0_FIX_04's
+    // ambiguous TARGET_A/TARGET_B rival candidates (~1.5x+ away) -- though those are already
+    // excluded up front because the engine lists them as real Candidates.
+    private const double OrphanShapeLabelRadiusFactor = 1.0;
 
     public ProviderDescriptor Descriptor { get; } = new(
         "docredock.docx.openxml", new Version(0, 2, 0), 1,
@@ -119,6 +132,11 @@ public sealed class DocxAdapter : IFormatProbe
                 AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal);
             }
         }
+        // Word stores floating nodes and connectors in separate paragraphs surprisingly often.
+        // Build one document-level visual canvas so a flow is reconstructed across paragraph
+        // boundaries; unresolved primitives remain represented by the visual fallback/diagnostic
+        // data carried by the derived Diagram node.
+        AddDocumentVisualGraph(bodyElements, nodes, ref ordinal, VisualInferenceTimeout, cancellationToken);
         if (options.IncludeFurniture)
             ordinal = await AddRelatedTextPartsAsync(archive, relationships, "header", NodeKind.Header, ContentLayer.Furniture, nodes, ordinal, cancellationToken).ConfigureAwait(false);
         if (options.IncludeFurniture)
@@ -227,7 +245,7 @@ public sealed class DocxAdapter : IFormatProbe
     private static void AddParagraph(XElement paragraph, string partUri, RawSliceRef? slice, int order,
         ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, IDictionary<string, DocxRunCharacterMap> runMaps,
         IReadOnlyDictionary<string, string> relationships, ContentLayer layer,
-        NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters)
+        NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters, bool includeVisualGraph = true)
     {
         var paraId = (string?)paragraph.Attribute(W14 + "paraId");
         var anchor = new SourceAnchor("docx", partUri,
@@ -337,41 +355,22 @@ public sealed class DocxAdapter : IFormatProbe
         {
             // The ancestor depth is not an identity: sibling textboxes have the same depth.
             // Use the source-order index so repeated visual objects receive stable unique IDs.
-            var boxAnchor = anchor with { Locators = [new("textbox", textboxIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))] };
+            var shapeId = TextBoxShapeId(textBox);
+            var locators = new List<AnchorLocator>
+            {
+                new("textbox", textboxIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            };
+            if (shapeId is not null) locators.Insert(0, new AnchorLocator("shape_id", shapeId));
+            var boxAnchor = anchor with { Locators = locators };
             var boxId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, boxAnchor);
-            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(ParagraphText(textBox)), boxAnchor,
-                Editability: NodeEditability.EditableWithConstraints, Provenance: [new(EvidenceKind.Native)]));
-        }
-        if (BuildDocxVisualGraph(paragraph, anchor, id) is { } visualGraph)
-        {
-            // Mark source textboxes only when the connector topology is valid; unresolved
-            // visual fragments remain ordinary projections and are not hidden by serializers.
-            if (visualGraph.HasTopology && nodes is List<DocumentNode> nodeList)
-            {
-                for (var nodeIndex = 0; nodeIndex < nodeList.Count; nodeIndex++)
+            var boxExtensions = shapeId is null
+                ? null
+                : new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                 {
-                    var source = nodeList[nodeIndex];
-                    if (source.ParentId != id || source.Kind != NodeKind.TextBox) continue;
-                    var textboxText = source.Content is TextNodeContent textContent ? textContent.Text : string.Empty;
-                    if (!visualGraph.Edges.Any(edge => string.Equals(edge.Label?.Trim(), textboxText.Trim(), StringComparison.Ordinal))) continue;
-                    var memberExtensions = source.Extensions is null
-                        ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
-                        : new Dictionary<string, JsonElement>(source.Extensions, StringComparer.Ordinal);
-                    memberExtensions["visual_graph_member"] = JsonSerializer.SerializeToElement(true);
-                    nodeList[nodeIndex] = source with { Extensions = memberExtensions };
-                }
-            }
-            var diagramAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("visual_graph", "0")]).ToArray() };
-            var diagramId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, diagramAnchor);
-            var diagramExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(visualGraph) };
-            if (visualGraph.HasTopology)
-            {
-                diagramExtensions["visual_fallback_suppressed"] = JsonSerializer.SerializeToElement(true);
-                // The derived Diagram node is the stable DocumentNode anchor for connector
-                // sources, which have no standalone WordprocessingML node projection.
-            }
-            nodes.Add(new(diagramId, NodeKind.Diagram, id, order, ContentLayer.Derived, new TextNodeContent("DOCX visual graph"), diagramAnchor,
-                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: diagramExtensions));
+                    ["shape_id"] = JsonSerializer.SerializeToElement(shapeId),
+                };
+            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(TextBoxText(textBox)), boxAnchor,
+                Editability: NodeEditability.EditableWithConstraints, Provenance: [new(EvidenceKind.Native)], Extensions: boxExtensions));
         }
         // D18: an explicit page break (w:br type="page") gets its own PageBreak marker node so
         // readable can render a chapter separator (---) instead. ParagraphText/ExtractRichTextRuns/
@@ -422,26 +421,184 @@ public sealed class DocxAdapter : IFormatProbe
         }
     }
 
-    private static VisualGraph? BuildDocxVisualGraph(XElement paragraph, SourceAnchor anchor, string sourceNodeId)
+    private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, ICollection<DocumentNode> nodes, ref int ordinal, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+    {
+        var visualRoot = new XElement(W + "p", bodyElements.Select(element => new XElement(element)));
+        var anchor = new SourceAnchor("docx", "/word/document.xml", [new AnchorLocator("visual_graph", "document")], ordinal);
+        if (BuildDocxVisualGraph(visualRoot, anchor, "doc_document", inferenceTimeout, cancellationToken) is not { } visualGraph) return;
+
+        if (visualGraph.HasTopology && nodes is List<DocumentNode> nodeList)
+        {
+            // Body suppression is keyed by the actual source shape IDs consumed by the
+            // visual graph. Text is deliberately not used: a diagram label may be repeated
+            // by an unrelated textbox elsewhere in the document.
+            var labelShapeIds = (visualGraph.SourceItems ?? [])
+                .Where(item => item.Kind == VisualSourceItemKind.TextLabel && item.Disposition == VisualDisposition.ProjectedNode)
+                .SelectMany(item => item.SourceAnchor?.Locators ?? [])
+                .Where(locator => locator.Kind == "shape_id" && !string.IsNullOrWhiteSpace(locator.Value))
+                .Select(locator => locator.Value)
+                .ToHashSet(StringComparer.Ordinal);
+            var memberShapeIds = (visualGraph.SourceItems ?? [])
+                .Where(item => item.Kind != VisualSourceItemKind.TextLabel || item.Reason == "attached as connector label")
+                .SelectMany(item => item.SourceAnchor?.Locators ?? [])
+                .Where(locator => locator.Kind == "shape_id" && !string.IsNullOrWhiteSpace(locator.Value))
+                .Select(locator => locator.Value)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var visualNode in visualGraph.Nodes)
+            {
+                foreach (var locator in visualNode.SourceAnchor?.Locators ?? [])
+                    if (locator.Kind == "shape_id" && !string.IsNullOrWhiteSpace(locator.Value) && !labelShapeIds.Contains(locator.Value)) memberShapeIds.Add(locator.Value);
+            }
+            for (var i = 0; i < nodeList.Count; i++)
+            {
+                var source = nodeList[i];
+                if (source.Kind != NodeKind.TextBox || source.Extensions is null ||
+                    !source.Extensions.TryGetValue("shape_id", out var shapeId) || shapeId.ValueKind != JsonValueKind.String ||
+                    !memberShapeIds.Contains(shapeId.GetString()!)) continue;
+                var extensions = new Dictionary<string, JsonElement>(source.Extensions, StringComparer.Ordinal)
+                {
+                    ["visual_graph_member"] = JsonSerializer.SerializeToElement(true),
+                };
+                nodeList[i] = source with { Extensions = extensions };
+            }
+        }
+
+        var componentIndex = 0;
+        foreach (var component in SplitVisualGraphs(visualGraph))
+        {
+            var diagramAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("visual_graph", componentIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))]).ToArray() };
+            var componentShapeIds = component.Nodes
+                .SelectMany(node => node.SourceAnchor?.Locators ?? [])
+                .Where(locator => locator.Kind == "shape_id" && !string.IsNullOrWhiteSpace(locator.Value))
+                .Select(locator => locator.Value)
+                .Concat((component.SourceItems ?? [])
+                    .Where(item => item.Kind != VisualSourceItemKind.TextLabel || item.Reason == "attached as connector label")
+                    .SelectMany(item => item.SourceAnchor?.Locators ?? [])
+                    .Where(locator => locator.Kind == "shape_id" && !string.IsNullOrWhiteSpace(locator.Value))
+                    .Select(locator => locator.Value))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .ToArray();
+            var diagramExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(component),
+                ["visual_graph_member_shape_ids"] = JsonSerializer.SerializeToElement(componentShapeIds),
+            };
+            if (component.HasTopology)
+                diagramExtensions["visual_fallback_suppressed"] = JsonSerializer.SerializeToElement(true);
+            nodes.Add(new DocumentNode(
+                NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, diagramAnchor), NodeKind.Diagram,
+                null, ordinal++, ContentLayer.Derived, new TextNodeContent("DOCX visual graph"), diagramAnchor,
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: diagramExtensions));
+            componentIndex++;
+        }
+    }
+
+    private static IEnumerable<VisualGraph> SplitVisualGraphs(VisualGraph graph)
+    {
+        var nodes = (graph.Nodes ?? []).Where(node => node is not null).OrderBy(node => node.Id, StringComparer.Ordinal).ToArray();
+        var edges = (graph.Edges ?? []).Where(edge => edge is not null).ToArray();
+        var remaining = nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        var groups = new List<HashSet<string>>();
+        while (remaining.Count > 0)
+        {
+            var seed = remaining.OrderBy(id => id, StringComparer.Ordinal).First();
+            var group = new HashSet<string>(StringComparer.Ordinal) { seed };
+            var changed = true;
+            while (changed)
+            {
+                changed = false;
+                foreach (var edge in edges)
+                    if (edge.SourceId is not null && edge.TargetId is not null &&
+                        (group.Contains(edge.SourceId) || group.Contains(edge.TargetId)) &&
+                        (group.Add(edge.SourceId) | group.Add(edge.TargetId))) changed = true;
+            }
+            groups.Add(group);
+            remaining.ExceptWith(group);
+        }
+        var connectedGroups = groups.Count(ids => edges.Any(edge => edge.SourceId is not null && edge.TargetId is not null && ids.Contains(edge.SourceId) && ids.Contains(edge.TargetId)));
+        // The inference engine's cluster IDs are authoritative. Do not merge two independently
+        // solved diagrams merely because an ambiguous projection happened to connect their nodes.
+        var evidenceGroups = edges.Where(edge => !string.IsNullOrWhiteSpace(edge.Evidence?.ClusterId))
+            .GroupBy(edge => edge.Evidence!.ClusterId!, StringComparer.Ordinal)
+            .Where(group => group.Any(edge => edge.SourceId is not null && edge.TargetId is not null))
+            .Select(group => group.SelectMany(edge => new[] { edge.SourceId!, edge.TargetId! }).ToHashSet(StringComparer.Ordinal))
+            .ToArray();
+        if (evidenceGroups.Length >= 2)
+        {
+            var clusteredIds = evidenceGroups.SelectMany(group => group).ToHashSet(StringComparer.Ordinal);
+            groups = evidenceGroups.ToList();
+            groups.AddRange(nodes.Where(node => !clusteredIds.Contains(node.Id)).Select(node => new HashSet<string>(StringComparer.Ordinal) { node.Id }));
+            connectedGroups = evidenceGroups.Length;
+        }
+        if (connectedGroups < 2) return [graph];
+        return groups.Select((ids, index) =>
+        {
+            var id = graph.Id + "_cluster_" + index.ToString("D3", System.Globalization.CultureInfo.InvariantCulture);
+            var componentNodes = nodes.Where(node => ids.Contains(node.Id)).ToArray();
+            var componentEdges = edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null && ids.Contains(edge.SourceId) && ids.Contains(edge.TargetId)).ToArray();
+            var componentPaths = (graph.Paths ?? [])
+                .Where(path => path.SourceNodeId is null || ids.Contains(path.SourceNodeId) ||
+                    componentEdges.Any(edge => edge.Path?.SequenceEqual(path.Points ?? []) == true))
+                .ToArray();
+            var componentNodeIds = componentNodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+            var componentEdgeIds = componentEdges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+            var componentPathIds = componentPaths.Select(path => path.Id).ToHashSet(StringComparer.Ordinal);
+            var componentAnchors = componentNodes.SelectMany(node => node.SourceAnchor?.Locators ?? [])
+                .Concat(componentEdges.SelectMany(edge => edge.SourceAnchor?.Locators ?? []))
+                .Concat(componentPaths.SelectMany(path => path.SourceAnchor?.Locators ?? []))
+                // The graph-level visual_graph locator is shared by every component and
+                // must not pull unrelated source items into this component's ledger.
+                .Where(locator => locator.Kind != "visual_graph")
+                .Select(locator => locator.Kind + "=" + locator.Value)
+                .ToHashSet(StringComparer.Ordinal);
+            var componentDiagnostics = (graph.Diagnostics ?? [])
+                .Where(diagnostic => diagnostic.SourceObjectId is null ||
+                    componentEdges.Any(edge => edge.SourceAnchor?.Locators.Any(locator => locator.Value == diagnostic.SourceObjectId) == true))
+                .ToArray();
+            var componentDiagnosticCodes = componentDiagnostics.Select(diagnostic => diagnostic.Code).ToHashSet(StringComparer.Ordinal);
+            var componentItems = (graph.SourceItems ?? [])
+                .Where(item =>
+                    item.ProjectedNodeId is not null && componentNodeIds.Contains(item.ProjectedNodeId) ||
+                    item.ProjectedEdgeId is not null && componentEdgeIds.Contains(item.ProjectedEdgeId) ||
+                    item.FallbackPathId is not null && componentPathIds.Contains(item.FallbackPathId) ||
+                    item.Disposition == VisualDisposition.DiagnosticOnly && item.DiagnosticCode is not null && componentDiagnosticCodes.Contains(item.DiagnosticCode) ||
+                    item.SourceAnchor?.Locators.Any(locator => componentAnchors.Contains(locator.Kind + "=" + locator.Value)) == true)
+                .ToArray();
+            return graph with { Id = id, Nodes = componentNodes, Edges = componentEdges,
+                Paths = componentPaths, Diagnostics = componentDiagnostics, SourceItems = componentItems };
+        }).ToArray();
+    }
+
+    private static VisualGraph? BuildDocxVisualGraph(XElement paragraph, SourceAnchor anchor, string sourceNodeId, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
         static bool IsVmlConnector(XElement item)
         {
-            if (item.Name != V + "shape") return false;
+            if (item.Name != V + "shape" && item.Name != V + "line") return false;
             var type = ((string?)item.Attribute("type") ?? string.Empty).ToLowerInvariant();
-            return type.Contains("line") || item.Attribute("from") is not null || item.Attribute("to") is not null;
+            return item.Name == V + "line" || type.Contains("line") || item.Attribute("from") is not null || item.Attribute("to") is not null;
         }
 
         var shapeElements = paragraph.Descendants().Where(item =>
-            item.Name == A + "sp" || item.Name == WPS + "wsp" ||
-            (item.Name == V + "shape" && !IsVmlConnector(item))).ToArray();
+            item.Name == A + "sp" ||
+            (item.Name == WPS + "wsp" && !string.Equals(
+                (string?)item.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst"), "line", StringComparison.OrdinalIgnoreCase)) ||
+            (item.Name == V + "shape" && !IsVmlConnector(item)) ||
+            (item.Name == V + "rect" || item.Name == V + "roundrect" || item.Name == V + "oval")).ToArray();
         var connectorElements = paragraph.Descendants(A + "cxnSp")
             .Select(item => (Element: item, Vml: false))
             .Concat(paragraph.Descendants(WPS + "wsp")
                 .Where(item => string.Equals((string?)item.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst"), "line", StringComparison.OrdinalIgnoreCase))
                 .Select(item => (Element: item, Vml: false)))
             .Concat(paragraph.Descendants(V + "shape").Where(IsVmlConnector).Select(item => (Element: item, Vml: true)))
+            .Concat(paragraph.Descendants(V + "line").Select(item => (Element: item, Vml: true)))
             .ToArray();
         if (shapeElements.Length == 0 && connectorElements.Length == 0) return null;
+        // Textbox content is already projected as ordinary DocumentNodes. Without any
+        // connector, a textbox-only canvas adds no visual semantics and would duplicate
+        // that same text in the visual-fallback section.
+        if (connectorElements.Length == 0 && shapeElements.All(item => item.Descendants(W + "txbxContent").Any()))
+            return null;
 
         // Build the semantic node set once per unique source shape ID. Duplicate IDs are
         // preserved in the source ledger as suppressed duplicates rather than becoming
@@ -453,9 +610,10 @@ public sealed class DocxAdapter : IFormatProbe
             var nodeAnchor = anchor with { Locators = [new AnchorLocator("shape_id", shapeId)] };
             var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
             var geometry = ReadVisualGeometry(shape);
-            var label = ParagraphText(shape).Trim();
+            var label = TextBoxText(shape).Trim();
             if (label.Length == 0) label = "Shape " + shapeId;
-            return (shapeId, Geometry: geometry,
+            return (shapeId, PrimitiveId: "docx-primitive-" + index.ToString("D6", System.Globalization.CultureInfo.InvariantCulture), Geometry: geometry,
+                IsTextBox: shape.Name == A + "sp" && shape.Descendants(W + "txbxContent").Any(),
                 Node: new VisualNode(id, label, VisualNodeKind.Generic, sourceNodeId,
                     Geometry: geometry, SourceAnchor: nodeAnchor,
                     Group: (string?)shape.Ancestors(A + "grpSp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id") ??
@@ -479,99 +637,342 @@ public sealed class DocxAdapter : IFormatProbe
             }
             shapeSourceItems[record.shapeId] = sourceItemId;
             nodes.Add(record.Node);
-            sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.Shape,
+            sourceItems.Add(new VisualSourceItem(sourceItemId,
+                record.IsTextBox ? VisualSourceItemKind.TextLabel : VisualSourceItemKind.Shape,
                 VisualDisposition.ProjectedNode, ProjectedNodeId: record.Node.Id, SourceAnchor: record.Node.SourceAnchor));
         }
 
         var edges = new List<VisualEdge>();
         var paths = new List<VisualPath>();
         var diagnostics = new List<VisualDiagnostic>();
-        var usedLabels = new HashSet<string>(StringComparer.Ordinal);
-
-        static double Distance(VisualPathPoint point, Geometry geometry)
+        var coordinateSpaces = nodes.Where(node => node.Geometry is not null).Select(node => node.Geometry!.CoordinateSpace)
+            .Distinct(StringComparer.Ordinal).ToArray();
+        var hasIncompatibleCoordinateSpaces = coordinateSpaces.Length > 1;
+        if (hasIncompatibleCoordinateSpaces)
+            diagnostics.Add(new VisualDiagnostic("VisualCoordinateSpaceIncompatible",
+                "DOCX anchored shapes use incompatible relative coordinate frames and were not merged into a semantic relation.",
+                Format: "docx", PartUri: anchor.PartUri, PartitionId: sourceNodeId));
+        var labelRecords = shapeRecords
+            .Where(item => item.IsTextBox && item.Geometry is not null && !string.IsNullOrWhiteSpace(item.Node.Label) && shapeSourceItems.ContainsKey(item.shapeId))
+            .ToArray();
+        var labelChoices = new List<EdgeLabelCandidate>();
+        foreach (var (labelRecord, labelIndex) in labelRecords.Select((item, index) => (item, index)))
         {
-            var cx = geometry.X + geometry.Width / 2;
-            var cy = geometry.Y + geometry.Height / 2;
-            return Math.Sqrt(Math.Pow(point.X - cx, 2) + Math.Pow(point.Y - cy, 2));
+            // Edge-label assignment uses the connector segment, not matching text. This keeps
+            // repeated labels independent and gives the shared one-to-one assigner the same
+            // deterministic features for every connector.
+            foreach (var (connector, connectorIndex) in connectorElements.Select((item, index) => (item, index)))
+            {
+                var connectorGeometry = connector.Vml && connector.Element.Name == V + "line"
+                    ? ReadVmlLineGeometry(connector.Element)
+                    : ReadVisualGeometry(connector.Element);
+                if (connectorGeometry is null) continue;
+                var first = new VisualPoint(connectorGeometry.X, connectorGeometry.Y);
+                var last = new VisualPoint(connectorGeometry.X + connectorGeometry.Width, connectorGeometry.Y + connectorGeometry.Height);
+                var labelCenter = new VisualPoint(labelRecord.Geometry!.X + labelRecord.Geometry.Width / 2,
+                    labelRecord.Geometry.Y + labelRecord.Geometry.Height / 2);
+                var distance = GeometryMath.DistanceToSegment(labelCenter, first, last, out _);
+                var segmentScale = Math.Max(Math.Sqrt(connectorGeometry.Width * connectorGeometry.Width + connectorGeometry.Height * connectorGeometry.Height), 1);
+                var score = 1d - distance / Math.Max(segmentScale * 0.35, 1);
+                if (score > 0)
+                    labelChoices.Add(new EdgeLabelCandidate("label:" + labelRecord.shapeId, "edge:" + connectorIndex, score));
+            }
         }
-        static VisualPathPoint? PointAt(Geometry? geometry, bool end)
+        var labelAssignments = EdgeLabelAssigner.Assign(labelChoices);
+        var assignedLabelByEdge = labelAssignments.ToDictionary(item => item.Value, item => item.Key, StringComparer.Ordinal);
+        var assignedLabelShapeIds = labelAssignments.Keys
+            .Select(item => item["label:".Length..])
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var labelRecord in labelRecords.Where(item => !assignedLabelShapeIds.Contains(item.shapeId)))
+        {
+            if (!shapeSourceItems.TryGetValue(labelRecord.shapeId, out var labelSourceItemId)) continue;
+            nodes.RemoveAll(node => node.Id == lookup[labelRecord.shapeId].Node.Id);
+            sourceItems.RemoveAll(item => item.Id == labelSourceItemId);
+            sourceItems.Add(new VisualSourceItem(labelSourceItemId, VisualSourceItemKind.TextLabel,
+                VisualDisposition.IgnoredDecorative,
+                Reason: labelChoices.Any(item => item.LabelId == "label:" + labelRecord.shapeId)
+                    ? "unresolved edge label; retained as document text" : "independent textbox retained as document text",
+                SourceAnchor: labelRecord.Node.SourceAnchor));
+        }
+        foreach (var labelId in labelChoices.Select(item => item.LabelId).Distinct(StringComparer.Ordinal))
+        {
+            if (labelAssignments.ContainsKey(labelId)) continue;
+            var shapeId = labelId["label:".Length..];
+            diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved",
+                "DOCX textbox was near a connector but could not be assigned uniquely as its edge label.", sourceNodeId,
+                Fallback: "textbox retained as document text and visual fallback", Remedy: "place the textbox on one connector segment",
+                Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: shapeId,
+                SourceObjectType: "textbox", Confidence: 0));
+        }
+
+        static VisualPathPoint? PointAt(XElement element, Geometry? geometry, bool end)
         {
             if (geometry is null || (geometry.Width == 0 && geometry.Height == 0)) return null;
-            return new VisualPathPoint(end ? geometry.X + geometry.Width : geometry.X,
+            var point = new VisualPoint(end ? geometry.X + geometry.Width : geometry.X,
                 end ? geometry.Y + geometry.Height : geometry.Y);
-        }
-        static string? Infer(VisualPathPoint? point, IEnumerable<(string shapeId, Geometry? Geometry)> candidates,
-            out bool ambiguous)
-        {
-            ambiguous = false;
-            if (point is null) return null;
-            var ranked = candidates.Where(item => item.Geometry is not null)
-                .Select(item => (item.shapeId, Distance(point, item.Geometry!)))
-                .OrderBy(item => item.Item2).ToArray();
-            if (ranked.Length == 0) return null;
-            if (ranked.Length > 1 && ranked[1].Item2 <= ranked[0].Item2 * 1.2 + 0.001)
+            var xfrm = element.Descendants(A + "xfrm").FirstOrDefault();
+            var flipH = string.Equals((string?)xfrm?.Attribute("flipH"), "1", StringComparison.Ordinal) || string.Equals((string?)xfrm?.Attribute("flipH"), "true", StringComparison.OrdinalIgnoreCase);
+            var flipV = string.Equals((string?)xfrm?.Attribute("flipV"), "1", StringComparison.Ordinal) || string.Equals((string?)xfrm?.Attribute("flipV"), "true", StringComparison.OrdinalIgnoreCase);
+            if (flipH) point = new VisualPoint(geometry.X + geometry.Width - (point.X - geometry.X), point.Y);
+            if (flipV) point = new VisualPoint(point.X, geometry.Y + geometry.Height - (point.Y - geometry.Y));
+            if (double.TryParse((string?)xfrm?.Attribute("rot"), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rotation) && Math.Abs(rotation) > 1e-9)
             {
-                ambiguous = true;
-                return null;
+                var degrees = rotation / 60000d;
+                var radians = degrees * Math.PI / 180d;
+                var center = new VisualPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2);
+                var dx = point.X - center.X;
+                var dy = point.Y - center.Y;
+                point = new VisualPoint(center.X + dx * Math.Cos(radians) - dy * Math.Sin(radians),
+                    center.Y + dx * Math.Sin(radians) + dy * Math.Cos(radians));
             }
-            return ranked[0].shapeId;
+            return new VisualPathPoint(point.X, point.Y);
+        }
+        // Build one shared inference document for the whole visual region. Projection below only
+        // selects its connector result; it must not re-cluster/re-infer per connector.
+        var sharedCanvasId = "docx:" + sourceNodeId;
+        // Preserve every source shape as a distinct inference primitive even when malformed
+        // input repeats cNvPr IDs. The shared shape_id alias lets the engine reject collisions;
+        // semantic projection still deduplicates repeated source IDs through `lookup` above.
+        var sharedNodeRecords = shapeRecords.Where(item => item.Geometry is not null && !item.IsTextBox).ToArray();
+        var sharedNodeShapeIds = sharedNodeRecords.ToDictionary(item => item.PrimitiveId, item => item.shapeId, StringComparer.Ordinal);
+        var sharedNodes = sharedNodeRecords
+            .Select(item => (VisualPrimitive)new VisualNodePrimitive(item.PrimitiveId, sharedCanvasId, item.Node.SourceAnchor ?? anchor,
+                new VisualRect(item.Geometry!.X, item.Geometry.Y, item.Geometry.Width, item.Geometry.Height), Text: item.Node.Label,
+                GroupId: item.Node.Group, Aliases: [new VisualIdentityAlias("shape_id", item.shapeId)]))
+            .ToArray();
+        var sharedConnectors = connectorElements.Select((item, index) =>
+        {
+            var literal = item.Vml && item.Element.Name == V + "line";
+            var geometry = literal ? ReadVmlLineGeometry(item.Element) : ReadVisualGeometry(item.Element);
+            var points = geometry is null
+                ? Array.Empty<VisualPoint>()
+                : new[]
+                {
+                    PointAt(item.Element, geometry, false) is { } startPoint
+                        ? new VisualPoint(startPoint.X, startPoint.Y)
+                        : new VisualPoint(geometry.X, geometry.Y),
+                    PointAt(item.Element, geometry, true) is { } endPoint
+                        ? new VisualPoint(endPoint.X, endPoint.Y)
+                        : new VisualPoint(geometry.X + geometry.Width, geometry.Y + geometry.Height),
+                };
+            static string? SharedAlias(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimStart('#');
+            var from = literal ? null : SharedAlias((string?)item.Element.Attribute("from") ?? (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "stCxn")?.Attribute("id"));
+            var to = literal ? null : SharedAlias((string?)item.Element.Attribute("to") ?? (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "endCxn")?.Attribute("id"));
+            var id = item.Vml ? (string?)item.Element.Attribute("id") : (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "cNvPr")?.Attribute("id");
+            id ??= index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var drawingLine = item.Element.Descendants(A + "ln").FirstOrDefault();
+            var startArrowhead = item.Vml && item.Element.Descendants(V + "stroke").Any(stroke => !string.IsNullOrWhiteSpace((string?)stroke.Attribute("startarrow"))) ||
+                drawingLine?.Element(A + "headEnd") is not null
+                ? new ArrowheadEvidence(true, Kind: item.Vml ? "vml-start" : "drawingml-head", Confidence: 1) : null;
+            var endArrowhead = item.Vml && item.Element.Descendants(V + "stroke").Any(stroke => !string.IsNullOrWhiteSpace((string?)stroke.Attribute("endarrow"))) ||
+                drawingLine?.Element(A + "tailEnd") is not null
+                ? new ArrowheadEvidence(true, Kind: item.Vml ? "vml-end" : "drawingml-tail", Confidence: 1) : null;
+            return (VisualPrimitive)new VisualConnectorPrimitive(id, sharedCanvasId, anchor,
+                new VisualConnectorPath(points, StartArrowhead: startArrowhead, EndArrowhead: endArrowhead), from, to);
+        }).ToArray();
+        var sharedTextLabels = labelRecords.Select((item, index) =>
+            (VisualPrimitive)new VisualTextPrimitive(item.PrimitiveId, sharedCanvasId, item.Node.SourceAnchor ?? anchor,
+                item.Geometry is null ? null : new VisualRect(item.Geometry.X, item.Geometry.Y, item.Geometry.Width, item.Geometry.Height),
+                item.Node.Label, GroupId: item.Node.Group)).ToArray();
+        var sharedPrimitives = sharedNodes.Concat(sharedConnectors).Concat(sharedTextLabels).ToArray();
+        var sharedBounds = sharedNodes.Select(node => node.Bounds).Where(item => item is not null).Cast<VisualRect>().ToArray();
+        var sharedWidth = Math.Max(1, sharedBounds.Select(item => item.Right).DefaultIfEmpty(1).Max());
+        var sharedHeight = Math.Max(1, sharedBounds.Select(item => item.Bottom).DefaultIfEmpty(1).Max());
+        var sharedDocument = new VisualPrimitiveDocument("docx:" + sourceNodeId, DocumentFormatKind.Docx,
+            [new VisualCanvas(sharedCanvasId, anchor.PartUri, "part-0001", sharedWidth, sharedHeight, "ooxml", anchor)], sharedPrimitives);
+        var sharedClusterer = new DiagramClusterer();
+        var sharedClusters = sharedClusterer.Cluster(sharedDocument);
+        SoftConnectionResult sharedInference;
+        try
+        {
+            using var inferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            if (inferenceTimeout is { } timeout)
+            {
+                if (timeout <= TimeSpan.Zero) inferenceCts.Cancel();
+                else inferenceCts.CancelAfter(timeout);
+            }
+            sharedInference = new SoftConnectionEngine().Infer(sharedDocument, sharedClusters,
+                new SoftConnectionOptions(VisualInferenceContext.Current), inferenceCts.Token);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Do not project a partially solved graph. Keep every connector as fallback
+            // geometry and expose one stable warning for callers/QA.
+            diagnostics.Add(new VisualDiagnostic("VisualInferenceTimeout",
+                "DOCX visual inference exceeded its configured time budget and returned no partial topology.", sourceNodeId,
+                Fallback: "all connector geometry retained as visual fallback", Remedy: "increase VisualInferenceTimeout or simplify the diagram",
+                Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectType: "inference"));
+            sharedInference = new SoftConnectionResult([], [], [], Diagnostics: [new VisualExtractionDiagnostic("VisualInferenceTimeout", "visual inference timed out")]);
+        }
+
+        static bool SegmentIntersectsInterior(VisualPoint first, VisualPoint last, Geometry rectangle)
+        {
+            var left = rectangle.X + 1e-6;
+            var right = rectangle.X + rectangle.Width - 1e-6;
+            var top = rectangle.Y + 1e-6;
+            var bottom = rectangle.Y + rectangle.Height - 1e-6;
+            var dx = last.X - first.X;
+            var dy = last.Y - first.Y;
+            var enter = 0d;
+            var exit = 1d;
+            static bool Clip(double p, double q, ref double enter, ref double exit)
+            {
+                if (Math.Abs(p) < 1e-12) return q >= 0;
+                var ratio = q / p;
+                if (p < 0)
+                {
+                    if (ratio > exit) return false;
+                    if (ratio > enter) enter = ratio;
+                }
+                else
+                {
+                    if (ratio < enter) return false;
+                    if (ratio < exit) exit = ratio;
+                }
+                return true;
+            }
+            return rectangle.Width > 0 && rectangle.Height > 0 &&
+                Clip(-dx, first.X - left, ref enter, ref exit) &&
+                Clip(dx, right - first.X, ref enter, ref exit) &&
+                Clip(-dy, first.Y - top, ref enter, ref exit) &&
+                Clip(dy, bottom - first.Y, ref enter, ref exit) && exit > enter;
+        }
+
+        (string? SourceKey, string? TargetKey, bool AmbiguousStart, bool AmbiguousEnd, VisualConnectionEvidence? Evidence, IReadOnlyList<string>? RejectedCandidateIds)
+            InferConnector(string connectorId, string? startAlias, string? endAlias, IReadOnlyList<VisualPathPoint?> endpoints,
+                ArrowheadEvidence? startArrowhead, ArrowheadEvidence? endArrowhead)
+        {
+            var nativeAliasAmbiguous = (startAlias is not null && sharedNodeRecords.Count(item => StringComparer.Ordinal.Equals(item.shapeId, startAlias)) != 1) ||
+                (endAlias is not null && sharedNodeRecords.Count(item => StringComparer.Ordinal.Equals(item.shapeId, endAlias)) != 1);
+            if (nativeAliasAmbiguous)
+                return (null, null, false, false, null, ["VisualNativeAliasAmbiguous"]);
+            if (hasIncompatibleCoordinateSpaces) return (null, null, false, false, null, null);
+            var path = endpoints.Where(point => point is not null).Select(point => new VisualPoint(point!.X, point.Y)).ToArray();
+            if (path.Length < 2 && (startAlias is null || endAlias is null))
+                return (null, null, false, false, null, null);
+            var options = new SoftConnectionOptions(VisualInferenceContext.Current);
+            var inference = sharedInference;
+            var pair = inference.Resolved.SingleOrDefault(item => item.ConnectorId == connectorId);
+            var unresolvedPair = inference.Unresolved.SingleOrDefault(item => item.ConnectorId == connectorId);
+            var rejectedCandidateIds = unresolvedPair?.RejectedCandidateIds;
+            var startCandidates = inference.Candidates.Where(candidate => candidate.ConnectorId == connectorId && candidate.IsStart && !candidate.IsHardRejected).ToArray();
+            var endCandidates = inference.Candidates.Where(candidate => candidate.ConnectorId == connectorId && !candidate.IsStart && !candidate.IsHardRejected).ToArray();
+            var ambiguousStart = startAlias is null && startCandidates.FirstOrDefault()?.Features.CandidateMargin < options.HighMargin;
+            var ambiguousEnd = endAlias is null && endCandidates.FirstOrDefault()?.Features.CandidateMargin < options.HighMargin;
+            if (pair?.SourceId is null || pair.TargetId is null)
+                return (null, null, ambiguousStart, ambiguousEnd, null, rejectedCandidateIds);
+            if (startAlias is null && endAlias is null && path.Length >= 2 &&
+                sharedNodeRecords.Any(item => item.PrimitiveId != pair.SourceId && item.PrimitiveId != pair.TargetId &&
+                    SegmentIntersectsInterior(path[0], path[^1], item.Geometry!)))
+                return (null, null, ambiguousStart, ambiguousEnd, null,
+                    (rejectedCandidateIds ?? []).Append("VisualIntermediateNodeCrossing").ToArray());
+            var physicalStartId = pair.Direction == ConnectionDirection.Reverse ? pair.TargetId : pair.SourceId;
+            var physicalEndId = pair.Direction == ConnectionDirection.Reverse ? pair.SourceId : pair.TargetId;
+            var selected = inference.Candidates.Where(candidate => candidate.ConnectorId == connectorId &&
+                    (candidate.IsStart && candidate.NodeId == physicalStartId || !candidate.IsStart && candidate.NodeId == physicalEndId))
+                .ToArray();
+            var margin = selected.Select(candidate => candidate.Features.CandidateMargin).DefaultIfEmpty(1).Min();
+            var evidence = new VisualConnectionEvidence(
+                pair.IsNative ? "native-connection" : "soft-geometry",
+                pair.Confidence.ToString(), pair.Score,
+                SecondBestScore: Math.Max(0, pair.Score - margin), CandidateMargin: margin,
+                BoundaryDistanceNormalized: selected.Select(candidate => candidate.Features.BoundaryDistanceNormalized).DefaultIfEmpty(0).Max(),
+                RayIntersects: selected.All(candidate => candidate.Features.RayIntersects),
+                RayFirstHit: selected.All(candidate => candidate.Features.RayFirstHit),
+                AngularDeviationDegrees: selected.Select(candidate => candidate.Features.AngularDeviationDegrees).DefaultIfEmpty(0).Max(),
+                PerpendicularOffsetNormalized: selected.Select(candidate => candidate.Features.PerpendicularOffsetNormalized).DefaultIfEmpty(0).Max(),
+                IntermediateNodeCount: selected.Select(candidate => candidate.Features.IntermediateNodeCount).DefaultIfEmpty(0).Max(),
+                ArrowheadEvidence: "none", ClusterId: pair.ClusterId,
+                RejectedCandidateIds: pair.RejectedCandidateIds);
+            var sourceKey = sharedNodeShapeIds.TryGetValue(pair.SourceId, out var mappedSource) ? mappedSource : null;
+            var targetKey = sharedNodeShapeIds.TryGetValue(pair.TargetId, out var mappedTarget) ? mappedTarget : null;
+            return (sourceKey, targetKey, ambiguousStart, ambiguousEnd, evidence, rejectedCandidateIds);
         }
 
         foreach (var (connector, index) in connectorElements.Select((item, index) => (item, index)))
         {
             static string? NormalizeRef(string? value) =>
                 string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimStart('#');
-            var start = connector.Vml
+            var isLiteralVmlLine = connector.Vml && connector.Element.Name == V + "line";
+            var drawingLine = connector.Element.Descendants(A + "ln").FirstOrDefault();
+            var startArrowhead = connector.Vml && connector.Element.Descendants(V + "stroke").Any(stroke => !string.IsNullOrWhiteSpace((string?)stroke.Attribute("startarrow"))) ||
+                drawingLine?.Element(A + "headEnd") is not null
+                ? new ArrowheadEvidence(true, Kind: connector.Vml ? "vml-start" : "drawingml-head", Confidence: 1) : null;
+            var endArrowhead = connector.Vml && connector.Element.Descendants(V + "stroke").Any(stroke => !string.IsNullOrWhiteSpace((string?)stroke.Attribute("endarrow"))) ||
+                drawingLine?.Element(A + "tailEnd") is not null
+                ? new ArrowheadEvidence(true, Kind: connector.Vml ? "vml-end" : "drawingml-tail", Confidence: 1) : null;
+            var vmlReversed = isLiteralVmlLine && VmlCoordinate((string?)connector.Element.Attribute("from")) > VmlCoordinate((string?)connector.Element.Attribute("to"));
+            var start = isLiteralVmlLine ? null
+                : connector.Vml
                 ? NormalizeRef((string?)connector.Element.Attribute("from") ?? (string?)connector.Element.Attribute("start"))
                 : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "stCxn")?.Attribute("id"));
-            var end = connector.Vml
+            var end = isLiteralVmlLine ? null
+                : connector.Vml
                 ? NormalizeRef((string?)connector.Element.Attribute("to") ?? (string?)connector.Element.Attribute("end"))
                 : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "endCxn")?.Attribute("id"));
-            var geometry = ReadVisualGeometry(connector.Element);
+            var geometry = connector.Vml && connector.Element.Name == V + "line"
+                ? ReadVmlLineGeometry(connector.Element)
+                : ReadVisualGeometry(connector.Element);
             var connectorObjectId = connector.Vml
                 ? (string?)connector.Element.Attribute("id")
                 : (string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
             connectorObjectId ??= index.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            var points = new[] { PointAt(geometry, false), PointAt(geometry, true) };
-            var sourceKey = start is not null && lookup.ContainsKey(start) ? start : null;
-            var targetKey = end is not null && lookup.ContainsKey(end) ? end : null;
-            var ambiguousStart = false; var ambiguousEnd = false;
-            if (sourceKey is null) sourceKey = Infer(points[0], lookup.Select(item => (item.Key, item.Value.Geometry)), out ambiguousStart);
-            if (targetKey is null) targetKey = Infer(points[1], lookup.Select(item => (item.Key, item.Value.Geometry)), out ambiguousEnd);
+            var points = new[] { PointAt(connector.Element, geometry, false), PointAt(connector.Element, geometry, true) };
+            var inferred = InferConnector(connectorObjectId, start, end, points, startArrowhead, endArrowhead);
+            var sourceKey = inferred.SourceKey;
+            var targetKey = inferred.TargetKey;
+            // PointAt already applies DrawingML flip/rotation to the inference segment;
+            // only literal VML retains a normalized geometry box, so its source order still
+            // needs the legacy from/to correction.
+            if (vmlReversed && ((startArrowhead is not null) != (endArrowhead is not null)))
+                (sourceKey, targetKey) = (targetKey, sourceKey);
+            var nativeSourceResolved = start is not null && sourceKey == start;
+            var nativeTargetResolved = end is not null && targetKey == end;
+            var ambiguousStart = inferred.AmbiguousStart;
+            var ambiguousEnd = inferred.AmbiguousEnd;
             var source = sourceKey is not null ? lookup[sourceKey].Node.Id : null;
             var target = targetKey is not null ? lookup[targetKey].Node.Id : null;
             var selfEdge = source is not null && source == target;
             if (selfEdge) { source = null; target = null; }
             var resolved = source is not null && target is not null;
-            var resolution = start is not null || end is not null
-                ? (resolved ? VisualEdgeResolution.NativeConnection : VisualEdgeResolution.Unresolved)
-                : (resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved);
+            var resolution = resolved
+                ? nativeSourceResolved && nativeTargetResolved
+                    ? VisualEdgeResolution.NativeConnection
+                    : VisualEdgeResolution.GeometryInferred
+                : VisualEdgeResolution.Unresolved;
             var edgeAnchor = anchor with { Locators = anchor.Locators.Concat([new AnchorLocator("connector", index.ToString(System.Globalization.CultureInfo.InvariantCulture))]).ToArray() };
-            var labelCandidates = paragraph.Descendants(W + "txbxContent")
-                .Select(box => (Box: box, Text: ParagraphText(box).Trim(), Geometry: ReadVisualGeometry(box.Ancestors().FirstOrDefault(item => item.Name == V + "shape" || item.Name == A + "sp") ?? box)))
-                .Where(item => item.Text.Length != 0 && item.Geometry is not null && !usedLabels.Contains(item.Text))
-                .Where(item => geometry is not null && Distance(new VisualPathPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2), item.Geometry!) < Math.Max(geometry.Width, geometry.Height) * 1.5 + 1)
-                .ToArray();
-            var label = labelCandidates.Length == 1 ? labelCandidates[0].Text : null;
-            if (label is not null)
+            var labelShapeId = assignedLabelByEdge.TryGetValue("edge:" + index, out var assignedLabelId)
+                ? assignedLabelId["label:".Length..] : null;
+            string? label = null;
+            if (labelShapeId is not null)
             {
-                usedLabels.Add(label);
-                var labelShapeId = (string?)labelCandidates[0].Box.Ancestors().FirstOrDefault(item => item.Name == A + "sp" || item.Name == V + "shape")?
-                    .Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
-                var labelSourceId = "label:" + index;
-                if (labelShapeId is not null && shapeSourceItems.TryGetValue(labelShapeId, out var duplicateOf))
-                    sourceItems.Add(new VisualSourceItem(labelSourceId, VisualSourceItemKind.TextLabel,
-                        VisualDisposition.SuppressedDuplicate, DuplicateOfSourceItemId: duplicateOf,
-                        Reason: "attached to connector edge", SourceAnchor: anchor with { Locators = [new AnchorLocator("shape_id", labelShapeId)] }));
-                else
-                    sourceItems.Add(new VisualSourceItem(labelSourceId, VisualSourceItemKind.TextLabel,
-                        VisualDisposition.IgnoredDecorative, Reason: "attached as connector label", SourceAnchor: edgeAnchor));
+                var assignedLabel = labelRecords.First(item => StringComparer.Ordinal.Equals(item.shapeId, labelShapeId));
+                label = assignedLabel.Node.Label.Trim();
+                var labelAnchor = anchor with
+                {
+                    Locators = [new AnchorLocator("connector", index.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                        new AnchorLocator("shape_id", assignedLabel.shapeId)]
+                };
+                if (shapeSourceItems.TryGetValue(assignedLabel.shapeId, out var labelShapeSourceId))
+                {
+                    // The source textbox remains an ordinary DocumentNode, but once adopted as
+                    // an edge label it must no longer also be a semantic VisualNode.
+                    nodes.RemoveAll(node => node.Id == lookup[assignedLabel.shapeId].Node.Id);
+                    sourceItems.RemoveAll(item => item.Id == labelShapeSourceId);
+                    sourceItems.Add(new VisualSourceItem(labelShapeSourceId, VisualSourceItemKind.TextLabel,
+                        VisualDisposition.IgnoredDecorative, Reason: "attached as connector label", SourceAnchor: labelAnchor));
+                }
             }
             var diagnosticConfidence = resolved
                 ? resolution == VisualEdgeResolution.NativeConnection ? 1d : 0.8d
                 : 0d;
             if (ambiguousStart || ambiguousEnd)
                 diagnostics.Add(new VisualDiagnostic("VisualConnectorAmbiguous", "DOCX connector endpoint inference was ambiguous.", sourceNodeId,
+                    Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: connectorObjectId,
+                    SourceObjectType: "connector", Confidence: diagnosticConfidence));
+            if (inferred.RejectedCandidateIds?.Contains("VisualNativeAliasAmbiguous", StringComparer.Ordinal) == true)
+                diagnostics.Add(new VisualDiagnostic("VisualNativeAliasAmbiguous", "DOCX native connector alias was ambiguous and remained unresolved.", sourceNodeId,
+                    Fallback: "connector retained as visual fallback", Remedy: "assign unique shape IDs before reconnecting the connector",
                     Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: connectorObjectId,
                     SourceObjectType: "connector", Confidence: diagnosticConfidence));
             if (!resolved)
@@ -587,6 +988,11 @@ public sealed class DocxAdapter : IFormatProbe
                 pathId = "path_" + index;
                 paths.Add(new VisualPath(pathId, pathPoints, geometry, edgeAnchor, resolved ? 0.9 : 0.4, !resolved, sourceNodeId));
             }
+            // Native endpoint references and DrawingML connector shapes carry directed
+            // relation semantics even when an explicit arrowhead is omitted. Free geometry
+            // (including literal VML and unsnapped WPS lines) remains undirected without one.
+            var hasArrowhead = startArrowhead is not null || endArrowhead is not null ||
+                resolved && (connector.Element.Name == A + "cxnSp" || start is not null && end is not null);
             var connectorSourceId = "connector:" + index;
             if (resolved)
                 sourceItems.Add(new VisualSourceItem(connectorSourceId, VisualSourceItemKind.Connector,
@@ -598,12 +1004,91 @@ public sealed class DocxAdapter : IFormatProbe
                 sourceItems.Add(new VisualSourceItem(connectorSourceId, VisualSourceItemKind.Connector,
                     VisualDisposition.DiagnosticOnly, DiagnosticCode: "VisualConnectorUnresolved", SourceAnchor: edgeAnchor));
             edges.Add(new VisualEdge("edge_" + index, source, target, Label: label,
-                Resolution: resolution, SourceNodeId: sourceNodeId, Direction: "directed",
+                Resolution: resolution, SourceNodeId: sourceNodeId, Direction: hasArrowhead ? "directed" : "undirected",
                 Geometry: geometry, Confidence: resolved ? (resolution == VisualEdgeResolution.NativeConnection ? 1 : 0.8) : 0,
-                Path: pathPoints, SourceAnchor: edgeAnchor, EdgeDirection: VisualEdgeDirection.Directed));
+                Path: pathPoints, SourceAnchor: edgeAnchor, EdgeDirection: hasArrowhead ? VisualEdgeDirection.Directed : VisualEdgeDirection.Undirected,
+                Evidence: resolved ? inferred.Evidence : null));
         }
-        return new VisualGraph("docx_visual_" + sourceNodeId, nodes, edges, diagnostics, "LR",
+
+        // A wps:wsp shape is always sent to the engine as a full node candidate (only DrawingML
+        // a:sp text boxes get the pre-engine label treatment above), so a small "YES"-style label
+        // built as a wps:wsp shape has no path back out of node-hood when the engine simply never
+        // considers it a plausible connector endpoint. Recover that case here: a shape absent from
+        // every connector's Candidates (never within the engine's own endpoint search radius) and
+        // not attached to any edge, but sitting close to a connector that DID resolve, is almost
+        // certainly a mislabeled edge label rather than a deliberately unconnected node. This only
+        // reclassifies shapes the engine already left untouched; it can never override a resolved
+        // or ambiguous engine decision -- R0_FIX_04's equidistant TARGET_A/TARGET_B stay real nodes
+        // because the engine already lists them as Candidates.
+        var engineCandidateNodeIds = sharedInference.Candidates.Select(candidate => candidate.NodeId).ToHashSet(StringComparer.Ordinal);
+        var edgeAttachedNodeIds = edges.SelectMany(edge => new[] { edge.SourceId, edge.TargetId })
+            .Where(id => id is not null).Select(id => id!).ToHashSet(StringComparer.Ordinal);
+        var nodeMinorAxes = sharedNodeRecords.Select(item => Math.Min(item.Geometry!.Width, item.Geometry.Height))
+            .OrderBy(value => value).ToArray();
+        if (nodeMinorAxes.Length > 0)
+        {
+            var midIndex = nodeMinorAxes.Length / 2;
+            var minorAxisMedian = nodeMinorAxes.Length % 2 == 0
+                ? (nodeMinorAxes[midIndex - 1] + nodeMinorAxes[midIndex]) / 2 : nodeMinorAxes[midIndex];
+            var labelRadius = Math.Max(minorAxisMedian * OrphanShapeLabelRadiusFactor, 1);
+            var orphanLabelChoices = new List<EdgeLabelCandidate>();
+            foreach (var record in sharedNodeRecords)
+            {
+                if (engineCandidateNodeIds.Contains(record.PrimitiveId)) continue;
+                if (edgeAttachedNodeIds.Contains(record.Node.Id)) continue;
+                foreach (var (connector, connectorIndex) in connectorElements.Select((item, index) => (item, index)))
+                {
+                    if (edges[connectorIndex].SourceId is null || edges[connectorIndex].TargetId is null) continue;
+                    if (assignedLabelByEdge.ContainsKey("edge:" + connectorIndex)) continue;
+                    var connectorGeometry = connector.Vml && connector.Element.Name == V + "line"
+                        ? ReadVmlLineGeometry(connector.Element)
+                        : ReadVisualGeometry(connector.Element);
+                    if (connectorGeometry is null) continue;
+                    var first = new VisualPoint(connectorGeometry.X, connectorGeometry.Y);
+                    var last = new VisualPoint(connectorGeometry.X + connectorGeometry.Width, connectorGeometry.Y + connectorGeometry.Height);
+                    var center = new VisualPoint(record.Geometry!.X + record.Geometry.Width / 2, record.Geometry.Y + record.Geometry.Height / 2);
+                    var distance = GeometryMath.DistanceToSegment(center, first, last, out _);
+                    var score = 1d - distance / labelRadius;
+                    if (score > 0)
+                        orphanLabelChoices.Add(new EdgeLabelCandidate("label:" + record.shapeId, "edge:" + connectorIndex, score));
+                }
+            }
+            var orphanAssignments = EdgeLabelAssigner.Assign(orphanLabelChoices);
+            foreach (var labelId in orphanLabelChoices.Select(item => item.LabelId).Distinct(StringComparer.Ordinal))
+            {
+                var shapeId = labelId["label:".Length..];
+                if (!shapeSourceItems.TryGetValue(shapeId, out var shapeSourceItemId)) continue;
+                var demoted = lookup[shapeId];
+                nodes.RemoveAll(node => node.Id == demoted.Node.Id);
+                sourceItems.RemoveAll(item => item.Id == shapeSourceItemId);
+                if (orphanAssignments.TryGetValue(labelId, out var assignedEdgeId))
+                {
+                    var connectorIndex = int.Parse(assignedEdgeId["edge:".Length..], System.Globalization.CultureInfo.InvariantCulture);
+                    var labelAnchor = anchor with
+                    {
+                        Locators = [new AnchorLocator("connector", connectorIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                            new AnchorLocator("shape_id", shapeId)]
+                    };
+                    edges[connectorIndex] = edges[connectorIndex] with { Label = demoted.Node.Label.Trim() };
+                    sourceItems.Add(new VisualSourceItem(shapeSourceItemId, VisualSourceItemKind.TextLabel,
+                        VisualDisposition.IgnoredDecorative, Reason: "attached as connector label", SourceAnchor: labelAnchor));
+                }
+                else
+                {
+                    diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved",
+                        "DOCX shape was near a resolved connector but could not be assigned uniquely as its edge label.", sourceNodeId,
+                        Fallback: "shape retained as document text and visual fallback", Remedy: "move the shape onto one connector segment or increase its distance from unrelated connectors",
+                        Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: shapeId,
+                        SourceObjectType: "shape", Confidence: 0));
+                    sourceItems.Add(new VisualSourceItem(shapeSourceItemId, VisualSourceItemKind.TextLabel,
+                        VisualDisposition.IgnoredDecorative, Reason: "unresolved edge label; retained as document text", SourceAnchor: demoted.Node.SourceAnchor));
+                }
+            }
+        }
+
+        var graph = new VisualGraph("docx_visual_" + sourceNodeId, nodes, edges, diagnostics, "LR",
             Paths: paths, SourceItems: sourceItems);
+        return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
     }
 
     private static Geometry? ReadVisualGeometry(XElement element)
@@ -618,6 +1103,18 @@ public sealed class DocxAdapter : IFormatProbe
         var y = Parse((string?)off?.Attribute("y"));
         var width = Parse((string?)ext?.Attribute("cx"));
         var height = Parse((string?)ext?.Attribute("cy"));
+        var anchor = element.AncestorsAndSelf(WP + "anchor").FirstOrDefault();
+        var horizontal = anchor?.Element(WP + "positionH");
+        var vertical = anchor?.Element(WP + "positionV");
+        var horizontalFrame = (string?)horizontal?.Attribute("relativeFrom");
+        var verticalFrame = (string?)vertical?.Attribute("relativeFrom");
+        var offsetX = horizontal?.Element(WP + "posOffset")?.Value;
+        var offsetY = vertical?.Element(WP + "posOffset")?.Value;
+        if (anchor is not null)
+        {
+            x = Parse(offsetX) + x;
+            y = Parse(offsetY) + y;
+        }
         if (extent is not null) { width = Parse((string?)extent.Attribute("cx")); height = Parse((string?)extent.Attribute("cy")); }
         if (style is not null)
         {
@@ -631,7 +1128,41 @@ public sealed class DocxAdapter : IFormatProbe
                 else if (pair[0].Trim().Equals("height", StringComparison.OrdinalIgnoreCase)) height = value;
             }
         }
-        return width > 0 || height > 0 ? new Geometry("ooxml", x, y, width, height) : null;
+        if (width <= 0 && height <= 0) return null;
+        var compatiblePageFrames = new[] { "page", "margin" };
+        var coordinateSpace = anchor is null ||
+            (compatiblePageFrames.Contains(horizontalFrame, StringComparer.OrdinalIgnoreCase) &&
+             compatiblePageFrames.Contains(verticalFrame, StringComparer.OrdinalIgnoreCase) &&
+             horizontal?.Element(WP + "align") is null && vertical?.Element(WP + "align") is null)
+            ? "docx-page" : "docx-relative-" + (horizontalFrame ?? verticalFrame ?? "unknown");
+        return new Geometry(coordinateSpace, x, y, width, height);
+    }
+
+    private static double VmlCoordinate(string? endpoint)
+    {
+        var value = (endpoint ?? string.Empty).Split(",", StringSplitOptions.TrimEntries).FirstOrDefault();
+        value = value?.TrimEnd('p','t','x','m');
+        return double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : 0;
+    }
+
+    private static Geometry? ReadVmlLineGeometry(XElement line)
+    {
+        static double Value(string? text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return 0;
+            var number = text.Trim().TrimEnd('p','t','x','m');
+            return double.TryParse(number, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        }
+        static (double X, double Y) Point(string? text)
+        {
+            var parts = (text ?? string.Empty).Split(',', StringSplitOptions.TrimEntries);
+            return (parts.Length > 0 ? Value(parts[0]) : 0, parts.Length > 1 ? Value(parts[1]) : 0);
+        }
+        var from = Point((string?)line.Attribute("from"));
+        var to = Point((string?)line.Attribute("to"));
+        var x = Math.Min(from.X, to.X);
+        var y = Math.Min(from.Y, to.Y);
+        return new Geometry("ooxml", x, y, Math.Abs(to.X - from.X), Math.Abs(to.Y - from.Y));
     }
 
     private static string? FirstNonEmptyAttribute(XElement? element, params string[] names)
@@ -840,6 +1371,26 @@ public sealed class DocxAdapter : IFormatProbe
     // untouched and keep contributing a line break exactly as before.
     private static bool IsPageBreakElement(XElement element) =>
         element.Name == W + "br" && StringComparer.OrdinalIgnoreCase.Equals((string?)element.Attribute(W + "type"), "page");
+
+    private static string? TextBoxShapeId(XElement textBox)
+    {
+        var owner = textBox.Ancestors().FirstOrDefault(item =>
+            item.Name == A + "sp" || item.Name == WPS + "wsp" || item.Name == V + "shape" ||
+            item.Name == V + "rect" || item.Name == V + "roundrect");
+        return (string?)owner?.Attribute("id") ??
+            (string?)owner?.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
+    }
+
+    private static string TextBoxText(XElement textBox)
+    {
+        var boxes = textBox.Name == W + "txbxContent"
+            ? [textBox]
+            : textBox.Descendants(W + "txbxContent").ToArray();
+        var paragraphs = boxes.SelectMany(box => box.Elements(W + "p")).ToArray();
+        return paragraphs.Length == 0
+            ? ParagraphText(textBox)
+            : string.Join("\n", paragraphs.Select(ParagraphText));
+    }
 
     private static string ParagraphText(XContainer container)
     {

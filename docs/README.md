@@ -1,31 +1,31 @@
 # DocRedock documentation
 
-Choose documentation by audience. The current release support status is separate from implementation capability.
+Choose documentation by audience. The current release support status is defined separately from experimental technical references.
 
 ## Users
 
 Japanese:
 
 - [30-second quick start and user guide](ja/user-guide.md)
-- [v0.1.7の対応機能](ja/supported-features.md)
+- [v0.2.0の対応機能](ja/supported-features.md)
 - [Experimental features](ja/experimental-features.md)
 - [Security and privacy](ja/security-and-privacy.md)
 
 English:
 
 - [30-second quick start and user guide](en/user-guide.md)
-- [v0.1.7 supported features](en/supported-features.md)
+- [v0.2.0 supported features](en/supported-features.md)
 - [Experimental features](en/experimental-features.md)
 - [Security and privacy](en/security-and-privacy.md)
 
 ## Reference
 
 - [Reference index](reference/README.md)
-- [Implementation capability matrix](FORMAT_CAPABILITY_MATRIX.md)
+- [Format capability reference](FORMAT_CAPABILITY_MATRIX.md)
 - [DRMD Markdown specification](DRMD_MARKDOWN_SPEC.md)
 - [AI editing rules](DRMD_AI_EDITING_RULES.md)
 
-Reference documents may describe experimental capabilities implemented in code. They do not override the current user-facing support table.
+Technical references also cover experimental workflows. They do not expand or override the current user-facing support table.
 
 ## Benchmarks
 
@@ -41,5 +41,4 @@ Reference documents may describe experimental capabilities implemented in code. 
 
 ## Historical material
 
-- [Historical implementation-plan index](archive/implementation-plans/README.md)
-- [Historical DRMD sidecar image implementation plan](DRMD_SIDECAR_IMAGE_SPEC.md)
+- [Historical design-record index](archive/implementation-plans/README.md)

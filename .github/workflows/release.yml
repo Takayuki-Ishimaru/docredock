@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.7
+        default: v0.2.0
 
 permissions:
   contents: read
@@ -73,8 +73,22 @@ jobs:
         run: |
           dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj --configuration Release --no-build --no-restore
           dotnet test tests/DocRedock.Gui.HeadlessTests/DocRedock.Gui.HeadlessTests.csproj --configuration Release --no-build --no-restore
+      - name: Record quality product commit
+        id: quality-source
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Run conversion QA
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.quality-source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: python3 tools/conversion-qa/run.py --all
+      - name: Upload conversion QA evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quality-conversion-qa
+          path: artifacts/conversion-qa/**
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify licenses and generate source dependency SBOM
         run: dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output artifacts/compliance
       - name: Upload compliance input
@@ -319,6 +333,9 @@ jobs:
       - name: Extract and smoke-test Windows package
         if: matrix.family == 'windows'
         shell: pwsh
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
@@ -327,6 +344,9 @@ jobs:
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
         shell: bash
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
@@ -337,6 +357,9 @@ jobs:
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
         shell: bash
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -385,15 +408,24 @@ jobs:
         with:
           name: quality-compliance
           path: release-compliance
+      - name: Download conversion QA evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: quality-conversion-qa
+          path: release-conversion-qa
       - name: Write checked release evidence
         shell: bash
         run: |
           commit=$(git rev-parse HEAD)
+          test -f release-conversion-qa/summary.md
+          cp release-conversion-qa/summary.md release-files/CONVERSION-QA-EVIDENCE.md
           cat > release-files/RELEASE-EVIDENCE.md <<EOF
           # Release evidence: $RELEASE_TAG
 
-          - [x] Tagged source checked out: `$commit`
+          - [x] Product source commit: `$commit`
+          - [x] Release workflow commit: `${{ github.workflow_sha }}`
           - [x] Locked restore, Release build, unit tests, and conversion QA passed
+          - [x] Conversion-QA evidence is attached as `CONVERSION-QA-EVIDENCE.md` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
           - [x] License allowlist check passed
           - [x] Six RID-specific self-contained packages were built
           - [x] Every archive was extracted before testing

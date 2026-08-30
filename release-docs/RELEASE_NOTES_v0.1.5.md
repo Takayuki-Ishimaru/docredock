@@ -7,7 +7,7 @@ DocRedock v0.1.5はPublic Betaの信頼性hotfixです。利用者向けのサ�
 ## 主な変更
 
 - CLI `export`の既定profileを一方向の`readable`へ変更しました。往復処理の自動化は`--profile roundtrip`を明示してください。
-- OCR証跡を親画像またはPDFページが属するpartitionへ配置し、解決できない証跡を診断付きで`derived-assets`へ隔離します。
+- OCRテキストを対応する画像またはPDFページとともに表示し、対応先が不明な内容は診断付きで分けて表示します。
 - 横・縦結合表を空の継続セルで出力し、往復処理で継続セル・表形状の変更を拒否します。
 - 実験的PDF生成から日本語フォントの同梱・固定前提を除去しました。
 - デスクトップGUIはPDF入力を既定で受け付けます。ネイティブテキストを直接抽出し、文字のないページのOCRには引き続きrasterizerとOCR providerの構成が必要です。
@@ -21,25 +21,21 @@ ASCIIのみのPDFはフォントプログラムを埋め込まずBase14 Helvetic
 2. `DOCREDOCK_PDF_FONT_PATH`と任意の`DOCREDOCK_PDF_FONT_FACE_INDEX`
 3. OSにインストールされたシステムフォント
 
-resolverはSFNT／TTC構造、collection face抽出、TrueType outline、OS/2の埋め込み許可、必要グリフcoverageを検証します。CFF／CFF2、不正・過大なフォント、埋め込み禁止、グリフ不足は明確な診断で失敗します。DocRedockはフォントをダウンロードせず、選択フォントのライセンス遵守は利用者の責任です。
+DocRedockは選択したTrueTypeフォントの埋め込み許可と必要文字を確認します。不正、過大、埋め込み禁止、または文字不足のフォントは診断付きで拒否します。フォントを自動ダウンロードしないため、選択フォントのライセンス確認は利用者の責任です。
 
 フォント選択とcoverageは情報、欠落と切り詰めは警告です。警告があるCLI renderは終了コード1を返します。`--quiet`は情報行を抑制し、`--verbose`は選択フォントのパスを表示します。
 
 ## OCR・表・変換品質
 
-- OCRノードは親画像のpartitionとhidden／metadata layerを引き継ぎます。
-- rasterizeしたPDFページassetは対応ページへ配置し、rasterizerがなければ`PdfRasterizerUnavailable`を出します。
-- DRMD editing rules 1.1は1.0互換を維持しながら、結合表の継続セルと形状を検査します。
-- 閲覧用の結合表はrow／column spanの継続セルを空欄にします。
-- 太字のbullet runを含むPPTXのリテラルbulletをMarkdown list markerへ変換します。
-- GUIの空projectionは明示的な`EmptyProjection`結果になります。
+- OCRテキストは対応する画像またはPDFページと同じ表示ポリシーに従います。
+- PDFページのプレビューは対応ページに配置し、rasterizerがない場合は診断を表示します。
+- 閲覧用の結合表は、行／列結合の継続セルを空欄にします。
+- 強調された記号を含むPPTXの箇条書きをMarkdownリストへ変換します。
+- 変換結果が空の場合は、その状態を明示します。
 
-## 配布と検証
+## 配布
 
-- 変換QAは、メタデータ、数式、非表示行・列・シート、グラフ参照、画像、結合セルを含む複雑なXLSXを決定的に生成します。
-- `--all` QAはDOCX／XLSX／PPTXの実行を必須とし、coverage不足を`ConversionQaCoverageTooLow`で失敗させます。
-- リリーススモークは`BINARY-SHA256SUMS`を検証し、予期しないフォントバイナリを拒否し、readable／roundtrip出力、直後のゼロoperation diff、日本語PDF sentinelの生成・抽出を確認します。
-- Linux CI／release jobはPDF検証用の日本語システムフォントを明示的に導入しますが、配布物はfont-freeです。
+公開パッケージはフォントを同梱せず、チェックサムで検証できます。
 
 ## 安全性と互換性
 

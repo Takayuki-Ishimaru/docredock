@@ -55,6 +55,9 @@
 - [ ] native connection、geometry inference、unresolved connector、edge label、unsupported visual のstable diagnosticを確認した
 - [ ] 既存のparagraph／list／table／image／OCR出力に回帰がなく、出力markerと順序が決定的である
 - [ ] 公開バイナリのsmokeでexit code、marker、diagnostic、各count、fixture SHA-256、output SHA-256を`RELEASE-EVIDENCE.md`へ保存した
+- [ ] `product_source_commit`と`release_workflow_commit`を分離して記録した
+- [ ] smokeとconversion-QAの双方で、分離したcommit、fixture／出力SHA-256、tier、mode、判定、反復出力の決定性を保存した
+- [ ] `native-only`／`safe`／`balanced` のrelation assertion結果を記録した（positive／negativeを含む）
 - [x] DOCX connectorとPDF vector topologyは条件付き対応としてのみ記載し、完全drawing／SmartArt／任意vector graph再構成を対応済みと記載していない
 
 ## ビルドとテスト

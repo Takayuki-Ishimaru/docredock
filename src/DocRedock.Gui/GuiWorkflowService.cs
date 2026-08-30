@@ -1,9 +1,11 @@
 using System.Text;
+using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Ocr.Tesseract;
 using DocRedock.RoundTrip;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Gui;
 
@@ -14,7 +16,9 @@ public sealed record GuiExportResult(
     string Fidelity,
     IReadOnlyList<Diagnostic> Diagnostics,
     bool IsReadable = false,
-    SidecarForm? SidecarForm = null)
+    SidecarForm? SidecarForm = null,
+    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
+    string? VisualSummary = null)
 {
     public string PackagePath => SidecarPath;
 }
@@ -63,7 +67,8 @@ public sealed class GuiWorkflowService
         bool includeDiagrams = true,
         bool embedReadableImages = false,
         bool zipSidecar = false,
-        string contentPolicy = "visible")
+        string contentPolicy = "visible",
+        VisualInferenceMode inferenceMode = VisualInferenceMode.Safe)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -97,14 +102,17 @@ public sealed class GuiWorkflowService
                     ShowFormulas: showFormulas,
                     IncludeSvgPreviews: includeSvgPreviews,
                     IncludeDiagrams: includeDiagrams,
-                    EmbedImages: embedReadableImages), cancellationToken).ConfigureAwait(false);
+                    EmbedImages: embedReadableImages,
+                    InferenceMode: inferenceMode), cancellationToken).ConfigureAwait(false);
                 return new GuiExportResult(
                     markdownPath,
                     string.Empty,
                     exported.Graph.Format.ToString().ToLowerInvariant(),
                     "Readable Markdown (one-way)",
                     AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
-                    IsReadable: true);
+                    IsReadable: true,
+                    InferenceMode: exported.InferenceMode,
+                    VisualSummary: SummarizeVisualGraph(exported.Graph));
             }
             catch
             {
@@ -128,7 +136,8 @@ public sealed class GuiWorkflowService
                 markdownPath,
                 enableOcr,
                 NormalizeLanguages(ocrLanguages),
-                ContentPolicy: contentPolicy), cancellationToken).ConfigureAwait(false);
+                ContentPolicy: contentPolicy,
+                InferenceMode: inferenceMode), cancellationToken).ConfigureAwait(false);
             var sidecarForm = SidecarForm.Directory;
             if (zipSidecar)
             {
@@ -139,7 +148,7 @@ public sealed class GuiWorkflowService
             var fidelity = format == "pdf"
                 ? "F0 baseline / edited PDF is F3"
                 : "F0 baseline / supported edits are F1";
-            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm);
+            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(exported.Graph));
         }
         catch
         {
@@ -228,6 +237,16 @@ public sealed class GuiWorkflowService
             "EmptyProjection",
             "No extractable content was found in the document projection.",
             DiagnosticSeverity.Warning)).ToArray();
+    }
+
+    private static string? SummarizeVisualGraph(DocumentGraph graph)
+    {
+        var visual = graph.Nodes.Select(node => node.Extensions?.TryGetValue("visual_graph", out var value) == true
+            ? value.Deserialize<VisualGraph>() : null).OfType<VisualGraph>().ToArray();
+        if (visual.Length == 0) return null;
+        var edges = visual.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
+        var fallback = visual.SelectMany(item => item.Paths ?? []).Count(path => path?.IsFallback == true);
+        return $"図: {visual.Length}件 / native {edges.Count(edge => edge.Resolution == VisualEdgeResolution.NativeConnection)} / high {edges.Count(edge => edge.Evidence?.ConfidenceBand == "High")} / medium {edges.Count(edge => edge.Evidence?.ConfidenceBand == "Medium")} / unresolved {edges.Count(edge => edge.SourceId is null || edge.TargetId is null)} / fallback {fallback}";
     }
 
     public static string SafeFileName(string untrustedName, string fallbackBaseName)

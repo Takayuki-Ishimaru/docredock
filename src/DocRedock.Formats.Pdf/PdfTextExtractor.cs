@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Formats.Pdf;
 
@@ -29,11 +30,13 @@ public sealed record PdfExtractionOptions(
     int MaxPages = 10_000,
     int MaxObjects = 200_000,
     long MaxExpandedStreamBytes = 268_435_456,
-    TimeSpan? RegexTimeout = null)
+    TimeSpan? RegexTimeout = null,
+    TimeSpan? VisualInferenceTimeout = null)
 {
     public TimeSpan EffectiveRegexTimeout => RegexTimeout is { } value && value > TimeSpan.Zero
         ? value
         : TimeSpan.FromSeconds(1);
+    public TimeSpan EffectiveVisualInferenceTimeout => VisualInferenceTimeout ?? TimeSpan.FromSeconds(5);
 }
 
 public sealed class PdfExtractionException : Exception
@@ -51,19 +54,22 @@ public static class PdfTextExtractor
     private const string LiteralPattern = @"\((?:\\.|[^\\)])*\)";
     private const string NumberPattern = @"[-+]?(?:\d+(?:\.\d*)?|\.\d+)";
 
-    public static PdfExtractionResult Extract(string path, PdfExtractionOptions? options = null)
+    public static PdfExtractionResult Extract(string path, PdfExtractionOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         options ??= new PdfExtractionOptions();
         var info = new FileInfo(path);
         if (!info.Exists) throw new FileNotFoundException("PDF input was not found.", path);
         if (info.Length > options.MaxInputBytes) throw new PdfExtractionException($"PDF input exceeds the {options.MaxInputBytes}-byte limit.");
-        return Extract(File.ReadAllBytes(path), options);
+        return Extract(File.ReadAllBytes(path), options, cancellationToken);
     }
 
-    public static PdfExtractionResult Extract(ReadOnlyMemory<byte> bytes, PdfExtractionOptions? options = null)
+    public static PdfExtractionResult Extract(ReadOnlyMemory<byte> bytes, PdfExtractionOptions? options = null,
+        CancellationToken cancellationToken = default)
     {
         options ??= new PdfExtractionOptions();
+        cancellationToken.ThrowIfCancellationRequested();
         if (bytes.Length > options.MaxInputBytes) throw new PdfExtractionException($"PDF input exceeds the {options.MaxInputBytes}-byte limit.");
         var raw = bytes.ToArray();
         if (raw.Length < 5 || !raw.AsSpan(0, 5).SequenceEqual("%PDF-"u8)) throw new PdfExtractionException("Input does not have a PDF header.");
@@ -121,7 +127,10 @@ public static class PdfTextExtractor
                 diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} contains image-only content; rasterizer/OCR may be required.");
                 regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
             }
-            VisualGraph? visualGraph = vector ? BuildVisualGraph(pageNumber, stream, regions, diagnostics) : null;
+            cancellationToken.ThrowIfCancellationRequested();
+            VisualGraph? visualGraph = vector
+                ? BuildVisualGraph(pageNumber, stream, regions, diagnostics, options.EffectiveVisualInferenceTimeout, cancellationToken)
+                : null;
             if (vector && visualGraph is not null)
             {
                 var accounting = visualGraph.Accounting;
@@ -149,8 +158,10 @@ public static class PdfTextExtractor
         return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs);
     }
 
-    private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions, List<string> diagnostics)
+    private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions,
+        List<string> diagnostics, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
+        var allowGeometryInference = VisualInferenceContext.Current != VisualInferenceMode.NativeOnly;
         var nodes = new List<VisualNode>();
         var edges = new List<VisualEdge>();
         var paths = new List<VisualPath>();
@@ -161,9 +172,13 @@ public static class PdfTextExtractor
         var current = new List<VisualPathPoint>();
         var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
         var arrowheadTips = new List<VisualPathPoint>();
+        var triangleCandidates = new List<(IReadOnlyList<VisualPathPoint> Points, Geometry Geometry, string PathId)>();
+        var unlabelledClosedCandidates = new List<(Geometry Geometry, string PathId)>();
+        var provisionalUnlabelledNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var assignedLabelRegions = new HashSet<int>();
         var duplicatePathIds = new HashSet<string>(StringComparer.Ordinal);
         var arrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
+        var mergedArrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
         var unresolvedPathIds = new HashSet<string>(StringComparer.Ordinal);
         var closed = false;
         var curveSeen = false;
@@ -222,7 +237,7 @@ public static class PdfTextExtractor
                         // `re` starts a new subpath; promote prior closed rectangles only when the
                         // following paint operator confirms that the compound path is painted.
                         foreach (var subpath in pendingClosedSubpaths)
-                            AddClosedNode(subpath);
+                            AddPaintedClosedSubpath(subpath);
                         pendingClosedSubpaths.Clear();
                         var points = current.ToArray();
                         var isClosed = closed || token is "s" or "b" or "b*" or "f" or "F" or "f*" or "B" or "B*" ||
@@ -237,19 +252,15 @@ public static class PdfTextExtractor
                         if (isClosed && painted) AddClosedNode(points);
                         else if (isStroke)
                         {
-                            var start = points[0]; var end = points[^1];
-                            var source = nodes.Where(node => Near(node.Geometry, start)).ToArray();
-                            var target = nodes.Where(node => Near(node.Geometry, end)).ToArray();
-                            var resolved = source.Length == 1 && target.Length == 1 && source[0].Id != target[0].Id;
-                            var label = regions.Where(region => Between(region.BoundingBox.X, minX, maxX) && Between(region.BoundingBox.Y, minY, maxY))
-                                .Select(region => region.Text).Distinct(StringComparer.Ordinal).ToArray();
-                            var edgeLabel = label.Length == 1 ? label[0] : null;
-                            if (label.Length > 1) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge label is ambiguous."); graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge label is ambiguous.", 0.2)); }
-                            edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", resolved ? source[0].Id : null, resolved ? target[0].Id : null,
-                                edgeLabel, resolved ? VisualEdgeResolution.GeometryInferred : VisualEdgeResolution.Unresolved, Direction: "undirected",
-                                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: resolved ? 0.85 : 0.2,
+                            // Edge labels are assigned only after all closed paths have claimed
+                            // their text regions as node labels. PDF content streams routinely
+                            // paint a connector before its endpoint rectangles and text.
+                            edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", null, null,
+                                null, VisualEdgeResolution.Unresolved, Direction: "undirected",
+                                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: 0.2,
                                 Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
-                            if (!resolved) { diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous."); graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2)); }
+                            diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
+                            graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2));
                         }
                         if (curveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
                     }
@@ -259,22 +270,214 @@ public static class PdfTextExtractor
         }
         foreach (var subpath in pendingClosedSubpaths)
             RetainClosedSubpath(subpath);
-        // Resolve endpoints after all paths have been visited; PDF producers may paint
-        // connectors before the rectangles that define their endpoints.
-        for (var edgeIndex = 0; edgeIndex < edges.Count; edgeIndex++)
+        var labelledAreas = nodes.Where(node => node.Geometry is not null)
+            .Select(node => Math.Abs(node.Geometry!.Width * node.Geometry.Height))
+            .Where(area => area > 0).OrderBy(area => area).ToArray();
+        var medianLabelledArea = labelledAreas.Length == 0 ? 0 : labelledAreas[labelledAreas.Length / 2];
+        var visualBounds = paths.Select(path => path.Geometry).Where(geometry => geometry is not null).Cast<Geometry>()
+            .Concat(regions.Select(region => region.BoundingBox)).ToArray();
+        var pageDiagonalSquared = visualBounds.Length == 0 ? 1 :
+            Math.Pow(visualBounds.Max(geometry => geometry.X + geometry.Width) - visualBounds.Min(geometry => geometry.X), 2) +
+            Math.Pow(visualBounds.Max(geometry => geometry.Y + geometry.Height) - visualBounds.Min(geometry => geometry.Y), 2);
+        // PDF user space can be scaled by a CTM. Classify small unlabelled closed paths
+        // relative to the labelled-node population and page extent, never by a fixed size.
+        var decorativeAreaThreshold = Math.Max(medianLabelledArea * .05, pageDiagonalSquared * .00005);
+        foreach (var candidate in unlabelledClosedCandidates)
         {
-            var edge = edges[edgeIndex];
-            if (edge.SourceId is not null && edge.TargetId is not null || edge.Path is null || edge.Path.Count < 2) continue;
-            var startCandidates = nodes.Where(node => Near(node.Geometry, edge.Path[0])).ToArray();
-            var endCandidates = nodes.Where(node => Near(node.Geometry, edge.Path[^1])).ToArray();
-            if (startCandidates.Length != 1 || endCandidates.Length != 1 || startCandidates[0].Id == endCandidates[0].Id) continue;
-            edges[edgeIndex] = edge with { SourceId = startCandidates[0].Id, TargetId = endCandidates[0].Id,
-                Resolution = VisualEdgeResolution.GeometryInferred, Confidence = 0.75 };
-            var deferredDiagnostic = graphDiagnostics.FindIndex(item => item.Code == "VisualConnectorUnresolved");
-            if (deferredDiagnostic >= 0) graphDiagnostics.RemoveAt(deferredDiagnostic);
-            var deferredGlobal = diagnostics.FindIndex(message =>
-                message.StartsWith($"VisualConnectorUnresolved: PDF page {pageNumber}", StringComparison.Ordinal));
-            if (deferredGlobal >= 0) diagnostics.RemoveAt(deferredGlobal);
+            var area = Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height);
+            if (area <= decorativeAreaThreshold) continue;
+            var node = new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", $"Vector node {nodes.Count + 1}",
+                VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor);
+            nodes.Add(node);
+            provisionalUnlabelledNodeIds.Add(node.Id);
+        }
+        foreach (var candidate in triangleCandidates)
+        {
+            var tip = ArrowTip(candidate.Points);
+            var nearest = edges.Where(edge => edge.Path is { Count: >= 2 })
+                .Select(edge => (Edge: edge,
+                    EndpointDistance: Math.Min(Distance(edge.Path![0], tip), Distance(edge.Path[^1], tip)),
+                    Length: edge.Path.Zip(edge.Path.Skip(1), Distance).Sum()))
+                .OrderBy(item => item.EndpointDistance).FirstOrDefault();
+            var markerSize = Math.Sqrt(candidate.Geometry.Width * candidate.Geometry.Width +
+                candidate.Geometry.Height * candidate.Geometry.Height);
+            var isArrowhead = nearest.Edge is not null && nearest.Length > 0 &&
+                markerSize <= nearest.Length * .30 &&
+                nearest.EndpointDistance <= Math.Max(markerSize * 1.5, nearest.Length * .08);
+            var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
+            if (isArrowhead)
+            {
+                arrowheadTips.Add(tip);
+                arrowheadPathIds.Add(candidate.PathId);
+                if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .3, IsFallback = true };
+            }
+            else if (Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height) > decorativeAreaThreshold)
+            {
+                var node = new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", $"Vector node {nodes.Count + 1}",
+                    VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor);
+                nodes.Add(node);
+                provisionalUnlabelledNodeIds.Add(node.Id);
+                if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .75, IsFallback = false };
+            }
+            else if (pathIndex >= 0)
+            {
+                paths[pathIndex] = paths[pathIndex] with { Confidence = .35, IsFallback = true };
+            }
+        }
+
+        var edgeLabelChoices = new List<EdgeLabelCandidate>();
+        var labelRegions = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
+        {
+            if (assignedLabelRegions.Contains(regionIndex) || string.IsNullOrWhiteSpace(region.Text)) continue;
+            var labelId = "region:" + regionIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var bestScore = double.NegativeInfinity;
+            string? bestEdgeId = null;
+            var center = new VisualPoint(region.BoundingBox.X + region.BoundingBox.Width / 2,
+                region.BoundingBox.Y + region.BoundingBox.Height / 2);
+            foreach (var edge in edges.Where(edge => edge.Path is { Count: >= 2 }))
+            {
+                for (var pointIndex = 1; pointIndex < edge.Path!.Count; pointIndex++)
+                {
+                    var start = edge.Path[pointIndex - 1];
+                    var end = edge.Path[pointIndex];
+                    var dx = end.X - start.X; var dy = end.Y - start.Y;
+                    var length = Math.Sqrt(dx * dx + dy * dy);
+                    if (length <= 1e-9) continue;
+                    var projection = ((center.X - start.X) * dx + (center.Y - start.Y) * dy) / (length * length);
+                    if (projection is < -.1 or > 1.1) continue;
+                    var distance = GeometryMath.DistanceToSegment(center,
+                        new VisualPoint(start.X, start.Y), new VisualPoint(end.X, end.Y), out _);
+                    var tolerance = Math.Max(Math.Max(region.BoundingBox.Width, region.BoundingBox.Height) * 1.5, length * .12);
+                    var score = 1 - distance / Math.Max(1, tolerance) - Math.Abs(projection - .5) * .15;
+                    if (score > bestScore)
+                    {
+                        bestScore = score;
+                        bestEdgeId = edge.Id;
+                    }
+                }
+            }
+            if (bestEdgeId is null || bestScore <= 0) continue;
+            edgeLabelChoices.Add(new EdgeLabelCandidate(labelId, bestEdgeId, bestScore));
+            labelRegions[labelId] = regionIndex;
+        }
+        var deferredLabels = EdgeLabelAssigner.Assign(edgeLabelChoices);
+        foreach (var (labelId, edgeId) in deferredLabels)
+        {
+            if (!labelRegions.TryGetValue(labelId, out var regionIndex)) continue;
+            var edgeIndex = edges.FindIndex(edge => edge.Id == edgeId);
+            if (edgeIndex < 0) continue;
+            edges[edgeIndex] = edges[edgeIndex] with { Label = regions[regionIndex].Text };
+            assignedLabelRegions.Add(regionIndex);
+        }
+        foreach (var labelId in labelRegions.Keys.Where(labelId => !deferredLabels.ContainsKey(labelId)))
+        {
+            diagnostics.Add($"VisualEdgeLabelUnresolved: PDF page {pageNumber} text remained independent.");
+            graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2));
+        }
+
+        // Resolve all endpoints together after every path has been visited. This keeps CTM
+        // transforms, adaptive scale, cluster boundaries, and global ambiguity handling in
+        // the same shared inference engine used by the Office adapters.
+        if (allowGeometryInference && nodes.Count > 0 && edges.Count > 0)
+        {
+            var canvasId = $"pdf-page-{pageNumber}";
+            var nodePrimitives = nodes.Where(node => node.Geometry is not null).Select(node =>
+                (VisualPrimitive)new VisualNodePrimitive(node.Id, canvasId, node.SourceAnchor ?? anchor,
+                    new VisualRect(node.Geometry!.X, node.Geometry.Y, node.Geometry.Width, node.Geometry.Height),
+                    Text: node.Label)).ToArray();
+            var connectorPrimitives = edges.Where(edge => edge.Path is { Count: >= 2 }).Select(edge =>
+                (VisualPrimitive)new VisualConnectorPrimitive(edge.Id, canvasId, edge.SourceAnchor ?? anchor,
+                    new VisualConnectorPath(edge.Path!.Select(point => new VisualPoint(point.X, point.Y)).ToArray()))).ToArray();
+            var primitives = nodePrimitives.Concat(connectorPrimitives).ToArray();
+            var primitiveBounds = primitives.Select(item => item.Bounds).Where(item => item is not null).Cast<VisualRect>().ToArray();
+            var minCanvasX = primitiveBounds.Select(item => item.X).DefaultIfEmpty(0).Min();
+            var minCanvasY = primitiveBounds.Select(item => item.Y).DefaultIfEmpty(0).Min();
+            var maxCanvasX = primitiveBounds.Select(item => item.Right).DefaultIfEmpty(1).Max();
+            var maxCanvasY = primitiveBounds.Select(item => item.Bottom).DefaultIfEmpty(1).Max();
+            var document = new VisualPrimitiveDocument($"pdf-page-{pageNumber}", DocumentFormatKind.Pdf,
+                [new VisualCanvas(canvasId, $"pdf:page:{pageNumber}", $"page-{pageNumber}",
+                    Math.Max(1, maxCanvasX - minCanvasX), Math.Max(1, maxCanvasY - minCanvasY), "pdf-user-space", anchor)],
+                primitives);
+            // A PDF page's content stream is already one analysis unit: every primitive built
+            // above shares this single VisualCanvas, unlike a DOCX/PPTX/XLSX canvas, which can
+            // legitimately hold several unrelated diagrams far apart on the same sheet/slide.
+            // Do not let DiagramClusterer's proximity/touch heuristics fragment that unit
+            // further. Those heuristics union a node with a connector only when the node
+            // touches one of the connector's two path *endpoints*, or sits within a generic
+            // center-distance radius of another already-unioned shape; a node whose box lies
+            // along the *middle* of a straight connector -- touching neither endpoint -- can
+            // satisfy neither test (a purely horizontal or vertical connector also has a
+            // zero-length minor axis, which collapses that generic radius to nothing) and is
+            // split into its own single-node cluster. FindIntermediateNodeIds only ever sees
+            // the nodes inside the connector's own cluster, so a node stranded that way becomes
+            // invisible to the corridor check that exists specifically to stop the flanking
+            // nodes from resolving a "skip" edge across it that the page never drew. Passing one
+            // explicit whole-canvas cluster keeps every recognized node on the page visible to
+            // that check for every connector on the page -- the same explicit-cluster shape
+            // DocxAdapter and XlsxMermaidProjection already pass, rather than leaving it to
+            // SoftConnectionEngine's internal per-call default.
+            var clusters = new[] { new DiagramCluster(canvasId,
+                primitives.Select(item => item.Id).OrderBy(id => id, StringComparer.Ordinal).ToArray()) };
+            SoftConnectionResult inference;
+            try
+            {
+                using var inferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                if (inferenceTimeout is { } timeout)
+                {
+                    if (timeout <= TimeSpan.Zero) inferenceCts.Cancel();
+                    else inferenceCts.CancelAfter(timeout);
+                }
+                inference = new SoftConnectionEngine().Infer(document, clusters,
+                    new SoftConnectionOptions(VisualInferenceContext.Current), inferenceCts.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                const string message = "PDF visual inference exceeded its configured time budget; all vector connectors remain fallback geometry.";
+                diagnostics.Add($"VisualInferenceTimeout: PDF page {pageNumber} {message}");
+                graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceTimeout", message,
+                    Fallback: "vector connectors retained as visual fallback",
+                    Remedy: "increase VisualInferenceTimeout or simplify the diagram",
+                    Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
+                    SourceObjectType: "inference", Confidence: 0));
+                inference = new SoftConnectionResult([], [], []);
+            }
+            foreach (var pair in inference.Resolved)
+            {
+                var edgeIndex = edges.FindIndex(edge => edge.Id == pair.ConnectorId);
+                if (edgeIndex < 0 || pair.SourceId is null || pair.TargetId is null) continue;
+                var edge = edges[edgeIndex];
+                var physicalStartId = pair.Direction == ConnectionDirection.Reverse ? pair.TargetId : pair.SourceId;
+                var physicalEndId = pair.Direction == ConnectionDirection.Reverse ? pair.SourceId : pair.TargetId;
+                var selected = inference.Candidates.Where(candidate => candidate.ConnectorId == pair.ConnectorId &&
+                        (candidate.IsStart && candidate.NodeId == physicalStartId || !candidate.IsStart && candidate.NodeId == physicalEndId))
+                    .ToArray();
+                var margin = selected.Select(candidate => candidate.Features.CandidateMargin).DefaultIfEmpty(0).Min();
+                var confidence = pair.Confidence == ConnectionConfidence.Medium ? .75 : Math.Max(.85, pair.Score);
+                edges[edgeIndex] = edge with
+                {
+                    SourceId = pair.SourceId,
+                    TargetId = pair.TargetId,
+                    Resolution = VisualEdgeResolution.GeometryInferred,
+                    Confidence = confidence,
+                    Evidence = new VisualConnectionEvidence("pdf-soft-geometry", pair.Confidence.ToString(), pair.Score,
+                        SecondBestScore: Math.Max(0, pair.Score - margin), CandidateMargin: margin,
+                        BoundaryDistanceNormalized: selected.Select(candidate => candidate.Features.BoundaryDistanceNormalized).DefaultIfEmpty(0).Max(),
+                        RayIntersects: selected.All(candidate => candidate.Features.RayIntersects),
+                        RayFirstHit: selected.All(candidate => candidate.Features.RayFirstHit),
+                        AngularDeviationDegrees: selected.Select(candidate => candidate.Features.AngularDeviationDegrees).DefaultIfEmpty(0).Max(),
+                        PerpendicularOffsetNormalized: selected.Select(candidate => candidate.Features.PerpendicularOffsetNormalized).DefaultIfEmpty(0).Max(),
+                        IntermediateNodeCount: selected.Select(candidate => candidate.Features.IntermediateNodeCount).DefaultIfEmpty(0).Max(),
+                        ArrowheadEvidence: "none", ClusterId: pair.ClusterId,
+                        RejectedCandidateIds: pair.RejectedCandidateIds)
+                };
+                var deferredDiagnostic = graphDiagnostics.FindIndex(item => item.Code == "VisualConnectorUnresolved" &&
+                    item.Message.Contains("endpoint", StringComparison.OrdinalIgnoreCase));
+                if (deferredDiagnostic >= 0) graphDiagnostics.RemoveAt(deferredDiagnostic);
+                var deferredGlobal = diagnostics.FindIndex(message =>
+                    message.StartsWith($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint", StringComparison.Ordinal));
+                if (deferredGlobal >= 0) diagnostics.RemoveAt(deferredGlobal);
+            }
         }
         // A small closed triangle touching a shaft is an arrowhead, not a node.
         // Promote the shaft to directed only when that evidence is unambiguous.
@@ -291,7 +494,59 @@ public static class PdfTextExtractor
             var atEnd = Distance(edge.Path![^1], tip) <= Distance(edge.Path[0], tip);
             if (!atEnd && edge.SourceId is not null && edge.TargetId is not null)
                 edge = edge with { SourceId = edge.TargetId, TargetId = edge.SourceId };
-            edges[match.index] = edge with { Direction = "directed", EdgeDirection = VisualEdgeDirection.Directed };
+            edges[match.index] = edge with
+            {
+                Direction = "directed",
+                EdgeDirection = VisualEdgeDirection.Directed,
+                Evidence = (edge.Evidence ?? new VisualConnectionEvidence("pdf-arrowhead-geometry", "High", edge.Confidence ?? .75,
+                    ClusterId: $"page-{pageNumber}")) with { ArrowheadEvidence = atEnd ? "end" : "start" }
+            };
+        }
+        // Merge an open, two-segment V adjacent to a shaft into one directed edge.
+        // A standalone V has no qualifying shaft and remains a fallback/decorative path.
+        for (var shaftIndex = 0; shaftIndex < edges.Count; shaftIndex++)
+        {
+            var shaft = edges[shaftIndex];
+            if (shaft.Path is not { Count: >= 2 }) continue;
+            var shaftLength = shaft.Path.Zip(shaft.Path.Skip(1), Distance).Sum();
+            if (shaftLength <= 0 || shaft.SourceId is null || shaft.TargetId is null) continue;
+            foreach (var endpoint in new[] { (Point: shaft.Path[0], AtStart: true), (Point: shaft.Path[^1], AtStart: false) })
+            {
+                var decoration = edges.Select((edge, index) => (edge, index))
+                    .Where(item => item.index != shaftIndex && item.edge.Path is { Count: >= 3 })
+                    .Select(item => (item.edge, item.index, points: item.edge.Path!, length: item.edge.Path!.Zip(item.edge.Path!.Skip(1), Distance).Sum()))
+                    .Where(item => item.length > 0 && item.length <= shaftLength * .75 &&
+                        IsVDecoration(item.points, endpoint.Point, shaftLength,
+                            endpoint.AtStart
+                                ? new VisualVector(shaft.Path[0].X - shaft.Path[^1].X, shaft.Path[0].Y - shaft.Path[^1].Y)
+                                : new VisualVector(shaft.Path[^1].X - shaft.Path[0].X, shaft.Path[^1].Y - shaft.Path[0].Y)))
+                    .OrderBy(item => Distance(item.points.First(), endpoint.Point)).FirstOrDefault();
+                if (decoration.edge is null) continue;
+                var source = endpoint.AtStart ? shaft.TargetId : shaft.SourceId;
+                var target = endpoint.AtStart ? shaft.SourceId : shaft.TargetId;
+                edges[shaftIndex] = shaft with
+                {
+                    SourceId = source, TargetId = target, Direction = "directed", EdgeDirection = VisualEdgeDirection.Directed,
+                    Evidence = (shaft.Evidence ?? new VisualConnectionEvidence("pdf-v-arrowhead-geometry", "High", shaft.Confidence ?? .8,
+                        ClusterId: $"page-{pageNumber}")) with { ArrowheadEvidence = endpoint.AtStart ? "start" : "end" }
+                };
+                var decorationPath = paths.FirstOrDefault(path => ReferenceEquals(path.Points, decoration.edge.Path));
+                if (decorationPath is not null) mergedArrowheadPathIds.Add(decorationPath.Id);
+                edges.RemoveAt(decoration.index);
+                if (decoration.index < shaftIndex) shaftIndex--;
+                break;
+            }
+        }
+
+        // A textless closed path is only a semantic node if it participated in a resolved
+        // relation. All others remain paths so decorative marks cannot leak into Mermaid.
+        var connectedNodeIds = edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null)
+            .SelectMany(edge => new[] { edge.SourceId!, edge.TargetId! }).ToHashSet(StringComparer.Ordinal);
+        foreach (var node in nodes.Where(node => provisionalUnlabelledNodeIds.Contains(node.Id) && !connectedNodeIds.Contains(node.Id)).ToArray())
+        {
+            nodes.Remove(node);
+            var pathIndex = paths.FindIndex(path => path.Geometry == node.Geometry);
+            if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { IsFallback = true, Confidence = .35 };
         }
         var sourceItems = new List<VisualSourceItem>();
         foreach (var path in paths)
@@ -308,7 +563,7 @@ public static class PdfTextExtractor
                     : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
                         FallbackPathId: path.Id, Reason: "duplicate closed path retained without canonical reference", SourceAnchor: path.SourceAnchor));
             }
-            else if (arrowheadPathIds.Contains(path.Id))
+            else if (arrowheadPathIds.Contains(path.Id) || mergedArrowheadPathIds.Contains(path.Id))
             {
                 var related = edges.FirstOrDefault(candidate => candidate.Path is { Count: >= 2 } &&
                     arrowheadTips.Any(tip => Distance(candidate.Path![^1], tip) <= 18 || Distance(candidate.Path[0], tip) <= 18));
@@ -332,8 +587,9 @@ public static class PdfTextExtractor
                 sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
                     Reason: "non-semantic decorative vector path", SourceAnchor: path.SourceAnchor));
         }
-        return new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
+        var graph = new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
             SourceItems: sourceItems);
+        return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
 
         IEnumerable<string> Tokens(string value)
         {
@@ -349,10 +605,6 @@ public static class PdfTextExtractor
             }
         }
         VisualPathPoint Transform(double x, double y) => new(ctm.A * x + ctm.C * y + ctm.E, ctm.B * x + ctm.D * y + ctm.F);
-        static bool Between(double value, double min, double max) => value >= min - 24 && value <= max + 24;
-        static bool Near(Geometry? geometry, VisualPathPoint point) => geometry is not null &&
-            (Between(point.X, geometry.X, geometry.X + geometry.Width) || Between(point.X, geometry.X + geometry.Width, geometry.X)) &&
-            (Between(point.Y, geometry.Y, geometry.Y + geometry.Height) || Between(point.Y, geometry.Y + geometry.Height, geometry.Y));
         static double Distance(VisualPathPoint left, VisualPathPoint right) => Math.Sqrt(Math.Pow(left.X - right.X, 2) + Math.Pow(left.Y - right.Y, 2));
         VisualDiagnostic Diag(string code, string message, double? confidence = null) => new(code, message,
             Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}", Confidence: confidence);
@@ -375,6 +627,16 @@ public static class PdfTextExtractor
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                 0.35, IsFallback: true, SourceNodeId: null));
             graphDiagnostics.Add(Diag("VisualPathPartial", "Unpainted PDF subpath retained as fallback.", 0.35));
+        }
+
+        void AddPaintedClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
+        {
+            var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
+            var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
+            paths.Add(new VisualPath($"pdf_p{pageNumber}_path{paths.Count + 1}", subpath,
+                new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
+                0.9, IsFallback: false, SourceNodeId: null));
+            AddClosedNode(subpath);
         }
 
         void AddClosedNode(IReadOnlyList<VisualPathPoint> subpath)
@@ -406,30 +668,61 @@ public static class PdfTextExtractor
             var hasLabel = labelCandidate.Length > 0;
             var label = hasLabel ? labelCandidate[0].region.Text : null;
             if (hasLabel) assignedLabelRegions.Add(labelCandidate[0].index);
-            // Tiny unlabelled closed paths are markers/arrowheads, not semantic nodes.
-            if (string.IsNullOrWhiteSpace(label) && width <= 16 && height <= 16)
+            // Closed triangles are arrowhead evidence, regardless of document scale. Other
+            // closed shapes remain candidate nodes; fixed absolute size cutoffs would make
+            // connection inference change under a PDF CTM scale transform.
+            if (string.IsNullOrWhiteSpace(label) && IsTriangle(subpath))
             {
-                if (IsTriangle(subpath))
-                {
-                    arrowheadTips.Add(ArrowTip(subpath));
-                    if (paths.Count > 0) arrowheadPathIds.Add(paths[^1].Id);
-                }
-                paths.Add(new VisualPath($"pdf_p{pageNumber}_decorative{paths.Count + 1}", subpath, geometry, anchor, 0.3, IsFallback: true));
+                if (paths.Count == 0 || paths[^1].Geometry != geometry)
+                    paths.Add(new VisualPath($"pdf_p{pageNumber}_decorative{paths.Count + 1}", subpath, geometry, anchor, 0.3, IsFallback: true));
+                triangleCandidates.Add((subpath, geometry, paths[^1].Id));
                 return;
             }
-            label ??= $"Vector node {nodes.Count + 1}";
+            if (string.IsNullOrWhiteSpace(label))
+            {
+                unlabelledClosedCandidates.Add((geometry, paths[^1].Id));
+                return;
+            }
             nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
                 Geometry: geometry, SourceAnchor: anchor));
         }
 
+        // A text region should only "win" a label slot when it is actually near the shape it
+        // would label. Without a floor, 1/(1+centerDistance) stays positive for any finite
+        // distance, so a bare, unrelated text region anywhere on the page could still out-score
+        // "no candidate" and get absorbed as a node's label -- or, worse, as an arrowhead
+        // triangle's label, which routes the triangle away from IsTriangle's arrowhead-evidence
+        // branch below (see AddClosedNode) and turns it into a spurious semantic node carrying
+        // meaning the source document never expressed. Gate acceptance on real proximity: either
+        // the label box overlaps the shape at all, or its center falls within
+        // LabelDistanceGateFactor times the larger of the two diagonals. That bound is relative
+        // to the shapes themselves (matching the pageDiagonalSquared/decorativeAreaThreshold
+        // convention above), so it does not change under a PDF CTM scale transform, and it
+        // leaves genuinely unassociated text unassigned rather than inventing a label for it.
+        // 3.5 (not the smaller ~1.5 first tried) is the calibrated value: with two rectangle
+        // nodes plus a small arrowhead triangle sharing a page, and text regions comparable in
+        // size to the node they label, a tighter floor started rejecting one of two similarly-far
+        // *unclaimed* candidates for the triangle while keeping the other -- turning what used to
+        // be a correctly-detected tie (both candidates weak and near-equal, see the ambiguous-
+        // label check below) into an artificial single "winner" for R3_S0_7's inverted paint
+        // order. 3.5 keeps both of that test's candidates on equal footing (so the pre-existing
+        // ambiguity check still resolves it) while still rejecting text that is astronomically far
+        // (page-scale-and-beyond) from the shape, which is the defect this gate exists to close.
         static double LabelScore(Geometry label, Geometry node)
         {
+            const double LabelDistanceGateFactor = 3.5;
             var left = Math.Max(label.X, node.X); var right = Math.Min(label.X + label.Width, node.X + node.Width);
             var bottom = Math.Max(label.Y, node.Y); var top = Math.Min(label.Y + label.Height, node.Y + node.Height);
             var overlap = Math.Max(0, right - left) * Math.Max(0, top - bottom);
             var labelArea = Math.Max(1, label.Width * label.Height);
             var centerDistance = Math.Sqrt(Math.Pow(label.X + label.Width / 2 - (node.X + node.Width / 2), 2) +
                 Math.Pow(label.Y + label.Height / 2 - (node.Y + node.Height / 2), 2));
+            if (overlap <= 0)
+            {
+                var nodeDiagonal = Math.Sqrt(node.Width * node.Width + node.Height * node.Height);
+                var labelDiagonal = Math.Sqrt(label.Width * label.Width + label.Height * label.Height);
+                if (centerDistance > LabelDistanceGateFactor * Math.Max(nodeDiagonal, labelDiagonal)) return 0;
+            }
             return overlap / labelArea + 1d / (1d + centerDistance);
         }
 
@@ -440,6 +733,30 @@ public static class PdfTextExtractor
                 Math.Max(0, Math.Min(left.Y + left.Height, right.Y + right.Height) - Math.Max(left.Y, right.Y));
             var union = Math.Max(1, left.Width * left.Height + right.Width * right.Height - intersection);
             return intersection / union;
+        }
+
+        static bool IsVDecoration(IReadOnlyList<VisualPathPoint> points, VisualPathPoint shaftEndpoint,
+            double shaftLength, VisualVector shaftDirection)
+        {
+            if (points.Count < 3) return false;
+            var apexIndex = Enumerable.Range(0, points.Count).OrderBy(index => Distance(points[index], shaftEndpoint)).First();
+            if (Distance(points[apexIndex], shaftEndpoint) > Math.Max(18, shaftLength * .12)) return false;
+            var first = points[(apexIndex + 1) % points.Count];
+            var second = points[(apexIndex + points.Count - 1) % points.Count];
+            var ax = first.X - points[apexIndex].X; var ay = first.Y - points[apexIndex].Y;
+            var bx = second.X - points[apexIndex].X; var by = second.Y - points[apexIndex].Y;
+            var firstLength = Math.Sqrt(ax * ax + ay * ay);
+            var secondLength = Math.Sqrt(bx * bx + by * by);
+            var product = firstLength * secondLength;
+            if (product <= 0) return false;
+            var direction = shaftDirection.Normalize();
+            if (direction.Length <= 0) return false;
+            var firstProjection = (ax * direction.X + ay * direction.Y) / firstLength;
+            var secondProjection = (bx * direction.X + by * direction.Y) / secondLength;
+            var openingCosine = (ax * bx + ay * by) / product;
+            var cross = Math.Abs(ax * by - ay * bx) / product;
+            return cross > .25 && openingCosine > 0 &&
+                firstProjection < -.15 && secondProjection < -.15;
         }
 
         static bool IsTriangle(IReadOnlyList<VisualPathPoint> points)

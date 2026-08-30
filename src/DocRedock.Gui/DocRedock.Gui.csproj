@@ -6,6 +6,7 @@
     <ProjectReference Include="..\DocRedock.Formats.Pdf\DocRedock.Formats.Pdf.csproj" />
     <ProjectReference Include="..\DocRedock.Ocr.Tesseract\DocRedock.Ocr.Tesseract.csproj" />
     <ProjectReference Include="..\DocRedock.RoundTrip\DocRedock.RoundTrip.csproj" />
+    <ProjectReference Include="..\DocRedock.VisualInference\DocRedock.VisualInference.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

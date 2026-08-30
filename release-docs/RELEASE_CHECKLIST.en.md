@@ -53,6 +53,9 @@ Desktop GUI PDF input is available by default. CLI PDF export, restoration, and 
 - [ ] For synthetic DOCX/XLSX/PPTX/PDF fixtures, every recognized visual survives as native projection, semantic projection, visual fallback, or an explicit diagnostic
 - [ ] Reconcile `recognized = semantic projection + visual fallback + explicitly diagnosed omission` per format and for the complete document
 - [ ] Verify stable diagnostics for native connections, geometry inference, unresolved connectors, edge labels, and unsupported visuals
+- [ ] Record `product_source_commit` and `release_workflow_commit` as separate evidence values
+- [ ] Preserve, in both smoke and conversion-QA evidence, the separate commits, fixture/output SHA-256 values, tier, mode, decision, and repeat-output determinism
+- [ ] Execute and record positive and negative relation assertions for `native-only`, `safe`, and `balanced`
 - [ ] Confirm no regression in paragraph/list/table/image/OCR output and deterministic markers/order
 - [ ] From published-binary smoke, persist exit code, markers, diagnostics, counts, fixture SHA-256, and output SHA-256 in `RELEASE-EVIDENCE.md`
 - [x] Describe DOCX connector and PDF vector topology as conditional support only; do not claim complete drawing/SmartArt/arbitrary-vector reconstruction

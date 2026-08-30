@@ -302,6 +302,23 @@ public sealed class PdfTextExtractorTests
     }
 
     [Fact]
+    public void Standalone_unlabelled_triangle_is_a_node_not_an_arrowhead()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 45 >> stream\n0 0 m 100 0 l 50 100 l h S\nendstream\n%%EOF");
+
+        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+
+        // With no other semantic element anywhere on the page, this closed path is the page's
+        // only visual content, so it is retained as a node on the graph rather than dropped (a
+        // validator would not normally promote an isolated synthetic shape into Mermaid, but
+        // there is nothing else on this page for it to compete against). Suppression of an
+        // off-flow unlabelled triangle when a real flow coexists elsewhere on the page is
+        // covered separately by R3_S0_6_off_flow_unlabelled_triangle_is_not_promoted_when_a_flow_exists.
+        Assert.Single(graph.Nodes);
+        Assert.DoesNotContain(graph.SourceItems!, item => item.Reason?.Contains("arrowhead", StringComparison.OrdinalIgnoreCase) == true);
+    }
+
+    [Fact]
     public void Ambiguous_open_path_remains_unresolved()
     {
         var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 42 >> stream\n0 0 m 100 100 l S\nendstream\n%%EOF");
@@ -330,6 +347,39 @@ public sealed class PdfTextExtractorTests
         var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 110 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\nendstream\n%%EOF");
         var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
         Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.GeometryInferred);
+    }
+
+    [Fact]
+    public void Visual_inference_timeout_returns_vector_fallback_without_partial_topology()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 110 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf,
+            new PdfExtractionOptions(VisualInferenceTimeout: TimeSpan.Zero));
+        var graph = result.VisualGraphs![1];
+
+        Assert.DoesNotContain(graph.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        var diagnostic = Assert.Single(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
+        Assert.Contains(result.Diagnostics!, item => item.StartsWith("VisualInferenceTimeout", StringComparison.Ordinal));
+        Assert.True(graph.Accounting.IsConsistent);
+    }
+
+    [Theory]
+    [InlineData(0d, 1d)]
+    [InlineData(500d, 1d)]
+    [InlineData(0d, .01d)]
+    public void Vector_connection_inference_is_translation_and_uniform_scale_invariant(double translate, double scale)
+    {
+        var matrix = string.Create(System.Globalization.CultureInfo.InvariantCulture,
+            $"{scale} 0 0 {scale} {translate} {translate} cm");
+        var pdf = Encoding.Latin1.GetBytes($"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 140 >> stream\nq {matrix} 0 0 20 20 re S 100 0 20 20 re S 20 10 m 100 10 l S Q\nendstream\n%%EOF");
+
+        var edge = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs![1].Edges);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
     }
 
     [Theory]
@@ -373,7 +423,279 @@ public sealed class PdfTextExtractorTests
         var edge = Assert.Single(graph.Edges);
         Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
         Assert.Equal("directed", edge.Direction);
+        Assert.Equal("end", edge.Evidence?.ArrowheadEvidence);
+        Assert.Equal(VisualGraphQuality.HighConfidenceInferred, graph.Quality);
         Assert.Contains(graph.SourceItems!, item => item.Disposition == VisualDisposition.SuppressedDuplicate);
-        Assert.True(graph.HasTopology);
+        var validation = VisualGraphValidator.Validate(graph);
+        Assert.True(graph.HasTopology, string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
+    }
+
+    [Fact]
+    public void R0_FIX07_decorative_unlabelled_rectangles_are_accounted_without_becoming_semantic_nodes()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 420 >> stream
+            BT 1 0 0 1 10 20 Tm (RL_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (RL_CHECK) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            400 400 8 8 re f
+            420 400 8 8 re f
+            440 400 8 8 re f
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Collection(graph.Nodes,
+            node => Assert.Equal("RL_START", node.Label),
+            node => Assert.Equal("RL_CHECK", node.Label));
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
+        Assert.Equal("RL_START", graph.Nodes.Single(node => node.Id == edge.SourceId).Label);
+        Assert.Equal("RL_CHECK", graph.Nodes.Single(node => node.Id == edge.TargetId).Label);
+        Assert.DoesNotContain(graph.Nodes, node => node.Label.StartsWith("Vector node", StringComparison.Ordinal));
+        Assert.True(graph.SourceItems!.Count(item => item.Disposition == VisualDisposition.IgnoredDecorative ||
+            item.Disposition == VisualDisposition.VisualFallback) >= 3);
+    }
+
+    [Fact]
+    public void R3_S0_7_stroke_and_filled_arrowhead_before_text_does_not_misassign_a_node_label_as_an_edge_label()
+    {
+        // Content-stream order deliberately inverted from the fixtures above: the shaft and its
+        // filled triangle arrowhead are painted FIRST, both rectangles second, and the
+        // RL_START/RL_CHECK text runs (BT/Tj) LAST -- after the shapes they label. This guards
+        // against mis-assigning a node's own label text as a nearby EDGE label when paint order
+        // doesn't match reading order.
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 260 >> stream
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            0 0 100 50 re S
+            200 0 100 50 re S
+            BT 1 0 0 1 10 20 Tm (RL_START) Tj ET
+            BT 1 0 0 1 210 20 Tm (RL_CHECK) Tj ET
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Collection(graph.Nodes,
+            node => Assert.Equal("RL_START", node.Label),
+            node => Assert.Equal("RL_CHECK", node.Label));
+        var edge = Assert.Single(graph.Edges);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+        // Negative case: neither node label was misassigned as the connector's own edge label.
+        Assert.False(edge.Label != null && edge.Label.StartsWith("RL_", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void R3_S0_6_off_flow_unlabelled_triangle_is_not_promoted_when_a_flow_exists()
+    {
+        // A real two-node flow (RL_START -> RL_CHECK, same shape as R0_FIX07 above) plus one
+        // extra unlabelled filled triangle far off to the side (400,400), unconnected to
+        // anything. Unlike Standalone_unlabelled_triangle_is_a_node_not_an_arrowhead (where an
+        // isolated triangle is the page's only content and is kept as a node), the presence of a
+        // real flow here means the off-flow triangle must not be promoted to a semantic
+        // "Vector node" -- it is still accounted for, just not as graph topology.
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 320 >> stream
+            BT 1 0 0 1 10 20 Tm (RL_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (RL_CHECK) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            400 400 m 440 400 l 420 440 l h f
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.DoesNotContain(graph.Nodes, node => node.Label.StartsWith("Vector node", StringComparison.Ordinal));
+        Assert.Single(graph.Edges);
+        // The off-flow triangle isn't a repeated decorative pattern (unlike R0_FIX07's three
+        // small squares), so it is retained as a generic fallback path rather than dropped or
+        // promoted to a node -- this is the "some disposition" accounting entry for it.
+        Assert.Contains(graph.SourceItems!, item => item.Disposition == VisualDisposition.VisualFallback &&
+            item.Reason == "vector path retained as fallback");
+    }
+
+    [Fact]
+    public async Task R3_far_unclaimed_text_is_not_absorbed_as_a_node_or_arrowhead_label()
+    {
+        // Same two-node-plus-arrowhead flow as Closed_path_boxes_are_canonicalized_and_
+        // triangle_arrowhead_promotes_shaft_to_directed above, plus one more text run
+        // ("REMOTE") placed at (5000, 5000) -- far past 3x either rectangle's ~112pt
+        // diagonal from anything in the flow. Before LabelScore gained a proximity floor,
+        // its distance term 1/(1+centerDistance) stayed positive for any finite distance,
+        // so once RL_START and RL_CHECK were claimed by their own rectangles, REMOTE was
+        // the *only* unclaimed text region left when the triangle ran through that same
+        // labelCandidate selection -- and a positive score, however tiny, was enough to
+        // "win" by default. That routed the triangle away from IsTriangle's arrowhead
+        // branch and turned a legitimate arrowhead into a spurious "REMOTE" node instead
+        // of directed-edge evidence.
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 360 >> stream
+            BT 1 0 0 1 10 20 Tm (RL_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (RL_CHECK) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            BT 1 0 0 1 5000 5000 Tm (REMOTE) Tj ET
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        // The flow resolves exactly as it does without the far-away text: two labelled
+        // nodes and one directed edge, with the triangle correctly read as arrowhead
+        // evidence rather than being promoted into a third "REMOTE" node.
+        Assert.Equal(2, graph.Nodes.Count);
+        Assert.DoesNotContain(graph.Nodes, node => node.Label.Contains("REMOTE", StringComparison.Ordinal));
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
+        Assert.True(edge.Label is null || !edge.Label.Contains("REMOTE", StringComparison.Ordinal));
+
+        var root = Path.Combine(Path.GetTempPath(), "docredock-pdf-far-label-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var source = Path.Combine(root, "far-label.pdf");
+            var output = Path.Combine(root, "far-label.md");
+            await File.WriteAllBytesAsync(source, pdf);
+            await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+            var markdown = await File.ReadAllTextAsync(output);
+
+            var mermaidStart = markdown.IndexOf("```mermaid", StringComparison.Ordinal);
+            Assert.True(mermaidStart >= 0, "Expected the resolved flow to render as a mermaid diagram.");
+            var mermaidEnd = markdown.IndexOf("```", mermaidStart + "```mermaid".Length, StringComparison.Ordinal);
+            var mermaid = markdown[mermaidStart..(mermaidEnd < 0 ? markdown.Length : mermaidEnd)];
+
+            // REMOTE must never appear inside the mermaid diagram itself -- as a node or edge
+            // label -- even though the underlying extracted text may still be present
+            // elsewhere in the readable export as ordinary body text.
+            Assert.DoesNotContain("REMOTE", mermaid, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void R5_v_head_promotes_horizontal_shaft_to_directed_edge()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 280 >> stream
+            BT 1 0 0 1 10 20 Tm (V_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (V_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            190 32 m 200 25 l 190 18 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+        Assert.Collection(graph.Nodes, node => Assert.Equal("V_START", node.Label), node => Assert.Equal("V_DONE", node.Label));
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
+        Assert.Equal("V_START", graph.Nodes.Single(node => node.Id == edge.SourceId).Label);
+        Assert.Equal("V_DONE", graph.Nodes.Single(node => node.Id == edge.TargetId).Label);
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void R5_forward_opening_v_is_not_promoted_to_an_arrowhead()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 280 >> stream
+            BT 1 0 0 1 10 20 Tm (V_NEGATIVE_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (V_NEGATIVE_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            210 32 m 200 25 l 210 18 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+        Assert.DoesNotContain(graph.Edges, edge => edge.EdgeDirection == VisualEdgeDirection.Directed);
+        Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved);
+    }
+
+    [Fact]
+    public void R3_intermediate_node_box_after_connector_stays_visible_to_inference_and_blocks_skip_edge()
+    {
+        // START and END sit at the two ends of a single straight connector; MIDDLE's box is
+        // drawn on that same line, between them, but the shaft only ever touches START's and
+        // END's boundaries -- never MIDDLE's. DiagramClusterer only unions a node into a
+        // connector's cluster when the node touches one of the connector's two path endpoints,
+        // or sits within a generic center-distance radius of another already-unioned shape; a
+        // perfectly horizontal (or vertical) connector's own bounding box has a zero-length
+        // minor axis, which collapses that generic radius to almost nothing. MIDDLE satisfies
+        // neither test, so without an explicit whole-canvas cluster it would be split into its
+        // own single-node cluster -- invisible to the corridor check that exists specifically to
+        // stop the flanking nodes from resolving a "skip" edge across a node drawn in between.
+        // MIDDLE must both stay a first-class labelled node and remain visible to that check, so
+        // the shaft is correctly left unresolved rather than reporting a false START --> END.
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 400 >> stream
+            BT /F1 12 Tf 100 330 Td (START) Tj ET
+            BT /F1 12 Tf 500 330 Td (END) Tj ET
+            80 300 100 60 re S
+            500 300 100 60 re S
+            180.00 330 m 500.00 330 l S
+            500.00 330 m 488.00 338 l 488.00 322 l h f
+            300 300 100 60 re S
+            BT /F1 12 Tf 315 330 Td (MIDDLE) Tj ET
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Collection(graph.Nodes,
+            node => Assert.Equal("START", node.Label),
+            node => Assert.Equal("END", node.Label),
+            node => Assert.Equal("MIDDLE", node.Label));
+
+        // No topology: the connector stays unresolved with a diagnostic rather than silently
+        // connecting START to END across the node drawn in between.
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(graph.Diagnostics!, diag => diag.Code == "VisualConnectorUnresolved");
+
+        // Negative case: START --> END must never appear, resolved or otherwise.
+        var startId = graph.Nodes.Single(node => node.Label == "START").Id;
+        var endId = graph.Nodes.Single(node => node.Label == "END").Id;
+        Assert.DoesNotContain(graph.Edges, candidate => candidate.SourceId == startId && candidate.TargetId == endId);
     }
 }

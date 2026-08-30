@@ -107,6 +107,8 @@ public sealed class ReadableMarkdownTests
         Assert.DoesNotContain("```mermaid", fallback, StringComparison.Ordinal);
         Assert.Contains("- A → B", fallback, StringComparison.Ordinal);
         Assert.Contains(fallbackSerializer.Diagnostics, diagnostic => diagnostic.Code == "VisualSemanticProjectionPartial");
+        Assert.Contains(fallbackSerializer.Diagnostics, diagnostic => diagnostic.Code == "VisualSemanticProjectionFallback" &&
+            diagnostic.Severity == MarkdownDiagnosticSeverity.Error);
     }
 
     [Fact]
