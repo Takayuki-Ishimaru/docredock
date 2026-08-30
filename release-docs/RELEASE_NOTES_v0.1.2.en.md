@@ -43,12 +43,9 @@ Choose the asset matching your operating system and CPU on GitHub Releases.
 
 Each package includes the GUI, CLI, Japanese and English quick starts and security guidance, licenses, artifact-file checksums, an artifact-linked SBOM, provenance, and an explicit signing-status record. A separate .NET SDK installation is not required.
 
-## Verification
+## Quality checks
 
-- All 259 tests pass in Release configuration.
-- Readable and round-trip exports were checked with a complex XLSX, a complex PPTX, and a 15-slide synthetic PPTX.
-- The tested XLSX and PPTX files restored byte-identically in unchanged F0 regression checks. This is a mechanical regression check, not support for round-trip or restore operation.
-- The release workflow requires locked restore, Release build, the full test suite, conversion QA, LicenseAudit, and extracted-package smoke tests for all six RIDs.
+Readable output was reviewed with complex XLSX/PPTX documents and a multi-slide presentation. Round-trip and restoration checks did not make those workflows part of the user-supported scope.
 
 ## Known limitations
 
@@ -59,14 +56,9 @@ Each package includes the GUI, CLI, Japanese and English quick starts and securi
 - Macros, signatures, encryption, protection, and unsafe or unsupported package structures may be rejected.
 - Windows signing and macOS signing/notarization are applied only when credentials are configured; every package records its status.
 
-## Experimental engine changes — not supported in v0.1.2
+## Experimental features
 
-The following changes are part of implementation and regression testing but are outside the v0.1.2 user support scope.
-
-- The round-trip preview, `.drmd`/`.drmdpkg`, `verify`, `diff`, and `restore` paths were maintained and improved.
-- Nested PPTX groups compose `off/ext/chOff/chExt`, rotation, flips, and non-uniform scaling into coordinates while avoiding non-finite geometry for missing or zero-sized transforms.
-- Relationship XML, ZIP expanded-size/compression-ratio, and sparse chart-point limits are enforced. A backup-cleanup failure after a successful multi-output commit does not roll back committed outputs; feasible rollback operations continue and are reported.
-- Mermaid rendering in `render`, Office templates, PDF fallback, and restoration to original formats remain experimental engine features and are not supported for users.
+Round-trip editing, `.drmd`/`.drmdpkg`, `verify`, `diff`, `restore`, new-document generation with Mermaid, Office templates, and PDF fallback are outside the v0.1.2 user-supported scope. Safety limits apply to large or malformed inputs.
 
 See the [user guide](../docs/en/user-guide.md), [supported features](../docs/en/supported-features.md), and [security and privacy guide](../docs/en/security-and-privacy.md) for details.
 

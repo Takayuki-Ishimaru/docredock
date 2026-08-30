@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -22,7 +23,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+TOOLS_ROOT = Path(__file__).resolve().parents[1]
+if str(TOOLS_ROOT) not in sys.path:
+    sys.path.insert(0, str(TOOLS_ROOT))
+
 from generate_complex_xlsx import generate_complex_xlsx
+from visual_semantics_assertions import evaluate as evaluate_mermaid_graph
 
 try:
     from PIL import Image
@@ -43,8 +49,12 @@ GENERATED_XLSX_EXPECTATIONS = REPO_ROOT / "tools" / "conversion-qa" / "fixtures"
 EXPORT_TIMEOUT_SEC = 180
 RENDER_TIMEOUT_SEC = 120
 
-VALID_TYPES = {"contains", "not_contains", "unique", "regex", "count"}
+VALID_TYPES = {"contains", "not_contains", "unique", "regex", "count", "mermaid_graph"}
 VALID_SEVERITIES = {"guard", "goal"}
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 # --------------------------------------------------------------------------
 # 道具の発見: 環境変数 -> PATH -> 既知パス
@@ -230,6 +240,10 @@ def evaluate_item(md_text: str, item: dict) -> dict:
             if max_v is not None and count > max_v:
                 ok = False
             detail = f"count={count} (min={min_v}, max={max_v})"
+        elif item_type == "mermaid_graph":
+            result = evaluate_mermaid_graph(md_text, item)
+            ok = result["pass"]
+            detail = result["detail"]
         else:
             detail = f"unknown type '{item_type}'"
     except re.error as exc:
@@ -441,6 +455,9 @@ def process_target(target: Path, expectations_path: Optional[Path], out_dir: Pat
         "expectations_path": str(expectations_path) if expectations_path else None,
         "out_dir": str(out_dir),
         "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "product_source_commit": os.environ.get("PRODUCT_SOURCE_COMMIT", os.environ.get("GITHUB_SHA", "local")),
+        "release_workflow_commit": os.environ.get("RELEASE_WORKFLOW_COMMIT", os.environ.get("GITHUB_SHA", "local")),
+        "fixture_sha256": sha256(target),
         "tooling": tools,
         "warnings": [],
     }
@@ -469,6 +486,27 @@ def process_target(target: Path, expectations_path: Optional[Path], out_dir: Pat
         export_info["roundtrip"] = run_export(dotnet, target, "roundtrip", roundtrip_out)
 
     result["export"] = export_info
+    output_evidence = {}
+    for mode, path, info in (
+        ("readable", out_dir / (target.stem + ".md"), export_info["readable"]),
+        ("roundtrip", out_dir / "roundtrip" / (target.stem + ".md"), export_info["roundtrip"]),
+    ):
+        evidence = {"mode": mode, "output_sha256": sha256(path) if path.is_file() else None,
+                    "decision": info.get("status", "not-run"), "repeat_output_sha256": None, "deterministic": None}
+        if info.get("status") in ("success", "success_with_warnings"):
+            # Keep the same output basename so generated relative asset links are
+            # byte-identical; isolate the second run in its own directory instead.
+            repeated = path.parent / ".determinism" / path.name
+            repeated_info = run_export(dotnet, target, mode, repeated)
+            evidence["repeat_output_sha256"] = sha256(repeated) if repeated.is_file() else None
+            evidence["deterministic"] = (
+                repeated_info.get("status") in ("success", "success_with_warnings")
+                and evidence["output_sha256"] == evidence["repeat_output_sha256"]
+            )
+            if not evidence["deterministic"]:
+                evidence["decision"] = "non-deterministic"
+        output_evidence[mode] = evidence
+    result["output_evidence"] = output_evidence
 
     checks = []
     if expectations_path is not None:
@@ -494,6 +532,22 @@ def process_target(target: Path, expectations_path: Optional[Path], out_dir: Pat
 
     result["checks"] = checks
     result["check_summary"] = summarize_checks(checks)
+    mode_checks = {tier: {"pass": 0, "total": 0, "fail": 0} for tier in ("A", "B", "C")}
+    for check in checks:
+        tier = str(check.get("tier", "A" if check.get("severity") == "guard" else "B")).upper()
+        if tier not in mode_checks:
+            tier = "C"
+        mode_checks[tier]["total"] += 1
+        if check.get("skipped"):
+            continue
+        if check.get("pass"):
+            mode_checks[tier]["pass"] += 1
+        else:
+            mode_checks[tier]["fail"] += 1
+    # Content expectations are pass/fail mode checks, not edge-quality
+    # fractions. Visual precision/recall Tier metrics live in
+    # visual-semantics-evidence.json and must not be inferred from these rows.
+    result["mode_checks"] = mode_checks
 
     result["render"] = render_original(target, out_dir / "render", tools, do_render)
 
@@ -504,7 +558,8 @@ def process_target(target: Path, expectations_path: Optional[Path], out_dir: Pat
         or roundtrip_rc is None or roundtrip_rc >= 2
     )
     guard_failed = result["check_summary"]["guard"]["fail"] > 0
-    result["target_failed"] = bool(export_failed or guard_failed)
+    determinism_failed = any(item.get("deterministic") is False for item in output_evidence.values())
+    result["target_failed"] = bool(export_failed or guard_failed or determinism_failed)
     if expectations_path is None:
         result["status"] = "fail" if export_failed else "reference"
     else:
@@ -558,6 +613,11 @@ def render_report_md(result: dict) -> str:
     else:
         lines.append("- expectations: (none — reference entry)")
     lines.append(f"- generated_at: {result.get('generated_at', '')}")
+    lines.append(f"- product_source_commit: `{result.get('product_source_commit', 'local')}`")
+    lines.append(f"- release_workflow_commit: `{result.get('release_workflow_commit', 'local')}`")
+    lines.append(f"- fixture_sha256: `{result.get('fixture_sha256', '')}`")
+    lines.append(f"- output_evidence: `{json.dumps(result.get('output_evidence', {}), sort_keys=True)}`")
+    lines.append(f"- mode_checks: `{json.dumps(result.get('mode_checks', {}), sort_keys=True)}`")
     lines.append(f"- status: **{result['status']}**")
     if result.get("error"):
         lines.append(f"- error: {result['error']}")
@@ -675,6 +735,21 @@ def render_summary_md(results: list) -> str:
     total_targets = len(results)
     failed_targets = sum(1 for r in results if r.get("target_failed"))
     lines.append(f"- targets: {total_targets} (failed: {failed_targets})")
+    lines.append(f"- product_source_commit: `{os.environ.get('PRODUCT_SOURCE_COMMIT', os.environ.get('GITHUB_SHA', 'local'))}`")
+    lines.append(f"- release_workflow_commit: `{os.environ.get('RELEASE_WORKFLOW_COMMIT', os.environ.get('GITHUB_SHA', 'local'))}`")
+    aggregate = {tier: {"pass": 0, "total": 0, "fail": 0} for tier in ("A", "B", "C")}
+    for result in results:
+        for tier, values in result.get("mode_checks", {}).items():
+            for key in aggregate[tier]: aggregate[tier][key] += values.get(key, 0)
+    lines.append(f"- mode_checks: `{json.dumps(aggregate, sort_keys=True)}`")
+    lines.append("")
+    lines.append("## Hash and determinism evidence")
+    lines.append("")
+    for result in results:
+        lines.append(
+            f"- `{result['target']}` fixture_sha256=`{result.get('fixture_sha256', '')}` "
+            f"outputs=`{json.dumps(result.get('output_evidence', {}), sort_keys=True)}`"
+        )
     lines.append("")
     return "\n".join(lines)
 

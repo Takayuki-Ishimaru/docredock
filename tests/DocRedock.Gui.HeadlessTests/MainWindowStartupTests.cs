@@ -73,6 +73,15 @@ public sealed class MainWindowStartupTests
             Assert.False(Get<Control>(window, "SidecarOptionsPanel").IsVisible);
             Assert.False(Get<Control>(window, "RoundTripWarningText").IsVisible);
 
+            var inferenceMode = Get<ComboBox>(window, "VisualInferenceModeComboBox");
+            var inferenceLabels = inferenceMode.Items.Cast<ComboBoxItem>().Select(item => item.Content?.ToString() ?? string.Empty).ToArray();
+            Assert.Equal(["接続推定なし（native only）", "安全優先（safe・推奨）", "復元優先（balanced）"], inferenceLabels);
+            var balancedWarning = Get<TextBlock>(window, "BalancedInferenceWarning");
+            inferenceMode.SelectedIndex = 2;
+            Assert.True(balancedWarning.IsVisible);
+            inferenceMode.SelectedIndex = 1;
+            Assert.False(balancedWarning.IsVisible);
+
             Invoke(window, "SetExportBusy", true, null);
             Assert.False(exportMode.IsEnabled);
             Assert.False(restoreMode.IsEnabled);

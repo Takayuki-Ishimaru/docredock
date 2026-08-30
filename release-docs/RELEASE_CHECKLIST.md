@@ -4,7 +4,7 @@
 
 この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。Release Owner が証跡と公開判断を所有し、CI/QA Owner が技術ゲートを実行します。必須ゲートが一つでも未完了または失敗している場合は公開しません。
 
-デスクトップGUIのPDF入力はv0.1.6で既定利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元は実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
+デスクトップGUIのPDF入力は既定で利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元は実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
 
 ## P0: 公開ブランチの確定
 
@@ -48,18 +48,21 @@
 - [ ] provenance/ の記録が採用コードと一致する
 - [ ] SBOM に対象 RID、commit、配布物内の実ファイルと SHA-256 を記録し、成果物 provenance／attestation と結び付けた
 
-## P0: v0.1.6 visual semantics
+## P0: Visual semantics correctness
 
 - [ ] DOCX／XLSX／PPTX／PDF の合成 fixture で、認識対象ごとに native projection、semantic projection、visual fallback、明示的診断のいずれかが残る
 - [ ] `recognized = semantic projection + visual fallback + explicitly diagnosed omission` のaccountingを形式別・文書全体で照合した
 - [ ] native connection、geometry inference、unresolved connector、edge label、unsupported visual のstable diagnosticを確認した
 - [ ] 既存のparagraph／list／table／image／OCR出力に回帰がなく、出力markerと順序が決定的である
 - [ ] 公開バイナリのsmokeでexit code、marker、diagnostic、各count、fixture SHA-256、output SHA-256を`RELEASE-EVIDENCE.md`へ保存した
+- [ ] `product_source_commit`と`release_workflow_commit`を分離して記録した
+- [ ] smokeとconversion-QAの双方で、分離したcommit、fixture／出力SHA-256、tier、mode、判定、反復出力の決定性を保存した
+- [ ] `native-only`／`safe`／`balanced` のrelation assertion結果を記録した（positive／negativeを含む）
 - [x] DOCX connectorとPDF vector topologyは条件付き対応としてのみ記載し、完全drawing／SmartArt／任意vector graph再構成を対応済みと記載していない
 
 ## ビルドとテスト
 
-ローカル事前検証（2026-08-29、.NET 10.0.400）では、main 359件とGUI headless 4件が失敗0／skip 0で成功し、osx-arm64 self-contained CLI／GUI publishと抽出済みbinary smokeも成功しました。これは以下のclean clone、全RID、署名／notarization、公開証跡ゲートを完了扱いにはしません。
+ローカル検証結果は恒久的な公開条件ではありません。clean clone、全RID、署名／notarization、構造化visual evidenceの各ゲートを、対象releaseごとに記録してください。
 
 クリーン clone と固定 SDK で次を実行します。
 
@@ -84,7 +87,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で展開し、CLI と GUI バイナリを検証した
 - [ ] headless CI ではパッケージ前にAvalonia headlessでMainWindowを構築し、Windows GUIのPE形式・CPU、macOS GUIのMach-O形式・CPU・実行権限を検証し、LinuxではXvfb上で実配布GUI子プロセスの生存を確認した
-- [ ] CLIのv0.1.6バージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した
+- [ ] 対象releaseのCLIバージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した
 - [ ] 展開後の実バイナリでDOCX／XLSX／PPTX／PDF visual-semantics smokeを実行し、結果をリリース証跡に記録した
 - [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換／復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
 - [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX／PDF入力と閲覧用Markdownの見た目を確認した

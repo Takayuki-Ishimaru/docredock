@@ -303,6 +303,57 @@ public sealed class DocxAdapterTests
     }
 
     [Fact]
+    public async Task Native_connector_without_geometry_uses_aliases_without_throwing()
+    {
+        var connector = "<a:cxnSp><a:nvCxnSpPr><a:cNvPr id=\"native-no-geometry\" />" +
+            "<a:cNvCxnSpPr><a:stCxn id=\"start\" /><a:endCxn id=\"end\" /></a:cNvCxnSpPr>" +
+            "</a:nvCxnSpPr><a:spPr /></a:cxnSp>";
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
+            DrawingShape("end", "END", 100, 0) + connector);
+
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var edge = Assert.Single(VisualGraphOf(extraction).Edges);
+
+        Assert.Equal(VisualEdgeResolution.NativeConnection, edge.Resolution);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+    }
+
+    [Fact]
+    public async Task Visual_inference_timeout_returns_complete_fallback_without_partial_topology()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
+            DrawingShape("end", "END", 100, 0) + DrawingConnector("inferred", 10, 10, 100, 10));
+
+        var extraction = await new DocxAdapter { VisualInferenceTimeout = TimeSpan.Zero }.ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+
+        Assert.DoesNotContain(visual.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public async Task Document_level_visual_graph_connects_shapes_across_paragraph_boundaries()
+    {
+        var source = await CreateVisualTopologyDocxAsync(
+            DrawingShape("start", "START", 0, 0),
+            DrawingShape("end", "END", 100, 0),
+            DrawingConnector("cross-paragraph", 10, 10, 100, 10));
+
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+        Assert.Equal(VisualGraphQuality.HighConfidenceInferred, visual.Quality);
+        Assert.True(visual.HasTopology);
+    }
+
+    [Fact]
     public async Task Geometry_connector_attaches_unique_label_and_keeps_unadopted_textbox()
     {
         var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
@@ -317,10 +368,48 @@ public sealed class DocxAdapterTests
 
         Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
         Assert.Equal("YES", edge.Label);
+        Assert.Equal("label", labelNode.Extensions!["shape_id"].GetString());
         Assert.True(labelNode.Extensions?.TryGetValue("visual_graph_member", out var marker) == true && marker.GetBoolean());
+        Assert.Equal(1, Count(markdown, "YES"));
         Assert.Contains(" -->|YES| ", markdown, StringComparison.Ordinal);
         Assert.Contains("Explanation remains", markdown, StringComparison.Ordinal);
         Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public async Task Same_text_outside_diagram_is_not_suppressed_by_visual_member_shape_ids()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
+            DrawingShape("end", "END", 100, 0) + DrawingTextBox("label", "YES", 50, 0) +
+            DrawingTextBox("outside", "YES", 600, 600) + DrawingConnector("inferred", 10, 10, 100, 10));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal("YES", Assert.Single(visual.Edges).Label);
+        Assert.Equal(2, extraction.Graph.Nodes.Count(node => node.Kind == NodeKind.TextBox && Text(node) == "YES"));
+        Assert.Equal(2, Count(markdown, "YES"));
+    }
+
+    [Fact]
+    public async Task Geometry_connector_label_joins_multiple_textbox_paragraphs_and_is_suppressed_once()
+    {
+        var source = await CreateVisualTopologyDocxAsync(DrawingShape("start", "START", 0, 0) +
+            DrawingShape("end", "END", 100, 0) + DrawingTextBoxParagraphs("label", 50, 0, "YES", "Proceed") +
+            DrawingConnector("inferred", 10, 10, 100, 10));
+        var extraction = await new DocxAdapter().ExtractAsync(source);
+        var visual = VisualGraphOf(extraction);
+        var labelNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.TextBox && node.Extensions?.TryGetValue("shape_id", out var id) == true && id.GetString() == "label");
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal("YES\nProceed", Assert.IsType<TextNodeContent>(labelNode.Content).Text);
+        Assert.Equal("YES\nProceed", Assert.Single(visual.Edges).Label);
+        Assert.True(labelNode.Extensions?.TryGetValue("visual_graph_member", out var marker) == true && marker.GetBoolean());
+        Assert.Equal(1, Count(markdown, "YES"));
+
+        var edge = Assert.Single(visual.Edges);
+        Assert.Equal("label", labelNode.Extensions!["shape_id"].GetString());
+        Assert.Equal("YES\nProceed", edge.Label);
     }
 
     [Fact]
@@ -335,9 +424,22 @@ public sealed class DocxAdapterTests
 
         Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
         Assert.Null(edge.SourceId);
-        Assert.NotNull(edge.TargetId);
-        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorAmbiguous");
-        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.Null(edge.TargetId);
+        var ambiguous = Assert.Single(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorAmbiguous");
+        var unresolved = Assert.Single(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.Equal("docx", ambiguous.Format);
+        Assert.Equal("/word/document.xml", ambiguous.PartUri);
+        Assert.Equal("part-0001", ambiguous.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(ambiguous.SourceObjectId));
+        Assert.Equal("connector", ambiguous.SourceObjectType);
+        Assert.Equal(0d, ambiguous.Confidence);
+        Assert.NotNull(ambiguous.LocationSummary);
+        Assert.Contains("format=docx", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("part=/word/document.xml", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("source_type=connector", ambiguous.LocationSummary!, StringComparison.Ordinal);
+        Assert.Equal("docx", unresolved.Format);
+        Assert.Equal("part-0001", unresolved.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(unresolved.SourceObjectId));
         Assert.False(visual.HasTopology);
         Assert.True(visual.Accounting.IsConsistent);
     }
@@ -382,6 +484,9 @@ public sealed class DocxAdapterTests
     private static string DrawingTextBox(string id, string text, int x, int y) =>
         $"<a:sp><a:nvSpPr><a:cNvPr id=\"{id}\" /></a:nvSpPr><a:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm></a:spPr><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></a:sp>";
 
+    private static string DrawingTextBoxParagraphs(string id, int x, int y, params string[] paragraphs) =>
+        $"<a:sp><a:nvSpPr><a:cNvPr id=\"{id}\" /></a:nvSpPr><a:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm></a:spPr><w:txbxContent>{string.Concat(paragraphs.Select(text => $"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"))}</w:txbxContent></a:sp>";
+
     private static string WpsShape(string id, string text, int x, int y) =>
         $"<wps:wsp><a:cNvPr id=\"{id}\" /><a:xfrm><a:off x=\"{x}\" y=\"{y}\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:wsp>";
 
@@ -398,7 +503,7 @@ public sealed class DocxAdapterTests
     private static string VmlShape(string id, string text, int x, int y) =>
         $"<v:shape id=\"{id}\" style=\"margin-left:{x}pt;margin-top:{y}pt;width:20pt;height:20pt\"><v:textbox><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>";
 
-    private static async Task<string> CreateVisualTopologyDocxAsync(string visualContent)
+    private static async Task<string> CreateVisualTopologyDocxAsync(params string[] visualParagraphs)
     {
         var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
@@ -407,7 +512,9 @@ public sealed class DocxAdapterTests
         using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
         await Write(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
         await Write(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
-        await Write(zip, "word/document.xml", $"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" xmlns:v=\"urn:schemas-microsoft-com:vml\"><w:body><w:p w14:paraId=\"AA\"><w:r><w:drawing>{visualContent}</w:drawing></w:r></w:p></w:body></w:document>");
+        var body = string.Concat(visualParagraphs.Select((visualContent, index) =>
+            $"<w:p w14:paraId=\"{index + 1:X8}\"><w:r><w:drawing>{visualContent}</w:drawing></w:r></w:p>"));
+        await Write(zip, "word/document.xml", $"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:w14=\"http://schemas.microsoft.com/office/word/2010/wordml\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" xmlns:v=\"urn:schemas-microsoft-com:vml\"><w:body>{body}</w:body></w:document>");
         return path;
     }
 
@@ -523,6 +630,13 @@ public sealed class DocxAdapterTests
         Assert.Equal(NodeKind.Heading, heading.Kind);
         Assert.Equal(2, heading.Extensions!["heading_level"].GetInt32());
         Assert.Equal(NodeKind.CodeBlock, code.Kind);
+    }
+
+    private static int Count(string value, string token)
+    {
+        var count = 0;
+        for (var index = 0; (index = value.IndexOf(token, index, StringComparison.Ordinal)) >= 0; index += token.Length) count++;
+        return count;
     }
 
     private static string Text(DocumentNode node) => node.Content is TextNodeContent text ? text.Text : string.Empty;

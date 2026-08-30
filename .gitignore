@@ -9,6 +9,9 @@ TestResults/
 *.drmd/
 *.drmd
 *.drmdpkg
+# This synthetic legacy fixture is intentionally tracked for clean-clone compatibility tests.
+!tests/DocRedock.Tests/Fixtures/Legacy/v0.1.7-docx.drmd/
+!tests/DocRedock.Tests/Fixtures/Legacy/v0.1.7-docx.drmd/**
 artifacts/
 output/
 outputs/

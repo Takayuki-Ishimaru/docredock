@@ -4,7 +4,7 @@
 
 Released: August 26, 2026
 
-v0.1.1 is a Public Beta update that fixes Windows UI, XLSX conversion, CLI safety, and release-process issues found before wider internal evaluation.
+v0.1.1 is a Public Beta update that fixes Windows UI, XLSX conversion, CLI safety, and distribution issues found before publication.
 
 > **The currently approved scope is one-way “Markdown only” export from DOCX, XLSX, and PPTX.**
 > PDF conversion/rendering and restoration to original file formats have not been validated sufficiently and may not work. Do not use them at this stage.
@@ -29,18 +29,16 @@ Each package includes the GUI, CLI, Japanese and English quick starts and securi
 - Fixed XLSX phonetic shared-string runs being appended to Markdown as unwanted katakana.
 - Split `verify` output into workspace integrity, edit applicability, and restore readiness so “valid” is not mistaken for “restorable.”
 - Changed `--force` to finish work in a staging area before replacement, preserving the previous valid output on failure.
-- Removed the repository-only `licenses` command from end-user help and command dispatch.
+- Removed the unavailable `licenses` command from end-user help and the distributed command list.
 - Removed the ineffective `restore --strict` option from help; specifying it now explains that strict validation is always active and rejects the option.
-- Disabled single-file compression to avoid a runtime crash seen during repeated execution of published binaries.
+- Avoided a runtime crash that could occur when published binaries were launched repeatedly.
 - The GUI now checks public GitHub Releases metadata at startup and shows a non-modal notice only when a newer version exists. It never downloads or installs updates automatically, and a failed check does not affect startup.
 
-## Release and verification
+## Distribution integrity
 
-- A release requires locked restore, Release build, the complete test suite, conversion QA, and LicenseAudit to pass.
-- Every OS/CPU archive is extracted to a fresh directory before testing DOCX/XLSX/PPTX readable export, F0 SHA comparison, F1 regression, pack/unpack, tamper rejection, and GUI startup. Restore tests are mechanical regression checks, not approval for user operation.
-- An existing release tag is never overwritten. Every correction requires a new version number.
-- RID-specific runtime locks, artifact hashes, commit, SBOM, provenance, attestations, and a completed `RELEASE-EVIDENCE.md` are linked.
-- Windows signing and macOS signing/notarization are applied only when credentials are configured. Missing certificates do not block a Public Beta release; each package records that it is unsigned when applicable.
+- Existing release tags are never overwritten; corrections use a new version number.
+- Published packages include checksums, an SBOM, provenance, and signing/notarization status.
+- Unsigned Public Beta packages state that status explicitly.
 
 ## Known limitations
 

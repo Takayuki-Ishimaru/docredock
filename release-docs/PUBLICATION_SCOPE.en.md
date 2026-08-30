@@ -44,6 +44,7 @@ The policy is therefore:
 | Path or material | Publication condition |
 | --- | --- |
 | Office/PDF binaries under tests/DocRedock.Tests/Fixtures | Entirely synthetic, free of customer/personal data, all fonts and images redistributable, and essential to the tests |
+| tests/DocRedock.Tests/Fixtures/Legacy/v0.1.7-docx.drmd | Minimal synthetic fixture required for v0.1.7 compatibility testing; record its origin, contents, license, and SHA-256 in the adjacent README |
 | Fixture generators and expectations | Reproducible with pinned dependencies and free of absolute paths or local-environment details |
 | tools/conversion-qa | Publish when used by public CI. If internal-only, remove it from public CI too |
 | docs/BRAND_DESIGN_GUIDELINES.md | Publish after defining third-party name and logo usage |

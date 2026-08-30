@@ -1,10 +1,12 @@
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Pptx;
 using DocRedock.Markdown;
+using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.Pptx;
 
@@ -193,6 +195,47 @@ public sealed class PptxAdapterTests
     }
 
     [Fact]
+    public void R0_FIX08_visual_node_body_text_is_emitted_only_inside_mermaid()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage()));
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Contains("START", markdown, StringComparison.Ordinal);
+        Assert.Contains("END", markdown, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(markdown, "START").Cast<Match>());
+        Assert.Single(Regex.Matches(markdown, "END").Cast<Match>());
+    }
+
+    [Fact]
+    public void R3_PPTX_visual_graph_marks_consumed_members_by_stable_shape_id()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage()));
+        var start = Assert.Single(extraction.Graph.Nodes, node => node.Source?.Locators.Any(locator => locator.Value == "100") == true);
+        var end = Assert.Single(extraction.Graph.Nodes, node => node.Source?.Locators.Any(locator => locator.Value == "101") == true);
+        Assert.True(start.Extensions!["visual_graph_node"].GetBoolean());
+        Assert.True(end.Extensions!["visual_graph_node"].GetBoolean());
+        var diagram = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        var members = diagram.Extensions!["visual_graph_member_shape_ids"].Deserialize<string[]>()!;
+        Assert.Contains("100", members);
+        Assert.Contains("101", members);
+        Assert.Contains("104", members);
+    }
+
+    [Fact]
+    public void R0_FIX08_no_diagrams_lists_connector_relation_exactly_once()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage()));
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(IncludeDiagrams: false)).Serialize(extraction.Graph);
+
+        Assert.DoesNotContain("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Single(Regex.Matches(markdown, "START — END").Cast<Match>());
+        // The combined "START — END" match alone cannot detect a duplicate standalone "START"
+        // (or "END") elsewhere in the body text; count each endpoint token independently too.
+        Assert.Single(Regex.Matches(markdown, "START").Cast<Match>());
+        Assert.Single(Regex.Matches(markdown, "END").Cast<Match>());
+    }
+
+    [Fact]
     public void MermaidOmitsUnconnectedTitleShape()
     {
         var entries = Entries(CreateGapFeaturesPackage());
@@ -245,8 +288,88 @@ public sealed class PptxAdapterTests
         Assert.Equal("v_100", edge.SourceId);
         Assert.Equal("v_101", edge.TargetId);
         Assert.Equal("YES", edge.Label);
-        Assert.Contains("v_100 -->|YES| v_101", markdown, StringComparison.Ordinal);
+        Assert.Equal("High", edge.Evidence?.ConfidenceBand);
+        Assert.Equal(VisualGraphQuality.HighConfidenceInferred, visual.Quality);
+        var validation = VisualGraphValidator.Validate(visual);
+        Assert.True(validation.IsValidForSemanticProjection,
+            string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
+        // Undirected by design: CreateGeometryConnectorPackage's connector carries no
+        // <a:tailEnd>/<a:headEnd> marker, so ConnectorDirection/DirectionOf finds no arrowhead
+        // evidence at all and resolves Direction=Unknown. With no directional evidence to report,
+        // the edge correctly renders with the undirected "---" connector rather than a guessed
+        // "-->"; this assertion is intentional, not a fallback or a regression.
+        Assert.Contains("v_100 ---|YES| v_101", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Visual_inference_timeout_returns_complete_fallback_without_partial_topology()
+    {
+        var extraction = new PptxAdapter { VisualInferenceTimeout = TimeSpan.Zero }
+            .Extract(new MemoryStream(CreateGeometryConnectorPackage(includeLabel: true)));
+        var visual = VisualGraphOf(extraction);
+
+        Assert.DoesNotContain(visual.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void R4_two_independent_unsnapped_arrow_diagrams_are_clustered_without_cross_edges()
+    {
+        var package = CreateTwoIndependentGeometryConnectorPackage();
+        var adapter = new PptxAdapter();
+        var first = adapter.Extract(new MemoryStream(package));
+        var second = adapter.Extract(new MemoryStream(package));
+        var graphs = VisualGraphsOf(first);
+
+        Assert.True(graphs.Length == 2, JsonSerializer.Serialize(graphs));
+        Assert.Equal(graphs.Select(graph => graph.Id).OrderBy(id => id), VisualGraphsOf(second).Select(graph => graph.Id).OrderBy(id => id));
+        var edges = graphs.SelectMany(graph => graph.Edges).ToArray();
+        Assert.Equal(2, edges.Length);
+        Assert.Contains(edges, edge => Label(graphs, edge.SourceId) == "PPT_R4_A" && Label(graphs, edge.TargetId) == "PPT_R4_B");
+        Assert.Contains(edges, edge => Label(graphs, edge.SourceId) == "PPT_R4_C" && Label(graphs, edge.TargetId) == "PPT_R4_D");
+        Assert.DoesNotContain(edges, edge => Label(graphs, edge.SourceId) is not ("PPT_R4_A" or "PPT_R4_C") || Label(graphs, edge.TargetId) is not ("PPT_R4_B" or "PPT_R4_D"));
+        Assert.All(edges, edge => Assert.False(string.IsNullOrWhiteSpace(edge.Evidence?.ClusterId)));
+        Assert.Equal(2, edges.Select(edge => edge.Evidence!.ClusterId).Distinct(StringComparer.Ordinal).Count());
+        Assert.Equal(JsonSerializer.Serialize(graphs), JsonSerializer.Serialize(VisualGraphsOf(second)));
+    }
+
+    [Fact]
+    public void Native_only_mode_keeps_unsnapped_connector_as_fallback()
+    {
+        using var inferenceScope = VisualInferenceContext.Push(VisualInferenceMode.NativeOnly);
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateGeometryConnectorPackage()));
+        var edge = Assert.Single(VisualGraphOf(extraction).Edges);
+
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void UnsnappedConnectorWithGenuineMedianSizedIntermediateNodeStaysUnresolved()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateIntermediateNodeGeometryConnectorPackage()));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+
+        // MIDDLE is the same 100x100 size as START/END -- squarely at the slide's own median --
+        // so it must stay a real node candidate despite sitting on the connector's shaft, and
+        // FindIntermediateNodeIds must keep rejecting the START-END pairing it blocks. No
+        // ClassifyEdgeLabelCandidateShapeIds bound reclassifies it: unlike CreateGeometryConnector
+        // Package(includeLabel: true)'s 40x20 "YES" (well under half that median), 100 is not
+        // under half of 100.
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        // Negative case: no START->END (nor END->START) relation of any kind was projected.
+        Assert.DoesNotContain(visual.Edges, resolvedEdge => resolvedEdge.SourceId is not null && resolvedEdge.TargetId is not null);
+        Assert.DoesNotContain(visual.Nodes, node => node.Label == "START" || node.Label == "END");
     }
 
     [Fact]
@@ -258,8 +381,101 @@ public sealed class PptxAdapterTests
         entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
         var markdown = new ReadableMarkdownSerializer().Serialize(new PptxAdapter().Extract(new MemoryStream(Repack(entries))).Graph);
 
-        Assert.Contains("v_100 -->|He said &quot;YES&quot;| v_101", markdown, StringComparison.Ordinal);
+        // Undirected by design: see the rationale in UnsnappedConnectorUsesUniqueGeometryAndAttachesNearbyEdgeLabel.
+        // This fixture's connector has no arrowhead evidence either, so "---" (not "-->") is correct here too.
+        Assert.Contains("v_100 ---|He said &quot;YES&quot;| v_101", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("#quot;", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void R3_balanced_medium_confidence_edge_is_promoted_with_contract_note_and_partial_warning()
+    {
+        // See CreateMediumConfidenceUnsnappedPackage for how the MEND candidate's geometry was
+        // tuned. Measured via SoftConnectionEngine at VisualInferenceMode.Balanced:
+        // Score=0.7244, CandidateMargin=0.4489, ConfidenceBand=Medium (not High: margin is well
+        // past HighMargin(.15) but the pair's own Score stays under HighThreshold(.85), and the
+        // candidate has no ray hit so it cannot qualify via strongRay either).
+        using var inferenceScope = VisualInferenceContext.Push(VisualInferenceMode.Balanced);
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMediumConfidenceUnsnappedPackage()));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+        var serializer = new ReadableMarkdownSerializer();
+        var markdown = serializer.Serialize(extraction.Graph);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.Equal("v_100", edge.SourceId);
+        Assert.Equal("v_101", edge.TargetId);
+        Assert.Equal("Medium", edge.Evidence?.ConfidenceBand);
+        Assert.Contains("v_100 --- v_101", markdown, StringComparison.Ordinal);
+        Assert.Contains("一部の接続は図形配置から推定されています。診断を確認してください。", markdown, StringComparison.Ordinal);
+        Assert.Contains(serializer.Diagnostics, diagnostic => diagnostic.Code == "VisualSemanticProjectionPartial" &&
+            diagnostic.Severity == MarkdownDiagnosticSeverity.Warning);
+    }
+
+    [Fact]
+    public void R3_safe_mode_does_not_promote_the_same_medium_confidence_candidate()
+    {
+        // Same fixture as the Balanced-mode test above, exercised under the default (Safe) mode.
+        // Safe's narrower endpoint radius (45 vs Balanced's 80, for these 100x100 shapes) scores
+        // the same MEND candidate low enough that the pair's average score drops under
+        // MediumThreshold(.70); ConnectionConfidence.Low then routes the connector to Unresolved,
+        // so it is never promoted at any confidence band (Medium included).
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMediumConfidenceUnsnappedPackage()));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Detached_triangle_arrowhead_is_associated_one_to_one_with_unsnapped_shaft()
+    {
+        var entries = Entries(CreateGeometryConnectorPackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string arrowhead =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"105\" name=\"Detached arrowhead\" /></p:nvSpPr>" +
+            "<p:spPr><a:xfrm><a:off x=\"305\" y=\"40\" /><a:ext cx=\"20\" cy=\"20\" /></a:xfrm>" +
+            "<a:prstGeom prst=\"triangle\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(
+            xml.Replace("</p:spTree>", arrowhead + "</p:spTree>", StringComparison.Ordinal));
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+        var diagram = Assert.Single(extraction.Graph.Nodes,
+            node => node.Kind == NodeKind.Diagram && node.Extensions?.ContainsKey("visual_graph") == true);
+        var members = diagram.Extensions!["visual_graph_member_shape_ids"].Deserialize<string[]>()!;
+
+        Assert.False(edge.IsUndirected);
+        Assert.Equal("v_100", edge.SourceId);
+        Assert.Equal("v_101", edge.TargetId);
+        Assert.Equal("end", edge.Evidence?.ArrowheadEvidence);
+        Assert.Contains("DetachedArrowhead", edge.Evidence?.EvidenceCodes ?? []);
+        Assert.Contains(visual.SourceItems ?? [], item => item.Id == "arrowhead:105" &&
+            item.Disposition == VisualDisposition.SuppressedDuplicate &&
+            item.DuplicateOfSourceItemId == "connector:0");
+        Assert.Contains("105", members);
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Hidden_native_endpoint_is_not_promoted_to_visual_topology()
+    {
+        var entries = Entries(CreateGapFeaturesPackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"])
+            .Replace("id=\"20\"", "id=\"20\" hidden=\"1\"", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var visual = VisualGraphOf(extraction);
+
+        Assert.DoesNotContain(visual.Nodes, node => node.SourceNodeId == "20");
+        Assert.Contains(visual.Edges, edge => edge.SourceId is null && edge.TargetId is null);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -270,6 +486,62 @@ public sealed class PptxAdapterTests
 
         Assert.Contains(visual.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved && edge.SourceId is null && edge.TargetId is null);
         Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualConnectorUnresolved");
+        Assert.Equal("pptx", diagnostic.Format);
+        Assert.Equal("ppt/slides/slide1.xml", diagnostic.PartUri);
+        Assert.Equal("slide1", diagnostic.PartitionId);
+        Assert.False(string.IsNullOrWhiteSpace(diagnostic.SourceObjectId));
+        Assert.Equal("connector", diagnostic.SourceObjectType);
+        Assert.Equal(0d, diagnostic.Confidence);
+        Assert.NotNull(diagnostic.LocationSummary);
+        Assert.Contains("format=pptx", diagnostic.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("part=ppt/slides/slide1.xml", diagnostic.LocationSummary!, StringComparison.Ordinal);
+        Assert.Contains("source_type=connector", diagnostic.LocationSummary!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Self_edge_connector_remains_unresolved_without_null_reference()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string selfEdge =
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"99\" name=\"Self edge\" /><a:stCxn id=\"2\" /><a:endCxn id=\"2\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"640000\" y=\"320000\" /><a:ext cx=\"100000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", selfEdge + "</p:spTree>", StringComparison.Ordinal));
+
+        var visual = VisualGraphOf(new PptxAdapter().Extract(new MemoryStream(Repack(entries))));
+        var edge = Assert.Single(visual.Edges);
+
+        Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
+        Assert.Null(edge.SourceId);
+        Assert.Null(edge.TargetId);
+        Assert.Contains(visual.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.False(visual.HasTopology);
+    }
+
+    [Fact]
+    public void Reserves_all_connector_endpoints_before_assigning_edge_labels()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string topology =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"First start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FIRST START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"First end\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1000\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FIRST END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"102\" name=\"Second start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"550\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>SECOND START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"Second end\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1600\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>SECOND END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"200\" name=\"First connector\" /><a:stCxn id=\"100\" /><a:endCxn id=\"101\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"1000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"201\" name=\"Second connector\" /><a:stCxn id=\"102\" /><a:endCxn id=\"103\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"650\" y=\"50\" /><a:ext cx=\"1000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", topology + "</p:spTree>", StringComparison.Ordinal));
+
+        var visual = VisualGraphOf(new PptxAdapter().Extract(new MemoryStream(Repack(entries))));
+
+        Assert.Equal(2, visual.Edges.Count);
+        Assert.All(visual.Edges, edge =>
+        {
+            Assert.NotNull(edge.SourceId);
+            Assert.NotNull(edge.TargetId);
+        });
+        Assert.Contains(visual.Nodes, node => node.SourceNodeId == "102");
+        Assert.DoesNotContain(visual.Edges, edge => string.Equals(edge.Label, "SECOND START", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -361,11 +633,99 @@ public sealed class PptxAdapterTests
         return Repack(entries);
     }
 
+    // Same START/END geometry as CreateGeometryConnectorPackage, plus a third shape (MIDDLE)
+    // the identical 100x100 size sitting squarely on the connector's shaft between them. Unlike
+    // CreateGeometryConnectorPackage(includeLabel: true)'s 40x20 "YES", MIDDLE sits exactly at
+    // the slide's own median text-bearing-shape size, so PptxAdapter's edge-label
+    // pre-classification must never treat it as a label candidate: it has to stay a real node
+    // and keep blocking the connector, mirroring SoftConnectionEngineTests.
+    // Merged_shaft_intermediate_node_keeps_the_connector_unresolved_instead_of_a_skip_edge at the
+    // engine level, exercised here end to end through the PPTX adapter.
+    private static byte[] CreateIntermediateNodeGeometryConnectorPackage()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        var shapes =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"Start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"105\" name=\"Middle\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"225\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>MIDDLE</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"End\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"450\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"104\" name=\"Unsnapped connector\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"350\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", shapes + "</p:spTree>", StringComparison.Ordinal));
+        return Repack(entries);
+    }
+
+    // Deliberately NOT built on CreatePackage(): that fixture's title placeholder carries
+    // EMU-scale geometry (offsets in the millions) which balloons the slide's canvas diagonal
+    // and, through AdaptiveScale, the endpoint search radius far beyond anything these small
+    // hand-placed shapes need. This stays minimal and title-free (like CreateGapFeaturesPackage)
+    // so SafeEndpointRadius/BalancedEndpointRadius land at their plain MinorAxis-derived values
+    // (45 / 80, for these 100x100 shapes) instead of being clamped upward by canvas size.
+    private static byte[] CreateMediumConfidenceUnsnappedPackage()
+    {
+        var parts = new Dictionary<string, string>
+        {
+            ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
+            ["ppt/presentation.xml"] = "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\" /></p:sldIdLst></p:presentation>",
+            ["ppt/_rels/presentation.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"slide\" Target=\"slides/slide1.xml\" /></Relationships>",
+            ["ppt/slides/slide1.xml"] =
+                "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:cSld><p:spTree>" +
+                // MSTART touches the connector's start point (100,50) exactly: an unambiguous,
+                // maximal-score (1.0) candidate on the start side in either inference mode.
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"Start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>MSTART</a:t></a:r></a:p></p:txBody></p:sp>" +
+                // MEND's nearest corner sits (dx=29, dy=6) from the connector's end point (900,50):
+                // boundary distance ~29.6, and its box top edge (y=56) stays clear of the ray band
+                // at y=50 so it never earns the SoftConnectionEngine +0.40 ray-first-hit bonus.
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"End\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"929\" y=\"56\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>MEND</a:t></a:r></a:p></p:txBody></p:sp>" +
+                // Unsnapped (no stCxn/endCxn): forces geometry inference instead of a native match.
+                "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"104\" name=\"Unsnapped\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"800\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>" +
+                "</p:spTree></p:cSld></p:sld>",
+            ["ppt/slides/_rels/slide1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />",
+        };
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var part in parts)
+            { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
+        return output.ToArray();
+    }
+
+    private static byte[] CreateTwoIndependentGeometryConnectorPackage()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string shapes =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"A\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>PPT_R4_A</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"B\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"300\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>PPT_R4_B</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"102\" name=\"C\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"10000\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>PPT_R4_C</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"D\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"10300\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>PPT_R4_D</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"200\" name=\"A to B\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"200\" cy=\"0\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"201\" name=\"C to D\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"10100\" y=\"50\" /><a:ext cx=\"200\" cy=\"0\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", shapes + "</p:spTree>", StringComparison.Ordinal));
+        return Repack(entries);
+    }
+
     private static VisualGraph VisualGraphOf(PptxExtractionResult extraction)
     {
-        var node = Assert.Single(extraction.Graph.Nodes, candidate => candidate.Extensions?.ContainsKey("visual_graph") == true);
-        return node.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var graphs = extraction.Graph.Nodes
+            .Where(candidate => candidate.Extensions?.ContainsKey("visual_graph") == true)
+            .Select(candidate => candidate.Extensions!["visual_graph"].Deserialize<VisualGraph>()!)
+            .ToArray();
+        Assert.NotEmpty(graphs);
+        if (graphs.Length == 1) return graphs[0];
+        var combined = new VisualGraph("combined", graphs.SelectMany(graph => graph.Nodes).ToArray(),
+            graphs.SelectMany(graph => graph.Edges).ToArray(), graphs.SelectMany(graph => graph.Diagnostics ?? []).ToArray(),
+            graphs[0].Direction, Paths: graphs.SelectMany(graph => graph.Paths ?? []).ToArray(),
+            SourceItems: graphs.SelectMany(graph => graph.SourceItems ?? []).ToArray());
+        return combined with { Quality = VisualGraphValidator.ComputeQuality(combined) };
     }
+
+    private static VisualGraph[] VisualGraphsOf(PptxExtractionResult extraction) => extraction.Graph.Nodes
+        .Where(node => node.Extensions?.ContainsKey("visual_graph") == true)
+        .Select(node => node.Extensions!["visual_graph"].Deserialize<VisualGraph>()!)
+        .ToArray();
+
+    private static string Label(IEnumerable<VisualGraph> graphs, string? nodeId) => graphs
+        .SelectMany(graph => graph.Nodes)
+        .Single(node => node.Id == nodeId).Label;
 
     private static DocumentGraph CorruptVisualGraph(DocumentGraph graph) => graph with
     {

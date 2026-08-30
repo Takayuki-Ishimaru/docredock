@@ -16,14 +16,14 @@ v0.1.3 strengthens the safe defaults and readability of Readable Markdown. The u
 - The GUI now exposes content-policy selection and a `complete` warning; CLI help documents `--content-policy`.
 - Readable output improves DOCX document titles/heading hierarchy/lists, XLSX key-value versus table separation and missing formula-cache markers, and PPTX document/slide headings and native-chart output.
 - Experimental CLI HTML rendering improves headings, emphasis, nested lists, tables, images, code, explicit breaks, and relative image paths, while preventing relative image paths from escaping the Markdown source directory.
-- `docredock --version` is derived from assembly metadata.
+- `docredock --version` reports the current version.
 - Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` to disable the GUI update metadata request.
-- Unedited restoration uses the original-byte F0 path directly, with strengthened identity regression coverage including hidden XLSX cells.
+- Restoring an unedited document uses the original bytes directly.
 - Hidden-image OCR and policy-excluded image assets are no longer emitted by safe readable policies; hidden XLSX chart sources and oversized worksheet/chart ranges are handled conservatively.
 
 ## Experimental workflows
 
-PDF, round-trip/audit export, restore, render, diff, rebase, pack, unpack, and migrate remain experimental. Explicitly opt in before launching the distributed GUI or CLI (the public library APIs are engineering surfaces and do not enforce this entry-point gate):
+PDF, round-trip/audit export, restore, render, diff, rebase, pack, unpack, and migrate remain experimental. Explicitly opt in before launching the distributed GUI or CLI:
 
 ```sh
 export DOCREDOCK_ENABLE_EXPERIMENTAL=1
@@ -35,16 +35,9 @@ These workflows and `.drmd`/`.drmdpkg` are outside user support. Sidecars and pa
 
 `visible` is the safe default, but Office visibility metadata can vary between producers. Review Markdown, images, OCR, cached calculation results, and diagnostics before sharing. Handle `complete` output with the same confidentiality as the source.
 
-## Verification
+## Package verification
 
-- Release build and complete automated test suite
-- Synthetic hidden-content regressions for DOCX/XLSX/PPTX
-- CLI version, experimental gate, F0/F1, pack/unpack, and tamper-rejection smoke tests
-- Readable Markdown and HTML structure regressions
-- LicenseAudit, SBOM, and conversion QA
-- Visual inspection of the GUI and rendered HTML
-
-The release-attached `RELEASE-EVIDENCE.md` is authoritative for the workflow run, commit, hashes, and signing/notarization status.
+Verify each archive's SHA-256 and signing/notarization status on the GitHub Release page.
 
 ## Packages
 

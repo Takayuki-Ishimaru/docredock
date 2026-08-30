@@ -62,7 +62,94 @@ public sealed record XlsxDrawingShapeRecord(
     bool IsConnector = false,
     string? StartConnectionId = null,
     string? EndConnectionId = null,
-    string? ParentGroupId = null);
+    string? ParentGroupId = null,
+    string AnchorKind = "oneCellAnchor",
+    long AbsoluteXEmu = 0,
+    long AbsoluteYEmu = 0,
+    long AbsoluteWidthEmu = 0,
+    long AbsoluteHeightEmu = 0,
+    long ToColumnOffset = 0,
+    long ToRowOffset = 0,
+    string? DrawingPartUri = null,
+    int AnchorIndex = 0)
+{
+    /// <summary>Absolute worksheet-space bounds after anchor and metric resolution.</summary>
+    public XlsxDrawingBounds? AbsoluteBounds => AbsoluteWidthEmu > 0 || AbsoluteHeightEmu > 0
+        ? new(AbsoluteXEmu, AbsoluteYEmu, AbsoluteWidthEmu, AbsoluteHeightEmu)
+        : null;
+}
+
+public sealed record XlsxDrawingBounds(long XEmu, long YEmu, long WidthEmu, long HeightEmu)
+{
+    public long RightEmu => checked(XEmu + WidthEmu);
+    public long BottomEmu => checked(YEmu + HeightEmu);
+}
+
+/// <summary>Worksheet column/row dimensions used to resolve DrawingML anchors.</summary>
+public sealed record XlsxWorksheetMetrics(
+    double DefaultColumnWidth = 8.43,
+    double DefaultRowHeight = 15,
+    IReadOnlyDictionary<int, double>? ColumnWidths = null,
+    IReadOnlyDictionary<int, double>? RowHeights = null)
+{
+    private const double EmuPerPixel = 9525d;
+    private const double EmuPerPoint = 12700d;
+
+    public double ColumnWidth(int column) => ColumnWidths is not null && ColumnWidths.TryGetValue(column, out var width)
+        ? width : DefaultColumnWidth;
+    public double RowHeight(int row) => RowHeights is not null && RowHeights.TryGetValue(row, out var height)
+        ? height : DefaultRowHeight;
+
+    // Excel's width is measured in character units. This is the same bounded
+    // conversion used by the desktop clients for the default Calibri grid.
+    public static double ColumnWidthToPixels(double width)
+    {
+        if (double.IsNaN(width) || double.IsInfinity(width) || width <= 0) return 0;
+        var pixels = Math.Floor(((256d * width + Math.Floor(128d / 7d)) / 256d) * 7d);
+        return Math.Max(0, pixels);
+    }
+    public static long ColumnWidthToEmu(double width) => checked((long)Math.Round(ColumnWidthToPixels(width) * EmuPerPixel));
+    public static long RowHeightToEmu(double points) => checked((long)Math.Round(Math.Max(0, points) * EmuPerPoint));
+
+    public long ColumnStartEmu(int column)
+    {
+        if (column <= 1) return 0;
+        var defaultEmu = ColumnWidthToEmu(DefaultColumnWidth);
+        var total = checked(defaultEmu * (column - 1L));
+        if (ColumnWidths is not null)
+            foreach (var item in ColumnWidths.Where(item => item.Key > 0 && item.Key < column))
+                total = checked(total + ColumnWidthToEmu(item.Value) - defaultEmu);
+        return total;
+    }
+    public long RowStartEmu(int row)
+    {
+        if (row <= 1) return 0;
+        var defaultEmu = RowHeightToEmu(DefaultRowHeight);
+        var total = checked(defaultEmu * (row - 1L));
+        if (RowHeights is not null)
+            foreach (var item in RowHeights.Where(item => item.Key > 0 && item.Key < row))
+                total = checked(total + RowHeightToEmu(item.Value) - defaultEmu);
+        return total;
+    }
+    public double ColumnFromEmu(long emu) => FractionalIndex(emu, ColumnStartEmu, column => ColumnWidthToEmu(ColumnWidth(column)), 16_384);
+    public double RowFromEmu(long emu) => FractionalIndex(emu, RowStartEmu, row => RowHeightToEmu(RowHeight(row)), 1_048_576);
+
+    private static double FractionalIndex(long emu, Func<int, long> start, Func<int, long> size, int maximum)
+    {
+        if (emu <= 0) return 1;
+        var low = 1;
+        var high = maximum;
+        while (low < high)
+        {
+            var middle = low + (high - low + 1) / 2;
+            if (start(middle) <= emu) low = middle;
+            else high = middle - 1;
+        }
+        var index = low;
+        var width = Math.Max(1, size(index));
+        return index + (emu - start(index)) / (double)width;
+    }
+}
 
 /// <summary>A picture in an XLSX DrawingML part, including its worksheet anchor.</summary>
 public sealed record XlsxPictureRecord(
@@ -112,7 +199,8 @@ public sealed record XlsxWorksheetRecord(
     IReadOnlyList<XlsxChartRecord>? Charts = null,
     string SheetState = "visible",
     IReadOnlySet<int>? HiddenRows = null,
-    IReadOnlySet<int>? HiddenColumns = null)
+    IReadOnlySet<int>? HiddenColumns = null,
+    XlsxWorksheetMetrics? Metrics = null)
 {
     public int RowCount => MinRow == 0 || MaxRow < MinRow ? 0 : MaxRow - MinRow + 1;
     public int ColumnCount => MinColumn == 0 || MaxColumn < MinColumn ? 0 : MaxColumn - MinColumn + 1;
@@ -145,6 +233,7 @@ public sealed class XlsxAdapter
     private const int MaxExcelRows = 1_048_576;
     private const int MaxExcelColumns = 16_384;
     private const long MaxChartResolutionCells = 100_000;
+    public TimeSpan? VisualInferenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     private static readonly Regex ChartCellReference = new(
         @"^(?:(?:'(?<quoted>(?:[^']|'')+)'|(?<plain>[^!]+))!)?\$?(?<startColumn>[A-Za-z]{1,3})\$?(?<startRow>\d+)(?::\$?(?<endColumn>[A-Za-z]{1,3})\$?(?<endRow>\d+))?$",
@@ -158,9 +247,10 @@ public sealed class XlsxAdapter
         MaxCharactersFromEntities = 0
     };
 
-    public XlsxExtractionResult Extract(Stream source)
+    public XlsxExtractionResult Extract(Stream source, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(source);
+        cancellationToken.ThrowIfCancellationRequested();
         var bytes = ReadAll(source);
         var package = Open(bytes);
         var shared = ReadSharedStrings(package);
@@ -179,22 +269,40 @@ public sealed class XlsxAdapter
             StringComparer.OrdinalIgnoreCase);
         foreach (var sheet in workbook.Sheets)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
             var mergedRanges = ReadMergedRanges(xml);
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
+            var metrics = ReadWorksheetMetrics(xml);
             var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
-            var drawingShapes = ReadDrawingShapes(package, sheet.PartUri);
+            var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
             var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells, sheetVisibility, warnings);
-            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns);
+            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns, metrics);
             worksheets.Add(worksheet);
             var nodes = cells
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
                 .Select((cell, index) => ToNode(cell, sheet.PartUri, index))
                 .ToList();
-            if (XlsxMermaidProjection.TryCreate(worksheet, nodes.Count) is { } diagram) nodes.Add(diagram);
+            var diagrams = XlsxMermaidProjection.TryCreateAll(worksheet, nodes.Count, VisualInferenceTimeout, cancellationToken);
+            if (diagrams.Count > 0)
+            {
+                nodes.AddRange(diagrams);
+                foreach (var diagram in diagrams)
+                {
+                    if (diagram.Extensions is null || !diagram.Extensions.TryGetValue("visual_graph", out var raw)) continue;
+                    VisualGraph? visualGraph;
+                    try { visualGraph = raw.Deserialize<VisualGraph>(); }
+                    catch (JsonException) { continue; }
+                    foreach (var diagnostic in visualGraph?.Diagnostics ?? [])
+                    {
+                        var warning = diagnostic.ToWarning();
+                        if (!warnings.Contains(warning, StringComparer.Ordinal)) warnings.Add(warning);
+                    }
+                }
+            }
             else if (drawingShapes.Count > 0)
                 warnings.Add($"{sheet.Name}: {drawingShapes.Count} DrawingML shape(s) were retained but not projected as a diagram.");
             foreach (var picture in pictures)
@@ -1123,7 +1231,8 @@ public sealed class XlsxAdapter
 
     private static IReadOnlyList<XlsxDrawingShapeRecord> ReadDrawingShapes(
         Dictionary<string, byte[]> package,
-        string worksheetPartUri)
+        string worksheetPartUri,
+        XlsxWorksheetMetrics metrics)
     {
         var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
         var fileName = Path.GetFileName(worksheetPartUri);
@@ -1139,15 +1248,29 @@ public sealed class XlsxAdapter
             document.Load(reader);
             var root = document.DocumentElement;
             if (root is null) continue;
+            var anchorIndex = 0;
             foreach (var anchor in root.ChildNodes.OfType<XmlElement>())
             {
+                anchorIndex++;
                 var from = DirectChild(anchor, "from");
-                if (from is null) continue;
-                var anchorColumn = ChildInt(from, "col") + 1;
-                var anchorRow = ChildInt(from, "row") + 1;
-                if (anchorColumn <= 0 || anchorRow <= 0) continue;
                 var anchorExtent = DirectChild(anchor, "ext");
                 var anchorTo = DirectChild(anchor, "to");
+                var absolutePosition = DirectChild(anchor, "pos");
+                var anchorColumn = from is null ? 1 : ChildInt(from, "col") + 1;
+                var anchorRow = from is null ? 1 : ChildInt(from, "row") + 1;
+                if (anchor.LocalName is not "absoluteAnchor" && (anchorColumn <= 0 || anchorRow <= 0)) continue;
+                var fromColumnOffset = from is null ? 0 : ChildLong(from, "colOff");
+                var fromRowOffset = from is null ? 0 : ChildLong(from, "rowOff");
+                var toColumnOffset = anchorTo is null ? 0 : ChildLong(anchorTo, "colOff");
+                var toRowOffset = anchorTo is null ? 0 : ChildLong(anchorTo, "rowOff");
+                var anchorX = anchor.LocalName == "absoluteAnchor" ? AttributeLong(absolutePosition, "x") : metrics.ColumnStartEmu(anchorColumn) + fromColumnOffset;
+                var anchorY = anchor.LocalName == "absoluteAnchor" ? AttributeLong(absolutePosition, "y") : metrics.RowStartEmu(anchorRow) + fromRowOffset;
+                var anchorWidth = AttributeLong(anchorExtent, "cx");
+                var anchorHeight = AttributeLong(anchorExtent, "cy");
+                var anchorRight = anchor.LocalName == "twoCellAnchor" && anchorTo is not null
+                    ? metrics.ColumnStartEmu(ChildInt(anchorTo, "col") + 1) + toColumnOffset : anchorX + anchorWidth;
+                var anchorBottom = anchor.LocalName == "twoCellAnchor" && anchorTo is not null
+                    ? metrics.RowStartEmu(ChildInt(anchorTo, "row") + 1) + toRowOffset : anchorY + anchorHeight;
                 var drawingElements = anchor.SelectNodes(".//*[local-name()='sp' or local-name()='cxnSp']")
                     ?.OfType<XmlElement>().ToArray() ?? [];
                 foreach (var shape in drawingElements)
@@ -1169,16 +1292,35 @@ public sealed class XlsxAdapter
                     var groupId = group is null ? null : Descendant(group, "cNvPr")?.GetAttribute("id");
                     var startConnection = Descendant(shape, "stCxn")?.GetAttribute("id");
                     var endConnection = Descendant(shape, "endCxn")?.GetAttribute("id");
+                    var groupTransform = group is null ? null : Descendant(group, "xfrm");
+                    var groupOffset = groupTransform is null ? null : DirectChild(groupTransform, "off");
+                    var groupExtent = groupTransform is null ? null : DirectChild(groupTransform, "ext");
+                    var groupChildOffset = groupTransform is null ? null : DirectChild(groupTransform, "chOff");
+                    var groupChildExtent = groupTransform is null ? null : DirectChild(groupTransform, "chExt");
+                    var groupScaleX = Math.Abs(AttributeLong(groupChildExtent, "cx")) > 0 && Math.Abs(AttributeLong(groupExtent, "cx")) > 0
+                        ? AttributeLong(groupExtent, "cx") / (double)AttributeLong(groupChildExtent, "cx") : 1d;
+                    var groupScaleY = Math.Abs(AttributeLong(groupChildExtent, "cy")) > 0 && Math.Abs(AttributeLong(groupExtent, "cy")) > 0
+                        ? AttributeLong(groupExtent, "cy") / (double)AttributeLong(groupChildExtent, "cy") : 1d;
+                    var localX = AttributeLong(shapeOffset, "x");
+                    var localY = AttributeLong(shapeOffset, "y");
+                    var shapeX = isTopLevel ? anchorX : anchorX + AttributeLong(groupOffset, "x") +
+                        (localX - AttributeLong(groupChildOffset, "x")) * groupScaleX;
+                    var shapeY = isTopLevel ? anchorY : anchorY + AttributeLong(groupOffset, "y") +
+                        (localY - AttributeLong(groupChildOffset, "y")) * groupScaleY;
+                    var topLevelWidth = anchorWidth > 0 ? anchorWidth : AttributeLong(shapeExtent, "cx");
+                    var topLevelHeight = anchorHeight > 0 ? anchorHeight : AttributeLong(shapeExtent, "cy");
+                    var shapeWidth = isTopLevel ? Math.Max(anchorRight - anchorX, topLevelWidth) : (long)Math.Round(AttributeLong(shapeExtent, "cx") * groupScaleX);
+                    var shapeHeight = isTopLevel ? Math.Max(anchorBottom - anchorY, topLevelHeight) : (long)Math.Round(AttributeLong(shapeExtent, "cy") * groupScaleY);
                     result.Add(new XlsxDrawingShapeRecord(
                         properties?.GetAttribute("id") ?? $"shape-{result.Count + 1}",
                         properties?.GetAttribute("name") ?? $"shape-{result.Count + 1}",
                         geometry,
                         anchorColumn,
                         anchorRow,
-                        ChildLong(from, "colOff") + (isTopLevel ? 0 : AttributeLong(shapeOffset, "x")),
-                        ChildLong(from, "rowOff") + (isTopLevel ? 0 : AttributeLong(shapeOffset, "y")),
-                        isTopLevel ? AttributeLong(anchorExtent, "cx") : AttributeLong(shapeExtent, "cx"),
-                        isTopLevel ? AttributeLong(anchorExtent, "cy") : AttributeLong(shapeExtent, "cy"),
+                        fromColumnOffset + (isTopLevel ? 0 : AttributeLong(shapeOffset, "x")),
+                        fromRowOffset + (isTopLevel ? 0 : AttributeLong(shapeOffset, "y")),
+                        shapeWidth,
+                        shapeHeight,
                         isTopLevel && anchorTo is not null ? ChildInt(anchorTo, "col") + 1 : null,
                         isTopLevel && anchorTo is not null ? ChildInt(anchorTo, "row") + 1 : null,
                         StringComparer.Ordinal.Equals(transform?.GetAttribute("flipH"), "1"),
@@ -1188,7 +1330,16 @@ public sealed class XlsxAdapter
                         isConnector,
                         string.IsNullOrWhiteSpace(startConnection) ? null : startConnection,
                         string.IsNullOrWhiteSpace(endConnection) ? null : endConnection,
-                        string.IsNullOrWhiteSpace(groupId) ? null : groupId));
+                        string.IsNullOrWhiteSpace(groupId) ? null : groupId,
+                        anchor.LocalName,
+                        checked((long)Math.Round(shapeX)),
+                        checked((long)Math.Round(shapeY)),
+                        shapeWidth,
+                        shapeHeight,
+                        toColumnOffset,
+                        toRowOffset,
+                        drawingPart,
+                        anchorIndex));
                 }
             }
         }
@@ -1221,6 +1372,45 @@ public sealed class XlsxAdapter
                 return reader.GetAttribute("ref");
         return null;
     }
+
+    private static XlsxWorksheetMetrics ReadWorksheetMetrics(byte[] bytes)
+    {
+        var defaultColumnWidth = 8.43d;
+        var defaultRowHeight = 15d;
+        var columns = new Dictionary<int, double>();
+        var rows = new Dictionary<int, double>();
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element) continue;
+            if (reader.LocalName == "sheetFormatPr")
+            {
+                defaultColumnWidth = AttributeDouble(reader, "defaultColWidth", defaultColumnWidth);
+                defaultRowHeight = AttributeDouble(reader, "defaultRowHeight", defaultRowHeight);
+            }
+            else if (reader.LocalName == "col")
+            {
+                var min = AttributeInt(reader, "min", 1);
+                var max = Math.Min(MaxExcelColumns, AttributeInt(reader, "max", min));
+                var width = AttributeDouble(reader, "width", defaultColumnWidth);
+                if (min <= max && width > 0)
+                    for (var column = Math.Max(1, min); column <= max; column++) columns[column] = width;
+            }
+            else if (reader.LocalName == "row")
+            {
+                var row = AttributeInt(reader, "r", 0);
+                var height = AttributeDouble(reader, "ht", defaultRowHeight);
+                if (row > 0 && height > 0) rows[row] = height;
+            }
+        }
+        return new(defaultColumnWidth, defaultRowHeight, columns, rows);
+    }
+
+    private static int AttributeInt(XmlReader reader, string name, int fallback) =>
+        int.TryParse(reader.GetAttribute(name), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : fallback;
+
+    private static double AttributeDouble(XmlReader reader, string name, double fallback) =>
+        double.TryParse(reader.GetAttribute(name), NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : fallback;
 
     private static (int Row, int Column) ParseCellReference(string reference)
     {

@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.1.6
+        default: v0.2.0
 
 permissions:
   contents: read
@@ -73,8 +73,22 @@ jobs:
         run: |
           dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj --configuration Release --no-build --no-restore
           dotnet test tests/DocRedock.Gui.HeadlessTests/DocRedock.Gui.HeadlessTests.csproj --configuration Release --no-build --no-restore
+      - name: Record quality product commit
+        id: quality-source
+        shell: bash
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Run conversion QA
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.quality-source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: python3 tools/conversion-qa/run.py --all
+      - name: Upload conversion QA evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quality-conversion-qa
+          path: artifacts/conversion-qa/**
+          if-no-files-found: error
+          retention-days: 7
       - name: Verify licenses and generate source dependency SBOM
         run: dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output artifacts/compliance
       - name: Upload compliance input
@@ -319,24 +333,33 @@ jobs:
       - name: Extract and smoke-test Windows package
         if: matrix.family == 'windows'
         shell: pwsh
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
           $root = "artifacts/smoke"
-          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary
+          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary --expected-version "$($env:RELEASE_TAG.Substring(1))" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
         shell: bash
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           name="DocRedock-$RELEASE_TAG-${{ matrix.rid }}"
           mkdir -p artifacts/smoke
           ditto -x -k "release/$name.zip" artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
         shell: bash
+        env:
+          PRODUCT_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -345,7 +368,10 @@ jobs:
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
+      - name: Stage visual semantics evidence with package
+        shell: bash
+        run: cp "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json" release/
       - name: Upload packaged application
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -363,6 +389,7 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      artifact-metadata: write
     steps:
       - name: Check out tagged source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -381,15 +408,25 @@ jobs:
         with:
           name: quality-compliance
           path: release-compliance
+      - name: Download conversion QA evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: quality-conversion-qa
+          path: release-conversion-qa
       - name: Write checked release evidence
         shell: bash
         run: |
+          set -euo pipefail
           commit=$(git rev-parse HEAD)
+          test -f release-conversion-qa/summary.md
+          cp release-conversion-qa/summary.md release-files/CONVERSION-QA-EVIDENCE.md
           cat > release-files/RELEASE-EVIDENCE.md <<EOF
           # Release evidence: $RELEASE_TAG
 
-          - [x] Tagged source checked out: `$commit`
+          - [x] Product source commit: \`$commit\`
+          - [x] Release workflow commit: \`${{ github.workflow_sha }}\`
           - [x] Locked restore, Release build, unit tests, and conversion QA passed
+          - [x] Conversion-QA evidence is attached as \`CONVERSION-QA-EVIDENCE.md\` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
           - [x] License allowlist check passed
           - [x] Six RID-specific self-contained packages were built
           - [x] Every archive was extracted before testing
@@ -408,6 +445,9 @@ jobs:
 
           Workflow evidence: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
+          grep -F -- "\`$commit\`" release-files/RELEASE-EVIDENCE.md
+          grep -F -- "\`${{ github.workflow_sha }}\`" release-files/RELEASE-EVIDENCE.md
+          grep -F -- '`CONVERSION-QA-EVIDENCE.md`' release-files/RELEASE-EVIDENCE.md
       - name: Generate release SBOM, provenance, and checksums
         shell: bash
         run: |
@@ -416,19 +456,16 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-path: |
-            release-files/*.zip
-            release-files/*.tar.gz
+          subject-path: 'release-files/DocRedock-*'
       - name: Attest release SBOM
         uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
-          subject-path: |
-            release-files/*.zip
-            release-files/*.tar.gz
+          subject-path: 'release-files/DocRedock-*'
           sbom-path: release-files/sbom.cdx.json
       - name: Build bilingual release body
         shell: bash
         run: |
+          set -euo pipefail
           {
             cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
             printf '\n---\n\n'
@@ -436,6 +473,17 @@ jobs:
             printf '\n---\n\n'
             cat release-files/RELEASE-EVIDENCE.md
           } > release-body.md
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path("release-body.md")
+          base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['RELEASE_TAG']}"
+          body = path.read_text(encoding="utf-8")
+          body = body.replace("](../docs/", f"]({base}/docs/")
+          body = body.replace("](ERRATA_", f"]({base}/release-docs/ERRATA_")
+          path.write_text(body, encoding="utf-8")
+          PY
       - name: Create new GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
