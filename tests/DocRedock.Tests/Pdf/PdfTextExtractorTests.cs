@@ -347,6 +347,7 @@ public sealed class PdfTextExtractorTests
         var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 110 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\nendstream\n%%EOF");
         var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
         Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.GeometryInferred);
+        Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualEdgeDirectionUnknown");
     }
 
     [Fact]
@@ -645,6 +646,257 @@ public sealed class PdfTextExtractorTests
         var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
         Assert.DoesNotContain(graph.Edges, edge => edge.EdgeDirection == VisualEdgeDirection.Directed);
         Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.Unresolved);
+    }
+
+    [Fact]
+    public void Regular_pdf_table_grid_is_suppressed_from_connector_inference()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 300 >> stream
+            /Ta#62le BMC
+            BT 1 0 0 1 10 10 Tm (A) Tj ET
+            BT 1 0 0 1 110 10 Tm (B) Tj ET
+            BT 1 0 0 1 10 40 Tm (C) Tj ET
+            BT 1 0 0 1 110 40 Tm (D) Tj ET
+            0 0 m 300 0 l S
+            0 30 m 300 30 l S
+            0 60 m 300 60 l S
+            0 90 m 300 90 l S
+            0 0 m 0 90 l S
+            100 0 m 100 90 l S
+            200 0 m 200 90 l S
+            300 0 m 300 90 l S
+            EMC
+            endstream
+            %%EOF
+            """);
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var graph = Assert.Single(result.VisualGraphs!).Value;
+
+        Assert.Empty(graph.Edges);
+        Assert.DoesNotContain(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        Assert.All(graph.Paths!, path => Assert.False(path.IsFallback));
+        Assert.Equal(8, graph.SourceItems!.Count(item => item.Disposition == VisualDisposition.IgnoredDecorative &&
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true));
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Untagged_labelled_grid_with_marker_like_text_is_not_suppressed_as_a_table()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 520 >> stream
+            BI /W 1 /H 1 /BPC 8 /CS /G ID
+            /Table BMC
+            EI
+            % /Table BMC is a comment, not a marked-content operator
+            BT 1 0 0 1 10 10 Tm (/Table BMC) Tj ET
+            BT 1 0 0 1 110 10 Tm (B) Tj ET
+            BT 1 0 0 1 10 40 Tm (C) Tj ET
+            BT 1 0 0 1 110 40 Tm (D) Tj ET
+            0 0 m 300 0 l S
+            0 30 m 300 30 l S
+            0 60 m 300 60 l S
+            0 90 m 300 90 l S
+            0 0 m 0 90 l S
+            100 0 m 100 90 l S
+            200 0 m 200 90 l S
+            300 0 m 300 90 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.NotEmpty(graph.Edges);
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Tagged_table_after_inline_image_is_still_suppressed()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 640 >> stream
+            BI /W 1 /H 1 /BPC 8 /CS /G ID
+            fake /Table BMC bytes
+            EI
+            /Table BMC
+            BT 1 0 0 1 10 10 Tm (A) Tj ET
+            BT 1 0 0 1 110 10 Tm (B) Tj ET
+            BT 1 0 0 1 10 40 Tm (C) Tj ET
+            BT 1 0 0 1 110 40 Tm (D) Tj ET
+            0 0 m 300 0 l S
+            0 30 m 300 30 l S
+            0 60 m 300 60 l S
+            0 90 m 300 90 l S
+            0 0 m 0 90 l S
+            100 0 m 100 90 l S
+            200 0 m 200 90 l S
+            300 0 m 300 90 l S
+            EMC
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Empty(graph.Edges);
+        Assert.Equal(8, graph.SourceItems!.Count(item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true));
+        Assert.DoesNotContain(graph.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
+    }
+
+    [Fact]
+    public void Table_grid_timeout_keeps_all_vector_edges_as_fallback()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 400 >> stream
+            /Table BMC
+            BT 1 0 0 1 10 10 Tm (A) Tj ET
+            BT 1 0 0 1 110 10 Tm (B) Tj ET
+            BT 1 0 0 1 10 40 Tm (C) Tj ET
+            BT 1 0 0 1 110 40 Tm (D) Tj ET
+            0 0 m 300 0 l S
+            0 30 m 300 30 l S
+            0 60 m 300 60 l S
+            0 90 m 300 90 l S
+            0 0 m 0 90 l S
+            100 0 m 100 90 l S
+            200 0 m 200 90 l S
+            300 0 m 300 90 l S
+            EMC
+            endstream
+            %%EOF
+            """);
+
+        var result = PdfTextExtractor.Extract(pdf,
+            new PdfExtractionOptions(VisualInferenceTimeout: TimeSpan.Zero));
+        var graph = Assert.Single(result.VisualGraphs!).Value;
+
+        Assert.Equal(8, graph.Edges.Count);
+        Assert.Contains(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Oversized_table_grid_skips_suppression_atomically()
+    {
+        var content = new StringBuilder("/Table BMC\n");
+        content.AppendLine("BT 1 0 0 1 10 10 Tm (A) Tj ET");
+        content.AppendLine("BT 1 0 0 1 110 10 Tm (B) Tj ET");
+        content.AppendLine("BT 1 0 0 1 10 40 Tm (C) Tj ET");
+        content.AppendLine("BT 1 0 0 1 110 40 Tm (D) Tj ET");
+        for (var index = 0; index < 257; index++)
+            content.AppendLine($"0 {index} m 300 {index} l S");
+        for (var index = 0; index < 257; index++)
+            content.AppendLine($"{index} 0 m {index} 300 l S");
+        content.AppendLine("EMC");
+
+        var pdf = Encoding.Latin1.GetBytes(
+            $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream\n%%EOF");
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Equal(514, graph.Edges.Count);
+        Assert.Contains(graph.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Overlong_axis_path_aborts_grid_classification_with_budget_diagnostic()
+    {
+        var content = new StringBuilder("0 0 m ");
+        for (var index = 1; index <= 16_385; index++)
+            content.Append(index).Append(" 0 l ");
+        content.Append("S\n");
+        var pdf = Encoding.Latin1.GetBytes(
+            $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream\n%%EOF");
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Single(graph.Edges);
+        Assert.Contains(graph.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Regular_undirected_network_grid_with_semantic_nodes_is_not_suppressed()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 600 >> stream
+            BT 1 0 0 1 -3 -3 Tm (A) Tj ET
+            -15 -15 30 30 re S
+            BT 1 0 0 1 297 -3 Tm (B) Tj ET
+            285 -15 30 30 re S
+            BT 1 0 0 1 -3 87 Tm (C) Tj ET
+            -15 75 30 30 re S
+            BT 1 0 0 1 297 87 Tm (D) Tj ET
+            285 75 30 30 re S
+            0 0 m 300 0 l S
+            0 30 m 300 30 l S
+            0 60 m 300 60 l S
+            0 90 m 300 90 l S
+            0 0 m 0 90 l S
+            100 0 m 100 90 l S
+            200 0 m 200 90 l S
+            300 0 m 300 90 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Equal(4, graph.Nodes.Count);
+        Assert.NotEmpty(graph.Edges);
+        Assert.Contains(graph.Edges, edge => edge.EdgeDirection == VisualEdgeDirection.Undirected);
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Separated_triangle_keeps_its_exact_shaft_when_another_path_is_nearby()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 320 >> stream
+            BT 1 0 0 1 10 20 Tm (EXACT_START) Tj ET
+            0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (EXACT_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            200 17 m 200 33 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+        var edge = Assert.Single(graph.Edges,
+            candidate => candidate.SourceId is not null && candidate.TargetId is not null);
+
+        Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection);
+        Assert.Equal("EXACT_START", graph.Nodes.Single(node => node.Id == edge.SourceId).Label);
+        Assert.Equal("EXACT_DONE", graph.Nodes.Single(node => node.Id == edge.TargetId).Label);
+        Assert.Equal("end", edge.Evidence?.ArrowheadEvidence);
     }
 
     [Fact]

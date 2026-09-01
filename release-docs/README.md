@@ -6,6 +6,13 @@
 
 ## 最新版
 
+### v0.2.1 Public Beta
+
+- [v0.2.1 リリースノート](RELEASE_NOTES_v0.2.1.md)
+- アプリ内の現在バージョン表示、起動時／手動のPublic Betaを含む公開版更新確認、信頼済みリリースページへの導線
+- PDF表罫線の抑制と矢印方向保持、診断とXLSX投影の精度改善
+- `docredock` launcherとLinux install/uninstallを含む配布導線
+
 ### v0.2.0 Public Beta
 
 - [v0.2.0 リリースノート](RELEASE_NOTES_v0.2.0.md)

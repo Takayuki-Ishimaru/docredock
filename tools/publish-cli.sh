@@ -51,6 +51,21 @@ for runtime_id in $runtime_ids; do
     project_name=$(basename "$project_directory")
     cp "$lock_file" "$runtime_lock_output/$project_name.packages.lock.json"
   done
+
+  case "$runtime_id" in
+    win-*)
+      printf '%s\r\n' '@echo off' '"%~dp0DocRedock.Cli.exe" %*' > "$output_directory/docredock.cmd"
+      ;;
+    *)
+      cat > "$output_directory/docredock" <<'LAUNCHER'
+#!/bin/sh
+set -eu
+launcher_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$launcher_directory/DocRedock.Cli" "$@"
+LAUNCHER
+      chmod 755 "$output_directory/docredock"
+      ;;
+  esac
 done
 
 echo "Published CLI builds: $output_root"

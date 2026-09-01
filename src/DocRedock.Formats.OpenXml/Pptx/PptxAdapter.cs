@@ -30,7 +30,8 @@ public sealed record PptxShapeRecord(
     bool IsHidden = false,
     string? ShapePreset = null,
     string? ConnectorHeadArrow = null,
-    string? ConnectorTailArrow = null);
+    string? ConnectorTailArrow = null,
+    IReadOnlyList<VisualPoint>? ConnectorPathPoints = null);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
@@ -493,12 +494,27 @@ public sealed class PptxAdapter
                     paragraph = null;
                 }
             }
-            if (geometry is not null) geometry = TransformGeometry(geometry, parentTransform * ShapeOrientation(geometry, flipH, flipV));
+            IReadOnlyList<VisualPoint>? connectorPathPoints = null;
+            if (geometry is not null)
+            {
+                var shapeTransform = parentTransform * ShapeOrientation(geometry, flipH, flipV);
+                if (StringComparer.Ordinal.Equals(shapeType, "connector"))
+                {
+                    var startPoint = shapeTransform.Apply(geometry.X, geometry.Y);
+                    var endPoint = shapeTransform.Apply(geometry.X + geometry.Width, geometry.Y + geometry.Height);
+                    connectorPathPoints =
+                    [
+                        new VisualPoint(startPoint.X, startPoint.Y),
+                        new VisualPoint(endPoint.X, endPoint.Y),
+                    ];
+                }
+                geometry = TransformGeometry(geometry, shapeTransform);
+            }
             var role = InferRole(placeholderType, name);
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
                 string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden, shapePreset,
-                connectorHeadArrow, connectorTailArrow));
+                connectorHeadArrow, connectorTailArrow, connectorPathPoints));
         }
         if (!result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
@@ -651,7 +667,7 @@ public sealed class PptxAdapter
                     [new AnchorLocator("shape_id", connector.ShapeId)]);
                 var direction = connectorDirections[connector.ShapeId];
                 var path = new VisualConnectorPath(
-                    ConnectorPoints(connector.Geometry),
+                    ConnectorPoints(connector),
                     StartArrowhead: new ArrowheadEvidence(
                         direction is ConnectionDirection.Reverse or ConnectionDirection.Bidirectional,
                         Kind: connector.ConnectorHeadArrow, Confidence: 1),
@@ -680,19 +696,21 @@ public sealed class PptxAdapter
                 "pptx-emu",
                 new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("slide_id", slide.SlideId)]))],
             inferencePrimitives);
+        using var inferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (inferenceTimeout is { } timeout)
+        {
+            if (timeout <= TimeSpan.Zero) inferenceCts.Cancel();
+            else inferenceCts.CancelAfter(timeout);
+        }
+        var inferenceToken = inferenceCts.Token;
         var clusterer = new DiagramClusterer();
         var clusters = clusterer.Cluster(primitiveDocument);
         SoftConnectionResult inference;
         try
         {
-            using var inferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            if (inferenceTimeout is { } timeout)
-            {
-                if (timeout <= TimeSpan.Zero) inferenceCts.Cancel();
-                else inferenceCts.CancelAfter(timeout);
-            }
+            inferenceToken.ThrowIfCancellationRequested();
             inference = new SoftConnectionEngine().Infer(
-                primitiveDocument, clusters, new SoftConnectionOptions(VisualInferenceContext.Current), inferenceCts.Token);
+                primitiveDocument, clusters, new SoftConnectionOptions(VisualInferenceContext.Current), inferenceToken);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -792,6 +810,84 @@ public sealed class PptxAdapter
             reservedEndpointShapeIds.Add(physicalStart);
             reservedEndpointShapeIds.Add(physicalEnd);
         }
+        var unresolvedConnectorIds = connectors
+            .Where(connector => !projectedConnectors.ContainsKey(connector.ShapeId))
+            .Select(connector => connector.ShapeId).ToHashSet(StringComparer.Ordinal);
+        // Candidate retention and shaft intersection share one deterministic budget. Keep both
+        // result sets staged so timeout or exhaustion cannot expose a partially analysed diagram.
+        const long maxUnresolvedConnectorWorkItems = 250_000;
+        long unresolvedConnectorWorkItems = 0;
+        var unresolvedAnalysisBudgetExceeded = false;
+        bool TrySpendUnresolvedAnalysis(long amount)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (inferenceToken.IsCancellationRequested) return false;
+            if (amount < 0 || unresolvedConnectorWorkItems > maxUnresolvedConnectorWorkItems - amount)
+            {
+                unresolvedAnalysisBudgetExceeded = true;
+                return false;
+            }
+            unresolvedConnectorWorkItems += amount;
+            return true;
+        }
+
+        var stagedCandidateNodeShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in inference.Candidates)
+        {
+            if (!TrySpendUnresolvedAnalysis(1)) break;
+            if (unresolvedConnectorIds.Contains(candidate.ConnectorId) && !candidate.IsHardRejected &&
+                nodeShapeByVisualId.TryGetValue(candidate.NodeId, out var candidateShape))
+                stagedCandidateNodeShapeIds.Add(candidateShape.ShapeId);
+        }
+        var stagedShaftNodeShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        if (!unresolvedAnalysisBudgetExceeded && !inferenceToken.IsCancellationRequested)
+        {
+            foreach (var connector in connectors.Where(item => unresolvedConnectorIds.Contains(item.ShapeId)))
+            {
+                if (!TrySpendUnresolvedAnalysis(1)) break;
+                var points = ConnectorPoints(connector);
+                if (points.Count < 2) continue;
+                foreach (var shape in nodeShapeByVisualId.Values)
+                {
+                    var comparisonCost = Math.Max(1, points.Count - 1);
+                    if (!TrySpendUnresolvedAnalysis(comparisonCost)) break;
+                    var geometry = shape.Geometry!;
+                    var bounds = new VisualRect(geometry.X, geometry.Y, geometry.Width, geometry.Height);
+                    var tolerance = Math.Max(1, Math.Min(bounds.Width, bounds.Height) * .05);
+                    if (Enumerable.Range(1, points.Count - 1).Any(index =>
+                            GeometryMath.DistanceToSegmentRect(points[index - 1], points[index], bounds) <= tolerance))
+                        stagedShaftNodeShapeIds.Add(shape.ShapeId);
+                }
+                if (unresolvedAnalysisBudgetExceeded || inferenceToken.IsCancellationRequested) break;
+            }
+        }
+        var unresolvedNodeShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (inferenceToken.IsCancellationRequested)
+        {
+            if (!diagnostics.Any(item => item.Code == "VisualInferenceTimeout"))
+                diagnostics.Add(new VisualDiagnostic("VisualInferenceTimeout",
+                    "PPTX visual inference exceeded its configured time budget; all connectors remain fallback geometry.",
+                    slide.SlideId, Fallback: "connectors retained as visual fallback",
+                    Remedy: "increase VisualInferenceTimeout or simplify the diagram",
+                    Format: "pptx", PartUri: slide.PartUri, PartitionId: slide.SlideId,
+                    SourceObjectId: slide.SlideId, SourceObjectType: "inference", Confidence: 0));
+        }
+        else if (unresolvedAnalysisBudgetExceeded)
+        {
+            diagnostics.Add(new VisualDiagnostic("VisualInferenceBudgetExceeded",
+                "PPTX unresolved-connector analysis exceeded its deterministic work budget; candidate and shaft-only node retention was skipped.",
+                slide.SlideId, Fallback: "connectors and implicated shapes retained as visual fallback",
+                Remedy: "simplify the slide or split dense diagrams across slides",
+                Format: "pptx", PartUri: slide.PartUri, PartitionId: slide.SlideId,
+                SourceObjectId: slide.SlideId, SourceObjectType: "unresolved-connector-analysis", Confidence: 0));
+        }
+        else
+        {
+            unresolvedNodeShapeIds.UnionWith(stagedCandidateNodeShapeIds);
+            unresolvedNodeShapeIds.UnionWith(stagedShaftNodeShapeIds);
+        }
+
         var assignedLabels = AssignEdgeLabels(connectors, projectedConnectors, drawable,
             reservedEndpointShapeIds, out var unresolvedLabelConnectorIds);
         foreach (var assignment in assignedLabels.Values)
@@ -866,9 +962,12 @@ public sealed class PptxAdapter
                 Fallback: "shape text and connector diagnostics retained", Format: "pptx", PartUri: slide.PartUri,
                 PartitionId: slide.SlideId, SourceObjectId: connectors.FirstOrDefault()?.ShapeId,
                 SourceObjectType: "connector", Confidence: 0));
-        // A slide often contains title, footer, and explanatory text boxes alongside a flow.  Only
-        // shapes that a resolved connector actually references belong to its Mermaid topology.
-        var nodes = byShapeId.Values.Where(shape => connectedShapeIds.Contains(shape.ShapeId) && !labels.Contains(shape.ShapeId))
+        // A slide often contains title, footer, and explanatory text boxes alongside a flow.
+        // Resolved endpoints and nodes touched/candidated by unresolved connectors belong to
+        // the topology; unrelated slide furniture remains outside it.
+        var visualNodeShapeIds = new HashSet<string>(connectedShapeIds, StringComparer.Ordinal);
+        visualNodeShapeIds.UnionWith(unresolvedNodeShapeIds);
+        var nodes = byShapeId.Values.Where(shape => visualNodeShapeIds.Contains(shape.ShapeId) && !labels.Contains(shape.ShapeId))
             .OrderBy(shape => shape.ShapeId, StringComparer.Ordinal)
             .Select(shape => new VisualNode("v_" + SafeVisualId(shape.ShapeId), VisualLabel(shape), VisualKind(shape.ShapePreset), shape.ShapeId,
                 Geometry: shape.Geometry,
@@ -897,7 +996,7 @@ public sealed class PptxAdapter
                 sourceItems.Add(new VisualSourceItem(sourceItemId, VisualSourceItemKind.TextLabel,
                     VisualDisposition.IgnoredDecorative, Reason: "attached as connector edge label", SourceAnchor: sourceAnchor));
             }
-            else if (connectedShapeIds.Contains(shape.ShapeId) && nodes.Any(node => node.SourceNodeId == shape.ShapeId))
+            else if (visualNodeShapeIds.Contains(shape.ShapeId) && nodes.Any(node => node.SourceNodeId == shape.ShapeId))
             {
                 sourceItems.Add(new VisualSourceItem(sourceItemId,
                     IsDirectionalShape(shape) ? VisualSourceItemKind.DirectionalShape : VisualSourceItemKind.Shape,
@@ -962,7 +1061,7 @@ public sealed class PptxAdapter
             foreach (var connector in connectorShapes.Where(item => ConnectorDirection(item) == ConnectionDirection.Unknown)
                          .OrderBy(item => item.ShapeId, StringComparer.Ordinal))
             {
-                var points = ConnectorPoints(connector.Geometry);
+                var points = ConnectorPoints(connector);
                 if (points.Count < 2) continue;
                 var shaft = points[^1] - points[0];
                 var tangent = shaft.Normalize();
@@ -1041,21 +1140,6 @@ public sealed class PptxAdapter
                 _ => VisualBoundaryKind.Rectangle,
             };
 
-        static IReadOnlyList<VisualPoint> ConnectorPoints(Geometry? geometry)
-        {
-            if (geometry is not { } line) return [];
-            var horizontal = line.Width >= line.Height;
-            var first = horizontal
-                ? new VisualPoint(line.X, line.Y + line.Height / 2)
-                : new VisualPoint(line.X + line.Width / 2, line.Y);
-            var second = horizontal
-                ? new VisualPoint(line.X + line.Width, line.Y + line.Height / 2)
-                : new VisualPoint(line.X + line.Width / 2, line.Y + line.Height);
-            if (Math.Abs(Math.Abs(line.RotationDegrees) - 180) < 1)
-                (first, second) = (second, first);
-            return [first, second];
-        }
-
         // Deterministic, fixture-independent edge-label pre-classification (see the call site
         // in BuildVisualGraph above). A shape qualifies as an edge-label candidate only when
         // ALL of the following hold:
@@ -1103,7 +1187,7 @@ public sealed class PptxAdapter
                 : (minDimensions[middle - 1] + minDimensions[middle]) / 2;
             var sizeThreshold = median * 0.5;
             if (sizeThreshold <= 0) return result;
-            var shafts = connectors.Select(connector => ConnectorPoints(connector.Geometry))
+            var shafts = connectors.Select(ConnectorPoints)
                 .Where(points => points.Count == 2).ToArray();
             if (shafts.Length == 0) return result;
             foreach (var shape in textBearing)
@@ -1164,6 +1248,28 @@ public sealed class PptxAdapter
                 ClusterId: pair.ClusterId,
                 RejectedCandidateIds: pair.RejectedCandidateIds);
         }
+    }
+
+    private static IReadOnlyList<VisualPoint> ConnectorPoints(PptxShapeRecord connector)
+    {
+        if (connector.ConnectorPathPoints is { Count: >= 2 } points)
+            return [points[0], points[^1]];
+        return ConnectorPoints(connector.Geometry);
+    }
+
+    private static IReadOnlyList<VisualPoint> ConnectorPoints(Geometry? geometry)
+    {
+        if (geometry is not { } line) return [];
+        var horizontal = line.Width >= line.Height;
+        var first = horizontal
+            ? new VisualPoint(line.X, line.Y + line.Height / 2)
+            : new VisualPoint(line.X + line.Width / 2, line.Y);
+        var second = horizontal
+            ? new VisualPoint(line.X + line.Width, line.Y + line.Height / 2)
+            : new VisualPoint(line.X + line.Width / 2, line.Y + line.Height);
+        if (Math.Abs(Math.Abs(line.RotationDegrees) - 180) < 1)
+            (first, second) = (second, first);
+        return [first, second];
     }
 
     private static (PptxShapeRecord Start, PptxShapeRecord End, VisualConnectionEvidence Evidence)? InferGeometryEndpoints(
@@ -1235,14 +1341,23 @@ public sealed class PptxAdapter
 
             foreach (var connector in connectors)
             {
-                if (connector.Geometry is not { } line || !projectedConnectors.ContainsKey(connector.ShapeId))
-                    continue;
-                var midpoint = (X: line.X + line.Width / 2, Y: line.Y + line.Height / 2);
-                var distance = DistanceToBox(midpoint, candidate.Geometry);
-                var tolerance = Math.Max(Math.Max(line.Width, line.Height), 1) * .35;
+                if (!projectedConnectors.ContainsKey(connector.ShapeId)) continue;
+                var shaft = ConnectorPoints(connector);
+                if (shaft.Count != 2) continue;
+                var rect = new VisualRect(candidate.Geometry.X, candidate.Geometry.Y,
+                    candidate.Geometry.Width, candidate.Geometry.Height);
+                GeometryMath.DistanceToSegment(rect.Center, shaft[0], shaft[1], out var projection);
+                if (projection is <= .05 or >= .95) continue;
+                var distance = GeometryMath.DistanceToSegmentRect(shaft[0], shaft[1], rect);
+                var shaftLength = (shaft[1] - shaft[0]).Length;
+                var labelMinorDimension = Math.Min(candidate.Geometry.Width, candidate.Geometry.Height);
+                var tolerance = Math.Max(1, Math.Max(labelMinorDimension * 1.5, shaftLength * .08));
                 if (distance > tolerance) continue;
 
-                choices.Add(new EdgeLabelCandidate(candidate.ShapeId, connector.ShapeId, 1 - distance / tolerance));
+                var proximityScore = 1 - distance / tolerance;
+                var midpointScore = 1 - Math.Abs(projection - .5) * 2;
+                var score = proximityScore * .75 + midpointScore * .25;
+                choices.Add(new EdgeLabelCandidate(candidate.ShapeId, connector.ShapeId, score));
                 labelsById[candidate.ShapeId] = new AssignedEdgeLabel(text, candidate.ShapeId);
                 if (!connectorIdsByLabel.TryGetValue(candidate.ShapeId, out var connectorIds))
                     connectorIdsByLabel[candidate.ShapeId] = connectorIds = new HashSet<string>(StringComparer.Ordinal);

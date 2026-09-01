@@ -4,7 +4,7 @@
 
 ### 対応バージョン
 
-DocRedock は現在 Public Beta です。最新の `0.1.x` リリースのみをセキュリティ更新の対象とします。修正は必要に応じて新しいBetaとして公開します。
+DocRedock は現在 Public Beta です。最新の Public Beta リリースのみをセキュリティ更新の対象とします。修正は必要に応じて新しいBetaとして公開します。
 
 ### 脆弱性の報告
 
@@ -28,7 +28,7 @@ DocRedock は現在 Public Beta です。最新の `0.1.x` リリースのみを
 
 ### Supported versions
 
-DocRedock is currently a Public Beta. Security updates are provided only for the latest `0.1.x` release. Fixes may be published as a newer beta when needed.
+DocRedock is currently a Public Beta. Security updates are provided only for the latest Public Beta release. Fixes may be published as a newer beta when needed.
 
 ### Reporting a vulnerability
 

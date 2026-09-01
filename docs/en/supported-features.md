@@ -1,10 +1,10 @@
-# v0.2.0 Supported Features
+# v0.2.1 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.2.0 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
+DocRedock v0.2.1 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
 
-| Feature | v0.2.0 status |
+| Feature | v0.2.1 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta; CLI default |
 | `visible`, `complete`, `sanitized` content policies | Supported |
@@ -24,8 +24,8 @@ Legend: ○ = supported, △ = conditional or partial, × = unsupported as a sem
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | DOCX | ○ DrawingML/VML text boxes | △ native endpoints, or uniquely resolvable geometry, within supported drawing fragments | △ only unique endpoints | △ only a unique nearby label | △ preserves extracted text; complete topology is not guaranteed | △ embedded images are retained as assets | ○ unresolved/partial topology is diagnosed; source text remains when no valid graph is rendered | Public Beta, conditional |
 | XLSX | ○ general shapes and standard `flowChart*` presets | ○ connected connectors | △ cell-layout/geometry projection | △ when existing projection can resolve it | × | △ embedded images are retained as assets | △ unknown `flowChart*` presets keep their labels but are not treated as confirmed connections | Public Beta |
-| PPTX | ○ process/decision/terminator/data/generic | ○ native connections | △ only uniquely resolved endpoints | △ when uniquely associated | △ preserves text and reports missing topology | △ embedded images are retained as assets | ○ reports unresolved connectors/labels and partial projection | Public Beta, conditional |
-| PDF | ○ native text | △ simple painted vector paths with uniquely matched endpoints | △ only unique vector endpoints | △ only a unique nearby label | △ valid simple topology projects to Mermaid | △ page preview when a rasterizer is available; path/page placeholder otherwise | ○ reports vector/path partiality, unresolved endpoints, and OCR/rasterizer gaps | Public Beta, conditional |
+| PPTX | ○ process/decision/terminator/data/generic | ○ native connections | △ only uniquely resolved endpoints, including diagonal connectors | △ when uniquely associated along the connector segment | △ preserves text and reports missing topology | △ embedded images are retained as assets | ○ reports unresolved connectors/labels and partial projection | Public Beta, conditional |
+| PDF | ○ native text | △ simple painted vector paths with uniquely matched endpoints | △ only unique vector endpoints; regular table grids are excluded from connector inference | △ only a unique nearby label | △ valid simple topology projects to Mermaid; arrow direction is retained and unknown direction is diagnosed | △ page preview when a rasterizer is available; path/page placeholder otherwise | ○ reports vector/path partiality, unknown direction, unresolved endpoints, and OCR/rasterizer gaps | Public Beta, conditional |
 
 Recognized visual content follows this order:
 
@@ -43,4 +43,4 @@ DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It con
 
 Readable Markdown is one-way output. `.drmd` and `.drmdpkg` are experimental and may contain source-derived information. Keep the source document as the authoritative copy.
 
-This document is the canonical public-support statement. See the [v0.2.0 release notes](../../release-docs/RELEASE_NOTES_v0.2.0.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
+This document is the canonical public-support statement. See the [v0.2.1 release notes](../../release-docs/RELEASE_NOTES_v0.2.1.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).

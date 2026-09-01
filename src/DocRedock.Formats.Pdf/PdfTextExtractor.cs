@@ -171,7 +171,8 @@ public static class PdfTextExtractor
         var operands = new List<double>();
         var current = new List<VisualPathPoint>();
         var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
-        var arrowheadTips = new List<VisualPathPoint>();
+        var arrowheadMatches = new List<(string PathId, string EdgeId, VisualPathPoint Tip, bool AtEnd)>();
+        var suppressedGridPathIds = new HashSet<string>(StringComparer.Ordinal);
         var triangleCandidates = new List<(IReadOnlyList<VisualPathPoint> Points, Geometry Geometry, string PathId)>();
         var unlabelledClosedCandidates = new List<(Geometry Geometry, string PathId)>();
         var provisionalUnlabelledNodeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -305,9 +306,10 @@ public static class PdfTextExtractor
                 markerSize <= nearest.Length * .30 &&
                 nearest.EndpointDistance <= Math.Max(markerSize * 1.5, nearest.Length * .08);
             var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
-            if (isArrowhead)
+            if (isArrowhead && nearest.Edge is { Path: { Count: >= 2 } nearestPath } arrowheadEdge)
             {
-                arrowheadTips.Add(tip);
+                var atEnd = Distance(nearestPath[^1], tip) <= Distance(nearestPath[0], tip);
+                arrowheadMatches.Add((candidate.PathId, arrowheadEdge.Id, tip, atEnd));
                 arrowheadPathIds.Add(candidate.PathId);
                 if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .3, IsFallback = true };
             }
@@ -324,6 +326,25 @@ public static class PdfTextExtractor
                 paths[pathIndex] = paths[pathIndex] with { Confidence = .35, IsFallback = true };
             }
         }
+
+        // Regular, dense orthogonal grids are table borders, chart grids, or page layout,
+        // not diagram connectors. Suppress them before label assignment and endpoint
+        // inference so they cannot interrupt reading order or produce connector warnings.
+        List<VisualPath>? preGridPaths = null;
+        List<VisualEdge>? preGridEdges = null;
+        List<string>? preGridDiagnostics = null;
+        List<VisualDiagnostic>? preGridGraphDiagnostics = null;
+        HashSet<string>? preGridSuppressedPathIds = null;
+        using var visualInferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (inferenceTimeout is { } visualInferenceTimeout)
+        {
+            if (visualInferenceTimeout <= TimeSpan.Zero) visualInferenceCts.Cancel();
+            else visualInferenceCts.CancelAfter(visualInferenceTimeout);
+        }
+        var visualInferenceToken = visualInferenceCts.Token;
+        SuppressTableGridEdges();
+        cancellationToken.ThrowIfCancellationRequested();
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
 
         var edgeLabelChoices = new List<EdgeLabelCandidate>();
         var labelRegions = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -387,8 +408,15 @@ public static class PdfTextExtractor
                     new VisualRect(node.Geometry!.X, node.Geometry.Y, node.Geometry.Width, node.Geometry.Height),
                     Text: node.Label)).ToArray();
             var connectorPrimitives = edges.Where(edge => edge.Path is { Count: >= 2 }).Select(edge =>
-                (VisualPrimitive)new VisualConnectorPrimitive(edge.Id, canvasId, edge.SourceAnchor ?? anchor,
-                    new VisualConnectorPath(edge.Path!.Select(point => new VisualPoint(point.X, point.Y)).ToArray()))).ToArray();
+            {
+                var arrowhead = arrowheadMatches.FirstOrDefault(match => match.EdgeId == edge.Id);
+                return (VisualPrimitive)new VisualConnectorPrimitive(edge.Id, canvasId, edge.SourceAnchor ?? anchor,
+                    new VisualConnectorPath(edge.Path!.Select(point => new VisualPoint(point.X, point.Y)).ToArray(),
+                        StartArrowhead: arrowhead.EdgeId is not null && !arrowhead.AtEnd
+                            ? new ArrowheadEvidence(true, Kind: "pdf-triangle", Confidence: .95) : null,
+                        EndArrowhead: arrowhead.EdgeId is not null && arrowhead.AtEnd
+                            ? new ArrowheadEvidence(true, Kind: "pdf-triangle", Confidence: .95) : null));
+            }).ToArray();
             var primitives = nodePrimitives.Concat(connectorPrimitives).ToArray();
             var primitiveBounds = primitives.Select(item => item.Bounds).Where(item => item is not null).Cast<VisualRect>().ToArray();
             var minCanvasX = primitiveBounds.Select(item => item.X).DefaultIfEmpty(0).Min();
@@ -422,24 +450,13 @@ public static class PdfTextExtractor
             SoftConnectionResult inference;
             try
             {
-                using var inferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                if (inferenceTimeout is { } timeout)
-                {
-                    if (timeout <= TimeSpan.Zero) inferenceCts.Cancel();
-                    else inferenceCts.CancelAfter(timeout);
-                }
+                visualInferenceToken.ThrowIfCancellationRequested();
                 inference = new SoftConnectionEngine().Infer(document, clusters,
-                    new SoftConnectionOptions(VisualInferenceContext.Current), inferenceCts.Token);
+                    new SoftConnectionOptions(VisualInferenceContext.Current), visualInferenceToken);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                const string message = "PDF visual inference exceeded its configured time budget; all vector connectors remain fallback geometry.";
-                diagnostics.Add($"VisualInferenceTimeout: PDF page {pageNumber} {message}");
-                graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceTimeout", message,
-                    Fallback: "vector connectors retained as visual fallback",
-                    Remedy: "increase VisualInferenceTimeout or simplify the diagram",
-                    Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
-                    SourceObjectType: "inference", Confidence: 0));
+                ReportVisualInferenceTimeout();
                 inference = new SoftConnectionResult([], [], []);
             }
             foreach (var pair in inference.Resolved)
@@ -481,25 +498,21 @@ public static class PdfTextExtractor
         }
         // A small closed triangle touching a shaft is an arrowhead, not a node.
         // Promote the shaft to directed only when that evidence is unambiguous.
-        foreach (var tip in arrowheadTips)
+        foreach (var arrowhead in arrowheadMatches)
         {
-            var matching = edges.Select((edge, index) => (edge, index))
-                .Where(item => item.edge.Path is { Count: >= 2 } &&
-                    (Distance(item.edge.Path![^1], tip) <= 18 || Distance(item.edge.Path[0], tip) <= 18))
-                .OrderBy(item => Math.Min(Distance(item.edge.Path![^1], tip), Distance(item.edge.Path[0], tip)))
-                .ToArray();
-            if (matching.Length != 1) continue;
-            var match = matching[0];
-            var edge = match.edge;
-            var atEnd = Distance(edge.Path![^1], tip) <= Distance(edge.Path[0], tip);
-            if (!atEnd && edge.SourceId is not null && edge.TargetId is not null)
-                edge = edge with { SourceId = edge.TargetId, TargetId = edge.SourceId };
-            edges[match.index] = edge with
+            var edgeIndex = edges.FindIndex(edge => edge.Id == arrowhead.EdgeId);
+            if (edgeIndex < 0) continue;
+            var edge = edges[edgeIndex];
+            if (edge.SourceId is null || edge.TargetId is null) continue;
+            // SoftConnectionEngine receives the same start/end arrowhead evidence and has
+            // already oriented SourceId/TargetId. Keep the exact shaft association here;
+            // a fixed-distance second match can become ambiguous when unrelated paths are near.
+            edges[edgeIndex] = edge with
             {
                 Direction = "directed",
                 EdgeDirection = VisualEdgeDirection.Directed,
                 Evidence = (edge.Evidence ?? new VisualConnectionEvidence("pdf-arrowhead-geometry", "High", edge.Confidence ?? .75,
-                    ClusterId: $"page-{pageNumber}")) with { ArrowheadEvidence = atEnd ? "end" : "start" }
+                    ClusterId: $"page-{pageNumber}")) with { ArrowheadEvidence = arrowhead.AtEnd ? "end" : "start" }
             };
         }
         // Merge an open, two-segment V adjacent to a shaft into one directed edge.
@@ -538,6 +551,18 @@ public static class PdfTextExtractor
             }
         }
 
+        foreach (var edge in edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null &&
+                     edge.EdgeDirection != VisualEdgeDirection.Directed))
+        {
+            var message = $"Edge '{edge.Id}' direction could not be determined; retained as undirected.";
+            diagnostics.Add($"VisualEdgeDirectionUnknown: PDF page {pageNumber} {message}");
+            graphDiagnostics.Add(new VisualDiagnostic("VisualEdgeDirectionUnknown", message,
+                Fallback: "undirected Mermaid edge retained",
+                Remedy: "verify the source arrowhead or use an explicit directional connector",
+                Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
+                SourceObjectId: edge.Id, SourceObjectType: "connector", Confidence: edge.Confidence));
+        }
+
         // A textless closed path is only a semantic node if it participated in a resolved
         // relation. All others remain paths so decorative marks cannot leak into Mermaid.
         var connectedNodeIds = edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null)
@@ -565,8 +590,12 @@ public static class PdfTextExtractor
             }
             else if (arrowheadPathIds.Contains(path.Id) || mergedArrowheadPathIds.Contains(path.Id))
             {
-                var related = edges.FirstOrDefault(candidate => candidate.Path is { Count: >= 2 } &&
-                    arrowheadTips.Any(tip => Distance(candidate.Path![^1], tip) <= 18 || Distance(candidate.Path[0], tip) <= 18));
+                var relatedEdgeId = arrowheadMatches.Where(match => match.PathId == path.Id)
+                    .Select(match => match.EdgeId).FirstOrDefault();
+                var related = relatedEdgeId is not null
+                    ? edges.FirstOrDefault(candidate => candidate.Id == relatedEdgeId)
+                    : edges.FirstOrDefault(candidate => candidate.EdgeDirection == VisualEdgeDirection.Directed &&
+                        candidate.Evidence?.ArrowheadEvidence is "start" or "end");
                 var relatedPath = paths.FirstOrDefault(candidate => related?.Path is not null && ReferenceEquals(candidate.Points, related.Path));
                 sourceItems.Add(relatedPath is not null
                     ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
@@ -574,6 +603,9 @@ public static class PdfTextExtractor
                     : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
                         FallbackPathId: path.Id, Reason: "arrowhead direction could not be resolved", SourceAnchor: path.SourceAnchor));
             }
+            else if (suppressedGridPathIds.Contains(path.Id))
+                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
+                    Reason: "regular orthogonal table/grid line suppressed from connector inference", SourceAnchor: path.SourceAnchor));
             else if (edge is not null && edge.SourceId is not null && edge.TargetId is not null)
                 sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedEdge,
                     ProjectedEdgeId: edge.Id, SourceAnchor: path.SourceAnchor));
@@ -608,6 +640,475 @@ public static class PdfTextExtractor
         static double Distance(VisualPathPoint left, VisualPathPoint right) => Math.Sqrt(Math.Pow(left.X - right.X, 2) + Math.Pow(left.Y - right.Y, 2));
         VisualDiagnostic Diag(string code, string message, double? confidence = null) => new(code, message,
             Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}", Confidence: confidence);
+
+        void ReportVisualInferenceTimeout()
+        {
+            RollbackTableGridSuppression();
+            if (graphDiagnostics.Any(item => item.Code == "VisualInferenceTimeout")) return;
+            const string message = "PDF visual inference exceeded its configured time budget; all vector connectors remain fallback geometry.";
+            diagnostics.Add($"VisualInferenceTimeout: PDF page {pageNumber} {message}");
+            graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceTimeout", message,
+                Fallback: "vector connectors retained as visual fallback",
+                Remedy: "increase VisualInferenceTimeout or simplify the diagram",
+                Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
+                SourceObjectType: "inference", Confidence: 0));
+            allowGeometryInference = false;
+        }
+
+        void SuppressTableGridEdges()
+        {
+            const int maxCandidateLines = 512;
+            const int maxAxisLinePoints = 16_384;
+            const long maxWorkItems = 250_000;
+            long workItems = 0;
+            var analysisAborted = false;
+
+            bool TrySpend(long amount)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (visualInferenceToken.IsCancellationRequested)
+                {
+                    analysisAborted = true;
+                    return false;
+                }
+                if (amount < 0 || workItems > maxWorkItems - amount)
+                {
+                    if (!graphDiagnostics.Any(item => item.Code == "VisualInferenceBudgetExceeded"))
+                    {
+                        const string message = "PDF table-grid inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
+                        diagnostics.Add($"VisualInferenceBudgetExceeded: PDF page {pageNumber} {message}");
+                        graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceBudgetExceeded", message,
+                            Fallback: "table-grid suppression skipped; vector paths retained",
+                            Remedy: "simplify the page or split dense diagrams across pages",
+                            Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
+                            SourceObjectType: "table-grid", Confidence: 0));
+                    }
+                    allowGeometryInference = false;
+                    analysisAborted = true;
+                    return false;
+                }
+                workItems += amount;
+                return true;
+            }
+
+            if (!TrySpend((long)paths.Count + edges.Count)) return;
+            var pathByPoints = new Dictionary<IReadOnlyList<VisualPathPoint>, VisualPath>(ReferenceEqualityComparer.Instance);
+            foreach (var path in paths)
+                if (path.Points is { } pathPoints) pathByPoints.TryAdd(pathPoints, path);
+            var arrowheadEdgeIds = arrowheadMatches.Select(match => match.EdgeId)
+                .ToHashSet(StringComparer.Ordinal);
+            var lines = edges.Select(edge =>
+            {
+                var path = edge.Path is not null && pathByPoints.TryGetValue(edge.Path, out var matched) ? matched : null;
+                return path is not null && TryAxisLine(edge, maxAxisLinePoints, maxWorkItems, TrySpend,
+                    out var horizontal, out var fixedCoordinate, out var minimum, out var maximum)
+                    ? (Edge: edge, Path: path, Horizontal: horizontal, Fixed: fixedCoordinate, Minimum: minimum, Maximum: maximum)
+                    : default;
+            }).Where(line => line.Edge is not null &&
+                !arrowheadEdgeIds.Contains(line.Edge.Id)).ToArray();
+            if (analysisAborted) return;
+            if (lines.Length > maxCandidateLines)
+            {
+                _ = TrySpend(maxWorkItems + 1);
+                return;
+            }
+            if (!TrySpend(lines.Length)) return;
+            var horizontalLines = lines.Where(line => line.Horizontal).ToArray();
+            var verticalLines = lines.Where(line => !line.Horizontal).ToArray();
+            if (horizontalLines.Length < 3 || verticalLines.Length < 3) return;
+            if (!TrySpend(3L * horizontalLines.Length * verticalLines.Length)) return;
+
+            bool Crosses((VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) horizontal,
+                (VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) vertical)
+            {
+                var tolerance = Math.Max(1, Math.Min(horizontal.Maximum - horizontal.Minimum,
+                    vertical.Maximum - vertical.Minimum) * .01);
+                return vertical.Fixed >= horizontal.Minimum - tolerance && vertical.Fixed <= horizontal.Maximum + tolerance &&
+                    horizontal.Fixed >= vertical.Minimum - tolerance && horizontal.Fixed <= vertical.Maximum + tolerance;
+            }
+
+            var activeHorizontal = horizontalLines.Where(horizontal =>
+                verticalLines.Count(vertical => Crosses(horizontal, vertical)) >= 3).ToArray();
+            var activeVertical = verticalLines.Where(vertical =>
+                horizontalLines.Count(horizontal => Crosses(horizontal, vertical)) >= 3).ToArray();
+            if (activeHorizontal.Length < 3 || activeVertical.Length < 3) return;
+            long crossingCount = activeHorizontal.Sum(horizontal => (long)activeVertical.Count(vertical => Crosses(horizontal, vertical)));
+            var density = crossingCount / ((double)activeHorizontal.Length * activeVertical.Length);
+            if (density < .70 ||
+                !HasRegularSpacing(activeHorizontal.Select(line => line.Fixed)) &&
+                !HasRegularSpacing(activeVertical.Select(line => line.Fixed))) return;
+
+            var gridLines = activeHorizontal.Concat(activeVertical).ToArray();
+            var semanticNodes = nodes.Where(node => node.Geometry is not null).ToArray();
+            if (!TrySpend((long)gridLines.Length * semanticNodes.Length)) return;
+            bool TouchesSemanticNode(
+                (VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) line)
+            {
+                foreach (var node in semanticNodes)
+                {
+                    var geometry = node.Geometry!;
+                    var tolerance = Math.Max(1, Math.Min(Math.Abs(geometry.Width), Math.Abs(geometry.Height)) * .1);
+                    if (line.Horizontal &&
+                        line.Fixed >= geometry.Y - tolerance &&
+                        line.Fixed <= geometry.Y + geometry.Height + tolerance &&
+                        line.Maximum >= geometry.X - tolerance &&
+                        line.Minimum <= geometry.X + geometry.Width + tolerance)
+                        return true;
+                    if (!line.Horizontal &&
+                        line.Fixed >= geometry.X - tolerance &&
+                        line.Fixed <= geometry.X + geometry.Width + tolerance &&
+                        line.Maximum >= geometry.Y - tolerance &&
+                        line.Minimum <= geometry.Y + geometry.Height + tolerance)
+                        return true;
+                }
+                return false;
+            }
+
+            // Geometry and cell-like text placement alone are insufficient evidence that a
+            // regular lattice is decorative: circuit and network diagrams can satisfy both.
+            // Only a PDF marked-content Table tag is affirmative table semantics.
+            bool HasMarkedTableEvidence()
+            {
+                var position = 0;
+                var tableState = 0;
+                var chargedThrough = 0;
+                while (position < content.Length)
+                {
+                    if (position >= chargedThrough)
+                    {
+                        var charge = Math.Min(4096, content.Length - position);
+                        if (!TrySpend(charge)) return false;
+                        chargedThrough = position + charge;
+                    }
+                    while (position < content.Length && char.IsWhiteSpace(content[position])) position++;
+                    if (position >= content.Length) break;
+                    if (content[position] == '%')
+                    {
+                        while (position < content.Length && content[position] is not '\r' and not '\n') position++;
+                        continue;
+                    }
+
+                    var kind = 0; // 1=name, 2=dictionary, 3=operator/other token, 4=string/delimiter
+                    string? value = null;
+                    if (content[position] == '(')
+                    {
+                        SkipLiteralString(ref position);
+                        kind = 4;
+                    }
+                    else if (content[position] == '<' && position + 1 < content.Length && content[position + 1] == '<')
+                    {
+                        SkipDictionary(ref position);
+                        kind = 2;
+                    }
+                    else if (content[position] == '<')
+                    {
+                        position++;
+                        while (position < content.Length && content[position++] != '>') { }
+                        kind = 4;
+                    }
+                    else if (content[position] == '/')
+                    {
+                        var start = ++position;
+                        while (position < content.Length &&
+                               !char.IsWhiteSpace(content[position]) &&
+                               !IsPdfDelimiter(content[position])) position++;
+                        value = DecodePdfName(content[start..position]);
+                        kind = 1;
+                    }
+                    else if (IsPdfDelimiter(content[position]))
+                    {
+                        position++;
+                        kind = 4;
+                    }
+                    else
+                    {
+                        var start = position++;
+                        while (position < content.Length &&
+                               !char.IsWhiteSpace(content[position]) &&
+                               !IsPdfDelimiter(content[position])) position++;
+                        value = content[start..position];
+                        kind = 3;
+                    }
+
+                    if (kind == 3 && string.Equals(value, "BI", StringComparison.Ordinal))
+                    {
+                        tableState = 0;
+                        if (!SkipInlineImage(ref position)) return false;
+                        chargedThrough = position;
+                        continue;
+                    }
+                    if (kind == 1 && string.Equals(value, "Table", StringComparison.Ordinal))
+                    {
+                        tableState = 1;
+                        continue;
+                    }
+                    if (tableState == 1 && kind == 3 && string.Equals(value, "BMC", StringComparison.Ordinal))
+                        return true;
+                    if (tableState == 1 && kind is 1 or 2)
+                    {
+                        tableState = 2;
+                        continue;
+                    }
+                    if (tableState == 2 && kind == 3 && string.Equals(value, "BDC", StringComparison.Ordinal))
+                        return true;
+                    tableState = 0;
+                }
+                return false;
+
+                bool SkipInlineImage(ref int index)
+                {
+                    var foundData = false;
+                    while (index < content.Length)
+                    {
+                        while (index < content.Length && char.IsWhiteSpace(content[index])) index++;
+                        if (index >= content.Length) break;
+                        var start = index;
+                        while (index < content.Length && !char.IsWhiteSpace(content[index])) index++;
+                        if (string.Equals(content[start..index], "ID", StringComparison.Ordinal))
+                        {
+                            if (index < content.Length && char.IsWhiteSpace(content[index])) index++;
+                            foundData = true;
+                            break;
+                        }
+                    }
+                    if (!foundData)
+                    {
+                        index = content.Length;
+                        return true;
+                    }
+                    var scanStart = index;
+                    for (; index + 1 < content.Length; index++)
+                    {
+                        if ((index - scanStart & 4095) == 0 && !TrySpend(Math.Min(4096, content.Length - index)))
+                            return false;
+                        if (content[index] == 'E' && content[index + 1] == 'I' &&
+                            index > 0 && char.IsWhiteSpace(content[index - 1]) &&
+                            (index + 2 >= content.Length || char.IsWhiteSpace(content[index + 2])))
+                        {
+                            index += 2;
+                            return true;
+                        }
+                    }
+                    index = content.Length;
+                    return true;
+                }
+
+                void SkipLiteralString(ref int index)
+                {
+                    var depth = 0;
+                    while (index < content.Length)
+                    {
+                        var character = content[index++];
+                        if (character == '\\')
+                        {
+                            if (index < content.Length) index++;
+                            continue;
+                        }
+                        if (character == '(') depth++;
+                        else if (character == ')' && --depth == 0) return;
+                    }
+                }
+
+                void SkipDictionary(ref int index)
+                {
+                    index += 2;
+                    var depth = 1;
+                    while (index < content.Length && depth > 0)
+                    {
+                        if (content[index] == '%')
+                        {
+                            while (index < content.Length && content[index] is not '\r' and not '\n') index++;
+                        }
+                        else if (content[index] == '(')
+                        {
+                            SkipLiteralString(ref index);
+                        }
+                        else if (content[index] == '<' && index + 1 < content.Length && content[index + 1] == '<')
+                        {
+                            depth++;
+                            index += 2;
+                        }
+                        else if (content[index] == '>' && index + 1 < content.Length && content[index + 1] == '>')
+                        {
+                            depth--;
+                            index += 2;
+                        }
+                        else if (content[index] == '<')
+                        {
+                            index++;
+                            while (index < content.Length && content[index++] != '>') { }
+                        }
+                        else
+                        {
+                            index++;
+                        }
+                    }
+                }
+
+                static bool IsPdfDelimiter(char character) =>
+                    character is '(' or ')' or '<' or '>' or '[' or ']' or '{' or '}' or '/' or '%';
+
+                static string DecodePdfName(string name)
+                {
+                    if (!name.Contains('#', StringComparison.Ordinal)) return name;
+                    var decoded = new List<char>(name.Length);
+                    for (var index = 0; index < name.Length; index++)
+                    {
+                        if (name[index] == '#' && index + 2 < name.Length)
+                        {
+                            var high = HexValue(name[index + 1]);
+                            var low = HexValue(name[index + 2]);
+                            if (high >= 0 && low >= 0)
+                            {
+                                decoded.Add((char)((high << 4) | low));
+                                index += 2;
+                                continue;
+                            }
+                        }
+                        decoded.Add(name[index]);
+                    }
+                    return new string(decoded.ToArray());
+                }
+
+                static int HexValue(char value) => value switch
+                {
+                    >= '0' and <= '9' => value - '0',
+                    >= 'A' and <= 'F' => value - 'A' + 10,
+                    >= 'a' and <= 'f' => value - 'a' + 10,
+                    _ => -1,
+                };
+            }
+
+            if (!HasMarkedTableEvidence() || gridLines.Any(TouchesSemanticNode)) return;
+
+            var xBoundaries = activeVertical.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
+            var yBoundaries = activeHorizontal.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
+            if (!TrySpend((long)regions.Count * (xBoundaries.Length + yBoundaries.Length))) return;
+            int FindCell(IReadOnlyList<double> boundaries, double coordinate)
+            {
+                for (var index = 0; index + 1 < boundaries.Count; index++)
+                {
+                    var span = boundaries[index + 1] - boundaries[index];
+                    var margin = Math.Min(2, span * .05);
+                    if (coordinate > boundaries[index] + margin &&
+                        coordinate < boundaries[index + 1] - margin)
+                        return index;
+                }
+                return -1;
+            }
+
+            var occupiedCells = new HashSet<(int Column, int Row)>();
+            foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
+            {
+                if (assignedLabelRegions.Contains(regionIndex) || string.IsNullOrWhiteSpace(region.Text)) continue;
+                var centerX = region.BoundingBox.X + region.BoundingBox.Width / 2;
+                var centerY = region.BoundingBox.Y + region.BoundingBox.Height / 2;
+                var column = FindCell(xBoundaries, centerX);
+                var row = FindCell(yBoundaries, centerY);
+                if (column >= 0 && row >= 0) occupiedCells.Add((column, row));
+            }
+            if (occupiedCells.Count < 4 ||
+                occupiedCells.Select(cell => cell.Column).Distinct().Count() < 2 ||
+                occupiedCells.Select(cell => cell.Row).Distinct().Count() < 2) return;
+
+            if (!TrySpend((long)gridLines.Length * paths.Count +
+                          (long)gridLines.Length * (diagnostics.Count + graphDiagnostics.Count + 1))) return;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (visualInferenceToken.IsCancellationRequested) return;
+            var pathIndexById = paths.Select((path, index) => (path.Id, index))
+                .ToDictionary(item => item.Id, item => item.index, StringComparer.Ordinal);
+            var suppressedEdgeIds = gridLines
+                .Select(line => line.Edge.Id).ToHashSet(StringComparer.Ordinal);
+            preGridPaths = [.. paths];
+            preGridEdges = [.. edges];
+            preGridDiagnostics = [.. diagnostics];
+            preGridGraphDiagnostics = [.. graphDiagnostics];
+            preGridSuppressedPathIds = [.. suppressedGridPathIds];
+            foreach (var line in gridLines)
+            {
+                suppressedGridPathIds.Add(line.Path.Id);
+                if (pathIndexById.TryGetValue(line.Path.Id, out var pathIndex))
+                    paths[pathIndex] = paths[pathIndex] with { IsFallback = false, Confidence = .95 };
+            }
+            edges.RemoveAll(edge => suppressedEdgeIds.Contains(edge.Id));
+            for (var index = 0; index < suppressedEdgeIds.Count; index++)
+            {
+                var warningIndex = diagnostics.FindIndex(message => message.StartsWith(
+                    $"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint", StringComparison.Ordinal));
+                if (warningIndex >= 0) diagnostics.RemoveAt(warningIndex);
+                var graphIndex = graphDiagnostics.FindIndex(item => item.Code == "VisualConnectorUnresolved" &&
+                    item.Message.Contains("endpoint", StringComparison.OrdinalIgnoreCase));
+                if (graphIndex >= 0) graphDiagnostics.RemoveAt(graphIndex);
+            }
+        }
+
+        static bool TryAxisLine(VisualEdge edge, int maxAxisLinePoints, long maxWorkItems,
+            Func<long, bool> trySpend, out bool horizontal, out double fixedCoordinate,
+            out double minimum, out double maximum)
+        {
+            horizontal = false; fixedCoordinate = minimum = maximum = 0;
+            if (edge.Path is not { Count: >= 2 } points) return false;
+            if (points.Count > maxAxisLinePoints)
+            {
+                _ = trySpend(maxWorkItems + 1);
+                return false;
+            }
+            var start = points[0]; var end = points[^1];
+            var dx = end.X - start.X; var dy = end.Y - start.Y;
+            var length = Math.Sqrt(dx * dx + dy * dy);
+            if (length <= 1e-9) return false;
+            var horizontalCandidate = Math.Abs(dy) <= length * .02;
+            var verticalCandidate = Math.Abs(dx) <= length * .02;
+            if (!horizontalCandidate && !verticalCandidate) return false;
+            var tolerance = Math.Max(1e-6, length * .02);
+            var sum = 0d;
+            minimum = double.PositiveInfinity;
+            maximum = double.NegativeInfinity;
+            for (var index = 0; index < points.Count; index++)
+            {
+                if ((index & 1023) == 0 && !trySpend(Math.Min(1024, points.Count - index)))
+                    return false;
+                var point = points[index];
+                if (horizontalCandidate && Math.Abs(point.Y - start.Y) > tolerance) horizontalCandidate = false;
+                if (verticalCandidate && Math.Abs(point.X - start.X) > tolerance) verticalCandidate = false;
+                if (!horizontalCandidate && !verticalCandidate) return false;
+                var varying = horizontalCandidate ? point.X : point.Y;
+                var fixedValue = horizontalCandidate ? point.Y : point.X;
+                minimum = Math.Min(minimum, varying);
+                maximum = Math.Max(maximum, varying);
+                sum += fixedValue;
+            }
+            horizontal = horizontalCandidate;
+            fixedCoordinate = sum / points.Count;
+            return true;
+        }
+
+        void RollbackTableGridSuppression()
+        {
+            if (preGridPaths is null || preGridEdges is null || preGridDiagnostics is null ||
+                preGridGraphDiagnostics is null || preGridSuppressedPathIds is null) return;
+            paths.Clear(); paths.AddRange(preGridPaths);
+            edges.Clear(); edges.AddRange(preGridEdges);
+            diagnostics.Clear(); diagnostics.AddRange(preGridDiagnostics);
+            graphDiagnostics.Clear(); graphDiagnostics.AddRange(preGridGraphDiagnostics);
+            suppressedGridPathIds.Clear(); suppressedGridPathIds.UnionWith(preGridSuppressedPathIds);
+            preGridPaths = null;
+            preGridEdges = null;
+            preGridDiagnostics = null;
+            preGridGraphDiagnostics = null;
+            preGridSuppressedPathIds = null;
+        }
+
+        static bool HasRegularSpacing(IEnumerable<double> positions)
+        {
+            var ordered = positions.Distinct().OrderBy(value => value).ToArray();
+            if (ordered.Length < 3) return false;
+            var gaps = ordered.Zip(ordered.Skip(1), (left, right) => right - left)
+                .Where(gap => gap > 1e-9).OrderBy(gap => gap).ToArray();
+            if (gaps.Length < 2) return false;
+            var median = gaps[gaps.Length / 2];
+            return gaps.All(gap => gap >= median * .4 && gap <= median * 2.5);
+        }
 
         void RetainSubpath()
         {

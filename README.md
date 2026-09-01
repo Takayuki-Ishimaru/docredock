@@ -10,7 +10,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.2.0 Public Beta support
+## v0.2.1 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -19,7 +19,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.0 release notes](release-docs/RELEASE_NOTES_v0.2.0.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.1 release notes](release-docs/RELEASE_NOTES_v0.2.1.en.md).
 
 ## Use it in 30 seconds
 
@@ -64,22 +64,22 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 ## Important limitations
 
-- v0.2.0 is a Public Beta, not a production-stable release.
+- v0.2.1 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
 - PDF OCR and visual fallback may require a configured rasterizer and OCR provider. If unavailable, review the page placeholder and warning.
 - DocRedock does not bundle or download a Japanese PDF font. The user is responsible for selecting a font and complying with its embedding license.
-- The GUI may query the public GitHub Releases API for update metadata. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable this request.
+- The GUI always shows the running version and checks published releases, including Public Beta builds, at startup or on demand. It never auto-installs an update; set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` to disable startup checks.
 - Verify the published SHA-256 checksum and signing/notarization status for each package.
 
 ## Documentation
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.2.0 supported features](docs/en/supported-features.md)
+- [v0.2.1 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.2.0 release notes](release-docs/RELEASE_NOTES_v0.2.0.en.md)
+- [v0.2.1 release notes](release-docs/RELEASE_NOTES_v0.2.1.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

@@ -10,7 +10,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.2.0 Public Betaの対応状況
+## v0.2.1 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -19,7 +19,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.0リリースノート](release-docs/RELEASE_NOTES_v0.2.0.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.1リリースノート](release-docs/RELEASE_NOTES_v0.2.1.md)へ集約します。
 
 ## 30秒で使う
 
@@ -64,21 +64,21 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 
 ## 主な制約
 
-- v0.2.0はPublic Betaであり、本番向けの安定版ではありません。
+- v0.2.1はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
 - PDF OCRとvisual fallbackにはrasterizerとOCR providerの構成が必要な場合があります。利用できない場合はpage placeholderとWarningを確認してください。
 - DocRedockは日本語PDFフォントを同梱・ダウンロードしません。フォントの導入・選択と埋め込みライセンスの確認は利用者の責任です。
-- GUIは公開GitHub Releases APIへ更新情報を問い合わせることがあります。起動前に`DOCREDOCK_DISABLE_UPDATE_CHECK=1`を設定すると無効化できます。
+- GUIは実行中バージョンを常時表示し、起動時または「更新を確認」からPublic Betaを含む非draftの公開版を確認できます。更新は自動インストールせず、`DOCREDOCK_DISABLE_UPDATE_CHECK=1`で起動時確認を無効化できます。
 - 各配布物のSHA-256と署名／notarization状況を確認してください。
 
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.2.0の対応状況](docs/ja/supported-features.md)
+- [v0.2.1の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.2.0リリースノート](release-docs/RELEASE_NOTES_v0.2.0.md)
+- [v0.2.1リリースノート](release-docs/RELEASE_NOTES_v0.2.1.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

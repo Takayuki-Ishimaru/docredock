@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DocRedock.Core.Documents;
 using DocRedock.RoundTrip;
 
@@ -178,6 +179,26 @@ public sealed class RoundTripWorkspaceTests
         await Assert.ThrowsAsync<WorkspaceIntegrityException>(() => RoundTripPackage.UnpackAsync(package, output));
 
         Assert.False(Directory.Exists(output));
+    }
+
+    [Fact]
+    public async Task Open_rejects_projection_file_name_that_escapes_the_workspace_parent()
+    {
+        using var fixture = new Fixture();
+        await File.WriteAllTextAsync(fixture.SourcePath, "original");
+        await File.WriteAllTextAsync(fixture.MarkdownPath, "# Original\n");
+        await RoundTripWorkspace.CreateAsync(fixture.WorkspacePath, fixture.SourcePath,
+            new RoundTripWorkspaceOptions { MarkdownPath = fixture.MarkdownPath });
+        var manifestPath = Path.Combine(fixture.WorkspacePath, "manifest.json");
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(manifestPath))
+            ?? throw new InvalidOperationException("Test manifest could not be parsed.");
+        manifest["projection"]!["file_name"] = "../outside.md";
+        await File.WriteAllTextAsync(manifestPath, manifest.ToJsonString());
+
+        var exception = await Assert.ThrowsAsync<WorkspaceIntegrityException>(
+            () => RoundTripWorkspace.OpenAsync(fixture.WorkspacePath));
+
+        Assert.Contains("plain file name", exception.Message, StringComparison.Ordinal);
     }
 
     [Fact]

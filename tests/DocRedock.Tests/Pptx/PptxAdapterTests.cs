@@ -303,6 +303,25 @@ public sealed class PptxAdapterTests
     }
 
     [Fact]
+    public void DiagonalUnsnappedConnectorUsesTransformedEndpointsAndSegmentBasedLabelScore()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateDiagonalGeometryConnectorPackage()));
+        var visual = VisualGraphOf(extraction);
+        var edge = Assert.Single(visual.Edges);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Equal(VisualEdgeResolution.GeometryInferred, edge.Resolution);
+        Assert.Equal("v_100", edge.SourceId);
+        Assert.Equal("v_101", edge.TargetId);
+        Assert.Equal("YES", edge.Label);
+        Assert.Contains("v_100 -->|YES| v_101", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(extraction.Warnings,
+            warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+        Assert.DoesNotContain(extraction.Warnings,
+            warning => warning.StartsWith("VisualEdgeLabelUnresolved", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Visual_inference_timeout_returns_complete_fallback_without_partial_topology()
     {
         var extraction = new PptxAdapter { VisualInferenceTimeout = TimeSpan.Zero }
@@ -312,6 +331,20 @@ public sealed class PptxAdapterTests
         Assert.DoesNotContain(visual.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
         var diagnostic = Assert.Single(visual.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
         Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
+        Assert.True(visual.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Timeout_skips_unresolved_shaft_node_retention_atomically()
+    {
+        var extraction = new PptxAdapter { VisualInferenceTimeout = TimeSpan.Zero }
+            .Extract(new MemoryStream(CreateIntermediateNodeGeometryConnectorPackage()));
+        var visual = VisualGraphOf(extraction);
+
+        Assert.DoesNotContain(visual.Nodes, node => node.Label == "MIDDLE");
+        Assert.DoesNotContain(visual.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        Assert.Single(visual.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.DoesNotContain(visual.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
         Assert.True(visual.Accounting.IsConsistent);
     }
 
@@ -356,6 +389,7 @@ public sealed class PptxAdapterTests
         var extraction = new PptxAdapter().Extract(new MemoryStream(CreateIntermediateNodeGeometryConnectorPackage()));
         var visual = VisualGraphOf(extraction);
         var edge = Assert.Single(visual.Edges);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
 
         // MIDDLE is the same 100x100 size as START/END -- squarely at the slide's own median --
         // so it must stay a real node candidate despite sitting on the connector's shaft, and
@@ -369,7 +403,13 @@ public sealed class PptxAdapterTests
         Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
         // Negative case: no START->END (nor END->START) relation of any kind was projected.
         Assert.DoesNotContain(visual.Edges, resolvedEdge => resolvedEdge.SourceId is not null && resolvedEdge.TargetId is not null);
-        Assert.DoesNotContain(visual.Nodes, node => node.Label == "START" || node.Label == "END");
+        Assert.Equal(new[] { "END", "MIDDLE", "START" },
+            visual.Nodes.Select(node => node.Label).OrderBy(label => label, StringComparer.Ordinal));
+        Assert.Contains("```mermaid\nflowchart", markdown, StringComparison.Ordinal);
+        Assert.Contains("[START]", markdown, StringComparison.Ordinal);
+        Assert.Contains("[MIDDLE]", markdown, StringComparison.Ordinal);
+        Assert.Contains("[END]", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --> ", markdown, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -630,6 +670,20 @@ public sealed class PptxAdapterTests
             (includeLabel ? "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"Decision label\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"190\" y=\"40\" /><a:ext cx=\"40\" cy=\"20\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>YES</a:t></a:r></a:p></p:txBody></p:sp>" : string.Empty) +
             "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"104\" name=\"Unsnapped connector\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"50\" /><a:ext cx=\"200\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
         entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml.Replace("</p:spTree>", shapes + "</p:spTree>", StringComparison.Ordinal));
+        return Repack(entries);
+    }
+
+    private static byte[] CreateDiagonalGeometryConnectorPackage()
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        const string shapes =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"100\" name=\"Start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>START</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"101\" name=\"End\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"300\" y=\"300\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>END</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"103\" name=\"Decision label\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"190\" y=\"190\" /><a:ext cx=\"40\" cy=\"20\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>YES</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"104\" name=\"Diagonal connector\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"100\" y=\"100\" /><a:ext cx=\"200\" cy=\"200\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(
+            xml.Replace("</p:spTree>", shapes + "</p:spTree>", StringComparison.Ordinal));
         return Repack(entries);
     }
 

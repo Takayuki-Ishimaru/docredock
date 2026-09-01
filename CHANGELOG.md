@@ -2,6 +2,16 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.2.1] - 2026-09-01
+
+- Added an always-visible running version, non-blocking startup update checks, a manual update action, and trusted release-page navigation.
+- Suppressed regular PDF table grids from connector inference, retained exact arrowhead/shaft direction, and diagnosed unknown direction explicitly.
+- Normalized duplicate diagnostics, made ordinary external links informational, and corrected XLSX formula-cache, comment, and filtered-sheet accounting.
+- Added the documented `docredock` launcher, Linux install/uninstall scripts, package-safe documentation links, and release smoke coverage for the update/install path.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.1.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.1.md)
+
 ## [0.2.0] - 2026-08-30
 
 - Public Beta visual inference modes: native-only, safe (default), and balanced.
@@ -98,6 +108,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.2.1]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.0
 [0.1.7]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.7
 [0.1.6]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.6

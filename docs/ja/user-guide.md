@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.2.0 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.2.1 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -83,6 +83,6 @@ CFF／CFF2、グリフ不足、不正なcollection、埋め込み禁止フォン
 
 ## 7. プライバシーと更新確認
 
-変換はローカルで行います。GUIは公開GitHub Releases APIへ更新情報を問い合わせる場合があります。起動前に`DOCREDOCK_DISABLE_UPDATE_CHECK=1`を設定すると無効化できます。
+変換はローカルで行います。アプリ上部には実行中のバージョンが常時表示されます。起動時に公開GitHub Releases APIからPublic Betaを含む非draftの公開版をバックグラウンド確認し、新版があれば現在版と最新版を表示します。「更新を確認」で手動確認でき、オフラインやAPI制限時も変換と起動は継続します。更新は自動インストールされず、信頼済みのGitHubリリースページから利用者がパッケージを選びます。起動前に`DOCREDOCK_DISABLE_UPDATE_CHECK=1`を設定すると自動確認を無効化できます。
 
 実験ワークフローは[実験機能](experimental-features.md)、取り扱いは[セキュリティとプライバシー](security-and-privacy.md)を参照してください。

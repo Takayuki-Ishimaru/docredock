@@ -8,13 +8,13 @@
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.0, )"
+          "DocRedock.Core": "[0.2.1, )"
         }
       },
       "docredock.visualinference": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.0, )"
+          "DocRedock.Core": "[0.2.1, )"
         }
       }
     }

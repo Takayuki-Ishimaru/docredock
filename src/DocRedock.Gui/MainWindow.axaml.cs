@@ -48,6 +48,8 @@ public partial class MainWindow : Window
     private bool _exportBusy;
     private bool _restoreBusy;
     private bool _updateCheckStarted;
+    private bool _updateCheckInProgress;
+    private DateTimeOffset? _lastUpdateCheckAt;
     private Uri? _updateReleaseUri;
     private bool _componentsInitialized;
 
@@ -71,7 +73,9 @@ public partial class MainWindow : Window
             updateCheckService ?? throw new ArgumentNullException(nameof(updateCheckService));
         InitializeComponent();
         _componentsInitialized = true;
+        CurrentVersionText.Text = $"v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}";
         LoadSettings();
+        ApplyPdfOcrCapability();
         // Office round-trip, restore, and PDF workflows are available in the GUI.
         // The explicit experimental labels remain for Office session opt-in.
         RoundTripExportRadio.IsEnabled = true;
@@ -199,6 +203,18 @@ public partial class MainWindow : Window
         Grid.SetRow(ExportSettingsColumn, narrow ? 1 : 0);
         Grid.SetColumn(RestoreSettingsColumn, narrow ? 0 : 1);
         Grid.SetRow(RestoreSettingsColumn, narrow ? 1 : 0);
+    }
+
+    private void ApplyPdfOcrCapability()
+    {
+        // The current GUI build has no IPdfRasterizer provider. Keep OCR visibly
+        // disabled rather than implying that image-only PDF OCR will work.
+        OcrToggle.IsEnabled = false;
+        OcrToggle.IsChecked = false;
+        OcrLanguagesPanel.IsVisible = false;
+        OcrUnavailableText.Text =
+            "このビルドではPDFラスタライザーが含まれていないため、画像PDFのOCRは利用できません。";
+        OcrUnavailableText.IsVisible = true;
     }
 
     private void OnOcrChanged(object? sender, RoutedEventArgs e)
@@ -670,14 +686,51 @@ public partial class MainWindow : Window
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
-        var importantDiagnostics = diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information).ToArray();
-        DiagnosticsTextBox.Text = string.Join(Environment.NewLine, importantDiagnostics.Select(diagnostic =>
-            $"{diagnostic.Severity.ToString().ToUpperInvariant()} {diagnostic.Code}: {diagnostic.Message}"));
-        DiagnosticsTextBox.IsVisible = importantDiagnostics.Length > 0;
+        var formattedDiagnostics = FormatDiagnosticsForDisplay(diagnostics);
+        DiagnosticsTextBox.Text = formattedDiagnostics;
+        DiagnosticsTextBox.IsVisible = formattedDiagnostics.Length > 0;
         OpenOutputFolderButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestOutputDirectory);
         OpenMarkdownButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestMarkdownPath);
         CancelOperationButton.IsVisible = false;
     }
+
+    private static string FormatDiagnosticsForDisplay(IReadOnlyList<Diagnostic> diagnostics)
+    {
+        return string.Join(Environment.NewLine + Environment.NewLine, diagnostics
+            .Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information)
+            .GroupBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
+            .OrderByDescending(group => group.Max(diagnostic => (int)diagnostic.Severity))
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var severity = (DiagnosticSeverity)group.Max(diagnostic => (int)diagnostic.Severity);
+                var count = group.Count();
+                var guidance = DiagnosticGuidance(group.Key, group.First().Message);
+                var countLabel = count > 1 ? $"（{count}件）" : string.Empty;
+                return $"{DiagnosticSeverityLabel(severity)} {group.Key}{countLabel}: {guidance.Summary}" +
+                    Environment.NewLine + $"対処: {guidance.Action}";
+            }));
+    }
+
+    private static string DiagnosticSeverityLabel(DiagnosticSeverity severity) => severity switch
+    {
+        DiagnosticSeverity.Error => "エラー",
+        DiagnosticSeverity.Warning => "警告",
+        _ => "情報",
+    };
+
+    private static (string Summary, string Action) DiagnosticGuidance(string code, string originalMessage) => code switch
+    {
+        "VisualConnectorUnresolved" => ("図のコネクタの接続先を一意に判断できませんでした。", "元文書を確認し、必要ならコネクタ端点を図形へ接続してください。"),
+        "VisualEdgeLabelUnresolved" => ("図のラベルを一つの接続線へ一意に対応付けできませんでした。", "ラベルを対象の接続線へ近づけ、周囲の線から離してください。"),
+        "VisualSemanticProjectionPartial" => ("図の一部だけを意味構造として変換しました。", "Markdownの図、代替表示、元文書を見比べてください。"),
+        "VisualEdgeDirectionUnknown" => ("接続線の向きを確定できないため、無向線として保持しました。", "元文書の矢印方向を確認してください。"),
+        "XlsxFormulaCachedValueMissing" => ("保存済みの計算結果がない数式セルがあります。", "Excel等で再計算して保存してから、もう一度変換してください。"),
+        "XlsxLegacyCommentsUnsupported" => ("旧形式のXLSXコメントは本文へ展開されません。", "必要なコメントは元ブックで確認してください。"),
+        "PdfRasterizerUnavailable" => ("画像PDFの読み取りに必要なrasterizerを利用できません。", "ネイティブテキストを使うか、対応rasterizerを構成してください。"),
+        "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
+        _ => ($"詳細: {originalMessage}", "元文書と生成結果を確認し、診断コードを添えて報告してください。"),
+    };
 
     private void OnOpenOutputFolder(object? sender, RoutedEventArgs e)
     {
@@ -714,19 +767,10 @@ public partial class MainWindow : Window
         }
 
         _updateCheckStarted = true;
+        // Fire-and-forget keeps startup independent from GitHub/network latency.
         try
         {
-            var update = await _updateCheckService.CheckAsync();
-            if (update is null)
-            {
-                return;
-            }
-
-            _updateReleaseUri = update.ReleaseUri;
-            UpdateVersionText.Text =
-                $"v{UpdateCheckService.FormatVersion(update.LatestVersion)} を利用できます。" +
-                $"（現在 v{UpdateCheckService.FormatVersion(update.CurrentVersion)}）";
-            UpdatePanel.IsVisible = true;
+            await CheckForUpdatesAsync(startup: true);
         }
         catch (Exception exception)
         {
@@ -735,9 +779,101 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void OnCheckForUpdates(object? sender, RoutedEventArgs e)
+    {
+        await CheckForUpdatesAsync(startup: false);
+    }
+
+    private async Task CheckForUpdatesAsync(bool startup)
+    {
+        if (_updateCheckInProgress)
+        {
+            return;
+        }
+
+        if (!startup && _lastUpdateCheckAt is { } last &&
+            DateTimeOffset.UtcNow - last < TimeSpan.FromSeconds(10))
+        {
+            return;
+        }
+
+        _updateCheckInProgress = true;
+        _lastUpdateCheckAt = DateTimeOffset.UtcNow;
+        CheckUpdatesButton.IsEnabled = false;
+        CheckUpdatesButton.Content = "確認中…";
+        if (!startup)
+        {
+            UpdateTitleText.Text = "更新を確認しています…";
+            UpdateVersionText.Text = "GitHubのリリース情報を取得しています。";
+            UpdateActionButton.IsVisible = false;
+            UpdatePanel.IsVisible = true;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(7));
+            var result = await _updateCheckService.CheckDetailedAsync(
+                UpdateCheckService.GetCurrentVersion(), timeout.Token);
+
+            _updateReleaseUri = null;
+            switch (result.Status)
+            {
+                case UpdateCheckStatus.UpdateAvailable when result.Update is not null:
+                    _updateReleaseUri = result.Update.ReleaseUri;
+                    UpdateTitleText.Text = "新しいバージョンがあります";
+                    UpdateVersionText.Text =
+                        $"v{UpdateCheckService.FormatVersion(result.Update.LatestVersion)} を利用できます。" +
+                        $"（現在 v{UpdateCheckService.FormatVersion(result.Update.CurrentVersion)}）";
+                    UpdateActionButton.IsVisible = true;
+                    UpdatePanel.IsVisible = true;
+                    break;
+
+                case UpdateCheckStatus.UpToDate:
+                    UpdateTitleText.Text = "DocRedockは最新です";
+                    UpdateVersionText.Text =
+                        $"現在 v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}です。";
+                    UpdateActionButton.IsVisible = false;
+                    UpdatePanel.IsVisible = true;
+                    break;
+
+                case UpdateCheckStatus.Failed:
+                    UpdateTitleText.Text = "更新を確認できませんでした";
+                    UpdateVersionText.Text = result.ErrorMessage ??
+                        "インターネット接続を確認して、後でもう一度お試しください。";
+                    UpdateActionButton.IsVisible = false;
+                    // Startup failures stay silent; a manual check gives useful feedback.
+                    UpdatePanel.IsVisible = !startup;
+                    break;
+
+                default:
+                    UpdatePanel.IsVisible = false;
+                    break;
+            }
+        }
+        catch (Exception exception)
+        {
+            // A failed update check must never prevent the app from starting.
+            Debug.WriteLine($"Update check failed: {exception.GetType().Name}");
+            if (!startup)
+            {
+                UpdateTitleText.Text = "更新を確認できませんでした";
+                UpdateVersionText.Text = "インターネット接続を確認して、後でもう一度お試しください。";
+                UpdateActionButton.IsVisible = false;
+                UpdatePanel.IsVisible = true;
+            }
+        }
+        finally
+        {
+            _updateCheckInProgress = false;
+            CheckUpdatesButton.IsEnabled = true;
+            CheckUpdatesButton.Content = "更新を確認";
+        }
+    }
+
     private void OnOpenUpdatePage(object? sender, RoutedEventArgs e)
     {
-        if (_updateReleaseUri is null)
+        if (_updateReleaseUri is null ||
+            !UpdateCheckService.TryGetTrustedReleaseUri(_updateReleaseUri.AbsoluteUri, out var trustedUri))
         {
             return;
         }
@@ -746,7 +882,7 @@ public partial class MainWindow : Window
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = _updateReleaseUri.AbsoluteUri,
+                FileName = trustedUri.AbsoluteUri,
                 UseShellExecute = true
             });
         }

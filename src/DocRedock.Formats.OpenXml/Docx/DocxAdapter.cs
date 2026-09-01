@@ -498,6 +498,10 @@ public sealed class DocxAdapter : IFormatProbe
     {
         var nodes = (graph.Nodes ?? []).Where(node => node is not null).OrderBy(node => node.Id, StringComparer.Ordinal).ToArray();
         var edges = (graph.Edges ?? []).Where(edge => edge is not null).ToArray();
+        // Unresolved geometry may be the only evidence that otherwise disconnected components
+        // belong to one visual. Keep the complete graph so candidate nodes and the ambiguity
+        // diagnostic survive together, matching XLSX and PPTX behavior.
+        if (edges.Any(edge => edge.SourceId is null || edge.TargetId is null)) return [graph];
         var remaining = nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
         var groups = new List<HashSet<string>>();
         while (remaining.Count > 0)

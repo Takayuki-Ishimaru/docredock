@@ -21,8 +21,10 @@ public sealed class RoundTripManifest
 
 public sealed class GeneratorInfo
 {
+    public static string CurrentVersion { get; } =
+        typeof(GeneratorInfo).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
     [JsonPropertyName("name")] public string Name { get; init; } = "docredock";
-    [JsonPropertyName("version")] public string Version { get; init; } = "0.2.0";
+    [JsonPropertyName("version")] public string Version { get; init; } = CurrentVersion;
 }
 
 public sealed class SourceInfo
@@ -39,9 +41,9 @@ public sealed class SourceInfo
 
 public sealed class ProviderSet
 {
-    [JsonPropertyName("format_adapter")] public ProviderInfo FormatAdapter { get; init; } = new("docredock.adapter.none", "0.2.0", 1);
-    [JsonPropertyName("markdown")] public ProviderInfo Markdown { get; init; } = new("docredock.markdown.default", "0.2.0", 1);
-    [JsonPropertyName("ocr")] public ProviderInfo Ocr { get; init; } = new("docredock.ocr.none", "0.2.0", 1);
+    [JsonPropertyName("format_adapter")] public ProviderInfo FormatAdapter { get; init; } = new("docredock.adapter.none", GeneratorInfo.CurrentVersion, 1);
+    [JsonPropertyName("markdown")] public ProviderInfo Markdown { get; init; } = new("docredock.markdown.default", GeneratorInfo.CurrentVersion, 1);
+    [JsonPropertyName("ocr")] public ProviderInfo Ocr { get; init; } = new("docredock.ocr.none", GeneratorInfo.CurrentVersion, 1);
 }
 
 public sealed class ProviderInfo

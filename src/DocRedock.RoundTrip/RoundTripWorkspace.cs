@@ -48,7 +48,7 @@ public sealed class RoundTripWorkspace
         var manifest = new RoundTripManifest
         {
             DocumentId = documentId,
-            Generator = new GeneratorInfo { Version = options.GeneratorVersion ?? "0.2.0" },
+            Generator = new GeneratorInfo { Version = options.GeneratorVersion ?? GeneratorInfo.CurrentVersion },
             Source = new SourceInfo
             {
                 FileName = sourceInfo.Name,
@@ -137,6 +137,7 @@ public sealed class RoundTripWorkspace
         if (!File.Exists(manifestPath)) throw new FileNotFoundException("manifest.json was not found.", manifestPath);
         var manifest = JsonSerializer.Deserialize<RoundTripManifest>(await File.ReadAllTextAsync(manifestPath, cancellationToken).ConfigureAwait(false), JsonCanonicalizer.Options)
             ?? throw new WorkspaceIntegrityException("manifest.json is empty or invalid.");
+        ValidateProjectionFileName(manifest.Projection.FileName);
         return new RoundTripWorkspace(root, manifest);
     }
 
@@ -549,6 +550,19 @@ public sealed class RoundTripWorkspace
             if (counts.GetValueOrDefault(status) != expected)
                 issues.Add(new("ocr.summary", $"OCR status summary for '{status}' does not match per-item results.", "manifest.json"));
         }
+    }
+
+    private static void ValidateProjectionFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName) ||
+            Path.IsPathRooted(fileName) ||
+            fileName is "." or ".." ||
+            fileName.Contains('/') ||
+            fileName.Contains('\\') ||
+            fileName.Contains(':') ||
+            !StringComparer.Ordinal.Equals(Path.GetFileName(fileName), fileName))
+            throw new WorkspaceIntegrityException(
+                "manifest projection file_name must be a plain file name and must not contain a path.");
     }
 
     private static string FormatFromExtension(string extension) => extension.ToLowerInvariant() switch

@@ -36,6 +36,53 @@ public sealed class SoftConnectionEngineTests
         Assert.Single(exact.Resolved); Assert.Equal(ConnectionConfidence.Native, exact.Resolved[0].Confidence);
     }
 
+
+    [Fact]
+    public void Endpoint_inside_single_node_does_not_jump_to_first_ray_hit_beyond_it()
+    {
+        var source = new VisualNodePrimitive("source", "c", Anchor(),
+            new VisualRect(0, 0, 20, 10), Text: "source");
+        var containing = new VisualNodePrimitive("containing", "c", Anchor(),
+            new VisualRect(80, 0, 40, 10), Text: "containing");
+        var farther = new VisualNodePrimitive("farther", "c", Anchor(),
+            new VisualRect(110, 0, 20, 10), Text: "farther");
+        var connector = new VisualConnectorPrimitive("arrow", "c", Anchor(),
+            new VisualConnectorPath([new(20, 5), new(100, 5)],
+                EndArrowhead: new ArrowheadEvidence(true)));
+
+        var result = new SoftConnectionEngine().Infer(
+            Document([source, containing, farther, connector]),
+            options: new SoftConnectionOptions(VisualInferenceMode.Balanced));
+
+        var edge = Assert.Single(result.Resolved);
+        Assert.Equal("source", edge.SourceId);
+        Assert.Equal("containing", edge.TargetId);
+    }
+
+
+    [Fact]
+    public void Endpoint_inside_multiple_nodes_remains_unresolved()
+    {
+        var source = new VisualNodePrimitive("source", "c", Anchor(),
+            new VisualRect(0, 0, 20, 10), Text: "source");
+        var first = new VisualNodePrimitive("first", "c", Anchor(),
+            new VisualRect(80, 0, 40, 10), Text: "first");
+        var second = new VisualNodePrimitive("second", "c", Anchor(),
+            new VisualRect(90, 0, 40, 10), Text: "second");
+        var connector = new VisualConnectorPrimitive("arrow", "c", Anchor(),
+            new VisualConnectorPath([new(20, 5), new(100, 5)],
+                EndArrowhead: new ArrowheadEvidence(true)));
+
+        var result = new SoftConnectionEngine().Infer(
+            Document([source, first, second, connector]),
+            options: new SoftConnectionOptions(VisualInferenceMode.Balanced));
+
+        Assert.Empty(result.Resolved);
+        var unresolved = Assert.Single(result.Unresolved);
+        Assert.Null(unresolved.SourceId);
+        Assert.Null(unresolved.TargetId);
+    }
+
     [Fact]
     public void DiagramClusterer_merges_a_node_resting_on_the_middle_of_a_horizontal_connector_shaft()
     {
