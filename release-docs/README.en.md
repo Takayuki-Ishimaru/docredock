@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.1 Public Beta
+
+- [v0.2.1 release notes](RELEASE_NOTES_v0.2.1.en.md)
+- Always-visible current version, published-release checks, including Public Beta builds, at startup and on demand, and a trusted release-page action
+- PDF table-grid suppression and arrow direction retention, plus more precise diagnostics and XLSX projection
+- Documented `docredock` launcher and Linux install/uninstall flow
+
 ### v0.2.0 Public Beta
 
 - [v0.2.0 release notes](RELEASE_NOTES_v0.2.0.en.md)

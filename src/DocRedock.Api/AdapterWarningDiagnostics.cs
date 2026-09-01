@@ -10,8 +10,46 @@ public static class AdapterWarningDiagnostics
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(fallbackCode);
         ArgumentNullException.ThrowIfNull(warning);
-        return VisualDiagnostic.TryParseWarning(warning, out var code, out var message)
-            ? new Diagnostic(code, message, severity)
-            : new Diagnostic(fallbackCode, warning, severity);
+        const string externalRelationshipCode = "ExternalRelationshipPresent";
+        if (warning.StartsWith(externalRelationshipCode + ":", StringComparison.Ordinal))
+            return new Diagnostic(externalRelationshipCode,
+                warning[(externalRelationshipCode.Length + 1)..].Trim(), DiagnosticSeverity.Information);
+
+        if (!VisualDiagnostic.TryParseWarning(warning, out var code, out var message))
+            return new Diagnostic(fallbackCode, warning, severity);
+        return new Diagnostic(code, message, severity);
     }
+
+    /// <summary>Coalesces repeated diagnostics while retaining distinct source locations.</summary>
+    public static IReadOnlyList<Diagnostic> Normalize(IEnumerable<Diagnostic> diagnostics)
+    {
+        ArgumentNullException.ThrowIfNull(diagnostics);
+        var result = new List<Diagnostic>();
+        var index = new Dictionary<(string Code, string? PartUri, string? NodeId, string Message, DiagnosticSeverity Severity), int>();
+        var counts = new List<int>();
+
+        foreach (var diagnostic in diagnostics)
+        {
+            var key = (diagnostic.Code, diagnostic.PartUri, diagnostic.NodeId, NormalizeMessage(diagnostic.Message), diagnostic.Severity);
+            if (index.TryGetValue(key, out var position))
+            {
+                counts[position]++;
+                continue;
+            }
+            index.Add(key, result.Count);
+            result.Add(diagnostic);
+            counts.Add(1);
+        }
+
+        for (var indexValue = 0; indexValue < result.Count; indexValue++)
+            if (counts[indexValue] > 1)
+                result[indexValue] = result[indexValue] with
+                {
+                    Message = $"{result[indexValue].Message.TrimEnd()} (repeated {counts[indexValue]} times)."
+                };
+        return result;
+    }
+
+    private static string NormalizeMessage(string message) =>
+        string.Join(' ', message.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
 }

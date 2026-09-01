@@ -261,6 +261,11 @@ public sealed class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
+        foreach (var part in package.Keys
+                     .Where(part => part.StartsWith("xl/comments", StringComparison.OrdinalIgnoreCase) &&
+                                    part.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+                     .OrderBy(part => part, StringComparer.Ordinal))
+            warnings.Add($"XlsxLegacyCommentsUnsupported: Legacy cell comments in '/{part}' are preserved in the source package but are not yet emitted in the projection.");
         var sheetVisibility = workbook.Sheets.ToDictionary(
             sheet => sheet.Name,
             sheet => package.TryGetValue(sheet.PartUri, out var worksheetXml)
@@ -275,7 +280,7 @@ public sealed class XlsxAdapter
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml);
-            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges);
+            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
@@ -699,7 +704,7 @@ public sealed class XlsxAdapter
 
     private static bool IsHiddenFlag(string? value) => value is "1" || bool.TryParse(value, out var parsed) && parsed;
 
-    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
+    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
     {
         var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
@@ -723,7 +728,12 @@ public sealed class XlsxAdapter
             var (row, column) = ParseCellReference(reference);
             if (row == 0 || column == 0) continue;
             if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) value = sharedValue;
-            if (formula is not null) diagnostics.Add(ClassifyFormula(reference, formula));
+            if (formula is not null)
+            {
+                diagnostics.Add(ClassifyFormula(reference, formula));
+                if (value is null)
+                    warnings.Add($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!{reference} has no cached value; DocRedock did not evaluate it.");
+            }
             var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
                 ? styles[styleIndex]
                 : null;

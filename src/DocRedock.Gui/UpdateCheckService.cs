@@ -6,6 +6,16 @@ namespace DocRedock.Gui;
 
 public sealed record UpdateInfo(Version CurrentVersion, Version LatestVersion, Uri ReleaseUri);
 
+public enum UpdateCheckStatus
+{
+    UpdateAvailable,
+    UpToDate,
+    Failed,
+    Disabled,
+}
+
+public sealed record UpdateCheckResult(UpdateCheckStatus Status, UpdateInfo? Update = null, string? ErrorMessage = null);
+
 public sealed class UpdateCheckService
 {
     private const int MaxResponseBytes = 512 * 1024;
@@ -27,18 +37,29 @@ public sealed class UpdateCheckService
 
     public Task<UpdateInfo?> CheckAsync(CancellationToken cancellationToken = default)
     {
-        var currentVersion =
-            typeof(UpdateCheckService).Assembly.GetName().Version ?? new Version(0, 0);
-        return CheckAsync(currentVersion, cancellationToken);
+        return CheckAsync(GetCurrentVersion(), cancellationToken);
+    }
+
+    public static Version GetCurrentVersion()
+    {
+        return typeof(UpdateCheckService).Assembly.GetName().Version ?? new Version(0, 0);
     }
 
     public async Task<UpdateInfo?> CheckAsync(
         Version currentVersion,
         CancellationToken cancellationToken = default)
     {
+        var result = await CheckDetailedAsync(currentVersion, cancellationToken);
+        return result.Status == UpdateCheckStatus.UpdateAvailable ? result.Update : null;
+    }
+
+    public async Task<UpdateCheckResult> CheckDetailedAsync(
+        Version currentVersion,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(currentVersion);
         if (StringComparer.Ordinal.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK"), "1"))
-            return null;
+            return new UpdateCheckResult(UpdateCheckStatus.Disabled);
 
         try
         {
@@ -53,11 +74,16 @@ public sealed class UpdateCheckService
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken);
+            if ((int)response.StatusCode is 403 or 429)
+            {
+                return new UpdateCheckResult(UpdateCheckStatus.Failed, ErrorMessage: "GitHubの更新確認が制限されています。後でもう一度お試しください。");
+            }
+
             response.EnsureSuccessStatusCode();
 
             if (response.Content.Headers.ContentLength is > MaxResponseBytes)
             {
-                return null;
+                return new UpdateCheckResult(UpdateCheckStatus.Failed, ErrorMessage: "更新情報の応答が大きすぎます。");
             }
 
             await using var responseStream =
@@ -74,7 +100,8 @@ public sealed class UpdateCheckService
 
                 if (buffer.Length + read > MaxResponseBytes)
                 {
-                    return null;
+                    return new UpdateCheckResult(UpdateCheckStatus.Failed,
+                        ErrorMessage: "更新情報の応答が大きすぎます。");
                 }
 
                 await buffer.WriteAsync(chunk.AsMemory(0, read), cancellationToken);
@@ -86,10 +113,11 @@ public sealed class UpdateCheckService
                 cancellationToken: cancellationToken);
             if (document.RootElement.ValueKind != JsonValueKind.Array)
             {
-                return null;
+                return new UpdateCheckResult(UpdateCheckStatus.Failed, ErrorMessage: "更新情報の形式を確認できませんでした。");
             }
 
             UpdateInfo? newest = null;
+            var rejectedNewerRelease = false;
             foreach (var release in document.RootElement.EnumerateArray())
             {
                 if (release.ValueKind != JsonValueKind.Object ||
@@ -98,11 +126,16 @@ public sealed class UpdateCheckService
                     !release.TryGetProperty("tag_name", out var tagElement) ||
                     tagElement.ValueKind != JsonValueKind.String ||
                     !TryParseReleaseVersion(tagElement.GetString(), out var releaseVersion) ||
-                    releaseVersion.CompareTo(currentVersion) <= 0 ||
-                    !release.TryGetProperty("html_url", out var urlElement) ||
+                    releaseVersion.CompareTo(currentVersion) <= 0)
+                {
+                    continue;
+                }
+
+                if (!release.TryGetProperty("html_url", out var urlElement) ||
                     urlElement.ValueKind != JsonValueKind.String ||
                     !TryGetTrustedReleaseUri(urlElement.GetString(), out var releaseUri))
                 {
+                    rejectedNewerRelease = true;
                     continue;
                 }
 
@@ -113,13 +146,22 @@ public sealed class UpdateCheckService
                 }
             }
 
-            return newest;
+            if (newest is not null)
+                return new UpdateCheckResult(UpdateCheckStatus.UpdateAvailable, newest);
+            return rejectedNewerRelease
+                ? new UpdateCheckResult(UpdateCheckStatus.Failed,
+                    ErrorMessage: "新しいリリースを検出しましたが、安全なリリースページを確認できませんでした。")
+                : new UpdateCheckResult(UpdateCheckStatus.UpToDate);
         }
         catch (Exception exception) when (
             exception is HttpRequestException or JsonException or IOException or
                 OperationCanceledException)
         {
-            return null;
+            return new UpdateCheckResult(
+                UpdateCheckStatus.Failed,
+                ErrorMessage: exception is OperationCanceledException
+                    ? "更新確認がタイムアウトしました。"
+                    : "更新情報を取得できませんでした。インターネット接続を確認してください。");
         }
     }
 

@@ -218,6 +218,7 @@ public sealed class DocumentService
             await workspace.WriteAssetsAsync(assets, cancellationToken).ConfigureAwait(false);
             foreach (var item in ocrResults)
                 await workspace.WriteDerivedOcrAsync(item.AssetId, item, cancellationToken).ConfigureAwait(false);
+            diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
             await workspace.WriteReportAsync("export-service-report.json", new FidelityReport(FidelityLevel.F0, PackagePreservationLevel.ByteIdentical, diagnostics), cancellationToken).ConfigureAwait(false);
             return new(markdownPath, workspace, graph, diagnostics, options.InferenceMode);
         }
@@ -318,6 +319,7 @@ public sealed class DocumentService
                     MarkdownDiagnosticSeverity.Error => DiagnosticSeverity.Error,
                     _ => DiagnosticSeverity.Warning,
                 }, NodeId: item.BlockId));
+            diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
             await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
             return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode);
         }
@@ -645,19 +647,23 @@ public sealed class DocumentService
         return (PdfDocumentGraphProjection.CreateGraph(extraction, sourceHash, includeTextlessPlaceholderNodes), PdfDocumentGraphProjection.Diagnostics(extraction));
     }
 
-    private static ProviderSet ProvidersFor(DocumentFormatKind format, ProviderDescriptor? ocrDescriptor) => new()
+    private static ProviderSet ProvidersFor(DocumentFormatKind format, ProviderDescriptor? ocrDescriptor)
     {
-        FormatAdapter = new ProviderInfo(format switch
+        var version = typeof(DocumentService).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        return new()
         {
-            DocumentFormatKind.Docx => "docredock.docx.openxml",
-            DocumentFormatKind.Xlsx => "docredock.xlsx.openxml",
-            DocumentFormatKind.Pptx => "docredock.pptx.openxml",
-            DocumentFormatKind.Pdf => "docredock.pdf.builtin",
-            _ => "docredock.adapter.none",
-        }, "0.2.0", 1),
-        Markdown = new ProviderInfo("docredock.markdown.default", "0.2.0", 1),
-        Ocr = ocrDescriptor is null ? new ProviderInfo("docredock.ocr.none", "0.2.0", 1) : new ProviderInfo(ocrDescriptor.ProviderId, ocrDescriptor.ProviderVersion.ToString(), ocrDescriptor.InterfaceVersion) { Sha256 = ocrDescriptor.BinarySha256 }
-    };
+            FormatAdapter = new ProviderInfo(format switch
+            {
+                DocumentFormatKind.Docx => "docredock.docx.openxml",
+                DocumentFormatKind.Xlsx => "docredock.xlsx.openxml",
+                DocumentFormatKind.Pptx => "docredock.pptx.openxml",
+                DocumentFormatKind.Pdf => "docredock.pdf.builtin",
+                _ => "docredock.adapter.none",
+            }, version, 1),
+            Markdown = new ProviderInfo("docredock.markdown.default", version, 1),
+            Ocr = ocrDescriptor is null ? new ProviderInfo("docredock.ocr.none", version, 1) : new ProviderInfo(ocrDescriptor.ProviderId, ocrDescriptor.ProviderVersion.ToString(), ocrDescriptor.InterfaceVersion) { Sha256 = ocrDescriptor.BinarySha256 }
+        };
+    }
 
     private async Task<IReadOnlyList<OcrAssetRecord>> CollectOcrAsync(
         DocumentFormatKind format,
@@ -1138,7 +1144,7 @@ public sealed class DocumentService
         {
             using var reader = new StreamReader(entry.Open(), Encoding.UTF8, true);
             if (ReadToEndLimited(reader, entry.FullName).Contains("TargetMode=\"External\"", StringComparison.OrdinalIgnoreCase))
-                result.Add(new Diagnostic("ExternalRelationshipPresent", "External relationships are recorded but never fetched.", DiagnosticSeverity.Warning, PartUri: "/" + entry.FullName));
+                result.Add(new Diagnostic("ExternalRelationshipPresent", "External relationships are recorded but never fetched.", DiagnosticSeverity.Information, PartUri: "/" + entry.FullName));
         }
         return result;
     }
@@ -1242,7 +1248,7 @@ public sealed class DocumentService
 
     private static string ProjectionPath(SidecarLease lease, RoundTripWorkspace workspace) => Path.Combine(
         Path.GetDirectoryName(Path.GetFullPath(lease.OriginalPath)) ?? workspace.RootPath,
-        workspace.Manifest.Projection.FileName);
+        Path.GetFileName(workspace.Manifest.Projection.FileName));
     private static IReadOnlyList<Diagnostic> AddSidecarDiagnostics(IReadOnlyList<Diagnostic> diagnostics, SidecarLease lease)
     {
         var result = diagnostics.ToList();
@@ -1251,7 +1257,7 @@ public sealed class DocumentService
                 "SidecarZipFormReadOnly",
                 "サイドカーは zip 形のため、workspace 内のレポートは保存されません。`docredock unpack <base>.drmd --in-place` で展開してください。",
                 DiagnosticSeverity.Information));
-        return result;
+        return AdapterWarningDiagnostics.Normalize(result);
     }
 
     private static void AddImageDisplayDiagnostics(ICollection<Diagnostic> diagnostics, DocumentGraph graph)

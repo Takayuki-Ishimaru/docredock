@@ -1,7 +1,7 @@
 # 形式別の技術的な対応範囲
 
 > **この文書は、各形式で利用できる操作と制約を説明する技術リファレンスです。**
-> v0.2.0 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
+> v0.2.1 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
 
 記号: ○ = 対応、△ = 条件付き・限定的、× = 非対応。
 
@@ -33,7 +33,7 @@ PNG、JPEG、GIF、WebP、BMP、SVG は通常の画像リンクとして表示�
 | --- | --- | --- | --- | --- | --- | --- |
 | DOCX | △ 対応するDrawingML／VML内 | △ 一意な端点のみ | △ 一意な近接ラベル | ○ | 元テキスト、画像、診断を保持 | Public Beta・条件付き |
 | XLSX | ○ 接続済みコネクタ | △ セル配置または一意な端点 | △ 一意な割り当てのみ | △ シート単位 | ラベルや画像を保持し、関係は確定しない | Public Beta |
-| PPTX | ○ 接続済みコネクタ | △ 一意な端点のみ | △ 分離した矢印先端は厳格な条件付き | ○ | 本文、画像、診断を保持 | Public Beta・条件付き |
+| PPTX | ○ 接続済みコネクタ | △ 斜め線を含む一意な端点のみ | △ 線分上で一意なラベル。分離した矢印先端は厳格な条件付き | ○ | 本文、画像、診断を保持 | Public Beta・条件付き |
 | PDF | — | △ 単純なベクターパスのみ | △ 一意な近接ラベルのみ | △ ページ単位 | ページプレビューまたはプレースホルダー | Public Beta（GUI）／Experimental（CLI） |
 
 `safe`が既定です。`native-only`は元形式に明示された接続だけを使い、`balanced`は追加の推定候補を扱います。曖昧、矛盾、重複、または確度不足の関係は Mermaid として確定しません。Warning が出た場合、CLI は終了コード1を返します。

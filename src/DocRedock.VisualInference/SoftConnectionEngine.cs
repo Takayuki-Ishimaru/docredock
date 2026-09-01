@@ -332,6 +332,20 @@ public sealed class SoftConnectionEngine
         var tangent = start ? new VisualVector(-connector.Path.StartDirection.X, -connector.Path.StartDirection.Y) : connector.Path.EndDirection;
         var radius = options.Mode == VisualInferenceMode.Balanced ? adaptive.BalancedEndpointRadius : adaptive.SafeEndpointRadius;
         var candidateNodes = spatialIndex.QueryEndpoint(endpoint, tangent, radius, adaptive.RayExtension);
+        // Once an endpoint lies inside a node, geometry has stronger evidence than a
+        // ray hit beyond that node. Keep every containing node so true overlaps stay
+        // ambiguous, but never jump through them to a farther candidate.
+        var containingNodes = candidateNodes.Where(node => node.Bounds!.Contains(endpoint))
+            .OrderBy(node => node.Id, StringComparer.Ordinal).ToArray();
+        if (containingNodes.Length > 1)
+        {
+            return containingNodes.Take(options.CandidateLimit).Select(node => new ConnectionCandidate(
+                connector.Id, node.Id, start,
+                new ConnectionFeatures(0, false, false, 0, 0, 1, false,
+                    connector.GroupId == node.GroupId && node.GroupId is not null, 0, CandidateMargin: 0),
+                Score: 1)).ToArray();
+        }
+        if (containingNodes.Length == 1) candidateNodes = containingNodes;
         var rayHits = new Dictionary<string, double>(StringComparer.Ordinal);
         foreach (var node in candidateNodes)
             if (GeometryMath.RayIntersectsRect(endpoint, tangent, node.Bounds!, out var hit) && hit <= adaptive.RayExtension)

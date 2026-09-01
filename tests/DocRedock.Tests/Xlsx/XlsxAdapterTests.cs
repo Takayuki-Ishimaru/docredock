@@ -70,6 +70,25 @@ public sealed class XlsxAdapterTests
     }
 
     [Fact]
+    public void Formula_without_cached_value_is_reported_as_a_stable_warning()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withFormulaCache: false)));
+
+        Assert.Contains(result.Warnings, warning =>
+            warning.StartsWith("XlsxFormulaCachedValueMissing: Formula cell Sheet1!B1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Legacy_cell_comments_are_reported_as_precise_unsupported_content()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withLegacyComment: true)));
+
+        Assert.Contains(result.Warnings, warning =>
+            warning.StartsWith("XlsxLegacyCommentsUnsupported:", StringComparison.Ordinal) &&
+            warning.Contains("/xl/comments1.xml", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void SharedStringPhoneticRunsAreNotAppendedToVisibleCellText()
     {
         var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withPhoneticRun: true)));
@@ -261,6 +280,31 @@ public sealed class XlsxAdapterTests
         var roundTrip = new MarkdownGraphEditor().Apply(extraction.Graph, markdown);
         Assert.True(roundTrip.IsValid, string.Join("\n", roundTrip.Diagnostics.Select(diagnostic => diagnostic.Message)));
         Assert.Empty(roundTrip.Diff.PatchSet.Operations);
+    }
+
+
+    [Fact]
+    public void Sequence_message_spanning_three_participants_is_preserved_as_unresolved_note()
+    {
+        var worksheet = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+              <sheetData>
+                <row r="4"><c r="B4" t="inlineStr"><is><t>利用者</t></is></c><c r="H4" t="inlineStr"><is><t>Webアプリ</t></is></c><c r="N4" t="inlineStr"><is><t>API Gateway</t></is></c><c r="T4" t="inlineStr"><is><t>審査サービス</t></is></c><c r="Z4" t="inlineStr"><is><t>決済サービス</t></is></c></row>
+                <row r="8"><c r="E8" t="inlineStr"><is><t>1. 注文詳細を開く ────────▶</t></is></c></row>
+                <row r="11"><c r="Q11" t="inlineStr"><is><t>7. 再照会 ────────▶（審査/決済のどちらか未確定）</t></is></c></row>
+              </sheetData>
+              <mergeCells count="7"><mergeCell ref="B4:F6"/><mergeCell ref="H4:L6"/><mergeCell ref="N4:R6"/><mergeCell ref="T4:X6"/><mergeCell ref="Z4:AD6"/><mergeCell ref="E8:I9"/><mergeCell ref="Q11:AA12"/></mergeCells>
+            </worksheet>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("シーケンス図", worksheet)));
+
+        var source = Assert.IsType<TextNodeContent>(
+            Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram).Content).Text;
+
+        Assert.Contains("participant P5 as 決済サービス", source, StringComparison.Ordinal);
+        Assert.Contains("Note over P3,P5: 7. 再照会", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("P3->>P4: 7. 再照会", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("────────▶", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -460,6 +504,42 @@ public sealed class XlsxAdapterTests
         var farEdgeTargetId = visual.Nodes.Single(node => node.Label == "STEP_FOUR").Id;
         Assert.DoesNotContain($"{farEdgeSourceId} --> {farEdgeTargetId}", source, StringComparison.Ordinal);
         Assert.Contains("STEP_ONE", markdown, StringComparison.Ordinal);
+    }
+
+
+    [Fact]
+    public void Ambiguous_overlapping_arrow_keeps_all_nodes_and_prevents_component_splitting()
+    {
+        const string worksheet = "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>";
+        const string drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S1" name="source-a"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>SOURCE_A</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="1200000" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S2" name="source-b"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>SOURCE_B</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="2400000" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S3" name="candidate-a"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CANDIDATE_A</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="2400000" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S4" name="candidate-b"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>CANDIDATE_B</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="5000000" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S5" name="tail-a"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>TAIL_A</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="6200000" y="0"/><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="S6" name="tail-b"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>TAIL_B</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="900000" y="200000"/><xdr:ext cx="300000" cy="100000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A1" name="resolved-a"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="2100000" y="200000"/><xdr:ext cx="800000" cy="100000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A2" name="ambiguous"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+              <xdr:absoluteAnchor><xdr:pos x="5900000" y="200000"/><xdr:ext cx="300000" cy="100000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="A3" name="resolved-b"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Workflow", worksheet, drawing)));
+
+        var diagram = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+        var source = Assert.IsType<TextNodeContent>(diagram.Content).Text;
+        var visual = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var labels = visual.Nodes.Select(node => node.Label).ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(6, visual.Nodes.Count);
+        Assert.Subset(labels, new HashSet<string>(["SOURCE_A", "SOURCE_B", "CANDIDATE_A", "CANDIDATE_B", "TAIL_A", "TAIL_B"], StringComparer.Ordinal));
+        Assert.Contains("SOURCE_A", source, StringComparison.Ordinal);
+        Assert.Contains("CANDIDATE_A", source, StringComparison.Ordinal);
+        Assert.Contains("CANDIDATE_B", source, StringComparison.Ordinal);
+        Assert.Contains("TAIL_B", source, StringComparison.Ordinal);
+        Assert.Contains(visual.Edges, edge => edge.SourceId is not null && edge.TargetId is not null);
+        Assert.Contains(visual.Edges, edge => edge.SourceId is null && edge.TargetId is null);
+        Assert.Contains(extraction.Warnings, warning => warning.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -874,7 +954,8 @@ public sealed class XlsxAdapterTests
         return output.ToArray();
     }
 
-    private static byte[] CreatePackage(bool absoluteWorksheetTarget = false, bool withMerge = false, bool withPhoneticRun = false)
+    private static byte[] CreatePackage(bool absoluteWorksheetTarget = false, bool withMerge = false, bool withPhoneticRun = false,
+        bool withFormulaCache = true, bool withLegacyComment = false)
     {
         var parts = new Dictionary<string, string>
         {
@@ -885,9 +966,11 @@ public sealed class XlsxAdapterTests
                 ? "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>抽出観点</t><rPh sb=\"0\" eb=\"4\"><t>チュウシュツカンテン</t></rPh><phoneticPr fontId=\"0\" /></si></sst>"
                 : "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>Hello</t></si></sst>",
             ["xl/styles.xml"] = "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"1\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font></fonts><cellXfs count=\"4\"><xf /><xf /><xf /><xf fontId=\"0\" applyFont=\"1\" /></cellXfs></styleSheet>",
-            ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><cols><col min=\"1\" max=\"3\" width=\"18.5\" customWidth=\"1\" /></cols><sheetData><row r=\"1\" ht=\"24\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"s\"><v>0</v></c><c r=\"B1\"><f>SUM(A1:A1)</f><v>0</v></c><c r=\"C1\" t=\"n\"><v>12345</v></c></row></sheetData>{(withMerge ? "<mergeCells count=\"1\"><mergeCell ref=\"A1:B2\" /></mergeCells>" : string.Empty)}<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\" /><pageSetup orientation=\"landscape\" /></worksheet>",
+            ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><cols><col min=\"1\" max=\"3\" width=\"18.5\" customWidth=\"1\" /></cols><sheetData><row r=\"1\" ht=\"24\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"s\"><v>0</v></c><c r=\"B1\"><f>SUM(A1:A1)</f>{(withFormulaCache ? "<v>0</v>" : string.Empty)}</c><c r=\"C1\" t=\"n\"><v>12345</v></c></row></sheetData>{(withMerge ? "<mergeCells count=\"1\"><mergeCell ref=\"A1:B2\" /></mergeCells>" : string.Empty)}<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\" /><pageSetup orientation=\"landscape\" /></worksheet>",
             ["custom/unknown.bin"] = "untouched"
         };
+        if (withLegacyComment)
+            parts["xl/comments1.xml"] = "<comments xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><commentList><comment ref=\"A1\"><text><t>Legacy note</t></text></comment></commentList></comments>";
         using var output = new MemoryStream(); using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true)) foreach (var part in parts) { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
         return output.ToArray();
     }

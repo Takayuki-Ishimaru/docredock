@@ -56,6 +56,11 @@ internal static class PdfDocumentGraphProjection
     }
 
     public static IReadOnlyList<Diagnostic> Diagnostics(PdfExtractionResult extraction) => extraction.Diagnostics?.Select(message =>
-        AdapterWarningDiagnostics.Create(message.StartsWith("PdfRasterizerUnavailable", StringComparison.Ordinal)
-            ? "PdfRasterizerUnavailable" : "VisualSemanticProjectionUnavailable", message)).ToArray() ?? [];
+    {
+        if (message.StartsWith("PdfRasterizerUnavailable", StringComparison.Ordinal))
+            return AdapterWarningDiagnostics.Create("PdfRasterizerUnavailable", message);
+        return VisualDiagnostic.TryParseWarning(message, out var code, out var detail)
+            ? AdapterWarningDiagnostics.Create(code, detail)
+            : AdapterWarningDiagnostics.Create("VisualSemanticProjectionUnavailable", message);
+    }).ToArray() ?? [];
 }

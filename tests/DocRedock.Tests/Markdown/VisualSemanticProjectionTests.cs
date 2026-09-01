@@ -110,6 +110,113 @@ public sealed class VisualSemanticProjectionTests
         Assert.Equal(2, serializer.Diagnostics.Count(item => item.Code == "VisualConnectorUnresolved"));
     }
 
+    [Theory]
+    [InlineData(DocumentFormatKind.Docx)]
+    [InlineData(DocumentFormatKind.Pptx)]
+    [InlineData(DocumentFormatKind.Pdf)]
+    public void Unresolved_visual_graph_keeps_every_node_in_node_only_mermaid(DocumentFormatKind format)
+    {
+        var visual = new VisualGraph("ambiguous",
+            [
+                new VisualNode("first", "FIRST", Geometry: new Geometry("test", 0, 0, 40, 20)),
+                new VisualNode("competing", "COMPETING", Geometry: new Geometry("test", 0, 0, 40, 20)),
+                new VisualNode("end", "END", Geometry: new Geometry("test", 100, 0, 40, 20))
+            ],
+            [new VisualEdge("edge", null, null, "ambiguous relation", VisualEdgeResolution.Unresolved,
+                Direction: "directed", Geometry: new Geometry("test", 20, 10, 100, 0),
+                EdgeDirection: VisualEdgeDirection.Directed)],
+            [new VisualDiagnostic("VisualConnectorUnresolved", "Connector endpoints are ambiguous.")]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("derived visual"), Extensions: new Dictionary<string, JsonElement>
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(visual)
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "ambiguous", format,
+            [new DocumentPartition("part", 0, [diagram])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("```mermaid\nflowchart", markdown, StringComparison.Ordinal);
+        Assert.Contains("first[FIRST]", markdown, StringComparison.Ordinal);
+        Assert.Contains("competing[COMPETING]", markdown, StringComparison.Ordinal);
+        Assert.Contains("end[END]", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --> ", markdown, StringComparison.Ordinal);
+        Assert.Contains("接続先未確定", markdown, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(DocumentFormatKind.Docx)]
+    [InlineData(DocumentFormatKind.Pptx)]
+    [InlineData(DocumentFormatKind.Pdf)]
+    public void Sequence_geometry_projects_messages_and_keeps_ambiguous_span_as_note(DocumentFormatKind format)
+    {
+        var nodes = new[]
+        {
+            new VisualNode("client", "Client", Geometry: new Geometry("test", 0, 0, 40, 20)),
+            new VisualNode("gateway", "Gateway", Geometry: new Geometry("test", 100, 0, 40, 20)),
+            new VisualNode("review", "Review", Geometry: new Geometry("test", 200, 0, 40, 20)),
+            new VisualNode("payment", "Payment", Geometry: new Geometry("test", 300, 0, 40, 20))
+        };
+        var edges = new[]
+        {
+            new VisualEdge("life1", null, null, Resolution: VisualEdgeResolution.Unresolved,
+                Direction: "undirected", Geometry: new Geometry("test", 20, 20, 0, 180), EdgeDirection: VisualEdgeDirection.Undirected),
+            new VisualEdge("life2", null, null, Resolution: VisualEdgeResolution.Unresolved,
+                Direction: "undirected", Geometry: new Geometry("test", 120, 20, 0, 180), EdgeDirection: VisualEdgeDirection.Undirected),
+            new VisualEdge("life3", null, null, Resolution: VisualEdgeResolution.Unresolved,
+                Direction: "undirected", Geometry: new Geometry("test", 220, 20, 0, 180), EdgeDirection: VisualEdgeDirection.Undirected),
+            new VisualEdge("life4", null, null, Resolution: VisualEdgeResolution.Unresolved,
+                Direction: "undirected", Geometry: new Geometry("test", 320, 20, 0, 180), EdgeDirection: VisualEdgeDirection.Undirected),
+            new VisualEdge("request", "client", "gateway", "1. Request", VisualEdgeResolution.GeometryInferred,
+                Direction: "directed", Geometry: new Geometry("test", 20, 60, 100, 0), EdgeDirection: VisualEdgeDirection.Directed),
+            new VisualEdge("retry", null, null, "2. Retry target undecided", VisualEdgeResolution.Unresolved,
+                Direction: "directed", Geometry: new Geometry("test", 120, 100, 200, 0), EdgeDirection: VisualEdgeDirection.Directed)
+        };
+        var visual = new VisualGraph("sequence", nodes, edges,
+            [new VisualDiagnostic("VisualConnectorUnresolved", "Retry target is ambiguous.")]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("derived visual"), Extensions: new Dictionary<string, JsonElement>
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(visual)
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sequence", format,
+            [new DocumentPartition("part", 0, [diagram])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("```mermaid\nsequenceDiagram", markdown, StringComparison.Ordinal);
+        Assert.Contains("participant P1 as Client", markdown, StringComparison.Ordinal);
+        Assert.Contains("participant P4 as Payment", markdown, StringComparison.Ordinal);
+        Assert.Contains("P1->>P2: 1. Request", markdown, StringComparison.Ordinal);
+        Assert.Contains("Note over P2,P4: 2. Retry target undecided", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("P2->>P4", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workflow_without_lifelines_is_not_misclassified_as_sequence()
+    {
+        var visual = new VisualGraph("workflow",
+            [
+                new VisualNode("start", "START", Geometry: new Geometry("test", 0, 0, 40, 20)),
+                new VisualNode("end", "END", Geometry: new Geometry("test", 100, 0, 40, 20))
+            ],
+            [new VisualEdge("edge", "start", "end", Resolution: VisualEdgeResolution.GeometryInferred,
+                Direction: "directed", Geometry: new Geometry("test", 20, 10, 100, 0),
+                EdgeDirection: VisualEdgeDirection.Directed)]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("derived visual"), Extensions: new Dictionary<string, JsonElement>
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(visual)
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "workflow", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [diagram])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("flowchart LR", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("sequenceDiagram", markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Blank_promoted_node_label_is_not_rendered_as_mermaid()
     {

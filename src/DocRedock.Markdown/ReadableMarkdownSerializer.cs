@@ -43,17 +43,22 @@ public sealed partial class ReadableMarkdownSerializer
     {
         ArgumentNullException.ThrowIfNull(graph);
         var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
-        var excludedCount = graph.Nodes.Count(node => !DocumentContentPolicyRules.Includes(node, policy));
-        var sensitiveCount = graph.Nodes.Count(node => node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
+        // Sheet filtering is an explicit projection boundary. Diagnostics must
+        // describe the selected workbook, not sheets that cannot appear in output.
+        var selectedGraph = graph.Format == DocumentFormatKind.Xlsx && options.IncludedSheets is { Count: > 0 }
+            ? graph with { Partitions = graph.Partitions.Where(partition => IsIncludedPartition(partition.Id)).ToArray() }
+            : graph;
+        var excludedCount = selectedGraph.Nodes.Count(node => !DocumentContentPolicyRules.Includes(node, policy));
+        var sensitiveCount = selectedGraph.Nodes.Count(node => node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
             node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes);
         Diagnostics = policy == DocumentContentPolicy.Complete && sensitiveCount > 0
             ? [new MarkdownDiagnostic("HiddenContentIncluded", $"Complete content policy included {sensitiveCount} hidden or metadata node(s).", MarkdownDiagnosticSeverity.Warning)]
             : excludedCount > 0
                 ? [new MarkdownDiagnostic("HiddenContentExcluded", $"{DocumentContentPolicyRules.Name(policy)} content policy excluded {excludedCount} hidden or metadata node(s).", MarkdownDiagnosticSeverity.Info)]
                 : Array.Empty<MarkdownDiagnostic>();
-        var projectedGraph = graph with
+        var projectedGraph = selectedGraph with
         {
-            Partitions = graph.Partitions.Select(partition => partition with
+            Partitions = selectedGraph.Partitions.Select(partition => partition with
             {
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy)).ToArray()
             }).ToArray()
@@ -204,7 +209,8 @@ public sealed partial class ReadableMarkdownSerializer
                 .Where(node => node.Kind == NodeKind.Diagram && HasVisualGraph(node)).ToArray();
             // Suppress source members only when a validated graph can represent them. Invalid
             // metadata must retain its original connector/label fallback for diagnostics.
-            var suppressVisualGraphMembers = visualGraphNodes.Any(TryGetRenderableVisualGraph);
+            var suppressVisualGraphMembers = visualGraphNodes.Any(node =>
+                options.IncludeDiagrams ? TryGetRenderableVisualGraph(node) : TryGetRelationVisualGraph(node));
             var consumedVisualShapeIds = visualGraphNodes
                 .SelectMany(VisualGraphMemberShapeIds).ToHashSet(StringComparer.Ordinal);
             foreach (var node in isPptx
@@ -1372,20 +1378,16 @@ public sealed partial class ReadableMarkdownSerializer
             AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial", contract,
                 MarkdownDiagnosticSeverity.Warning, node.Id + "\u001eMediumConfidence"));
         }
-        // Validation is authoritative: a malformed graph must reach the Invalid branch even
-        // when the serialized Quality field is absent or stale.
+        // Validation is authoritative: malformed metadata never reaches Mermaid.
         var quality = validation.Quality;
-        if (quality is VisualGraphQuality.FallbackOnly or VisualGraphQuality.Invalid)
+        if (quality == VisualGraphQuality.Invalid)
         {
             AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionFallback",
-                quality == VisualGraphQuality.Invalid
-                    ? "Visual graph is invalid; semantic Mermaid was omitted and source fallback is shown."
-                    : "Visual graph is fallback-only; semantic Mermaid was omitted and source fallback is shown.",
-                quality == VisualGraphQuality.Invalid ? MarkdownDiagnosticSeverity.Error : MarkdownDiagnosticSeverity.Warning, node.Id));
-            if (quality == VisualGraphQuality.Invalid)
-                AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
-                    "Visual graph validation failed; the source connector or vector fallback was retained.",
-                    MarkdownDiagnosticSeverity.Warning, node.Id));
+                "Visual graph is invalid; semantic Mermaid was omitted and source fallback is shown.",
+                MarkdownDiagnosticSeverity.Error, node.Id));
+            AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
+                "Visual graph validation failed; the source connector or vector fallback was retained.",
+                MarkdownDiagnosticSeverity.Warning, node.Id));
             WriteVisualGraphFallbackDetails(output, graph);
             return;
         }
@@ -1397,55 +1399,45 @@ public sealed partial class ReadableMarkdownSerializer
                 MarkdownDiagnosticSeverity.Info, node.Id));
             return;
         }
-        if (!validation.IsValidForSemanticProjection ||
-            !(graph.Edges ?? []).Any(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null))
+
+        // The shared projection is intentionally format-neutral. It keeps every recognized
+        // node when a connector is unresolved and recognizes sequence layouts from participant
+        // headers, lifelines, and horizontal messages in DOCX, PPTX, and vector PDF graphs.
+        var mermaid = ProjectVisualGraph(graph);
+        if (mermaid is null)
         {
             foreach (var issue in validation.Errors)
                 AddDiagnostic(new MarkdownDiagnostic(issue.Code, issue.Message, MarkdownDiagnosticSeverity.Warning, issue.SourceNodeId ?? node.Id));
+            AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionFallback",
+                quality == VisualGraphQuality.FallbackOnly
+                    ? "Visual graph is fallback-only and has no safely renderable semantic nodes."
+                    : "Visual graph has no safely renderable semantic topology.",
+                MarkdownDiagnosticSeverity.Warning, node.Id));
             if ((graph.Edges?.Count > 0 || graph.Paths is { Count: > 0 }) && !(graph.Diagnostics ?? []).Any(diagnostic =>
                     diagnostic is not null && string.Equals(diagnostic.Code, "VisualSemanticProjectionPartial", StringComparison.Ordinal)))
                 AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
                     "Visual metadata did not contain a valid semantic topology; the source connector or vector fallback was retained.",
                     MarkdownDiagnosticSeverity.Warning, node.Id));
-            WriteVisualEdgeFallback(output, graph);
+            WriteVisualGraphFallbackDetails(output, graph);
             return;
         }
-        output.AppendLine("```mermaid").Append("flowchart ").Append(graph.Direction is "TD" ? "TD" : "LR").AppendLine();
-        foreach (var visualNode in graph.Nodes.OrderBy(item => item.Id, StringComparer.Ordinal))
-        {
-            var label = MermaidText(visualNode.Label);
-            var rendered = visualNode.Kind switch
-            {
-                VisualNodeKind.Decision => "{" + label + "}",
-                VisualNodeKind.Terminator => "([" + label + "])",
-                VisualNodeKind.Data => "[/" + label + "/]",
-                VisualNodeKind.Process => "[" + label + "]",
-                _ => "[" + label + "]",
-            };
-            output.Append("    ").Append(visualNode.Id).Append(rendered).AppendLine();
-        }
-        foreach (var edge in (graph.Edges ?? []).Where(item => item.SourceId is not null && item.TargetId is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
-        {
-            var arrow = edge.IsUndirected
-                ? string.IsNullOrWhiteSpace(edge.Label) ? " --- " : " ---|" + MermaidText(edge.Label!) + "| "
-                : string.IsNullOrWhiteSpace(edge.Label) ? " --> " : " -->|" + MermaidText(edge.Label!) + "| ";
-            output.Append("    ").Append(edge.SourceId).Append(arrow).Append(edge.TargetId).AppendLine();
-        }
-        output.AppendLine("```").AppendLine();
-        if (quality == VisualGraphQuality.Partial)
+
+        WriteMermaid(output, mermaid);
+        var hasUnresolvedEdges = (graph.Edges ?? []).Any(edge => edge.SourceId is null || edge.TargetId is null);
+        if (quality is VisualGraphQuality.Partial or VisualGraphQuality.FallbackOnly || hasUnresolvedEdges)
             WritePartialVisualDetails(output, graph);
         else if (quality == VisualGraphQuality.HighConfidenceInferred)
-        {
             output.AppendLine("> 視覚構造は配置情報から推定されたものであり、内容の意味を保証するものではありません。").AppendLine();
-        }
     }
 
     private static void WritePartialVisualDetails(StringBuilder output, VisualGraph graph)
     {
         var unresolved = (graph.Diagnostics ?? []).Where(item => item is not null).ToArray();
+        var unresolvedEdges = (graph.Edges ?? []).Where(edge => edge.SourceId is null || edge.TargetId is null)
+            .OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray();
         output.AppendLine("#### 未解決の視覚接続").AppendLine();
         output.AppendLine("以下の接続は抽出結果に基づく未解決・推定情報であり、確定的な意味として解釈しないでください。").AppendLine();
-        if (unresolved.Length == 0)
+        if (unresolved.Length == 0 && unresolvedEdges.Length == 0)
         {
             output.AppendLine("- 未解決のコネクター情報はありません。").AppendLine();
             return;
@@ -1455,6 +1447,9 @@ public sealed partial class ReadableMarkdownSerializer
             var location = diagnostic.LocationSummary is { Length: > 0 } value ? $"（{value}）" : string.Empty;
             output.Append("- ").Append(InlineText(diagnostic.Message)).Append(location).AppendLine();
         }
+        foreach (var edge in unresolvedEdges)
+            output.Append("- 接続先未確定: ").AppendLine(InlineText(string.IsNullOrWhiteSpace(edge.Label)
+                ? "接続先を一意に判定できないコネクター" : edge.Label!));
         output.AppendLine();
     }
 
@@ -1505,8 +1500,204 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static bool TryGetRenderableVisualGraph(DocumentNode node) =>
         TryGetVisualGraph(node, out var graph) && graph is not null &&
+        VisualGraphValidator.Validate(graph).Quality != VisualGraphQuality.Invalid &&
+        ProjectVisualGraph(graph) is not null;
+
+    private static bool TryGetRelationVisualGraph(DocumentNode node) =>
+        TryGetVisualGraph(node, out var graph) && graph is not null &&
         VisualGraphValidator.Validate(graph).IsValidForSemanticProjection &&
-        (graph.Edges ?? []).Any(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null);
+        (graph.Edges ?? []).Any(edge => edge.SourceId is not null && edge.TargetId is not null);
+
+    private static string? ProjectVisualGraph(VisualGraph graph)
+    {
+        var nodes = (graph.Nodes ?? []).Where(node => node is not null).ToArray();
+        var edges = (graph.Edges ?? []).Where(edge => edge is not null).ToArray();
+        if (nodes.Length == 0 || nodes.Any(node => string.IsNullOrWhiteSpace(node.Id) || string.IsNullOrWhiteSpace(node.Label)))
+            return null;
+        if (TryProjectSequenceGraph(nodes, edges, out var sequence)) return sequence;
+        if (edges.Length == 0) return null;
+
+        var output = new StringBuilder("flowchart " + (graph.Direction is "TD" ? "TD" : "LR") + "\n");
+        foreach (var visualNode in nodes.OrderBy(item => item.Geometry?.Y ?? double.MaxValue)
+                     .ThenBy(item => item.Geometry?.X ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var label = MermaidText(visualNode.Label);
+            var rendered = visualNode.Kind switch
+            {
+                VisualNodeKind.Decision => "{" + label + "}",
+                VisualNodeKind.Terminator => "([" + label + "])",
+                VisualNodeKind.Data => "[/" + label + "/]",
+                VisualNodeKind.Process => "[" + label + "]",
+                _ => "[" + label + "]",
+            };
+            output.Append("    ").Append(visualNode.Id).Append(rendered).AppendLine();
+        }
+        foreach (var edge in edges.Where(item => item.SourceId is not null && item.TargetId is not null)
+                     .OrderBy(item => item.Geometry?.Y ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal))
+        {
+            var arrow = edge.IsUndirected
+                ? string.IsNullOrWhiteSpace(edge.Label) ? " --- " : " ---|" + MermaidText(edge.Label!) + "| "
+                : string.IsNullOrWhiteSpace(edge.Label) ? " --> " : " -->|" + MermaidText(edge.Label!) + "| ";
+            output.Append("    ").Append(edge.SourceId).Append(arrow).Append(edge.TargetId).AppendLine();
+        }
+        return output.ToString().TrimEnd();
+    }
+
+    private static bool TryProjectSequenceGraph(
+        IReadOnlyList<VisualNode> nodes,
+        IReadOnlyList<VisualEdge> edges,
+        out string mermaid)
+    {
+        mermaid = string.Empty;
+        var spatialNodes = nodes.Where(node => node.Geometry is { } geometry &&
+                double.IsFinite(geometry.X) && double.IsFinite(geometry.Y) &&
+                double.IsFinite(geometry.Width) && double.IsFinite(geometry.Height) &&
+                geometry.Width > 0 && geometry.Height > 0)
+            .ToArray();
+        var segments = edges.Select(edge => TrySequenceSegment(edge, out var segment) ? segment : null)
+            .Where(segment => segment is not null).Cast<SequenceSegment>().ToArray();
+        if (spatialNodes.Length < 2 || segments.Length < 3) return false;
+
+        static double Median(IEnumerable<double> values)
+        {
+            var ordered = values.Where(double.IsFinite).OrderBy(value => value).ToArray();
+            return ordered.Length == 0 ? 1 : ordered[ordered.Length / 2];
+        }
+
+        var medianWidth = Math.Max(1, Median(spatialNodes.Select(node => node.Geometry!.Width)));
+        var medianHeight = Math.Max(1, Median(spatialNodes.Select(node => node.Geometry!.Height)));
+        var topCenter = spatialNodes.Min(node => node.Geometry!.Y + node.Geometry.Height / 2);
+        var totalHeight = spatialNodes.Max(node => node.Geometry!.Y + node.Geometry.Height) -
+                          spatialNodes.Min(node => node.Geometry!.Y);
+        var headerBand = Math.Max(medianHeight, totalHeight * .08);
+        var headerNodes = spatialNodes
+            .Where(node => node.Geometry!.Y + node.Geometry.Height / 2 <= topCenter + headerBand)
+            .OrderBy(node => node.Geometry!.X + node.Geometry.Width / 2)
+            .ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
+        if (headerNodes.Length < 2) return false;
+
+        // Lifelines are long, vertical, normally undirected connectors without semantic
+        // endpoints. Requiring them prevents an ordinary top-to-bottom workflow from being
+        // misclassified as a sequence diagram.
+        var lifelines = segments.Where(segment =>
+                (segment.Edge.SourceId is null || segment.Edge.TargetId is null) &&
+                segment.Edge.IsUndirected &&
+                segment.Height >= Math.Max(medianHeight * 2, segment.Width * 3))
+            .ToArray();
+        var participants = headerNodes.Where(node =>
+        {
+            var geometry = node.Geometry!;
+            var centerX = geometry.X + geometry.Width / 2;
+            var tolerance = Math.Max(geometry.Width * .65, medianWidth * .35);
+            return lifelines.Any(lifeline =>
+                Math.Abs(lifeline.CenterX - centerX) <= tolerance &&
+                lifeline.MinY <= geometry.Y + geometry.Height * 2 &&
+                lifeline.MaxY >= geometry.Y + geometry.Height + medianHeight);
+        }).ToArray();
+        if (participants.Length < 2) return false;
+
+        var aliases = participants.Select((node, index) => (node.Id, Alias: "P" + (index + 1).ToString(CultureInfo.InvariantCulture)))
+            .ToDictionary(item => item.Id, item => item.Alias, StringComparer.Ordinal);
+        var participantCenters = participants.Select(node => new SequenceParticipant(
+                node, aliases[node.Id], node.Geometry!.X + node.Geometry.Width / 2))
+            .OrderBy(item => item.CenterX).ToArray();
+        var minGap = participantCenters.Zip(participantCenters.Skip(1),
+                (left, right) => right.CenterX - left.CenterX)
+            .Where(gap => gap > 0).DefaultIfEmpty(medianWidth * 2).Min();
+        var endpointTolerance = Math.Max(medianWidth, minGap * .3);
+        var participantBottom = participantCenters.Min(item => item.Node.Geometry!.Y + item.Node.Geometry.Height);
+        var messages = segments.Where(segment =>
+                segment.Width >= Math.Max(medianWidth * .5, segment.Height * 3) &&
+                segment.CenterY >= participantBottom - medianHeight * .25)
+            .Select(segment => new
+            {
+                Segment = segment,
+                Covered = participantCenters.Where(participant =>
+                        participant.CenterX >= segment.MinX - endpointTolerance &&
+                        participant.CenterX <= segment.MaxX + endpointTolerance)
+                    .ToArray()
+            })
+            .Where(item =>
+                item.Covered.Length >= 2 ||
+                item.Segment.Edge.SourceId is { } sourceId && aliases.ContainsKey(sourceId) &&
+                item.Segment.Edge.TargetId is { } targetId && aliases.ContainsKey(targetId))
+            .OrderBy(item => item.Segment.CenterY).ThenBy(item => item.Segment.Edge.Id, StringComparer.Ordinal)
+            .ToArray();
+        if (messages.Length == 0) return false;
+
+        var output = new StringBuilder("sequenceDiagram\n");
+        foreach (var participant in participantCenters)
+            output.Append("    participant ").Append(participant.Alias).Append(" as ")
+                .AppendLine(MermaidText(participant.Node.Label));
+
+        foreach (var message in messages)
+        {
+            var edge = message.Segment.Edge;
+            var label = SequenceMessageLabel(edge.Label);
+            if (edge.SourceId is { } knownSource && edge.TargetId is { } knownTarget &&
+                aliases.TryGetValue(knownSource, out var sourceAlias) &&
+                aliases.TryGetValue(knownTarget, out var targetAlias) && !edge.IsUndirected)
+            {
+                output.Append("    ").Append(sourceAlias).Append("->>").Append(targetAlias)
+                    .Append(": ").AppendLine(MermaidText(label));
+                continue;
+            }
+
+            if (message.Covered.Length > 2 || edge.IsUndirected)
+            {
+                var covered = message.Covered.Length == 0 ? participantCenters : message.Covered;
+                output.Append("    Note over ").Append(covered[0].Alias).Append(',').Append(covered[^1].Alias)
+                    .Append(": ").AppendLine(MermaidText(label));
+                continue;
+            }
+
+            var from = message.Covered.MinBy(item => Math.Abs(item.CenterX - message.Segment.StartX));
+            var to = message.Covered.MinBy(item => Math.Abs(item.CenterX - message.Segment.EndX));
+            if (string.Equals(edge.Direction, "reverse", StringComparison.OrdinalIgnoreCase))
+                (from, to) = (to, from);
+            if (from is null || to is null || from.Alias == to.Alias)
+            {
+                output.Append("    Note over ").Append(message.Covered[0].Alias).Append(',')
+                    .Append(message.Covered[^1].Alias).Append(": ").AppendLine(MermaidText(label));
+                continue;
+            }
+            output.Append("    ").Append(from.Alias).Append("->>").Append(to.Alias)
+                .Append(": ").AppendLine(MermaidText(label));
+        }
+
+        mermaid = output.ToString().TrimEnd();
+        return true;
+    }
+
+    private static bool TrySequenceSegment(VisualEdge edge, out SequenceSegment segment)
+    {
+        segment = default!;
+        if (edge.Path is { Count: >= 2 } path)
+        {
+            var first = path[0];
+            var last = path[^1];
+            if (double.IsFinite(first.X) && double.IsFinite(first.Y) &&
+                double.IsFinite(last.X) && double.IsFinite(last.Y))
+            {
+                segment = new SequenceSegment(edge, first.X, first.Y, last.X, last.Y);
+                return true;
+            }
+        }
+        if (edge.Geometry is not { } geometry ||
+            !double.IsFinite(geometry.X) || !double.IsFinite(geometry.Y) ||
+            !double.IsFinite(geometry.Width) || !double.IsFinite(geometry.Height))
+            return false;
+        segment = new SequenceSegment(edge, geometry.X, geometry.Y,
+            geometry.X + geometry.Width, geometry.Y + geometry.Height);
+        return true;
+    }
+
+    private static string SequenceMessageLabel(string? value)
+    {
+        var label = Regex.Replace(value ?? string.Empty,
+            @"\s*(?:[←→▶◀][─━—\-]*|[─━—\-]{2,}[<>▶◀←→]?)\s*", " ").Trim();
+        return label.Length == 0 ? "接続先未確定のメッセージ" : label;
+    }
 
     /// <summary>Returns true when visual_graph metadata exists; a null graph means it was malformed.</summary>
     private static bool TryGetVisualGraph(DocumentNode node, out VisualGraph? graph)
@@ -1699,6 +1890,18 @@ public sealed partial class ReadableMarkdownSerializer
         }
     }
     private sealed record ReadableDiagram(int MinRow, int MaxRow, string Mermaid);
+    private sealed record SequenceParticipant(VisualNode Node, string Alias, double CenterX);
+    private sealed record SequenceSegment(VisualEdge Edge, double StartX, double StartY, double EndX, double EndY)
+    {
+        public double MinX => Math.Min(StartX, EndX);
+        public double MaxX => Math.Max(StartX, EndX);
+        public double MinY => Math.Min(StartY, EndY);
+        public double MaxY => Math.Max(StartY, EndY);
+        public double Width => MaxX - MinX;
+        public double Height => MaxY - MinY;
+        public double CenterX => (StartX + EndX) / 2;
+        public double CenterY => (StartY + EndY) / 2;
+    }
     private sealed record ReadableImage(int Row, DocumentNode Node);
     private sealed record WorkbookInsertion(int Row, string Id, DocumentNode? Image, ReadableDiagram? Diagram);
 

@@ -28,6 +28,9 @@ internal static class XlsxMermaidProjection
         if (projection.Extensions is null || !projection.Extensions.TryGetValue("visual_graph", out var raw)) return [projection];
         var visual = raw.Deserialize<VisualGraph>();
         if (visual is null || visual.Nodes.Count < 2 || !visual.Edges.Any(edge => edge.SourceId is not null && edge.TargetId is not null)) return [projection];
+        // Unresolved geometry may be the only evidence tying otherwise disconnected
+        // components together. Splitting here would silently drop isolated candidates.
+        if (visual.Edges.Any(edge => edge.SourceId is null || edge.TargetId is null)) return [projection];
         var components = ConnectedComponents(visual)
             .Where(ids => visual.Edges.Any(edge => edge.SourceId is not null && edge.TargetId is not null &&
                 ids.Contains(edge.SourceId) && ids.Contains(edge.TargetId)))
@@ -273,7 +276,8 @@ internal static class XlsxMermaidProjection
             .Select(cell => new SequenceLine(
                 cell.RowIndex,
                 cell.ColumnIndex,
-                SequenceMessage(cell, actors, arrowAssignments.GetValueOrDefault(cell), worksheet.DrawingShapes ?? [])))
+                SequenceMessage(cell, actors, arrowAssignments.GetValueOrDefault(cell), worksheet.DrawingShapes ?? [],
+                    regions.FirstOrDefault(region => region.MinRow == cell.RowIndex && region.MinColumn == cell.ColumnIndex))))
             .Where(message => message.Text is not null)
             .ToArray();
         if (messages.Length == 0) return null;
@@ -297,7 +301,8 @@ internal static class XlsxMermaidProjection
         XlsxCellRecord cell,
         IReadOnlyList<Region> actors,
         DrawingArrow? drawingArrow,
-        IReadOnlyList<XlsxDrawingShapeRecord> shapes)
+        IReadOnlyList<XlsxDrawingShapeRecord> shapes,
+        Region? messageRegion)
     {
         var value = cell.Value ?? string.Empty;
         if (drawingArrow is not null)
@@ -316,6 +321,20 @@ internal static class XlsxMermaidProjection
                 if (drawingLabel.Length == 0) return null;
                 var drawingSyntax = drawingArrow.Direction is Direction.Left or Direction.Up ? "-->>" : "->>";
                 return $"P{drawingFrom}{drawingSyntax}P{drawingTo}: {Label(drawingLabel)}";
+            }
+        }
+
+        if (messageRegion is not null)
+        {
+            var overlappedActors = actors.Select((actor, index) => (actor, index))
+                .Where(item => item.actor.MaxColumn >= messageRegion.MinColumn &&
+                               item.actor.MinColumn <= messageRegion.MaxColumn)
+                .OrderBy(item => item.index).ToArray();
+            if (overlappedActors.Length > 2)
+            {
+                var unresolvedLabel = MessageLabel(value);
+                if (unresolvedLabel.Length == 0) return null;
+                return $"Note over P{overlappedActors[0].index + 1},P{overlappedActors[^1].index + 1}: {Label(unresolvedLabel)}";
             }
         }
 
@@ -349,7 +368,8 @@ internal static class XlsxMermaidProjection
     {
         // Keep source numbering (including branches such as 4a/4b) because other
         // sections in a design document often refer to those exact identifiers.
-        return Regex.Replace(value, @"\s*[─━—\-<>▶◀←→]+\s*$", string.Empty).Trim();
+        return Regex.Replace(value,
+            @"\s*(?:[←→▶◀][─━—\-]*|[─━—\-]{2,}[<>▶◀←→]?)\s*", " ").Trim();
     }
 
     private static void AppendSequenceTimeline(
@@ -875,14 +895,9 @@ internal static class XlsxMermaidProjection
         var nodePrimitives = nodes.Where(node =>
         {
             var candidate = shapes.FirstOrDefault(shape => shape.Id == node.ShapeId);
-            if (candidate?.AbsoluteBounds is not { } nodeBounds || string.IsNullOrWhiteSpace(candidate.Text)) return true;
-            return !arrows.Any(arrow =>
-            {
-                var arrowShape = shapes.FirstOrDefault(shape => shape.Id == arrow.SourceShapeId);
-                if (arrowShape?.AbsoluteBounds is not { } arrowBounds) return false;
-                return nodeBounds.XEmu < arrowBounds.RightEmu && arrowBounds.XEmu < nodeBounds.RightEmu &&
-                    nodeBounds.YEmu < arrowBounds.BottomEmu && arrowBounds.YEmu < nodeBounds.BottomEmu;
-            });
+            // A semantic process/decision remains a node even when an arrow overlaps it.
+            // Only a directional shape that was text-matched as a node is excluded.
+            return candidate is null || !TryArrowDirection(candidate, out _);
         }).Select(node =>
         {
             var shape = shapes.FirstOrDefault(candidate => candidate.Id == node.ShapeId);

@@ -9,6 +9,24 @@ namespace DocRedock.Tests.Markdown;
 public sealed class ReadableMarkdownTests
 {
     [Fact]
+    public void Workbook_sheet_filter_recomputes_hidden_content_diagnostics_for_selected_sheets()
+    {
+        var visible = Cell("A1", 1, 1, "selected") with { Layer = ContentLayer.Hidden };
+        var excluded = Cell("A1", 1, 1, "not selected") with { Layer = ContentLayer.Hidden };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sheet-filter", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("Selected", 0, [visible]),
+            new DocumentPartition("Excluded", 1, [excluded]),
+        ]);
+        var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(IncludedSheets: ["Selected"]));
+
+        _ = serializer.Serialize(graph);
+
+        var diagnostic = Assert.Single(serializer.Diagnostics, item => item.Code == "HiddenContentExcluded");
+        Assert.Contains("excluded 1 hidden or metadata node(s)", diagnostic.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Workbook_diagram_replaces_the_flattened_cell_region_with_a_mermaid_fence()
     {
         var diagram = new DocumentNode(

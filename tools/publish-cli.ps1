@@ -60,6 +60,21 @@ foreach ($RuntimeId in $RuntimeIds) {
             $ProjectName = $_.Directory.Parent.Parent.Name
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $RuntimeLockOutput "$ProjectName.packages.lock.json")
         }
+
+    if ($RuntimeId.StartsWith("win-", [StringComparison]::Ordinal)) {
+        "@echo off`r`n`"%~dp0DocRedock.Cli.exe`" %*`r`n" |
+            Set-Content -LiteralPath (Join-Path $Output "docredock.cmd") -Encoding ascii -NoNewline
+    }
+    else {
+        $Launcher = @'
+#!/bin/sh
+set -eu
+launcher_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec "$launcher_directory/DocRedock.Cli" "$@"
+'@
+        $Launcher | Set-Content -LiteralPath (Join-Path $Output "docredock") -Encoding utf8 -NoNewline
+        if (-not $IsWindows) { & chmod 755 (Join-Path $Output "docredock") }
+    }
 }
 
 Write-Host "Published CLI builds: $OutputRoot"

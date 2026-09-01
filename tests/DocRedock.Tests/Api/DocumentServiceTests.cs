@@ -47,7 +47,12 @@ public sealed class DocumentServiceTests
 
         Assert.All(visualGraph.Edges, edge => Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution));
         Assert.Equal(VisualGraphQuality.FallbackOnly, visualGraph.Quality);
-        Assert.DoesNotContain("```mermaid", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+        var readable = await File.ReadAllTextAsync(markdown);
+        Assert.Contains("```mermaid\nflowchart", readable, StringComparison.Ordinal);
+        Assert.Contains("[Start]", readable, StringComparison.Ordinal);
+        Assert.Contains("[End]", readable, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --> ", readable, StringComparison.Ordinal);
+        Assert.Contains("接続先未確定", readable, StringComparison.Ordinal);
     }
 
     [Fact]

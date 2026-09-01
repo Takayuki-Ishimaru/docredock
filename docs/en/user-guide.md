@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.0 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.1 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -83,6 +83,6 @@ The resolver rejects unsupported CFF/CFF2 outlines, missing glyph coverage, inva
 
 ## 7. Privacy and updates
 
-Conversion runs locally. The GUI may contact the public GitHub Releases API for update metadata; set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable it.
+Conversion runs locally. The app always shows its running version. At startup it checks non-draft published releases, including Public Beta builds, through the public GitHub Releases API in the background and shows current/latest versions when an update exists. **Check for updates** runs a manual check; offline and API-limit failures never block startup or conversion. Updates are not auto-installed: the user chooses a package from the trusted GitHub release page. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable automatic checks.
 
 For experimental workflows, see [Experimental features](experimental-features.md). For handling guidance, see [Security and privacy](security-and-privacy.md).

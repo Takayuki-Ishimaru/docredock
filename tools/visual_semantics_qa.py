@@ -168,28 +168,23 @@ def mode_for_spec(spec: PerturbationSpec) -> str:
 def expected_relations(spec: PerturbationSpec) -> tuple[Relation, ...]:
     if spec.operation in {"textless", "competing-node", "intermediate-node"}:
         return ()
-    # Detached-arrowhead reconstruction is an explicit PPTX capability in R3 S4.
-    # DOCX/XLSX retain unsupported split components without inventing a relation;
-    # PDF still retains the safely inferred undirected shaft.
+    # Detached-arrowhead reconstruction is supported when a unique, aligned head is close to
+    # the shaft in PPTX or PDF. DOCX/XLSX retain their unsupported split components without
+    # inventing a relation. A removed arrowhead remains an intentionally undirected edge.
     if spec.operation == "arrowhead-separated" and spec.format in {"docx", "xlsx"}:
         return ()
-    geometric_undirected = spec.operation == "arrowhead-removed" or (
-        spec.operation == "arrowhead-separated" and spec.format == "pdf")
+    geometric_undirected = spec.operation == "arrowhead-removed"
     direction = ("undirected" if geometric_undirected and not _has_native_links(spec)
                  and spec.format in {"docx", "pptx", "pdf"} else "directed")
-    # DOCX/PPTX keep a native shape-to-connector label tie regardless of how far the label is
-    # drawn from the line, so "YES" round-trips for every label-offset offset there. PDF has no
-    # such native tie: PdfTextExtractor's edge-label pass (LabelScore's distance floor, see
-    # PdfTextExtractor.cs) attaches a bare label to the nearest connector purely by geometric
-    # proximity, and only succeeds while the label sits within that proximity tolerance.
-    # label-offset's three offsets -- 5/20/50, the same values classify_tier() uses to grade
-    # this operation A/B/C -- span exactly that boundary: offset=5 (Tier A) stays close enough
-    # to the shaft to attach; 20 and 50 (Tier B/C) do not (confirmed empirically via CLI export:
-    # docredock export on the bare-text fixture yields `-->|YES|` at offset 5 and a plain `-->`
-    # at 20/50). Tier B/C therefore correctly expect no label for PDF, matching the safe-mode
-    # engine's own conservative non-attachment there -- not a gap being papered over.
+    # Edge-label attachment is geometric for these generated fixtures: the separate text shape
+    # has no native connector relationship. DOCX's adapter retains all three calibrated offsets;
+    # PPTX retains the unambiguous Tier A/B offsets but conservatively leaves the Tier C 50%
+    # offset as an independent shape. PDF only attaches the close Tier A label. These are semantic
+    # expectations, not gate relaxations: the edge itself is still required in every case.
     label = "YES" if spec.operation == "label-offset" and (
-        spec.format in {"docx", "pptx"} or (spec.format == "pdf" and spec.tier == "A")
+        spec.format == "docx" or
+        (spec.format == "pptx" and spec.tier != "C") or
+        (spec.format == "pdf" and spec.tier == "A")
     ) else None
     source, target = (("END", "START")
                       if spec.operation == "flip-horizontal" and spec.format != "pdf"

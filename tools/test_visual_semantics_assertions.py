@@ -181,11 +181,19 @@ flowchart LR
         intermediate = next(spec for spec in corpus if spec.operation == "intermediate-node")
         label = next(spec for spec in corpus
                      if spec.operation == "label-offset" and spec.parameter == 5)
+        far_label = next(spec for spec in corpus
+                         if spec.operation == "label-offset" and spec.parameter == 50)
         textless = next(spec for spec in corpus if spec.operation == "textless")
         self.assertEqual((), expected_relations(competing))
         self.assertEqual((), expected_relations(intermediate))
         self.assertEqual((("START", "END", "directed", "YES"),),
                          expected_relations(label))
+        self.assertEqual((("START", "END", "directed", None),),
+                         expected_relations(far_label))
+        pdf_separated = next(spec for spec in generate_perturbation_corpus(("pdf",))
+                             if spec.operation == "arrowhead-separated")
+        self.assertEqual((("START", "END", "directed", None),),
+                         expected_relations(pdf_separated))
         self.assertEqual((), expected_relations(textless))
 
     def test_textless_synthetic_cli_relation_is_diagnostic_not_false_edge(self):

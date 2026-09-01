@@ -1,10 +1,10 @@
-# v0.2.0 の対応機能
+# v0.2.1 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.2.0 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.2.1 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.2.0での扱い |
+| 機能 | v0.2.1での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート。CLI既定 |
 | `visible`／`complete`／`sanitized` | サポート |
@@ -24,8 +24,8 @@ DocRedock v0.2.0 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX�
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | DOCX | ○ DrawingML／VML textbox | △ 対応drawing fragment内でnative endpointまたは一意に解決できるgeometry | △ 一意な端点のみ | △ 一意に近接するlabelのみ | △ 抽出textを保持。完全topologyは保証しない | △ 埋め込み画像をassetとして保持 | ○ 未解決／partial topologyをdiagnostic化。有効graphを描画しない場合はsource textを保持 | Public Beta・条件付き |
 | XLSX | ○ 一般図形と標準`flowChart*` preset | ○ 接続済みconnector | △ cell layout／geometry由来 | △ 近接・既存projectionで解決可能な場合 | × | △ 埋め込み画像をassetとして保持 | △ 未知`flowChart*` presetはlabelを保持するが、確定した接続としては扱わない | Public Beta |
-| PPTX | ○ process／decision／terminator／data／generic | ○ native connection | △ 一意な端点だけ推定 | △ 一意に対応付く場合 | △ textを保持し、topology不足を報告 | △ 埋め込み画像をassetとして保持 | ○ 未解決connector／label／partial projectionを報告 | Public Beta・条件付き |
-| PDF | ○ ネイティブテキスト | △ 単純なpainted vector pathで端点が一意に対応する場合 | △ 一意なvector端点のみ | △ 一意に近接するlabelのみ | △ 有効な単純topologyをMermaidへ投影 | △ rasterizer利用時はpage preview、それ以外はpath/page placeholder | ○ vector/path partial、未解決端点、OCR/rasterizer不足を報告 | Public Beta・条件付き |
+| PPTX | ○ process／decision／terminator／data／generic | ○ native connection | △ 斜めconnectorを含む一意な端点だけ推定 | △ 線分上で一意に対応付く場合 | △ textを保持し、topology不足を報告 | △ 埋め込み画像をassetとして保持 | ○ 未解決connector／label／partial projectionを報告 | Public Beta・条件付き |
+| PDF | ○ ネイティブテキスト | △ 単純なpainted vector pathで端点が一意に対応する場合 | △ 一意なvector端点のみ。規則的な表罫線はconnector推定から除外 | △ 一意に近接するlabelのみ | △ 有効な単純topologyをMermaidへ投影。arrowhead方向を保持し、不明時は専用診断 | △ rasterizer利用時はpage preview、それ以外はpath/page placeholder | ○ vector/path partial、方向不明、未解決端点、OCR/rasterizer不足を報告 | Public Beta・条件付き |
 
 次の優先順位で、認識した視覚情報を処理します。
 
@@ -43,4 +43,4 @@ DOCX drawingとPDF vector topologyは完全復元しません。対応fragment�
 
 閲覧用Markdownは一方向の出力です。`.drmd`と`.drmdpkg`は実験用で、元文書由来の情報を含む可能性があります。元文書を正本として保持してください。
 
-この文書が利用者向けサポート範囲の正本です。[v0.2.0リリースノート](../../release-docs/RELEASE_NOTES_v0.2.0.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。
+この文書が利用者向けサポート範囲の正本です。[v0.2.1リリースノート](../../release-docs/RELEASE_NOTES_v0.2.1.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。

@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.2.0
+        default: v0.2.1
 
 permissions:
   contents: read
@@ -177,13 +177,15 @@ jobs:
           New-Item -ItemType Directory -Force -Path $staging, "release" | Out-Null
           Copy-Item "artifacts/gui/${{ matrix.rid }}/DocRedock.exe" "$staging/DocRedock.exe"
           Copy-Item "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli.exe" "$staging/DocRedock.Cli.exe"
+          Copy-Item "artifacts/cli/${{ matrix.rid }}/docredock.cmd" "$staging/docredock.cmd"
           Copy-Item "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/DocRedock-icon.png"
-          Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt" $staging
-          Copy-Item "docs/ja/user-guide.md" "$staging/QUICKSTART.ja.md"
-          Copy-Item "docs/en/user-guide.md" "$staging/QUICKSTART.en.md"
-          Copy-Item "docs/ja/security-and-privacy.md" "$staging/SECURITY_AND_PRIVACY.ja.md"
-          Copy-Item "docs/en/security-and-privacy.md" "$staging/SECURITY_AND_PRIVACY.en.md"
-          Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" $staging
+          Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt", "SECURITY.md" $staging
+          Copy-Item "release-docs/PACKAGE_QUICKSTART.md" "$staging/QUICKSTART.ja.md"
+          Copy-Item "release-docs/PACKAGE_QUICKSTART.en.md" "$staging/QUICKSTART.en.md"
+          New-Item -ItemType Directory -Force -Path "$staging/docs", "$staging/release-docs" | Out-Null
+          Copy-Item -Recurse "docs/ja", "docs/en" "$staging/docs/"
+          Copy-Item "docs/FORMAT_CAPABILITY_MATRIX.md" "$staging/docs/FORMAT_CAPABILITY_MATRIX.md"
+          Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
           Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
           New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
           Copy-Item "artifacts/gui/${{ matrix.rid }}/runtime-locks/*" "$staging/build-metadata/gui-runtime-locks/"
@@ -227,13 +229,15 @@ jobs:
           </dict></plist>
           PLIST
           cp "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
-          chmod 755 "$staging/DocRedock.Cli"
-          cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
-          cp docs/ja/user-guide.md "$staging/QUICKSTART.ja.md"
-          cp docs/en/user-guide.md "$staging/QUICKSTART.en.md"
-          cp docs/ja/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.ja.md"
-          cp docs/en/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.en.md"
-          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
+          cp "artifacts/cli/${{ matrix.rid }}/docredock" "$staging/docredock"
+          chmod 755 "$staging/DocRedock.Cli" "$staging/docredock"
+          cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
+          cp release-docs/PACKAGE_QUICKSTART.md "$staging/QUICKSTART.ja.md"
+          cp release-docs/PACKAGE_QUICKSTART.en.md "$staging/QUICKSTART.en.md"
+          mkdir -p "$staging/docs" "$staging/release-docs"
+          cp -R docs/ja docs/en "$staging/docs/"
+          cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
+          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
           cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"
@@ -306,23 +310,30 @@ jobs:
           mkdir -p "$staging" "$staging/share/applications" "$staging/share/icons/hicolor/256x256/apps" release
           install -m 755 "artifacts/gui/${{ matrix.rid }}/DocRedock" "$staging/DocRedock"
           install -m 755 "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
+          install -m 755 "artifacts/cli/${{ matrix.rid }}/docredock" "$staging/docredock"
+          ln -s DocRedock "$staging/docredock-gui"
+          install -m 755 tools/linux-install.sh "$staging/install.sh"
+          install -m 755 tools/linux-uninstall.sh "$staging/uninstall.sh"
           install -m 644 "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/share/icons/hicolor/256x256/apps/docredock.png"
           cat > "$staging/share/applications/docredock.desktop" <<'DESKTOP'
           [Desktop Entry]
           Type=Application
           Name=DocRedock
           Comment=Local-first Office to Markdown utility
-          Exec=DocRedock
+          TryExec=docredock-gui
+          Exec=docredock-gui
           Icon=docredock
+          X-DocRedock-Managed=true
           Terminal=false
           Categories=Office;Utility;
           DESKTOP
-          cp LICENSE THIRD-PARTY-NOTICES.txt "$staging/"
-          cp docs/ja/user-guide.md "$staging/QUICKSTART.ja.md"
-          cp docs/en/user-guide.md "$staging/QUICKSTART.en.md"
-          cp docs/ja/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.ja.md"
-          cp docs/en/security-and-privacy.md "$staging/SECURITY_AND_PRIVACY.en.md"
-          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/"
+          cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
+          cp release-docs/PACKAGE_QUICKSTART.md "$staging/QUICKSTART.ja.md"
+          cp release-docs/PACKAGE_QUICKSTART.en.md "$staging/QUICKSTART.en.md"
+          mkdir -p "$staging/docs" "$staging/release-docs"
+          cp -R docs/ja docs/en "$staging/docs/"
+          cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
+          cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
           cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"

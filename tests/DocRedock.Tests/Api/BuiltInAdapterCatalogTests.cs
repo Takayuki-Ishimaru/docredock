@@ -51,5 +51,30 @@ public sealed class BuiltInAdapterCatalogTests
         Assert.Equal(DiagnosticSeverity.Warning, visual.Severity);
         Assert.Equal("PptxWarning", ordinary.Code);
         Assert.Equal("Embedded chart was preserved as passthrough", ordinary.Message);
+
+        var repeated = AdapterWarningDiagnostics.Normalize(
+        [
+            new Diagnostic("Repeated", "same diagnostic", DiagnosticSeverity.Warning, "node-1", "/xl/worksheets/a.xml"),
+            new Diagnostic("Repeated", "same  diagnostic", DiagnosticSeverity.Warning, "node-1", "/xl/worksheets/a.xml"),
+            new Diagnostic("Repeated", "same diagnostic", DiagnosticSeverity.Warning, "node-2", "/xl/worksheets/a.xml"),
+            new Diagnostic("Repeated", "same diagnostic", DiagnosticSeverity.Warning, "node-1", "/xl/worksheets/b.xml"),
+        ]);
+        var external = AdapterWarningDiagnostics.Create("OfficeWarning",
+            "ExternalRelationshipPresent: External relationships are recorded but never fetched.");
+
+        var mixedSeverity = AdapterWarningDiagnostics.Normalize(
+        [
+            new Diagnostic("Escalated", "same event", DiagnosticSeverity.Information, "node-1", "/xl/worksheets/a.xml"),
+            new Diagnostic("Escalated", "same  event", DiagnosticSeverity.Error, "node-1", "/xl/worksheets/a.xml"),
+        ]);
+
+        Assert.Equal(3, repeated.Count);
+        Assert.Equal("same diagnostic (repeated 2 times).", repeated[0].Message);
+        Assert.Equal("node-2", repeated[1].NodeId);
+        Assert.Equal("/xl/worksheets/b.xml", repeated[2].PartUri);
+        Assert.Equal(2, mixedSeverity.Count);
+        Assert.Contains(mixedSeverity, diagnostic => diagnostic.Severity == DiagnosticSeverity.Information);
+        Assert.Contains(mixedSeverity, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+        Assert.Equal(DiagnosticSeverity.Information, external.Severity);
     }
 }

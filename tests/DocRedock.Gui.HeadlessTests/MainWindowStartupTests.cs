@@ -5,6 +5,7 @@ using Avalonia.Controls;
 using Avalonia.Headless;
 using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
+using DocRedock.Core.Reporting;
 using DocRedock.Gui;
 using Xunit;
 
@@ -27,6 +28,65 @@ public sealed class MainWindowStartupTests
         try
         {
             Assert.NotNull(window);
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [AvaloniaFact]
+    public void Current_version_and_manual_update_action_are_visible_on_startup()
+    {
+        var window = new MainWindow();
+        try
+        {
+            var version = Get<TextBlock>(window, "CurrentVersionText");
+            var checkUpdates = Get<Button>(window, "CheckUpdatesButton");
+
+            Assert.StartsWith("v", version.Text);
+            Assert.Equal("更新を確認", checkUpdates.Content?.ToString());
+            Assert.Equal("更新を確認", AutomationProperties.GetName(checkUpdates));
+        }
+        finally
+        {
+            window.Close();
+        }
+    }
+
+    [Fact]
+    public void Diagnostics_are_grouped_and_present_actionable_Japanese_guidance()
+    {
+        var diagnostics = new[]
+        {
+            new Diagnostic("VisualConnectorUnresolved", "first", DiagnosticSeverity.Warning),
+            new Diagnostic("VisualConnectorUnresolved", "second", DiagnosticSeverity.Warning),
+            new Diagnostic("ExternalRelationshipSkipped", "informational", DiagnosticSeverity.Information),
+        };
+        var method = typeof(MainWindow).GetMethod(
+            "FormatDiagnosticsForDisplay", BindingFlags.Static | BindingFlags.NonPublic)!;
+
+        var formatted = Assert.IsType<string>(method.Invoke(null, [diagnostics]));
+
+        Assert.Contains("警告 VisualConnectorUnresolved（2件）", formatted, StringComparison.Ordinal);
+        Assert.Contains("接続先を一意に判断できませんでした", formatted, StringComparison.Ordinal);
+        Assert.Contains("対処:", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("ExternalRelationshipSkipped", formatted, StringComparison.Ordinal);
+    }
+
+    [AvaloniaFact]
+    public void Pdf_ocr_capability_is_explicitly_disabled_when_rasterizer_is_unavailable()
+    {
+        var window = new MainWindow();
+        try
+        {
+            var ocrToggle = Get<ToggleSwitch>(window, "OcrToggle");
+            var unavailable = Get<TextBlock>(window, "OcrUnavailableText");
+
+            Assert.False(ocrToggle.IsEnabled);
+            Assert.NotEqual(true, ocrToggle.IsChecked);
+            Assert.True(unavailable.IsVisible);
+            Assert.Contains("画像PDFのOCRは利用できません", unavailable.Text, StringComparison.Ordinal);
         }
         finally
         {

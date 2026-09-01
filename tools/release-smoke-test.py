@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -484,6 +485,200 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
 
 
 
+MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+
+
+def verify_local_markdown_links(package_root: Path) -> None:
+    resolved_root = package_root.resolve()
+    documents: list[Path] = []
+    visited_directories: set[Path] = set()
+    for current, directory_names, file_names in os.walk(
+        resolved_root, topdown=True, followlinks=True
+    ):
+        current_path = Path(current)
+        resolved_current = current_path.resolve()
+        try:
+            resolved_current.relative_to(resolved_root)
+        except ValueError as exception:
+            raise RuntimeError(
+                f"packaged Markdown directory escapes package root: {current_path}"
+            ) from exception
+        if resolved_current in visited_directories:
+            directory_names.clear()
+            continue
+        visited_directories.add(resolved_current)
+
+        safe_directories: list[str] = []
+        for directory_name in sorted(directory_names):
+            directory = current_path / directory_name
+            resolved_directory = directory.resolve()
+            try:
+                resolved_directory.relative_to(resolved_root)
+            except ValueError as exception:
+                raise RuntimeError(
+                    f"packaged Markdown directory escapes package root: {directory}"
+                ) from exception
+            if resolved_directory not in visited_directories:
+                safe_directories.append(directory_name)
+        directory_names[:] = safe_directories
+        documents.extend(
+            current_path / file_name
+            for file_name in sorted(file_names)
+            if file_name.lower().endswith(".md")
+        )
+
+    for document in sorted(documents):
+        resolved_document = document.resolve()
+        try:
+            resolved_document.relative_to(resolved_root)
+        except ValueError as exception:
+            raise RuntimeError(
+                f"packaged Markdown document escapes package root: {document}"
+            ) from exception
+
+        for match in MARKDOWN_LINK_PATTERN.finditer(resolved_document.read_text(encoding="utf-8")):
+            target = match.group(1).strip().strip("<>").split("#", 1)[0]
+            lowered_target = target.lower()
+            if not target or target.startswith("#") or lowered_target.startswith("mailto:"):
+                continue
+            if lowered_target.startswith("file:"):
+                raise RuntimeError(
+                    f"packaged Markdown file URI is not allowed in {document}: {target}"
+                )
+            if lowered_target.startswith(("http://", "https://")) or "://" in target:
+                continue
+            resolved_target = (resolved_document.parent / target).resolve()
+            try:
+                resolved_target.relative_to(resolved_root)
+            except ValueError as exception:
+                raise RuntimeError(
+                    f"packaged Markdown link escapes package root in {document}: {target}"
+                ) from exception
+            if not resolved_target.exists():
+                raise RuntimeError(f"broken packaged Markdown link in {document}: {target}")
+
+
+def verify_cli_launcher(cli: Path, expected_version: str) -> None:
+    launcher = cli.parent / ("docredock.cmd" if os.name == "nt" else "docredock")
+    if not launcher.is_file():
+        raise RuntimeError(f"distribution is missing the documented CLI launcher: {launcher.name}")
+    if os.name != "nt" and not os.access(launcher, os.X_OK):
+        raise RuntimeError("documented CLI launcher is not executable")
+    command = ["cmd", "/d", "/c", str(launcher), "--version"] if os.name == "nt" else [str(launcher), "--version"]
+    result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            timeout=30, check=False)
+    if result.returncode != 0 or not result.stdout.strip().startswith(f"DocRedock {expected_version}"):
+        raise RuntimeError(f"documented CLI launcher failed: {result.stdout.strip()}")
+
+
+def exercise_linux_install(package_root: Path, expected_version: str) -> None:
+    if not sys.platform.startswith("linux") or not (package_root / "install.sh").is_file():
+        return
+    with tempfile.TemporaryDirectory(prefix="docredock-install-smoke-") as temporary:
+        temporary_root = Path(temporary)
+        prefix = temporary_root / "prefix"
+        outside = temporary_root / "outside"
+        outside.mkdir()
+
+        prefix_link = temporary_root / "prefix-link"
+        prefix_link.symlink_to(outside, target_is_directory=True)
+        rejected = subprocess.run([str(package_root / "install.sh"), "--prefix", str(prefix_link)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if rejected.returncode == 0 or any(outside.iterdir()):
+            raise RuntimeError("Linux installer accepted a symlinked prefix")
+
+        desktop_target = outside / "desktop-target"
+        desktop_target.write_text("outside sentinel", encoding="utf-8")
+        desktop = prefix / "share" / "applications" / "docredock.desktop"
+        desktop.parent.mkdir(parents=True)
+        desktop.symlink_to(desktop_target)
+        rejected = subprocess.run([str(package_root / "install.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if rejected.returncode == 0 or desktop_target.read_text(encoding="utf-8") != "outside sentinel":
+            raise RuntimeError("Linux installer accepted a symlinked desktop entry")
+        desktop.unlink()
+        shutil.rmtree(prefix)
+
+        unmanaged_application = prefix / "lib" / "docredock"
+        unmanaged_application.mkdir(parents=True)
+        unmanaged_sentinel = unmanaged_application / "sentinel"
+        unmanaged_sentinel.write_text("unmanaged application", encoding="utf-8")
+        rejected = subprocess.run([str(package_root / "install.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if (rejected.returncode == 0 or
+                unmanaged_sentinel.read_text(encoding="utf-8") != "unmanaged application" or
+                (prefix / "bin" / "docredock").exists()):
+            raise RuntimeError("Linux installer replaced an unmanaged application directory")
+        shutil.rmtree(prefix)
+
+        unmanaged_icon = prefix / "share" / "icons" / "hicolor" / "256x256" / "apps" / "docredock.png"
+        unmanaged_icon.parent.mkdir(parents=True)
+        unmanaged_icon.write_text("unmanaged icon", encoding="utf-8")
+        rejected = subprocess.run([str(package_root / "install.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if (rejected.returncode == 0 or
+                unmanaged_icon.read_text(encoding="utf-8") != "unmanaged icon" or
+                (prefix / "lib" / "docredock").exists()):
+            raise RuntimeError("Linux installer replaced an unmanaged icon")
+        shutil.rmtree(prefix)
+
+        subprocess.run([str(package_root / "install.sh"), "--prefix", str(prefix)],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=30, check=True)
+        launcher = prefix / "bin" / "docredock"
+        desktop = prefix / "share" / "applications" / "docredock.desktop"
+        marker = prefix / "lib" / "docredock" / ".docredock-managed"
+        if not launcher.exists() or not desktop.is_file():
+            raise RuntimeError("Linux installer did not create CLI and desktop launchers")
+        if marker.read_text(encoding="utf-8") != "DocRedock-managed-install-v1\n":
+            raise RuntimeError("Linux installer did not create the exact ownership marker")
+        if f"Exec={prefix}/bin/docredock-gui" not in desktop.read_text(encoding="utf-8"):
+            raise RuntimeError("Linux desktop entry does not contain the installed absolute GUI path")
+        result = subprocess.run([str(launcher), "--version"], text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, timeout=30, check=False)
+        if result.returncode != 0 or not result.stdout.strip().startswith(f"DocRedock {expected_version}"):
+            raise RuntimeError("installed Linux CLI launcher failed")
+
+        marker.unlink()
+        rejected = subprocess.run([str(package_root / "uninstall.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if rejected.returncode == 0 or not launcher.exists() or not desktop.exists():
+            raise RuntimeError("Linux uninstaller accepted a missing ownership marker")
+        marker.write_text("tampered\n", encoding="utf-8")
+        rejected = subprocess.run([str(package_root / "uninstall.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if rejected.returncode == 0 or not launcher.exists() or not desktop.exists():
+            raise RuntimeError("Linux uninstaller accepted a tampered ownership marker")
+        marker.write_text("DocRedock-managed-install-v1\n", encoding="utf-8")
+
+        external_docs = outside / "external-docs"
+        external_docs.mkdir()
+        sentinel = external_docs / "sentinel"
+        sentinel.write_text("keep", encoding="utf-8")
+        installed_docs = prefix / "lib" / "docredock" / "docs"
+        if installed_docs.exists():
+            shutil.rmtree(installed_docs)
+        installed_docs.symlink_to(external_docs, target_is_directory=True)
+        rejected = subprocess.run([str(package_root / "uninstall.sh"), "--prefix", str(prefix)],
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  timeout=30, check=False)
+        if rejected.returncode == 0 or not sentinel.is_file() or not launcher.exists():
+            raise RuntimeError("Linux uninstaller accepted a symlinked managed directory")
+        installed_docs.unlink()
+
+        subprocess.run([str(package_root / "uninstall.sh"), "--prefix", str(prefix)],
+                       text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                       timeout=30, check=True)
+        if launcher.exists() or desktop.exists():
+            raise RuntimeError("Linux uninstaller left managed launchers behind")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cli", required=True, type=Path)
@@ -516,6 +711,9 @@ def main() -> int:
     version = invoke(cli, ["--version"])
     if not version.stdout.strip().startswith(f"DocRedock {args.expected_version}"):
         raise RuntimeError(f"unexpected CLI version: {version.stdout.strip()}")
+    verify_cli_launcher(cli, args.expected_version)
+    verify_local_markdown_links(cli.parent)
+    exercise_linux_install(cli.parent, args.expected_version)
     blocked = invoke(cli, ["restore", "missing.md"], allowed=(4,))
     if "DOCREDOCK_ENABLE_EXPERIMENTAL=1" not in blocked.stdout:
         raise RuntimeError("experimental command did not explain the opt-in environment variable")

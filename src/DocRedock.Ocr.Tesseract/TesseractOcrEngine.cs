@@ -169,7 +169,8 @@ public sealed class TesseractOcrEngine : IOcrEngine
     private static string CacheKey(byte[] bytes, IReadOnlyList<string> languages, string executablePath)
     {
         var inputHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        var descriptor = "docredock.ocr.tesseract/0.2.0\n" + executablePath + "\n" + string.Join('+', languages);
+        var providerVersion = typeof(TesseractOcrEngine).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
+        var descriptor = "docredock.ocr.tesseract/" + providerVersion + "\n" + executablePath + "\n" + string.Join('+', languages);
         var configHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(descriptor))).ToLowerInvariant();
         return inputHash + "-" + configHash[..16];
     }

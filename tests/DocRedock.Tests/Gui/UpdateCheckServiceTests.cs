@@ -29,7 +29,7 @@ public sealed class UpdateCheckServiceTests
     }
 
     [Fact]
-    public async Task CheckAsync_ReportsNewestNonDraftReleaseIncludingPrerelease()
+    public async Task CheckAsync_ReportsNewestPublishedReleaseIncludingPublicBeta()
     {
         const string releases = """
             [
@@ -117,8 +117,11 @@ public sealed class UpdateCheckServiceTests
         var service = new UpdateCheckService(client);
 
         var update = await service.CheckAsync(new Version(0, 1, 1));
+        var detailed = await service.CheckDetailedAsync(new Version(0, 1, 1));
 
         Assert.Null(update);
+        Assert.Equal(UpdateCheckStatus.Failed, detailed.Status);
+        Assert.Contains("安全", detailed.ErrorMessage);
     }
 
     [Fact]
@@ -148,6 +151,26 @@ public sealed class UpdateCheckServiceTests
 
         Assert.True(parsed);
         Assert.Equal(new Version(expected), version);
+    }
+
+    [Fact]
+    public async Task CheckDetailedAsync_ReturnsUpToDateStatusWhenNoPublishedReleaseIsNewer()
+    {
+        const string releases = """[{"tag_name":"v0.2.0-beta.1","html_url":"https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.0-beta.1","draft":false,"prerelease":true}]""";
+        using var client = new HttpClient(new StubHttpMessageHandler(_ => JsonResponse(releases)));
+        var result = await new UpdateCheckService(client).CheckDetailedAsync(new Version(0, 2, 0));
+        Assert.Equal(UpdateCheckStatus.UpToDate, result.Status);
+        Assert.Null(result.Update);
+    }
+
+    [Fact]
+    public async Task CheckDetailedAsync_ReturnsFailedStatusForRateLimit()
+    {
+        using var client = new HttpClient(new StubHttpMessageHandler(_ =>
+            new HttpResponseMessage(HttpStatusCode.TooManyRequests)));
+        var result = await new UpdateCheckService(client).CheckDetailedAsync(new Version(0, 2, 0));
+        Assert.Equal(UpdateCheckStatus.Failed, result.Status);
+        Assert.Contains("制限", result.ErrorMessage);
     }
 
     private static HttpResponseMessage JsonResponse(string json)

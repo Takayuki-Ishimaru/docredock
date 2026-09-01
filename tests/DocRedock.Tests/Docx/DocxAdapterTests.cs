@@ -421,7 +421,15 @@ public sealed class DocxAdapterTests
         var extraction = await new DocxAdapter().ExtractAsync(source);
         var visual = VisualGraphOf(extraction);
         var edge = Assert.Single(visual.Edges);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
 
+        Assert.Equal(new[] { "COMPETING", "END", "FIRST" },
+            visual.Nodes.Select(node => node.Label).OrderBy(label => label, StringComparer.Ordinal));
+        Assert.Contains("```mermaid\nflowchart", markdown, StringComparison.Ordinal);
+        Assert.Contains("[COMPETING]", markdown, StringComparison.Ordinal);
+        Assert.Contains("[END]", markdown, StringComparison.Ordinal);
+        Assert.Contains("[FIRST]", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(" --> ", markdown, StringComparison.Ordinal);
         Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution);
         Assert.Null(edge.SourceId);
         Assert.Null(edge.TargetId);
