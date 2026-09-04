@@ -79,6 +79,24 @@ public sealed class XlsxAdapterTests
     }
 
     [Fact]
+    public void Formula_with_empty_cached_value_element_is_reported_as_a_stable_warning()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withEmptyFormulaCache: true)));
+
+        Assert.Contains(result.Warnings, warning =>
+            warning.StartsWith("XlsxFormulaCachedValueMissing: Formula cell Sheet1!B1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Formula_with_whitespace_only_cached_value_is_reported_as_missing()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withWhitespaceFormulaCache: true)));
+
+        Assert.Contains(result.Warnings, warning =>
+            warning.StartsWith("XlsxFormulaCachedValueMissing: Formula cell Sheet1!B1", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Legacy_cell_comments_are_reported_as_precise_unsupported_content()
     {
         var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withLegacyComment: true)));
@@ -955,7 +973,8 @@ public sealed class XlsxAdapterTests
     }
 
     private static byte[] CreatePackage(bool absoluteWorksheetTarget = false, bool withMerge = false, bool withPhoneticRun = false,
-        bool withFormulaCache = true, bool withLegacyComment = false)
+        bool withFormulaCache = true, bool withLegacyComment = false, bool withEmptyFormulaCache = false,
+        bool withWhitespaceFormulaCache = false)
     {
         var parts = new Dictionary<string, string>
         {
@@ -966,7 +985,7 @@ public sealed class XlsxAdapterTests
                 ? "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>抽出観点</t><rPh sb=\"0\" eb=\"4\"><t>チュウシュツカンテン</t></rPh><phoneticPr fontId=\"0\" /></si></sst>"
                 : "<sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>Hello</t></si></sst>",
             ["xl/styles.xml"] = "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"1\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font></fonts><cellXfs count=\"4\"><xf /><xf /><xf /><xf fontId=\"0\" applyFont=\"1\" /></cellXfs></styleSheet>",
-            ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><cols><col min=\"1\" max=\"3\" width=\"18.5\" customWidth=\"1\" /></cols><sheetData><row r=\"1\" ht=\"24\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"s\"><v>0</v></c><c r=\"B1\"><f>SUM(A1:A1)</f>{(withFormulaCache ? "<v>0</v>" : string.Empty)}</c><c r=\"C1\" t=\"n\"><v>12345</v></c></row></sheetData>{(withMerge ? "<mergeCells count=\"1\"><mergeCell ref=\"A1:B2\" /></mergeCells>" : string.Empty)}<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\" /><pageSetup orientation=\"landscape\" /></worksheet>",
+            ["xl/worksheets/sheet1.xml"] = $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><cols><col min=\"1\" max=\"3\" width=\"18.5\" customWidth=\"1\" /></cols><sheetData><row r=\"1\" ht=\"24\" customHeight=\"1\"><c r=\"A1\" s=\"3\" t=\"s\"><v>0</v></c><c r=\"B1\"><f>SUM(A1:A1)</f>{(withWhitespaceFormulaCache ? "<v>   </v>" : withEmptyFormulaCache ? "<v></v>" : withFormulaCache ? "<v>0</v>" : string.Empty)}</c><c r=\"C1\" t=\"n\"><v>12345</v></c></row></sheetData>{(withMerge ? "<mergeCells count=\"1\"><mergeCell ref=\"A1:B2\" /></mergeCells>" : string.Empty)}<pageMargins left=\"0.5\" right=\"0.5\" top=\"0.75\" bottom=\"0.75\" header=\"0.3\" footer=\"0.3\" /><pageSetup orientation=\"landscape\" /></worksheet>",
             ["custom/unknown.bin"] = "untouched"
         };
         if (withLegacyComment)

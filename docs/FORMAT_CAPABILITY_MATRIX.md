@@ -1,7 +1,7 @@
 # 形式別の技術的な対応範囲
 
 > **この文書は、各形式で利用できる操作と制約を説明する技術リファレンスです。**
-> v0.2.1 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
+> v0.2.2 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
 
 記号: ○ = 対応、△ = 条件付き・限定的、× = 非対応。
 

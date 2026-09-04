@@ -17,4 +17,4 @@
 - [利用ガイド](docs/ja/user-guide.md)
 - [対応機能](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [この版の変更点](release-docs/RELEASE_NOTES_v0.2.1.md)
+- [この版の変更点](release-docs/RELEASE_NOTES_v0.2.2.md)

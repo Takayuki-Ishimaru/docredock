@@ -2,6 +2,18 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.2.2] - 2026-09-04
+
+- Improved PDF table-grid recognition while keeping irregular diagram lattices and labelled triangular nodes available for semantic projection, and reporting when an untagged grid is inferred from layout.
+- Preserved arrow direction and nearby branch labels more reliably in PDF flow diagrams.
+- Added bounded PDF visual analysis so unusually complex pages fall back with a diagnostic instead of spending unbounded processing time.
+- Added clear diagnostics for XLSX formulas whose saved result is missing or empty, and aligned selected-sheet diagnostics and image assets with the requested worksheet scope.
+- Reduced repeated CLI diagnostics to one summary per code by default, with detailed entries available through `--verbose`.
+- Restored the project banner and app icon in both README languages.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.2.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.2.md)
+
 ## [0.2.1] - 2026-09-01
 
 - Added an always-visible running version, non-blocking startup update checks, a manual update action, and trusted release-page navigation.
@@ -108,6 +120,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.2.2]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.0
 [0.1.7]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.1.7

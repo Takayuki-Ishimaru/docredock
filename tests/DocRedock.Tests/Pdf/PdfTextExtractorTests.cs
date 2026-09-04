@@ -344,7 +344,7 @@ public sealed class PdfTextExtractorTests
     [Fact]
     public void Stroke_before_rectangle_is_resolved_in_second_pass()
     {
-        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 110 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\nendstream\n%%EOF");
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 150 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S 20 10 m 15 14 l 15 6 l h f\nendstream\n%%EOF");
         var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
         Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.GeometryInferred);
         Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualEdgeDirectionUnknown");
@@ -360,10 +360,88 @@ public sealed class PdfTextExtractorTests
         var graph = result.VisualGraphs![1];
 
         Assert.DoesNotContain(graph.Edges, edge => edge.SourceId is not null || edge.TargetId is not null);
+        Assert.DoesNotContain(graph.Edges, edge => edge.EdgeDirection == VisualEdgeDirection.Directed);
+        Assert.Empty(graph.Nodes);
+        Assert.Empty(graph.Edges);
+        Assert.Contains("semantic reconstruction unavailable", result.Text, StringComparison.Ordinal);
         var diagnostic = Assert.Single(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
         Assert.False(string.IsNullOrWhiteSpace(diagnostic.Fallback));
         Assert.Contains(result.Diagnostics!, item => item.StartsWith("VisualInferenceTimeout", StringComparison.Ordinal));
         Assert.True(graph.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Native_only_path_build_timeout_is_diagnosed_and_keeps_fallback_geometry()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 80 >> stream\n0 0 m 100 0 l S 0 0 20 20 re S\nendstream\n%%EOF");
+        using var inferenceScope = DocRedock.VisualInference.VisualInferenceContext.Push(
+            DocRedock.VisualInference.VisualInferenceMode.NativeOnly);
+
+        var result = PdfTextExtractor.Extract(pdf,
+            new PdfExtractionOptions(VisualInferenceTimeout: TimeSpan.Zero));
+        var graph = result.VisualGraphs![1];
+
+        Assert.Single(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.Empty(graph.Nodes);
+        Assert.Empty(graph.Edges);
+        Assert.Contains("semantic reconstruction unavailable", result.Text, StringComparison.Ordinal);
+        Assert.Contains(result.Diagnostics!, item => item.StartsWith("VisualInferenceTimeout", StringComparison.Ordinal));
+        Assert.True(graph.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Triangle_inference_budget_is_deterministic_and_leaves_no_partial_topology()
+    {
+        var content = new StringBuilder();
+        for (var index = 0; index < 200; index++)
+            content.Append("BT 1 0 0 1 ").Append(index * 3).Append(" 200 Tm (T").Append(index).Append(") Tj ET\n");
+        for (var index = 0; index < 200; index++)
+        {
+            var x = index * 3;
+            content.Append(x).Append(" 0 m ").Append(x + 2).Append(" 4 l ").Append(x + 4).Append(" 0 l h f\n");
+        }
+        var source = $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}endstream\n%%EOF";
+        var pdf = Encoding.Latin1.GetBytes(source);
+
+        var first = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+        var second = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Single(first.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
+        Assert.DoesNotContain(first.Nodes, node => node.Label.StartsWith("T", StringComparison.Ordinal));
+        Assert.All(first.Paths!, path => Assert.True(path.IsFallback));
+        Assert.Equal(
+            System.Text.Json.JsonSerializer.Serialize(first),
+            System.Text.Json.JsonSerializer.Serialize(second));
+        Assert.True(first.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Vector_path_build_budget_bounds_many_closed_shapes_before_semantic_inference()
+    {
+        var content = new StringBuilder();
+        for (var index = 0; index < 900; index++)
+            content.Append("BT 1 0 0 1 ").Append(index).Append(" 200 Tm (L").Append(index).Append(") Tj ET\n");
+        for (var index = 0; index < 900; index++)
+            content.Append(index).Append(" 0 1 1 re S\n");
+        var source = $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}endstream\n%%EOF";
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(Encoding.Latin1.GetBytes(source)).VisualGraphs!).Value;
+
+        Assert.Single(graph.Diagnostics!, item => item.Code == "VisualInferenceBudgetExceeded");
+        Assert.Empty(graph.Nodes);
+        Assert.All(graph.Paths!, path => Assert.True(path.IsFallback));
+        Assert.DoesNotContain(graph.SourceItems!, item => item.Disposition == VisualDisposition.ProjectedNode);
+        Assert.True(graph.Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Precancelled_caller_token_is_not_converted_to_visual_timeout()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 20 >> stream\n0 0 10 10 re S\nendstream\n%%EOF");
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() => PdfTextExtractor.Extract(pdf, cancellationToken: cancellation.Token));
     }
 
     [Theory]
@@ -686,7 +764,7 @@ public sealed class PdfTextExtractorTests
     }
 
     [Fact]
-    public void Untagged_labelled_grid_with_marker_like_text_is_not_suppressed_as_a_table()
+    public void Untagged_labelled_grid_is_suppressed_as_a_table_without_marker_spoofing()
     {
         var pdf = Encoding.Latin1.GetBytes("""
             %PDF-1.4
@@ -714,9 +792,139 @@ public sealed class PdfTextExtractorTests
 
         var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
 
+        Assert.Empty(graph.Edges);
+        Assert.DoesNotContain(graph.Diagnostics!, item => item.Code == "VisualConnectorUnresolved");
+        Assert.Equal(8, graph.SourceItems!.Count(item =>
+            item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true));
+        Assert.All(graph.SourceItems!.Where(item => item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true), item =>
+            Assert.Contains("inferred from layout", item.Reason!, StringComparison.Ordinal));
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Untagged_irregular_lattice_is_not_suppressed_when_only_one_axis_is_regular()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 500 >> stream
+            BT 1 0 0 1 40 0 Tm (A) Tj ET
+            BT 1 0 0 1 140 0 Tm (B) Tj ET
+            BT 1 0 0 1 40 45 Tm (C) Tj ET
+            BT 1 0 0 1 140 45 Tm (D) Tj ET
+            0 0 m 300 0 l S
+            0 10 m 300 10 l S
+            0 90 m 300 90 l S
+            0 100 m 300 100 l S
+            0 0 m 0 100 l S
+            100 0 m 100 100 l S
+            200 0 m 200 100 l S
+            300 0 m 300 100 l S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
         Assert.NotEmpty(graph.Edges);
         Assert.DoesNotContain(graph.SourceItems!, item =>
             item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Three_pdf_arrows_keep_direction_and_yes_no_labels()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 900 >> stream
+            BT 1 0 0 1 10 120 Tm (START) Tj ET
+            BT 1 0 0 1 210 120 Tm (CHECK) Tj ET
+            BT 1 0 0 1 410 200 Tm (OK) Tj ET
+            BT 1 0 0 1 410 40 Tm (NG) Tj ET
+            BT 1 0 0 1 350 172 Tm (YES) Tj ET
+            BT 1 0 0 1 350 68 Tm (NO) Tj ET
+            0 100 100 50 re S
+            200 100 100 50 re S
+            400 180 100 50 re S
+            400 20 100 50 re S
+            100 125 m 200 125 l S
+            200 125 m 188 133 l 188 117 l h f
+            300 135 m 400 205 l S
+            400 205 m 384 204 l 392 190 l h f
+            300 115 m 400 45 l S
+            400 45 m 392 60 l 384 46 l h f
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+        var markdown = new DocRedock.Markdown.ReadableMarkdownSerializer().Serialize(
+            new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "review-pdf", DocumentFormatKind.Pdf,
+                [new DocumentPartition("page-1", 0,
+                [
+                    new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Body,
+                        new TextNodeContent("review"), Extensions: new Dictionary<string, System.Text.Json.JsonElement>
+                        {
+                            ["visual_graph"] = System.Text.Json.JsonSerializer.SerializeToElement(graph)
+                        })
+                ])]));
+
+        Assert.Equal(3, graph.Edges.Count);
+        Assert.All(graph.Edges, edge => Assert.Equal(VisualEdgeDirection.Directed, edge.EdgeDirection));
+        Assert.Contains(graph.Edges, edge => edge.Label == "YES");
+        Assert.Contains(graph.Edges, edge => edge.Label == "NO");
+        Assert.Equal(3, System.Text.RegularExpressions.Regex.Matches(markdown, " -->").Count);
+        Assert.DoesNotContain(" ---", markdown, StringComparison.Ordinal);
+        Assert.Contains("|YES|", markdown, StringComparison.Ordinal);
+        Assert.Contains("|NO|", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Standalone_labelled_triangle_remains_a_semantic_node()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 220 >> stream
+            BT 1 0 0 1 30 28 Tm (DECISION) Tj ET
+            0 0 m 100 0 l 50 80 l h S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Contains(graph.Nodes, node => node.Label == "DECISION");
+        Assert.Empty(graph.Edges);
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("arrowhead", StringComparison.OrdinalIgnoreCase) == true);
+        Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Connected_triangle_with_an_embedded_label_is_not_consumed_as_an_arrowhead()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 320 >> stream
+            BT 1 0 0 1 8 9 Tm (SOURCE) Tj ET
+            BT 1 0 0 1 147 9 Tm (A) Tj ET
+            0 0 40 30 re S
+            40 15 m 140 15 l S
+            140 15 m 156 7 l 156 23 l h S
+            endstream
+            %%EOF
+            """);
+
+        var graph = Assert.Single(PdfTextExtractor.Extract(pdf).VisualGraphs!).Value;
+
+        Assert.Contains(graph.Nodes, node => node.Label == "SOURCE");
+        Assert.Contains(graph.Nodes, node => node.Label == "A");
+        Assert.DoesNotContain(graph.SourceItems!, item =>
+            item.Reason?.Contains("arrowhead attached", StringComparison.OrdinalIgnoreCase) == true);
         Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
     }
 
@@ -785,10 +993,26 @@ public sealed class PdfTextExtractorTests
             new PdfExtractionOptions(VisualInferenceTimeout: TimeSpan.Zero));
         var graph = Assert.Single(result.VisualGraphs!).Value;
 
-        Assert.Equal(8, graph.Edges.Count);
+        Assert.Empty(graph.Edges);
         Assert.Contains(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
         Assert.DoesNotContain(graph.SourceItems!, item =>
             item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true);
+    }
+
+    [Fact]
+    public void Zero_visual_timeout_stops_inside_a_long_single_token()
+    {
+        var longComment = new string('x', 1_000_000);
+        var source = $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {longComment.Length + 20} >> stream\n%{longComment}\n0 0 10 10 re S\nendstream\n%%EOF";
+
+        var result = PdfTextExtractor.Extract(Encoding.Latin1.GetBytes(source),
+            new PdfExtractionOptions(VisualInferenceTimeout: TimeSpan.Zero));
+        var graph = Assert.Single(result.VisualGraphs!).Value;
+
+        Assert.Single(graph.Diagnostics!, item => item.Code == "VisualInferenceTimeout");
+        Assert.Empty(graph.Paths!);
+        Assert.Contains("semantic reconstruction unavailable", result.Text, StringComparison.Ordinal);
+        Assert.True(graph.Accounting.IsConsistent);
     }
 
     [Fact]

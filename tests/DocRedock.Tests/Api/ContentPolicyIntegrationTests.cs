@@ -77,6 +77,160 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
     }
 
     [Fact]
+    public async Task Xlsx_complete_policy_recounts_hidden_content_after_sheet_selection()
+    {
+        var source = Path.Combine(root, "selected-hidden.xlsx");
+        var markdown = Path.Combine(root, "selected-hidden.md");
+        WritePackage(source, XlsxParts());
+
+        var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, ContentPolicy: "complete", Sheets: ["Hidden"]));
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "HiddenContentIncluded");
+        Assert.Contains("1 hidden or metadata node", diagnostic.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(XlsxVeryHiddenSheetSecret, await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+        Assert.False(Directory.Exists(Path.Combine(root, "selected-hidden.assets")));
+    }
+
+    [Fact]
+    public async Task Xlsx_sheet_selection_excludes_formula_and_cache_diagnostics_from_other_sheets()
+    {
+        var source = Path.Combine(root, "selected-formulas.xlsx");
+        var markdown = Path.Combine(root, "selected-formulas.md");
+        var parts = XlsxParts().ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+        parts["xl/worksheets/sheet1.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1"><f>SUM(1,1)</f></c></row>
+            </sheetData></worksheet>
+            """;
+        parts["xl/worksheets/sheet2.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1"><f>WEBSERVICE("https://example.invalid")</f></c></row>
+            </sheetData></worksheet>
+            """;
+        WritePackage(source, parts);
+
+        var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, ContentPolicy: "visible", Sheets: ["Visible"]));
+
+        Assert.Contains(result.Diagnostics, item => item.Code == "XlsxFormulaSafe");
+        Assert.DoesNotContain(result.Diagnostics, item => item.Code == "XlsxFormulaDangerous");
+        Assert.Contains(result.Diagnostics, item =>
+            item.Code == "XlsxProjectionWarning" && item.Message.Contains("Visible!A1", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics, item => item.Message.Contains("Hidden!A1", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Xlsx_sheet_selection_uses_exact_sheet_names_without_prefix_alias_collisions()
+    {
+        var source = Path.Combine(root, "sheet-name-collisions.xlsx");
+        var parts = XlsxParts().ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal);
+        parts["xl/workbook.xml"] = """
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>
+              <sheet name="Foo" sheetId="1" r:id="rId1"/>
+              <sheet name="sheet-Foo" sheetId="2" r:id="rId2"/>
+              <sheet name="partition-Foo" sheetId="3" r:id="rId3"/>
+              <sheet name="Foo Bar" sheetId="4" r:id="rId4"/>
+              <sheet name="Foo_Bar" sheetId="5" r:id="rId5"/>
+            </sheets></workbook>
+            """;
+        parts["xl/_rels/workbook.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/>
+              <Relationship Id="rId2" Type="worksheet" Target="worksheets/sheet2.xml"/>
+              <Relationship Id="rId3" Type="worksheet" Target="worksheets/sheet3.xml"/>
+              <Relationship Id="rId4" Type="worksheet" Target="worksheets/sheet4.xml"/>
+              <Relationship Id="rId5" Type="worksheet" Target="worksheets/sheet5.xml"/>
+            </Relationships>
+            """;
+        parts["xl/worksheets/sheet1.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1"><f>WEBSERVICE("https://example.invalid")</f></c>
+              <c r="B1" t="inlineStr"><is><t>EXCLUDED_FOO</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        parts["xl/worksheets/sheet2.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1"><f>SUM(1,1)</f><v>2</v></c>
+              <c r="B1" t="inlineStr"><is><t>SELECTED_SHEET_FOO</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        parts["xl/worksheets/sheet3.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1" t="inlineStr"><is><t>SELECTED_PARTITION_FOO</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        parts["xl/worksheets/sheet4.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1" t="inlineStr"><is><t>SELECTED_SPACE_NAME</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        parts["xl/worksheets/sheet5.xml"] = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+              <row r="1"><c r="A1" t="inlineStr"><is><t>EXCLUDED_UNDERSCORE_NAME</t></is></c></row>
+            </sheetData></worksheet>
+            """;
+        WritePackage(source, parts);
+
+        var service = new DocumentService();
+        var firstPath = Path.Combine(root, "sheet-prefix-selected.md");
+        var first = await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, firstPath, Sheets: ["sheet-Foo"]));
+        var firstMarkdown = await File.ReadAllTextAsync(firstPath);
+
+        Assert.Contains("SELECTED_SHEET_FOO", firstMarkdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("EXCLUDED_FOO", firstMarkdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(first.Diagnostics, item => item.Code == "XlsxFormulaDangerous");
+
+        var secondPath = Path.Combine(root, "partition-prefix-selected.md");
+        await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, secondPath, Sheets: ["partition-Foo"]));
+        Assert.Contains("SELECTED_PARTITION_FOO", await File.ReadAllTextAsync(secondPath), StringComparison.Ordinal);
+
+        var thirdPath = Path.Combine(root, "sheet-space-selected.md");
+        await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, thirdPath, Sheets: ["Foo Bar"]));
+        var thirdMarkdown = await File.ReadAllTextAsync(thirdPath);
+        Assert.Contains("SELECTED_SPACE_NAME", thirdMarkdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("EXCLUDED_UNDERSCORE_NAME", thirdMarkdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Xlsx_sheet_selection_excludes_other_sheet_images_before_ocr_and_diagnostics()
+    {
+        var source = Path.Combine(root, "selected-image-scope.xlsx");
+        var markdown = Path.Combine(root, "selected-image-scope.md");
+        WritePackage(source, XlsxParts());
+        var ocr = new HiddenImageOcrEngine();
+
+        var result = await new DocumentService(ocr).ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, EnableOcr: true, Sheets: ["Visible"]));
+
+        Assert.Equal(0, ocr.Calls);
+        Assert.DoesNotContain(result.Diagnostics, item => item.Code == "ImageFormatNotDisplayable");
+        Assert.False(Directory.Exists(Path.Combine(root, "selected-image-scope.assets")));
+    }
+
+    [Fact]
+    public async Task Xlsx_sheet_selection_keeps_selected_sheet_image_for_ocr_and_output()
+    {
+        var source = Path.Combine(root, "selected-image-kept.xlsx");
+        var markdown = Path.Combine(root, "selected-image-kept.md");
+        WritePackage(source, XlsxParts());
+        var ocr = new HiddenImageOcrEngine();
+
+        _ = await new DocumentService(ocr).ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, EnableOcr: true, ContentPolicy: "complete", Sheets: ["VeryHidden"]));
+
+        Assert.Equal(1, ocr.Calls);
+        Assert.Contains(PptxHiddenImageOcr, await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+        var assets = Path.Combine(root, "selected-image-kept.assets");
+        Assert.True(Directory.Exists(assets));
+        Assert.Single(Directory.EnumerateFiles(assets));
+    }
+
+    [Fact]
     public async Task Pptx_hidden_slide_and_notes_obey_readable_content_policy()
     {
         var source = Path.Combine(root, "hidden.pptx");
@@ -227,6 +381,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
     {
         ["[Content_Types].xml"] = """
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Default Extension="png" ContentType="image/png"/>
               <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
             </Types>
             """,
@@ -268,10 +423,32 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
             </sheetData></worksheet>
             """,
         ["xl/worksheets/sheet3.xml"] = $$"""
-            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+                       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData>
               <row r="1"><c r="A1" t="inlineStr"><is><t>{{XlsxVeryHiddenSheetSecret}}</t></is></c></row>
-            </sheetData></worksheet>
+            </sheetData><drawing r:id="rDrawing"/></worksheet>
             """,
+        ["xl/worksheets/_rels/sheet3.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing3.xml"/>
+            </Relationships>
+            """,
+        ["xl/drawings/drawing3.xml"] = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+                      xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                      xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>1</xdr:row></xdr:from>
+                <xdr:ext cx="1000" cy="1000"/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id="1" name="very-hidden-image"/></xdr:nvPicPr>
+                <xdr:blipFill><a:blip r:embed="rImage"/></xdr:blipFill><xdr:spPr/></xdr:pic><xdr:clientData/>
+              </xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """,
+        ["xl/drawings/_rels/drawing3.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/very-hidden.png"/>
+            </Relationships>
+            """,
+        ["xl/media/very-hidden.png"] = "VERY_HIDDEN_IMAGE_PAYLOAD",
     };
 
     private static IReadOnlyDictionary<string, string> PptxParts() => new Dictionary<string, string>
@@ -356,18 +533,23 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
 
     private sealed class HiddenImageOcrEngine : IOcrEngine
     {
+        public int Calls { get; private set; }
+
         public ProviderDescriptor Descriptor { get; } = new("test.hidden-image-ocr", new Version(1, 0), 1,
             new HashSet<string> { "ocr.text" }, "MIT", "built-in", true);
 
         public ValueTask<OcrAttemptResult> RecognizeAsync(
             OcrInput input,
             OcrOptions options,
-            CancellationToken cancellationToken) =>
-            ValueTask.FromResult(new OcrAttemptResult(
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return ValueTask.FromResult(new OcrAttemptResult(
                 OcrProcessingStatus.Completed,
                 new OcrResult(PptxHiddenImageOcr,
                     [new OcrTextRegion(PptxHiddenImageOcr, new Geometry("image-pixels", 0, 0, 1, 1), 1)]),
                 []));
+        }
     }
 
     public void Dispose()

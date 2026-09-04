@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Optional, Sequence
 import zipfile
 
-EVIDENCE_SCHEMA_VERSION = "1.1"
+EVIDENCE_SCHEMA_VERSION = "1.2"
 FIXED_SEED = 20260830
 FORMATS = ("docx", "pptx", "xlsx", "pdf")
 REQUIRED_PERTURBATIONS = frozenset({
@@ -643,6 +643,7 @@ def evaluate_cli_result(spec: PerturbationSpec,fixture: Path,mode: str,result: C
             "exit_code":result.exit_code,"expected_relations":[list(x) for x in expected],
             "observed_relations":[list(x) for x in observed],"diagnostic_codes":codes,
             "unresolved_expected":unresolved,"diagnosed_unresolved":min(unresolved,diagnosed),
+            "projected_nodes":len(labels),"duplicate_nodes":max(0,len(labels)-len(set(labels))),
             "execution":"docredock-cli-export","status":"passed" if passed else "failed"}
     return case,record
 
@@ -703,6 +704,23 @@ def tier_gate(tier:str,values:Mapping[str,object])->dict[str,object]:
     return {"passed":passed,"requirement":req}
 
 
+def format_gate(format_name:str,cases:Iterable[RelationCase])->dict[str,object]:
+    selected=tuple(cases)
+    stable=metrics(case for case in selected if case.tier in {"A","B"})
+    ambiguous=metrics(case for case in selected if case.tier=="C")
+    recall=float(stable["edge_recall"]["value"])
+    expected_edges=int(stable["counts"]["expected_inferred"])
+    duplicate_nodes=int(stable["counts"]["duplicate_nodes"])
+    false_edge_rate=float(ambiguous["false_edge_rate"]["value"])
+    diagnosed_rate=float(ambiguous["unresolved_but_diagnosed_rate"]["value"])
+    silent_loss_rate=float(ambiguous["silent_loss_rate"]["value"])
+    passed=(expected_edges>0 and recall>=.9 and duplicate_nodes==0 and
+            false_edge_rate==0 and diagnosed_rate==1 and silent_loss_rate==0)
+    return {"passed":passed,
+            "requirement":"Tier A/B edge recall>=90% and duplicate nodes=0; Tier C false edges=0%, unresolved diagnosed=100%, and silent loss=0%",
+            "format":format_name}
+
+
 def build_evidence(*,tag:str,version:str,cases:Sequence[RelationCase],
                    corpus:Sequence[PerturbationSpec]|None=None)->dict[str,object]:
     corpus=tuple(corpus if corpus is not None else generate_perturbation_corpus()); validate_corpus(corpus)
@@ -712,7 +730,8 @@ def build_evidence(*,tag:str,version:str,cases:Sequence[RelationCase],
         tiers[tier]={"case_count":len(selected),"metrics":values,"gate":tier_gate(tier,values)}
     formats={}
     for name in FORMATS:
-        selected=[c for c in cases if c.format==name]; formats[name]={"case_count":len(selected),"metrics":metrics(selected)}
+        selected=[c for c in cases if c.format==name]; values=metrics(selected)
+        formats[name]={"case_count":len(selected),"metrics":values,"gate":format_gate(name,selected)}
     return {"tag":tag,"version":version,"schema_version":EVIDENCE_SCHEMA_VERSION,"seed":FIXED_SEED,
       "metrics":metrics(cases),"tiers":tiers,"formats":formats,
       "execution":{"mode":"docredock-cli-export","executed_case_count":len(cases),"executed_case_ids":[c.case_id for c in cases]},

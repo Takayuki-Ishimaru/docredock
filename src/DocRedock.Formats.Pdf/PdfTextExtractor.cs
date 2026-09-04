@@ -131,6 +131,7 @@ public static class PdfTextExtractor
             VisualGraph? visualGraph = vector
                 ? BuildVisualGraph(pageNumber, stream, regions, diagnostics, options.EffectiveVisualInferenceTimeout, cancellationToken)
                 : null;
+            cancellationToken.ThrowIfCancellationRequested();
             if (vector && visualGraph is not null)
             {
                 var accounting = visualGraph.Accounting;
@@ -173,9 +174,11 @@ public static class PdfTextExtractor
         var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
         var arrowheadMatches = new List<(string PathId, string EdgeId, VisualPathPoint Tip, bool AtEnd)>();
         var suppressedGridPathIds = new HashSet<string>(StringComparer.Ordinal);
+        var inferredGridPathIds = new HashSet<string>(StringComparer.Ordinal);
         var triangleCandidates = new List<(IReadOnlyList<VisualPathPoint> Points, Geometry Geometry, string PathId)>();
         var unlabelledClosedCandidates = new List<(Geometry Geometry, string PathId)>();
         var provisionalUnlabelledNodeIds = new HashSet<string>(StringComparer.Ordinal);
+        var provisionalTriangleNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var assignedLabelRegions = new HashSet<int>();
         var duplicatePathIds = new HashSet<string>(StringComparer.Ordinal);
         var arrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
@@ -184,9 +187,44 @@ public static class PdfTextExtractor
         var closed = false;
         var curveSeen = false;
         var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString())]);
+        using var visualInferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (inferenceTimeout is { } visualInferenceTimeout)
+        {
+            if (visualInferenceTimeout <= TimeSpan.Zero) visualInferenceCts.Cancel();
+            else visualInferenceCts.CancelAfter(visualInferenceTimeout);
+        }
+        var visualInferenceToken = visualInferenceCts.Token;
+        const long maxVisualInferenceWorkItems = 250_000;
+        long visualInferenceWorkItems = 0;
+        (string SourceObjectType, string Message, string Fallback)? pendingVisualInferenceBudget = null;
 
+        bool TrySpendVisualInference(long amount, string sourceObjectType, string message, string fallback)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (visualInferenceToken.IsCancellationRequested) return false;
+            if (amount < 0 || visualInferenceWorkItems > maxVisualInferenceWorkItems - amount)
+            {
+                pendingVisualInferenceBudget ??= (sourceObjectType, message, fallback);
+                return false;
+            }
+            visualInferenceWorkItems += amount;
+            return true;
+        }
+
+        bool TrySpendVisualInferenceProduct(long left, long right, string sourceObjectType, string message, string fallback)
+        {
+            if (left < 0 || right < 0 || left > 0 && right > maxVisualInferenceWorkItems / left)
+                return TrySpendVisualInference(maxVisualInferenceWorkItems + 1, sourceObjectType, message, fallback);
+            return TrySpendVisualInference(left * right, sourceObjectType, message, fallback);
+        }
+
+        const string pathBuildBudgetMessage = "PDF vector-path analysis exceeded its deterministic work budget; parsed paths remain fallback geometry.";
+        const string pathBuildBudgetFallback = "remaining vector-path analysis skipped; parsed paths retained";
         foreach (var token in Tokens(content))
         {
+            if (visualInferenceToken.IsCancellationRequested || pendingVisualInferenceBudget is not null ||
+                !TrySpendVisualInference(1, "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback))
+                break;
             if (double.TryParse(token, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number))
             {
                 operands.Add(number);
@@ -269,8 +307,39 @@ public static class PdfTextExtractor
                 default: operands.Clear(); break;
             }
         }
-        foreach (var subpath in pendingClosedSubpaths)
-            RetainClosedSubpath(subpath);
+        if (!visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null)
+            foreach (var subpath in pendingClosedSubpaths)
+                RetainClosedSubpath(subpath);
+        var pathBuildCompleted = !visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null;
+        var preInferenceNodes = new List<VisualNode>(nodes);
+        var preInferenceEdges = new List<VisualEdge>(edges);
+        var preInferencePaths = new List<VisualPath>(paths);
+        var preInferenceDiagnostics = new List<string>(diagnostics);
+        var preInferenceGraphDiagnostics = new List<VisualDiagnostic>(graphDiagnostics);
+        var preInferenceAssignedLabelRegions = new HashSet<int>(assignedLabelRegions);
+        var preInferenceProvisionalUnlabelledNodeIds = new HashSet<string>(provisionalUnlabelledNodeIds, StringComparer.Ordinal);
+        var preInferenceProvisionalTriangleNodeIds = new HashSet<string>(provisionalTriangleNodeIds, StringComparer.Ordinal);
+        var preInferenceArrowheadMatches = new List<(string PathId, string EdgeId, VisualPathPoint Tip, bool AtEnd)>(arrowheadMatches);
+        var preInferenceArrowheadPathIds = new HashSet<string>(arrowheadPathIds, StringComparer.Ordinal);
+        var preInferenceMergedArrowheadPathIds = new HashSet<string>(mergedArrowheadPathIds, StringComparer.Ordinal);
+        var preInferenceUnresolvedPathIds = new HashSet<string>(unresolvedPathIds, StringComparer.Ordinal);
+        var semanticInferenceRolledBack = false;
+        List<VisualPath>? preGridPaths = null;
+        List<VisualEdge>? preGridEdges = null;
+        List<string>? preGridDiagnostics = null;
+        List<VisualDiagnostic>? preGridGraphDiagnostics = null;
+        HashSet<string>? preGridSuppressedPathIds = null;
+        HashSet<string>? preGridInferredPathIds = null;
+        void ReportPendingVisualInferenceBudget()
+        {
+            if (pendingVisualInferenceBudget is not { } pending) return;
+            pendingVisualInferenceBudget = null;
+            ReportVisualInferenceBudgetExceeded(pending.SourceObjectType, pending.Message, pending.Fallback);
+        }
+
+        ReportPendingVisualInferenceBudget();
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+
         var labelledAreas = nodes.Where(node => node.Geometry is not null)
             .Select(node => Math.Abs(node.Geometry!.Width * node.Geometry.Height))
             .Where(area => area > 0).OrderBy(area => area).ToArray();
@@ -283,73 +352,200 @@ public static class PdfTextExtractor
         // PDF user space can be scaled by a CTM. Classify small unlabelled closed paths
         // relative to the labelled-node population and page extent, never by a fixed size.
         var decorativeAreaThreshold = Math.Max(medianLabelledArea * .05, pageDiagonalSquared * .00005);
-        foreach (var candidate in unlabelledClosedCandidates)
+        const string triangleBudgetMessage = "PDF triangle and arrowhead inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
+        const string triangleBudgetFallback = "triangle and arrowhead inference skipped; vector paths retained";
+        var triangleEdgeMetrics = new List<(VisualEdge Edge, double Length)>();
+        var triangleInferenceReady = allowGeometryInference && !visualInferenceToken.IsCancellationRequested &&
+            TrySpendVisualInference((long)unlabelledClosedCandidates.Count + triangleCandidates.Count,
+                "triangle", triangleBudgetMessage, triangleBudgetFallback);
+        if (triangleInferenceReady && triangleCandidates.Count > 0)
         {
-            var area = Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height);
-            if (area <= decorativeAreaThreshold) continue;
-            var node = new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", $"Vector node {nodes.Count + 1}",
-                VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor);
-            nodes.Add(node);
-            provisionalUnlabelledNodeIds.Add(node.Id);
-        }
-        foreach (var candidate in triangleCandidates)
-        {
-            var tip = ArrowTip(candidate.Points);
-            var nearest = edges.Where(edge => edge.Path is { Count: >= 2 })
-                .Select(edge => (Edge: edge,
-                    EndpointDistance: Math.Min(Distance(edge.Path![0], tip), Distance(edge.Path[^1], tip)),
-                    Length: edge.Path.Zip(edge.Path.Skip(1), Distance).Sum()))
-                .OrderBy(item => item.EndpointDistance).FirstOrDefault();
-            var markerSize = Math.Sqrt(candidate.Geometry.Width * candidate.Geometry.Width +
-                candidate.Geometry.Height * candidate.Geometry.Height);
-            var isArrowhead = nearest.Edge is not null && nearest.Length > 0 &&
-                markerSize <= nearest.Length * .30 &&
-                nearest.EndpointDistance <= Math.Max(markerSize * 1.5, nearest.Length * .08);
-            var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
-            if (isArrowhead && nearest.Edge is { Path: { Count: >= 2 } nearestPath } arrowheadEdge)
+            foreach (var edge in edges.Where(edge => edge.Path is { Count: >= 2 }))
             {
-                var atEnd = Distance(nearestPath[^1], tip) <= Distance(nearestPath[0], tip);
-                arrowheadMatches.Add((candidate.PathId, arrowheadEdge.Id, tip, atEnd));
-                arrowheadPathIds.Add(candidate.PathId);
-                if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .3, IsFallback = true };
+                var edgePath = edge.Path!;
+                if (!TrySpendVisualInference(edgePath.Count, "triangle", triangleBudgetMessage, triangleBudgetFallback))
+                {
+                    triangleInferenceReady = false;
+                    break;
+                }
+                var length = 0d;
+                for (var index = 1; index < edgePath.Count; index++)
+                    length += Distance(edgePath[index - 1], edgePath[index]);
+                triangleEdgeMetrics.Add((edge, length));
             }
-            else if (Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height) > decorativeAreaThreshold)
+        }
+        if (triangleInferenceReady)
+        {
+            var sortFactor = regions.Count <= 1 ? 1 : 1 + (long)Math.Ceiling(Math.Log2(regions.Count));
+            foreach (var candidate in triangleCandidates)
             {
+                if (!TrySpendVisualInferenceProduct(regions.Count, sortFactor,
+                        "triangle", triangleBudgetMessage, triangleBudgetFallback) ||
+                    !TrySpendVisualInferenceProduct(candidate.Points.Count, triangleEdgeMetrics.Count,
+                        "triangle", triangleBudgetMessage, triangleBudgetFallback))
+                {
+                    triangleInferenceReady = false;
+                    break;
+                }
+            }
+        }
+        if (!triangleInferenceReady)
+        {
+            ReportPendingVisualInferenceBudget();
+            if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+            MarkTrianglePathsAsFallback();
+        }
+        else
+        {
+            foreach (var candidate in unlabelledClosedCandidates)
+            {
+                if (visualInferenceToken.IsCancellationRequested) break;
+                var area = Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height);
+                if (area <= decorativeAreaThreshold) continue;
                 var node = new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", $"Vector node {nodes.Count + 1}",
                     VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor);
                 nodes.Add(node);
                 provisionalUnlabelledNodeIds.Add(node.Id);
-                if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .75, IsFallback = false };
             }
-            else if (pathIndex >= 0)
+            if (!visualInferenceToken.IsCancellationRequested)
             {
-                paths[pathIndex] = paths[pathIndex] with { Confidence = .35, IsFallback = true };
+                foreach (var candidate in triangleCandidates)
+                {
+                    if (visualInferenceToken.IsCancellationRequested) break;
+                    var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
+                    var labelCandidates = regions.Select((region, index) =>
+                            (region, index, score: LabelScore(region.BoundingBox, candidate.Geometry)))
+                        .Where(item => item.score > 0 && !assignedLabelRegions.Contains(item.index))
+                        .OrderByDescending(item => item.score).ThenBy(item => item.region.ReadingOrder).ToArray();
+                    var embeddedLabels = labelCandidates.Where(item =>
+                    {
+                        var centerX = item.region.BoundingBox.X + item.region.BoundingBox.Width / 2;
+                        var centerY = item.region.BoundingBox.Y + item.region.BoundingBox.Height / 2;
+                        return centerX >= candidate.Geometry.X && centerX <= candidate.Geometry.X + candidate.Geometry.Width &&
+                               centerY >= candidate.Geometry.Y && centerY <= candidate.Geometry.Y + candidate.Geometry.Height;
+                    }).ToArray();
+                    if (embeddedLabels.Length > 0)
+                    {
+                        var ambiguousEmbeddedLabel = embeddedLabels.Length > 1 &&
+                            embeddedLabels[0].score - embeddedLabels[1].score < 0.15;
+                        if (ambiguousEmbeddedLabel)
+                        {
+                            if (pathIndex >= 0)
+                            {
+                                unresolvedPathIds.Add(paths[pathIndex].Id);
+                                paths[pathIndex] = paths[pathIndex] with { IsFallback = true };
+                            }
+                            graphDiagnostics.Add(Diag("VisualNodeLabelMissing",
+                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2));
+                            continue;
+                        }
+                        var embeddedLabel = embeddedLabels[0];
+                        assignedLabelRegions.Add(embeddedLabel.index);
+                        nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", embeddedLabel.region.Text,
+                            VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor));
+                        if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .9, IsFallback = false };
+                        continue;
+                    }
+                    VisualEdge? nearestEdge = null;
+                    var nearestTip = candidate.Points[0];
+                    var nearestEndpointDistance = double.PositiveInfinity;
+                    var nearestLength = 0d;
+                    foreach (var edgeMetric in triangleEdgeMetrics)
+                    foreach (var candidateTip in candidate.Points.Distinct())
+                    {
+                        var edgePath = edgeMetric.Edge.Path!;
+                        var endpointDistance = Math.Min(Distance(edgePath[0], candidateTip), Distance(edgePath[^1], candidateTip));
+                        if (endpointDistance >= nearestEndpointDistance) continue;
+                        nearestEdge = edgeMetric.Edge;
+                        nearestTip = candidateTip;
+                        nearestEndpointDistance = endpointDistance;
+                        nearestLength = edgeMetric.Length;
+                    }
+                    var markerSize = Math.Sqrt(candidate.Geometry.Width * candidate.Geometry.Width +
+                        candidate.Geometry.Height * candidate.Geometry.Height);
+                    var isArrowhead = nearestEdge is not null && nearestLength > 0 &&
+                        markerSize <= nearestLength * .30 &&
+                        nearestEndpointDistance <= Math.Max(markerSize * 1.5, nearestLength * .08);
+                    if (isArrowhead && nearestEdge is { Path: { Count: >= 2 } nearestPath } arrowheadEdge)
+                    {
+                        var atEnd = Distance(nearestPath[^1], nearestTip) <= Distance(nearestPath[0], nearestTip);
+                        arrowheadMatches.Add((candidate.PathId, arrowheadEdge.Id, nearestTip, atEnd));
+                        arrowheadPathIds.Add(candidate.PathId);
+                        if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .3, IsFallback = true };
+                    }
+                    else
+                    {
+                        // Only a triangle that actually matched a shaft is an arrowhead. If no shaft
+                        // qualifies, give the shape the same label-assignment opportunity as every
+                        // other closed node; otherwise a legitimate labelled decision triangle loses
+                        // its text merely because it shares arrowhead geometry.
+                        var ambiguousLabel = labelCandidates.Length > 1 && labelCandidates[0].score - labelCandidates[1].score < 0.15;
+                        if (ambiguousLabel)
+                        {
+                            if (pathIndex >= 0)
+                            {
+                                unresolvedPathIds.Add(paths[pathIndex].Id);
+                                paths[pathIndex] = paths[pathIndex] with { IsFallback = true };
+                            }
+                            graphDiagnostics.Add(Diag("VisualNodeLabelMissing",
+                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2));
+                            continue;
+                        }
+                        if (labelCandidates.Length > 0)
+                        {
+                            var label = labelCandidates[0];
+                            assignedLabelRegions.Add(label.index);
+                            nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label.region.Text,
+                                VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor));
+                            if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .9, IsFallback = false };
+                            continue;
+                        }
+                        if (Math.Abs(candidate.Geometry.Width * candidate.Geometry.Height) <= decorativeAreaThreshold)
+                        {
+                            if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .35, IsFallback = true };
+                            continue;
+                        }
+                        var node = new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", $"Vector node {nodes.Count + 1}",
+                            VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor);
+                        nodes.Add(node);
+                        provisionalUnlabelledNodeIds.Add(node.Id);
+                        provisionalTriangleNodeIds.Add(node.Id);
+                        if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .75, IsFallback = false };
+                    }
+                }
             }
+            if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
         }
 
         // Regular, dense orthogonal grids are table borders, chart grids, or page layout,
         // not diagram connectors. Suppress them before label assignment and endpoint
         // inference so they cannot interrupt reading order or produce connector warnings.
-        List<VisualPath>? preGridPaths = null;
-        List<VisualEdge>? preGridEdges = null;
-        List<string>? preGridDiagnostics = null;
-        List<VisualDiagnostic>? preGridGraphDiagnostics = null;
-        HashSet<string>? preGridSuppressedPathIds = null;
-        using var visualInferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (inferenceTimeout is { } visualInferenceTimeout)
-        {
-            if (visualInferenceTimeout <= TimeSpan.Zero) visualInferenceCts.Cancel();
-            else visualInferenceCts.CancelAfter(visualInferenceTimeout);
-        }
-        var visualInferenceToken = visualInferenceCts.Token;
         SuppressTableGridEdges();
+        ReportPendingVisualInferenceBudget();
         cancellationToken.ThrowIfCancellationRequested();
         if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
 
+        const string edgeLabelBudgetMessage = "PDF edge-label inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
+        long edgePathPointCount = 0;
+        foreach (var edge in edges.Where(edge => edge.Path is { Count: >= 2 }))
+        {
+            if (edgePathPointCount > maxVisualInferenceWorkItems - edge.Path!.Count)
+            {
+                edgePathPointCount = maxVisualInferenceWorkItems + 1;
+                break;
+            }
+            edgePathPointCount += edge.Path.Count;
+        }
+        var edgeLabelInferenceReady = allowGeometryInference &&
+            TrySpendVisualInferenceProduct(regions.Count, edgePathPointCount,
+                "edge-label", edgeLabelBudgetMessage, "edge-label assignment skipped; vector paths retained");
+        ReportPendingVisualInferenceBudget();
         var edgeLabelChoices = new List<EdgeLabelCandidate>();
         var labelRegions = new Dictionary<string, int>(StringComparer.Ordinal);
+        if (edgeLabelInferenceReady)
         foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
         {
+            if (visualInferenceToken.IsCancellationRequested) break;
             if (assignedLabelRegions.Contains(regionIndex) || string.IsNullOrWhiteSpace(region.Text)) continue;
             var labelId = "region:" + regionIndex.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var bestScore = double.NegativeInfinity;
@@ -382,19 +578,23 @@ public static class PdfTextExtractor
             edgeLabelChoices.Add(new EdgeLabelCandidate(labelId, bestEdgeId, bestScore));
             labelRegions[labelId] = regionIndex;
         }
-        var deferredLabels = EdgeLabelAssigner.Assign(edgeLabelChoices);
-        foreach (var (labelId, edgeId) in deferredLabels)
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+        if (allowGeometryInference && edgeLabelInferenceReady)
         {
-            if (!labelRegions.TryGetValue(labelId, out var regionIndex)) continue;
-            var edgeIndex = edges.FindIndex(edge => edge.Id == edgeId);
-            if (edgeIndex < 0) continue;
-            edges[edgeIndex] = edges[edgeIndex] with { Label = regions[regionIndex].Text };
-            assignedLabelRegions.Add(regionIndex);
-        }
-        foreach (var labelId in labelRegions.Keys.Where(labelId => !deferredLabels.ContainsKey(labelId)))
-        {
-            diagnostics.Add($"VisualEdgeLabelUnresolved: PDF page {pageNumber} text remained independent.");
-            graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2));
+            var deferredLabels = EdgeLabelAssigner.Assign(edgeLabelChoices);
+            foreach (var (labelId, edgeId) in deferredLabels)
+            {
+                if (!labelRegions.TryGetValue(labelId, out var regionIndex)) continue;
+                var edgeIndex = edges.FindIndex(edge => edge.Id == edgeId);
+                if (edgeIndex < 0) continue;
+                edges[edgeIndex] = edges[edgeIndex] with { Label = regions[regionIndex].Text };
+                assignedLabelRegions.Add(regionIndex);
+            }
+            foreach (var labelId in labelRegions.Keys.Where(labelId => !deferredLabels.ContainsKey(labelId)))
+            {
+                diagnostics.Add($"VisualEdgeLabelUnresolved: PDF page {pageNumber} text remained independent.");
+                graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2));
+            }
         }
 
         // Resolve all endpoints together after every path has been visited. This keeps CTM
@@ -498,6 +698,7 @@ public static class PdfTextExtractor
         }
         // A small closed triangle touching a shaft is an arrowhead, not a node.
         // Promote the shaft to directed only when that evidence is unambiguous.
+        if (allowGeometryInference)
         foreach (var arrowhead in arrowheadMatches)
         {
             var edgeIndex = edges.FindIndex(edge => edge.Id == arrowhead.EdgeId);
@@ -517,8 +718,15 @@ public static class PdfTextExtractor
         }
         // Merge an open, two-segment V adjacent to a shaft into one directed edge.
         // A standalone V has no qualifying shaft and remains a fallback/decorative path.
+        const string arrowDecorationBudgetMessage = "PDF arrow-decoration inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
+        var arrowDecorationInferenceReady = allowGeometryInference &&
+            TrySpendVisualInferenceProduct(edges.Count, edgePathPointCount,
+                "arrow-decoration", arrowDecorationBudgetMessage, "arrow-decoration inference skipped; vector paths retained");
+        ReportPendingVisualInferenceBudget();
+        if (arrowDecorationInferenceReady)
         for (var shaftIndex = 0; shaftIndex < edges.Count; shaftIndex++)
         {
+            if (visualInferenceToken.IsCancellationRequested) break;
             var shaft = edges[shaftIndex];
             if (shaft.Path is not { Count: >= 2 }) continue;
             var shaftLength = shaft.Path.Zip(shaft.Path.Skip(1), Distance).Sum();
@@ -550,8 +758,9 @@ public static class PdfTextExtractor
                 break;
             }
         }
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
 
-        foreach (var edge in edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null &&
+        foreach (var edge in edges.Where(edge => allowGeometryInference && edge.SourceId is not null && edge.TargetId is not null &&
                      edge.EdgeDirection != VisualEdgeDirection.Directed))
         {
             var message = $"Edge '{edge.Id}' direction could not be determined; retained as undirected.";
@@ -567,72 +776,128 @@ public static class PdfTextExtractor
         // relation. All others remain paths so decorative marks cannot leak into Mermaid.
         var connectedNodeIds = edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null)
             .SelectMany(edge => new[] { edge.SourceId!, edge.TargetId! }).ToHashSet(StringComparer.Ordinal);
-        foreach (var node in nodes.Where(node => provisionalUnlabelledNodeIds.Contains(node.Id) && !connectedNodeIds.Contains(node.Id)).ToArray())
+        var firstPathIndexByGeometry = new Dictionary<Geometry, int>();
+        for (var pathIndex = 0; pathIndex < paths.Count; pathIndex++)
+            if (paths[pathIndex].Geometry is { } geometry) firstPathIndexByGeometry.TryAdd(geometry, pathIndex);
+        foreach (var node in nodes.Where(node => provisionalUnlabelledNodeIds.Contains(node.Id) &&
+                     !connectedNodeIds.Contains(node.Id) &&
+                     !(provisionalTriangleNodeIds.Contains(node.Id) && connectedNodeIds.Count == 0 && nodes.Count == 1)).ToArray())
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (visualInferenceToken.IsCancellationRequested) break;
             nodes.Remove(node);
-            var pathIndex = paths.FindIndex(path => path.Geometry == node.Geometry);
-            if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { IsFallback = true, Confidence = .35 };
+            if (node.Geometry is { } geometry && firstPathIndexByGeometry.TryGetValue(geometry, out var pathIndex))
+                paths[pathIndex] = paths[pathIndex] with { IsFallback = true, Confidence = .35 };
         }
-        var sourceItems = new List<VisualSourceItem>();
-        foreach (var path in paths)
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+
+        List<VisualSourceItem> BuildSourceItems()
         {
-            var edge = edges.FirstOrDefault(candidate => candidate.Path is not null && ReferenceEquals(candidate.Path, path.Points));
-            var node = nodes.FirstOrDefault(candidate => candidate.Geometry == path.Geometry);
-            var itemId = path.Id;
-            if (duplicatePathIds.Contains(path.Id))
+            var result = new List<VisualSourceItem>(paths.Count);
+            var edgeByPath = new Dictionary<IReadOnlyList<VisualPathPoint>, VisualEdge>(ReferenceEqualityComparer.Instance);
+            var pathByPoints = new Dictionary<IReadOnlyList<VisualPathPoint>, VisualPath>(ReferenceEqualityComparer.Instance);
+            var nodeByGeometry = new Dictionary<Geometry, VisualNode>();
+            var canonicalPathByGeometry = new Dictionary<Geometry, VisualPath>();
+            var edgeById = edges.ToDictionary(edge => edge.Id, StringComparer.Ordinal);
+            var arrowEdgeIdByPathId = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var edge in edges)
+                if (edge.Path is { } edgePath) edgeByPath.TryAdd(edgePath, edge);
+            foreach (var path in paths)
             {
-                var canonical = paths.FirstOrDefault(candidate => candidate.Id != path.Id && candidate.Geometry == path.Geometry);
-                sourceItems.Add(canonical is not null
-                    ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
-                        DuplicateOfSourceItemId: canonical.Id, Reason: "duplicate closed path canonicalized", SourceAnchor: path.SourceAnchor)
-                    : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
-                        FallbackPathId: path.Id, Reason: "duplicate closed path retained without canonical reference", SourceAnchor: path.SourceAnchor));
+                if (path.Points is { } points) pathByPoints.TryAdd(points, path);
+                if (path.Geometry is { } geometry) canonicalPathByGeometry.TryAdd(geometry, path);
             }
-            else if (arrowheadPathIds.Contains(path.Id) || mergedArrowheadPathIds.Contains(path.Id))
+            foreach (var node in nodes)
+                if (node.Geometry is { } geometry) nodeByGeometry.TryAdd(geometry, node);
+            foreach (var match in arrowheadMatches)
+                arrowEdgeIdByPathId.TryAdd(match.PathId, match.EdgeId);
+            var fallbackDirectedEdge = edges.FirstOrDefault(candidate => candidate.EdgeDirection == VisualEdgeDirection.Directed &&
+                candidate.Evidence?.ArrowheadEvidence is "start" or "end");
+
+            foreach (var path in paths)
             {
-                var relatedEdgeId = arrowheadMatches.Where(match => match.PathId == path.Id)
-                    .Select(match => match.EdgeId).FirstOrDefault();
-                var related = relatedEdgeId is not null
-                    ? edges.FirstOrDefault(candidate => candidate.Id == relatedEdgeId)
-                    : edges.FirstOrDefault(candidate => candidate.EdgeDirection == VisualEdgeDirection.Directed &&
-                        candidate.Evidence?.ArrowheadEvidence is "start" or "end");
-                var relatedPath = paths.FirstOrDefault(candidate => related?.Path is not null && ReferenceEquals(candidate.Points, related.Path));
-                sourceItems.Add(relatedPath is not null
-                    ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
-                        DuplicateOfSourceItemId: relatedPath.Id, Reason: "arrowhead attached to shaft edge; not a node", SourceAnchor: path.SourceAnchor)
-                    : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
-                        FallbackPathId: path.Id, Reason: "arrowhead direction could not be resolved", SourceAnchor: path.SourceAnchor));
+                cancellationToken.ThrowIfCancellationRequested();
+                VisualEdge? edge = null;
+                if (path.Points is { } points) edgeByPath.TryGetValue(points, out edge);
+                VisualNode? node = null;
+                if (path.Geometry is { } geometry) nodeByGeometry.TryGetValue(geometry, out node);
+                var itemId = path.Id;
+                if (duplicatePathIds.Contains(path.Id))
+                {
+                    VisualPath? canonical = null;
+                    if (path.Geometry is { } duplicateGeometry) canonicalPathByGeometry.TryGetValue(duplicateGeometry, out canonical);
+                    result.Add(canonical is not null && canonical.Id != path.Id
+                        ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
+                            DuplicateOfSourceItemId: canonical.Id, Reason: "duplicate closed path canonicalized", SourceAnchor: path.SourceAnchor)
+                        : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                            FallbackPathId: path.Id, Reason: "duplicate closed path retained without canonical reference", SourceAnchor: path.SourceAnchor));
+                }
+                else if (arrowheadPathIds.Contains(path.Id) || mergedArrowheadPathIds.Contains(path.Id))
+                {
+                    VisualEdge? related = null;
+                    if (arrowEdgeIdByPathId.TryGetValue(path.Id, out var relatedEdgeId)) edgeById.TryGetValue(relatedEdgeId, out related);
+                    related ??= fallbackDirectedEdge;
+                    VisualPath? relatedPath = null;
+                    if (related?.Path is { } relatedPoints) pathByPoints.TryGetValue(relatedPoints, out relatedPath);
+                    result.Add(relatedPath is not null
+                        ? new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.SuppressedDuplicate,
+                            DuplicateOfSourceItemId: relatedPath.Id, Reason: "arrowhead attached to shaft edge; not a node", SourceAnchor: path.SourceAnchor)
+                        : new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                            FallbackPathId: path.Id, Reason: "arrowhead direction could not be resolved", SourceAnchor: path.SourceAnchor));
+                }
+                else if (suppressedGridPathIds.Contains(path.Id))
+                    result.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
+                        Reason: inferredGridPathIds.Contains(path.Id)
+                            ? "regular orthogonal table/grid line inferred from layout and suppressed from connector inference"
+                            : "regular orthogonal table/grid line suppressed from connector inference", SourceAnchor: path.SourceAnchor));
+                else if (edge is not null && edge.SourceId is not null && edge.TargetId is not null)
+                    result.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedEdge,
+                        ProjectedEdgeId: edge.Id, SourceAnchor: path.SourceAnchor));
+                else if (node is not null)
+                    result.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode,
+                        ProjectedNodeId: node.Id, SourceAnchor: path.SourceAnchor));
+                else if (path.IsFallback)
+                    result.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
+                        FallbackPathId: path.Id, Reason: unresolvedPathIds.Contains(path.Id) ? "ambiguous label assignment; vector box retained as fallback" : "vector path retained as fallback", SourceAnchor: path.SourceAnchor));
+                else
+                    result.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
+                        Reason: "non-semantic decorative vector path", SourceAnchor: path.SourceAnchor));
             }
-            else if (suppressedGridPathIds.Contains(path.Id))
-                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
-                    Reason: "regular orthogonal table/grid line suppressed from connector inference", SourceAnchor: path.SourceAnchor));
-            else if (edge is not null && edge.SourceId is not null && edge.TargetId is not null)
-                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedEdge,
-                    ProjectedEdgeId: edge.Id, SourceAnchor: path.SourceAnchor));
-            else if (node is not null)
-                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode,
-                    ProjectedNodeId: node.Id, SourceAnchor: path.SourceAnchor));
-            else if (path.IsFallback)
-                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback,
-                    FallbackPathId: path.Id, Reason: unresolvedPathIds.Contains(path.Id) ? "ambiguous label assignment; vector box retained as fallback" : "vector path retained as fallback", SourceAnchor: path.SourceAnchor));
-            else
-                sourceItems.Add(new VisualSourceItem(itemId, VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
-                    Reason: "non-semantic decorative vector path", SourceAnchor: path.SourceAnchor));
+            return result;
         }
+
+        if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+        var sourceItems = BuildSourceItems();
+        if (visualInferenceToken.IsCancellationRequested)
+        {
+            ReportVisualInferenceTimeout();
+            sourceItems = BuildSourceItems();
+        }
+        cancellationToken.ThrowIfCancellationRequested();
         var graph = new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
             SourceItems: sourceItems);
         return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
 
         IEnumerable<string> Tokens(string value)
         {
+            var observedAt = 0;
+            bool ShouldStop(int position)
+            {
+                if (position - observedAt < 4096) return false;
+                observedAt = position;
+                cancellationToken.ThrowIfCancellationRequested();
+                return visualInferenceToken.IsCancellationRequested || pendingVisualInferenceBudget is not null;
+            }
             for (var i = 0; i < value.Length;)
             {
-                if (value[i] == '%') { while (i < value.Length && value[i] is not '\r' and not '\n') i++; continue; }
-                if (value[i] == '(') { var depth = 1; i++; while (i < value.Length && depth > 0) { if (value[i] == '\\') i += Math.Min(2, value.Length - i); else if (value[i++] == '(') depth++; else if (value[i - 1] == ')') depth--; } continue; }
-                if (value[i] == '<') { i++; if (i < value.Length && value[i] == '<') { i++; continue; } while (i < value.Length && value[i++] != '>') { } continue; }
-                if (value[i] == '/') { i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) i++; continue; }
+                cancellationToken.ThrowIfCancellationRequested();
+                if (visualInferenceToken.IsCancellationRequested || pendingVisualInferenceBudget is not null) yield break;
+                if (value[i] == '%') { while (i < value.Length && value[i] is not '\r' and not '\n') { i++; if (ShouldStop(i)) yield break; } continue; }
+                if (value[i] == '(') { var depth = 1; i++; while (i < value.Length && depth > 0) { if (value[i] == '\\') i += Math.Min(2, value.Length - i); else if (value[i++] == '(') depth++; else if (value[i - 1] == ')') depth--; if (ShouldStop(i)) yield break; } continue; }
+                if (value[i] == '<') { i++; if (i < value.Length && value[i] == '<') { i++; continue; } while (i < value.Length && value[i++] != '>') if (ShouldStop(i)) yield break; continue; }
+                if (value[i] == '/') { i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) { i++; if (ShouldStop(i)) yield break; } continue; }
                 if (char.IsWhiteSpace(value[i])) { i++; continue; }
-                var start = i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) i++;
+                var start = i++; while (i < value.Length && !char.IsWhiteSpace(value[i]) && !"()<>[]{}/%".Contains(value[i])) { i++; if (ShouldStop(i)) yield break; }
                 yield return value[start..i];
             }
         }
@@ -641,9 +906,73 @@ public static class PdfTextExtractor
         VisualDiagnostic Diag(string code, string message, double? confidence = null) => new(code, message,
             Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}", Confidence: confidence);
 
+        void MarkTrianglePathsAsFallback()
+        {
+            foreach (var candidate in triangleCandidates)
+            {
+                var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
+                if (pathIndex < 0) continue;
+                unresolvedPathIds.Add(paths[pathIndex].Id);
+                paths[pathIndex] = paths[pathIndex] with { IsFallback = true, Confidence = Math.Min(paths[pathIndex].Confidence ?? .2, .2) };
+            }
+        }
+
+        void RollbackSemanticInference()
+        {
+            if (semanticInferenceRolledBack) return;
+            nodes.Clear(); nodes.AddRange(preInferenceNodes);
+            edges.Clear(); edges.AddRange(preInferenceEdges);
+            paths.Clear(); paths.AddRange(preInferencePaths);
+            diagnostics.Clear(); diagnostics.AddRange(preInferenceDiagnostics);
+            graphDiagnostics.Clear(); graphDiagnostics.AddRange(preInferenceGraphDiagnostics);
+            assignedLabelRegions.Clear(); assignedLabelRegions.UnionWith(preInferenceAssignedLabelRegions);
+            provisionalUnlabelledNodeIds.Clear(); provisionalUnlabelledNodeIds.UnionWith(preInferenceProvisionalUnlabelledNodeIds);
+            provisionalTriangleNodeIds.Clear(); provisionalTriangleNodeIds.UnionWith(preInferenceProvisionalTriangleNodeIds);
+            arrowheadMatches.Clear(); arrowheadMatches.AddRange(preInferenceArrowheadMatches);
+            arrowheadPathIds.Clear(); arrowheadPathIds.UnionWith(preInferenceArrowheadPathIds);
+            mergedArrowheadPathIds.Clear(); mergedArrowheadPathIds.UnionWith(preInferenceMergedArrowheadPathIds);
+            unresolvedPathIds.Clear(); unresolvedPathIds.UnionWith(preInferenceUnresolvedPathIds);
+            suppressedGridPathIds.Clear();
+            inferredGridPathIds.Clear();
+            if (!pathBuildCompleted)
+            {
+                nodes.Clear();
+                assignedLabelRegions.Clear();
+                provisionalUnlabelledNodeIds.Clear();
+                provisionalTriangleNodeIds.Clear();
+                triangleCandidates.Clear();
+                unlabelledClosedCandidates.Clear();
+                arrowheadMatches.Clear();
+                arrowheadPathIds.Clear();
+                mergedArrowheadPathIds.Clear();
+            }
+            semanticInferenceRolledBack = true;
+            for (var pathIndex = 0; pathIndex < paths.Count; pathIndex++)
+                paths[pathIndex] = paths[pathIndex] with
+                {
+                    IsFallback = true,
+                    Confidence = Math.Min(paths[pathIndex].Confidence ?? .2, .2),
+                };
+        }
+
+        void ReportVisualInferenceBudgetExceeded(string sourceObjectType, string message, string fallback)
+        {
+            RollbackTableGridSuppression();
+            RollbackSemanticInference();
+            allowGeometryInference = false;
+            if (graphDiagnostics.Any(item => item.Code == "VisualInferenceBudgetExceeded")) return;
+            diagnostics.Add($"VisualInferenceBudgetExceeded: PDF page {pageNumber} {message}");
+            graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceBudgetExceeded", message,
+                Fallback: fallback,
+                Remedy: "simplify the page or split dense diagrams across pages",
+                Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
+                SourceObjectType: sourceObjectType, Confidence: 0));
+        }
+
         void ReportVisualInferenceTimeout()
         {
             RollbackTableGridSuppression();
+            RollbackSemanticInference();
             if (graphDiagnostics.Any(item => item.Code == "VisualInferenceTimeout")) return;
             const string message = "PDF visual inference exceeded its configured time budget; all vector connectors remain fallback geometry.";
             diagnostics.Add($"VisualInferenceTimeout: PDF page {pageNumber} {message}");
@@ -659,36 +988,15 @@ public static class PdfTextExtractor
         {
             const int maxCandidateLines = 512;
             const int maxAxisLinePoints = 16_384;
-            const long maxWorkItems = 250_000;
-            long workItems = 0;
             var analysisAborted = false;
 
             bool TrySpend(long amount)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (visualInferenceToken.IsCancellationRequested)
-                {
-                    analysisAborted = true;
-                    return false;
-                }
-                if (amount < 0 || workItems > maxWorkItems - amount)
-                {
-                    if (!graphDiagnostics.Any(item => item.Code == "VisualInferenceBudgetExceeded"))
-                    {
-                        const string message = "PDF table-grid inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
-                        diagnostics.Add($"VisualInferenceBudgetExceeded: PDF page {pageNumber} {message}");
-                        graphDiagnostics.Add(new VisualDiagnostic("VisualInferenceBudgetExceeded", message,
-                            Fallback: "table-grid suppression skipped; vector paths retained",
-                            Remedy: "simplify the page or split dense diagrams across pages",
-                            Format: "pdf", PartUri: $"pdf:page:{pageNumber}", PartitionId: $"page-{pageNumber}",
-                            SourceObjectType: "table-grid", Confidence: 0));
-                    }
-                    allowGeometryInference = false;
-                    analysisAborted = true;
-                    return false;
-                }
-                workItems += amount;
-                return true;
+                const string message = "PDF table-grid inference exceeded its deterministic work budget; vector paths remain fallback geometry.";
+                var accepted = TrySpendVisualInference(amount, "table-grid", message,
+                    "table-grid suppression skipped; vector paths retained");
+                if (!accepted) analysisAborted = true;
+                return accepted;
             }
 
             if (!TrySpend((long)paths.Count + edges.Count)) return;
@@ -700,7 +1008,7 @@ public static class PdfTextExtractor
             var lines = edges.Select(edge =>
             {
                 var path = edge.Path is not null && pathByPoints.TryGetValue(edge.Path, out var matched) ? matched : null;
-                return path is not null && TryAxisLine(edge, maxAxisLinePoints, maxWorkItems, TrySpend,
+                return path is not null && TryAxisLine(edge, maxAxisLinePoints, maxVisualInferenceWorkItems, TrySpend,
                     out var horizontal, out var fixedCoordinate, out var minimum, out var maximum)
                     ? (Edge: edge, Path: path, Horizontal: horizontal, Fixed: fixedCoordinate, Minimum: minimum, Maximum: maximum)
                     : default;
@@ -709,7 +1017,7 @@ public static class PdfTextExtractor
             if (analysisAborted) return;
             if (lines.Length > maxCandidateLines)
             {
-                _ = TrySpend(maxWorkItems + 1);
+                _ = TrySpend(maxVisualInferenceWorkItems + 1);
                 return;
             }
             if (!TrySpend(lines.Length)) return;
@@ -734,9 +1042,10 @@ public static class PdfTextExtractor
             if (activeHorizontal.Length < 3 || activeVertical.Length < 3) return;
             long crossingCount = activeHorizontal.Sum(horizontal => (long)activeVertical.Count(vertical => Crosses(horizontal, vertical)));
             var density = crossingCount / ((double)activeHorizontal.Length * activeVertical.Length);
-            if (density < .70 ||
-                !HasRegularSpacing(activeHorizontal.Select(line => line.Fixed)) &&
-                !HasRegularSpacing(activeVertical.Select(line => line.Fixed))) return;
+            var hasMarkedTableEvidence = HasMarkedTableEvidence();
+            if (density < .70 || !hasMarkedTableEvidence &&
+                (!HasRegularSpacing(activeHorizontal.Select(line => line.Fixed)) ||
+                 !HasRegularSpacing(activeVertical.Select(line => line.Fixed)))) return;
 
             var gridLines = activeHorizontal.Concat(activeVertical).ToArray();
             var semanticNodes = nodes.Where(node => node.Geometry is not null).ToArray();
@@ -764,9 +1073,9 @@ public static class PdfTextExtractor
                 return false;
             }
 
-            // Geometry and cell-like text placement alone are insufficient evidence that a
-            // regular lattice is decorative: circuit and network diagrams can satisfy both.
-            // Only a PDF marked-content Table tag is affirmative table semantics.
+            // Marked-content Table tags are strong evidence, but many ordinary PDFs omit them.
+            // A dense regular lattice with text occupying multiple cells is also table evidence,
+            // provided no semantic node touches the lattice (the network-diagram guard above).
             bool HasMarkedTableEvidence()
             {
                 var position = 0;
@@ -979,7 +1288,7 @@ public static class PdfTextExtractor
                 };
             }
 
-            if (!HasMarkedTableEvidence() || gridLines.Any(TouchesSemanticNode)) return;
+            if (gridLines.Any(TouchesSemanticNode)) return;
 
             var xBoundaries = activeVertical.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
             var yBoundaries = activeHorizontal.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
@@ -1007,7 +1316,8 @@ public static class PdfTextExtractor
                 var row = FindCell(yBoundaries, centerY);
                 if (column >= 0 && row >= 0) occupiedCells.Add((column, row));
             }
-            if (occupiedCells.Count < 4 ||
+            var minimumOccupiedCells = hasMarkedTableEvidence ? 2 : 4;
+            if (occupiedCells.Count < minimumOccupiedCells ||
                 occupiedCells.Select(cell => cell.Column).Distinct().Count() < 2 ||
                 occupiedCells.Select(cell => cell.Row).Distinct().Count() < 2) return;
 
@@ -1024,9 +1334,11 @@ public static class PdfTextExtractor
             preGridDiagnostics = [.. diagnostics];
             preGridGraphDiagnostics = [.. graphDiagnostics];
             preGridSuppressedPathIds = [.. suppressedGridPathIds];
+            preGridInferredPathIds = [.. inferredGridPathIds];
             foreach (var line in gridLines)
             {
                 suppressedGridPathIds.Add(line.Path.Id);
+                if (!hasMarkedTableEvidence) inferredGridPathIds.Add(line.Path.Id);
                 if (pathIndexById.TryGetValue(line.Path.Id, out var pathIndex))
                     paths[pathIndex] = paths[pathIndex] with { IsFallback = false, Confidence = .95 };
             }
@@ -1086,17 +1398,19 @@ public static class PdfTextExtractor
         void RollbackTableGridSuppression()
         {
             if (preGridPaths is null || preGridEdges is null || preGridDiagnostics is null ||
-                preGridGraphDiagnostics is null || preGridSuppressedPathIds is null) return;
+                preGridGraphDiagnostics is null || preGridSuppressedPathIds is null || preGridInferredPathIds is null) return;
             paths.Clear(); paths.AddRange(preGridPaths);
             edges.Clear(); edges.AddRange(preGridEdges);
             diagnostics.Clear(); diagnostics.AddRange(preGridDiagnostics);
             graphDiagnostics.Clear(); graphDiagnostics.AddRange(preGridGraphDiagnostics);
             suppressedGridPathIds.Clear(); suppressedGridPathIds.UnionWith(preGridSuppressedPathIds);
+            inferredGridPathIds.Clear(); inferredGridPathIds.UnionWith(preGridInferredPathIds);
             preGridPaths = null;
             preGridEdges = null;
             preGridDiagnostics = null;
             preGridGraphDiagnostics = null;
             preGridSuppressedPathIds = null;
+            preGridInferredPathIds = null;
         }
 
         static bool HasRegularSpacing(IEnumerable<double> positions)
@@ -1142,6 +1456,12 @@ public static class PdfTextExtractor
 
         void AddClosedNode(IReadOnlyList<VisualPathPoint> subpath)
         {
+            var sortFactor = regions.Count <= 1 ? 1 : 1 + (long)Math.Ceiling(Math.Log2(regions.Count));
+            if (!TrySpendVisualInference((long)subpath.Count + nodes.Count + 1,
+                    "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback) ||
+                !TrySpendVisualInferenceProduct(regions.Count, sortFactor,
+                    "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback))
+                return;
             var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
             var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
             var width = maxX - minX; var height = maxY - minY;
@@ -1150,6 +1470,16 @@ public static class PdfTextExtractor
             if (nodes.Any(node => IoU(node.Geometry, geometry) >= 0.90))
             {
                 if (paths.Count > 0) duplicatePathIds.Add(paths[^1].Id);
+                return;
+            }
+            // A closed triangle is first classified as arrowhead geometry. Nearby YES/NO text
+            // remains available until shaft matching; unmatched triangles are subsequently
+            // offered normal node-label assignment.
+            if (IsTriangle(subpath))
+            {
+                if (paths.Count == 0 || paths[^1].Geometry != geometry)
+                    paths.Add(new VisualPath($"pdf_p{pageNumber}_decorative{paths.Count + 1}", subpath, geometry, anchor, 0.3, IsFallback: true));
+                triangleCandidates.Add((subpath, geometry, paths[^1].Id));
                 return;
             }
             var labelCandidate = regions.Select((region, index) => (region, index, score: LabelScore(region.BoundingBox, geometry)))
@@ -1169,16 +1499,6 @@ public static class PdfTextExtractor
             var hasLabel = labelCandidate.Length > 0;
             var label = hasLabel ? labelCandidate[0].region.Text : null;
             if (hasLabel) assignedLabelRegions.Add(labelCandidate[0].index);
-            // Closed triangles are arrowhead evidence, regardless of document scale. Other
-            // closed shapes remain candidate nodes; fixed absolute size cutoffs would make
-            // connection inference change under a PDF CTM scale transform.
-            if (string.IsNullOrWhiteSpace(label) && IsTriangle(subpath))
-            {
-                if (paths.Count == 0 || paths[^1].Geometry != geometry)
-                    paths.Add(new VisualPath($"pdf_p{pageNumber}_decorative{paths.Count + 1}", subpath, geometry, anchor, 0.3, IsFallback: true));
-                triangleCandidates.Add((subpath, geometry, paths[^1].Id));
-                return;
-            }
             if (string.IsNullOrWhiteSpace(label))
             {
                 unlabelledClosedCandidates.Add((geometry, paths[^1].Id));
@@ -1269,14 +1589,6 @@ public static class PdfTextExtractor
             return distinct == 3;
         }
 
-        static VisualPathPoint ArrowTip(IReadOnlyList<VisualPathPoint> points)
-        {
-            var minX = points.Min(point => point.X); var maxX = points.Max(point => point.X);
-            var minY = points.Min(point => point.Y); var maxY = points.Max(point => point.Y);
-            return points.OrderByDescending(point =>
-                Math.Min(Math.Abs(point.X - minX), Math.Abs(point.X - maxX)) +
-                Math.Min(Math.Abs(point.Y - minY), Math.Abs(point.Y - maxY))).First();
-        }
     }
 
 

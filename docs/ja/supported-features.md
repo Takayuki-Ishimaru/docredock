@@ -1,10 +1,10 @@
-# v0.2.1 の対応機能
+# v0.2.2 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.2.1 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.2.2 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.2.1での扱い |
+| 機能 | v0.2.2での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート。CLI既定 |
 | `visible`／`complete`／`sanitized` | サポート |
@@ -43,4 +43,4 @@ DOCX drawingとPDF vector topologyは完全復元しません。対応fragment�
 
 閲覧用Markdownは一方向の出力です。`.drmd`と`.drmdpkg`は実験用で、元文書由来の情報を含む可能性があります。元文書を正本として保持してください。
 
-この文書が利用者向けサポート範囲の正本です。[v0.2.1リリースノート](../../release-docs/RELEASE_NOTES_v0.2.1.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。
+この文書が利用者向けサポート範囲の正本です。[v0.2.2リリースノート](../../release-docs/RELEASE_NOTES_v0.2.2.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。

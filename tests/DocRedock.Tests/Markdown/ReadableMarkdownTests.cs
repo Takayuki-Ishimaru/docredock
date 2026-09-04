@@ -130,6 +130,83 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
+    public void Decorative_only_visual_graph_is_silent_while_unresolved_paths_keep_fallback()
+    {
+        var decorativePath = new VisualPath("grid-line",
+            [new VisualPathPoint(0, 0), new VisualPathPoint(100, 0)], IsFallback: false);
+        var decorative = new VisualGraph("table-grid", [], [], Paths: [decorativePath], SourceItems:
+        [
+            new VisualSourceItem("grid-line", VisualSourceItemKind.VectorPath,
+                VisualDisposition.IgnoredDecorative, Reason: "regular table/grid line")
+        ]);
+        var diagram = new DocumentNode("visual", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("Decorative grid"), Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(decorative)
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "decorative-grid", DocumentFormatKind.Pdf,
+            [new DocumentPartition("page-1", 0, [diagram])]);
+        var serializer = new ReadableMarkdownSerializer();
+
+        var markdown = serializer.Serialize(graph);
+
+        Assert.DoesNotContain("図の抽出結果", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("grid-line", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain(serializer.Diagnostics, diagnostic =>
+            diagnostic.Code is "VisualSemanticProjectionFallback" or "VisualSemanticProjectionPartial");
+
+        var inferred = decorative with
+        {
+            Id = "inferred-grid",
+            SourceItems =
+            [
+                new VisualSourceItem("grid-line", VisualSourceItemKind.VectorPath,
+                    VisualDisposition.IgnoredDecorative,
+                    Reason: "regular orthogonal table/grid line inferred from layout and suppressed from connector inference")
+            ]
+        };
+        var inferredSerializer = new ReadableMarkdownSerializer();
+        _ = inferredSerializer.Serialize(graph with
+        {
+            Partitions = [new DocumentPartition("page-1", 0,
+            [diagram with { Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                { ["visual_graph"] = JsonSerializer.SerializeToElement(inferred) } }])]
+        });
+        Assert.Contains(inferredSerializer.Diagnostics, diagnostic =>
+            diagnostic.Code == "VisualTableGridInferred" && diagnostic.Severity == MarkdownDiagnosticSeverity.Info);
+
+        var fallbackPath = decorativePath with { Id = "unresolved-line", IsFallback = true };
+        var unresolved = decorative with
+        {
+            Id = "unresolved",
+            Paths = [fallbackPath],
+            SourceItems =
+            [
+                new VisualSourceItem("unresolved-line", VisualSourceItemKind.VectorPath,
+                    VisualDisposition.VisualFallback, FallbackPathId: "unresolved-line")
+            ]
+        };
+        var unresolvedDiagram = diagram with
+        {
+            Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(unresolved)
+            }
+        };
+        var fallbackSerializer = new ReadableMarkdownSerializer();
+
+        var fallback = fallbackSerializer.Serialize(graph with
+        {
+            Partitions = [new DocumentPartition("page-1", 0, [unresolvedDiagram])]
+        });
+
+        Assert.Contains("図の抽出結果", fallback, StringComparison.Ordinal);
+        Assert.Contains("unresolved-line", fallback, StringComparison.Ordinal);
+        Assert.Contains(fallbackSerializer.Diagnostics, diagnostic =>
+            diagnostic.Code == "VisualSemanticProjectionFallback");
+    }
+
+    [Fact]
     public void Visual_graph_member_marker_suppresses_only_a_renderable_docx_graph()
     {
         var visual = new VisualGraph("docx-flow", [new VisualNode("a", "Start"), new VisualNode("b", "End")], [new VisualEdge("edge", "a", "b")]);
