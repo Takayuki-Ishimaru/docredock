@@ -4,6 +4,6 @@
 
 The user-facing security and privacy guide has moved to [docs/en/security-and-privacy.md](../docs/en/security-and-privacy.md).
 
-- [v0.2.1 supported features](../docs/en/supported-features.md)
+- [v0.2.2 supported features](../docs/en/supported-features.md)
 - [User guide](../docs/en/user-guide.md)
 - [Private vulnerability reporting](../SECURITY.md)

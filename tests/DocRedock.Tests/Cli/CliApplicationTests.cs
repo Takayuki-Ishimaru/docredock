@@ -215,6 +215,40 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task Readable_export_collapses_diagnostics_by_code_unless_verbose()
+    {
+        using var fixture = new Fixture();
+        await File.WriteAllBytesAsync(fixture.PdfPath, Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 260 >> stream
+            0 0 m 300 0 l S
+            0 10 m 300 10 l S
+            0 90 m 300 90 l S
+            0 100 m 300 100 l S
+            0 0 m 0 100 l S
+            100 0 m 100 100 l S
+            200 0 m 200 100 l S
+            300 0 m 300 100 l S
+            endstream
+            %%EOF
+            """));
+        var defaultOutput = new StringWriter();
+        var verboseOutput = new StringWriter();
+        var verboseMarkdown = Path.Combine(fixture.Root, "verbose.md");
+
+        await new CliApplication(defaultOutput, new StringWriter()).RunAsync(
+            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+        await new CliApplication(verboseOutput, new StringWriter()).RunAsync(
+            ["export", fixture.PdfPath, "--output", verboseMarkdown, "--profile", "readable", "--ocr", "off", "--verbose"]);
+
+        Assert.Single(defaultOutput.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries),
+            line => line.StartsWith("WARNING VisualConnectorUnresolved:", StringComparison.Ordinal));
+        Assert.Contains(verboseOutput.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries),
+            line => line.StartsWith("  - ", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Export_requires_force_before_replacing_existing_outputs()
     {
         using var fixture = new Fixture();

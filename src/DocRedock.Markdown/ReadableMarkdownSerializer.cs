@@ -153,10 +153,12 @@ public sealed partial class ReadableMarkdownSerializer
     private bool IsIncludedPartition(string partitionId)
     {
         if (options.IncludedSheets is not { Count: > 0 }) return true;
-        var humanized = HumanizePartitionName(partitionId);
+        var sheetName = partitionId.Trim();
+        if (sheetName.StartsWith("sheet-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["sheet-".Length..];
+        else if (sheetName.StartsWith("worksheet-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["worksheet-".Length..];
+        else if (sheetName.StartsWith("partition-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["partition-".Length..];
         return options.IncludedSheets.Any(sheet =>
-            StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), partitionId) ||
-            StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), humanized));
+            StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), sheetName));
     }
 
     private string SerializeDocument(DocumentGraph graph)
@@ -1359,6 +1361,23 @@ public sealed partial class ReadableMarkdownSerializer
             AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial", "The visual graph metadata could not be read; connector and label fallback was not suppressed.", MarkdownDiagnosticSeverity.Warning, node.Id));
             return;
         }
+        // Adapters may retain table borders and other non-semantic vectors as
+        // accounted source items. When every item was deliberately ignored and
+        // no fallback remains, there is nothing useful (or unresolved) to show.
+        if ((graph.Nodes?.Count ?? 0) == 0 &&
+            (graph.Edges?.Count ?? 0) == 0 &&
+            graph.SourceItems is { Count: > 0 } sourceItems &&
+            sourceItems.All(item => item is not null &&
+                item.Disposition is VisualDisposition.IgnoredDecorative or VisualDisposition.SuppressedDuplicate) &&
+            (graph.Paths ?? []).All(path => path is not null && !path.IsFallback) &&
+            !(graph.Diagnostics ?? []).Any(diagnostic => diagnostic is not null))
+        {
+            if (sourceItems.Any(item => item?.Reason?.Contains("inferred from layout", StringComparison.OrdinalIgnoreCase) == true))
+                AddDiagnostic(new MarkdownDiagnostic("VisualTableGridInferred",
+                    "Regular vector lines were inferred as table borders and omitted from connector output; review the source if the layout represents a diagram.",
+                    MarkdownDiagnosticSeverity.Info, node.Id));
+            return;
+        }
         foreach (var diagnostic in (graph.Diagnostics ?? []).Where(diagnostic => diagnostic is not null))
         {
             var message = diagnostic.LocationSummary is { Length: > 0 } location
@@ -1800,8 +1819,9 @@ public sealed partial class ReadableMarkdownSerializer
     private static string HumanizePartitionName(string id)
     {
         var value = id.Trim();
-        foreach (var prefix in new[] { "worksheet-", "sheet-", "partition-" })
-            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) value = value[prefix.Length..];
+        if (value.StartsWith("sheet-", StringComparison.OrdinalIgnoreCase)) value = value["sheet-".Length..];
+        else if (value.StartsWith("worksheet-", StringComparison.OrdinalIgnoreCase)) value = value["worksheet-".Length..];
+        else if (value.StartsWith("partition-", StringComparison.OrdinalIgnoreCase)) value = value["partition-".Length..];
         return value.Replace('_', ' ').Trim() is { Length: > 0 } result ? result : "シート";
     }
 

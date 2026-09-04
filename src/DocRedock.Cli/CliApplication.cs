@@ -120,8 +120,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
-            foreach (var item in readable.Diagnostics.Where(item => !quiet || item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information))
-                await output.WriteLineAsync($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}");
+            await WriteDiagnosticsAsync(readable.Diagnostics, quiet, args.HasFlag("verbose"));
             if (!readable.Graph.Nodes.Any())
             {
                 await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found.");
@@ -146,8 +145,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         await output.WriteLineAsync(result.Graph.Format == DocumentFormatKind.Pdf
             ? "Fidelity: F0 baseline; edited PDF requires explicit F3 render fallback"
             : "Fidelity: F0 baseline; supported Office edits use F1");
-        foreach (var item in result.Diagnostics.Where(item => !quiet || item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information))
-            await output.WriteLineAsync($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}");
+        await WriteDiagnosticsAsync(result.Diagnostics, quiet, args.HasFlag("verbose"));
         if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return 1; }
         return result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
     }
@@ -158,6 +156,28 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         "balanced" => VisualInferenceMode.Balanced,
         _ => VisualInferenceMode.Safe,
     };
+
+    private async Task WriteDiagnosticsAsync(
+        IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> diagnostics,
+        bool quiet,
+        bool verbose)
+    {
+        var visible = diagnostics
+            .Where(item => !quiet || item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information)
+            .ToArray();
+        foreach (var summary in AdapterWarningDiagnostics.SummarizeForDisplay(visible))
+        {
+            var count = summary.Count > 1 ? $" ({summary.Count} diagnostic entries; use --verbose for details)" : string.Empty;
+            await output.WriteLineAsync($"{summary.Severity.ToString().ToUpperInvariant()} {summary.Code}: {summary.Message}{count}");
+            if (!verbose) continue;
+            foreach (var detail in visible.Where(item => StringComparer.Ordinal.Equals(item.Code, summary.Code)))
+            {
+                var anchor = string.Join(", ", new[] { detail.PartUri, detail.NodeId }
+                    .Where(value => !string.IsNullOrWhiteSpace(value)));
+                await output.WriteLineAsync($"  - {detail.Message}{(anchor.Length > 0 ? $" [{anchor}]" : string.Empty)}");
+            }
+        }
+    }
 
     private async Task<int> RestoreAsync(Arguments args, CancellationToken token)
     {

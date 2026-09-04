@@ -14,6 +14,7 @@ from visual_semantics_qa import (
     build_evidence,
     classify_tier,
     expected_relations,
+    format_gate,
     generate_perturbation_corpus,
     materialize_perturbation_corpus,
     metrics,
@@ -380,6 +381,7 @@ flowchart LR
         self.assertEqual("docredock-cli-export", evidence["execution"]["mode"])
         self.assertEqual(len(cases), evidence["execution"]["executed_case_count"])
         self.assertTrue(all(evidence["tiers"][tier]["gate"]["passed"] for tier in ("A", "B", "C")))
+        self.assertIn("gate", evidence["formats"]["pptx"])
 
     def test_incorrect_and_missing_relations_change_fractions(self):
         expected = (("A", "B", "directed", None), ("B", "C", "directed", None))
@@ -388,6 +390,30 @@ flowchart LR
         self.assertEqual(0.5, values["edge_precision"]["value"])
         self.assertEqual(0.5, values["edge_recall"]["value"])
         self.assertEqual(0.5, values["false_edge_rate"]["value"])
+
+    def test_format_gate_enforces_recall_floor_and_zero_duplicate_nodes(self):
+        edge = ("A", "B", "directed", None)
+        passing = RelationCase("ok", "pdf", "B", (edge,), (edge,), projected_nodes=2)
+        low_recall = RelationCase("miss", "pdf", "B", (edge,), (), projected_nodes=2)
+        duplicated = RelationCase("dup", "pdf", "B", (edge,), (edge,), projected_nodes=3, duplicate_nodes=1)
+
+        self.assertTrue(format_gate("pdf", (passing,))["passed"])
+        self.assertFalse(format_gate("pdf", (low_recall,))["passed"])
+        self.assertFalse(format_gate("pdf", (duplicated,))["passed"])
+        self.assertFalse(format_gate("pdf", ())["passed"])
+
+    def test_format_gate_accepts_diagnosed_tier_c_ambiguity_but_rejects_silent_loss(self):
+        edge = ("A", "B", "directed", None)
+        stable = RelationCase("stable", "pptx", "B", (edge,), (edge,), projected_nodes=2)
+        diagnosed = RelationCase("diagnosed", "pptx", "C", (edge,), (),
+                                 unresolved_expected=1, diagnosed_unresolved=1,
+                                 projected_nodes=3, duplicate_nodes=1)
+        silent = diagnosed.__class__("silent", "pptx", "C", (edge,), (),
+                                     unresolved_expected=1, diagnosed_unresolved=0,
+                                     projected_nodes=3, duplicate_nodes=1)
+
+        self.assertTrue(format_gate("pptx", (stable, diagnosed))["passed"])
+        self.assertFalse(format_gate("pptx", (stable, silent))["passed"])
 
 
 if __name__ == "__main__":

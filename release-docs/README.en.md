@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.2 Public Beta
+
+- [v0.2.2 release notes](RELEASE_NOTES_v0.2.2.en.md)
+- Improved PDF table-grid, arrow-direction, and branch-label recognition
+- Improved XLSX formula diagnostics and selected-sheet output scope
+- Clearer CLI diagnostic summaries and stronger per-format quality checks
+
 ### v0.2.1 Public Beta
 
 - [v0.2.1 release notes](RELEASE_NOTES_v0.2.1.en.md)

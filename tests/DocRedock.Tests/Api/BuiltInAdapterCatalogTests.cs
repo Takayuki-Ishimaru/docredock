@@ -76,5 +76,10 @@ public sealed class BuiltInAdapterCatalogTests
         Assert.Contains(mixedSeverity, diagnostic => diagnostic.Severity == DiagnosticSeverity.Information);
         Assert.Contains(mixedSeverity, diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
         Assert.Equal(DiagnosticSeverity.Information, external.Severity);
+
+        var summaries = AdapterWarningDiagnostics.SummarizeForDisplay(repeated);
+        var repeatedSummary = Assert.Single(summaries, summary => summary.Code == "Repeated");
+        Assert.Equal(3, repeatedSummary.Count);
+        Assert.Equal(DiagnosticSeverity.Warning, repeatedSummary.Severity);
     }
 }

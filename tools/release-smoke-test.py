@@ -464,6 +464,49 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
     if "VisualConnectorUnresolved" in vector_result.stdout or "[PDF visual content:" in vector_markdown:
         raise RuntimeError("resolved vector PDF smoke unexpectedly emitted connector fallback")
 
+    # Regression coverage: an untagged 3x3 table must not become eight connector
+    # fallbacks, and three explicit arrowheads must remain directed.
+    table_pdf = root / "review-table-grid.pdf"
+    table_markdown_path = root / "review-table-grid.md"
+    table_pdf.write_bytes(
+        b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 500 >> stream\n"
+        b"BT 1 0 0 1 10 10 Tm (A) Tj ET BT 1 0 0 1 110 10 Tm (B) Tj ET "
+        b"BT 1 0 0 1 10 40 Tm (C) Tj ET BT 1 0 0 1 110 40 Tm (D) Tj ET "
+        b"0 0 m 300 0 l S 0 30 m 300 30 l S 0 60 m 300 60 l S 0 90 m 300 90 l S "
+        b"0 0 m 0 90 l S 100 0 m 100 90 l S 200 0 m 200 90 l S 300 0 m 300 90 l S\n"
+        b"endstream\n%%EOF"
+    )
+    table_result = invoke(cli, ["export", str(table_pdf), "--profile", "readable",
+                                "--output", str(table_markdown_path), "--ocr", "off"],
+                          allowed=(0, 1), experimental=True)
+    table_markdown = table_markdown_path.read_text(encoding="utf-8")
+    if "VisualConnectorUnresolved" in table_result.stdout or "pdf_p1_path" in table_markdown:
+        raise RuntimeError(
+            "untagged PDF table grid regressed into connector fallback\n"
+            f"Diagnostics:\n{table_result.stdout}\nMarkdown:\n{table_markdown}"
+        )
+
+    flow_pdf = root / "review-directed-flow.pdf"
+    flow_markdown_path = root / "review-directed-flow.md"
+    flow_pdf.write_bytes(
+        b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 900 >> stream\n"
+        b"BT 1 0 0 1 10 120 Tm (START) Tj ET BT 1 0 0 1 210 120 Tm (CHECK) Tj ET "
+        b"BT 1 0 0 1 410 200 Tm (OK) Tj ET BT 1 0 0 1 410 40 Tm (NG) Tj ET "
+        b"BT 1 0 0 1 350 172 Tm (YES) Tj ET BT 1 0 0 1 350 68 Tm (NO) Tj ET "
+        b"0 100 100 50 re S 200 100 100 50 re S 400 180 100 50 re S 400 20 100 50 re S "
+        b"100 125 m 200 125 l S 200 125 m 188 133 l 188 117 l h f "
+        b"300 135 m 400 205 l S 400 205 m 384 204 l 392 190 l h f "
+        b"300 115 m 400 45 l S 400 45 m 392 60 l 384 46 l h f\nendstream\n%%EOF"
+    )
+    invoke(cli, ["export", str(flow_pdf), "--profile", "readable",
+                 "--output", str(flow_markdown_path), "--ocr", "off"],
+           allowed=(0, 1), experimental=True)
+    flow_markdown = flow_markdown_path.read_text(encoding="utf-8")
+    if flow_markdown.count(" -->") != 3 or " ---" in flow_markdown:
+        raise RuntimeError("review PDF arrows were not projected as three directed edges")
+    if "|YES|" not in flow_markdown or "|NO|" not in flow_markdown:
+        raise RuntimeError("review PDF edge labels were not preserved")
+
     partial_pdf = root / "partial-vector-pdf.pdf"
     partial_extracted = root / "partial-vector-pdf-extracted.md"
     partial_pdf.write_bytes(
@@ -738,8 +781,9 @@ def main() -> int:
         corpus=generate_perturbation_corpus(),
     )
     failed_tiers = [tier for tier, item in qa_evidence["tiers"].items() if not item["gate"]["passed"]]
+    failed_formats = [name for name, item in qa_evidence["formats"].items() if not item["gate"]["passed"]]
     determinism_failures = visual_evidence["determinism_failures"]
-    qa_status = "failed" if failed_tiers or determinism_failures else "passed"
+    qa_status = "failed" if failed_tiers or failed_formats or determinism_failures else "passed"
     evidence = {
         "tag": qa_evidence["tag"],
         "version": qa_evidence["version"],
@@ -773,11 +817,13 @@ def main() -> int:
     }
     args.evidence_json.parent.mkdir(parents=True, exist_ok=True)
     args.evidence_json.write_text(json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    if failed_tiers or determinism_failures:
+    if failed_tiers or failed_formats or determinism_failures:
         print(f"Visual semantics evidence: {args.evidence_json}")
         reasons = []
         if failed_tiers:
             reasons.append("metric gates failed: " + ", ".join(failed_tiers))
+        if failed_formats:
+            reasons.append("format gates failed: " + ", ".join(failed_formats))
         if determinism_failures:
             reasons.append("non-deterministic cases: " + ", ".join(determinism_failures))
         raise RuntimeError("visual semantics " + "; ".join(reasons)

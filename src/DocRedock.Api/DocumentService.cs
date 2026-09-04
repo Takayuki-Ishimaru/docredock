@@ -251,9 +251,10 @@ public sealed class DocumentService
             var source = Path.GetFullPath(options.SourcePath);
             var (graph, extractedDiagnostics, assets) = await ExtractReadableGraphAsync(source, options, cancellationToken).ConfigureAwait(false);
             var diagnostics = extractedDiagnostics.ToList();
-            AddContentPolicyDiagnostics(diagnostics, graph, options.ContentPolicy);
+            var readableScopeNodes = ReadableScopeNodes(graph, options.Sheets);
+            AddContentPolicyDiagnostics(diagnostics, readableScopeNodes, options.ContentPolicy);
             var contentPolicy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
-            var includedImageAssetIds = graph.Nodes
+            var includedImageAssetIds = readableScopeNodes
                 .Where(node => DocumentContentPolicyRules.Includes(node, contentPolicy))
                 .Where(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent)
                 .Select(node => ((ReferenceNodeContent)node.Content).Reference)
@@ -354,8 +355,9 @@ public sealed class DocumentService
                 {
                     var extraction = xlsx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
-                    AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics);
-                    diagnostics.AddRange(extraction.Warnings.Select(warning =>
+                    AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics.Where(item =>
+                        item.SheetName is null || IncludedXlsxSheet(item.SheetName, options.Sheets)).ToArray());
+                    diagnostics.AddRange(ScopeXlsxWarnings(extraction.Warnings, extraction.Worksheets, options.Sheets).Select(warning =>
                         AdapterWarningDiagnostics.Create("XlsxProjectionWarning", warning)));
                 }
                 break;
@@ -384,10 +386,23 @@ public sealed class DocumentService
         var assets = format == DocumentFormatKind.Pdf
             ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
             : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
+        if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 })
+        {
+            var selectedImageReferences = ReadableScopeNodes(graph, options.Sheets)
+                .Where(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent)
+                .Select(node => ((ReferenceNodeContent)node.Content).Reference)
+                .ToHashSet(StringComparer.Ordinal);
+            var selectedImageIds = selectedImageReferences
+                .Select(reference => FindAsset(reference, assets))
+                .Where(asset => asset is not null)
+                .Select(asset => asset!.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            assets = assets.Where(asset => selectedImageIds.Contains(asset.Id)).ToArray();
+        }
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
             options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
         graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
-        AddImageDisplayDiagnostics(diagnostics, graph);
+        AddImageDisplayDiagnostics(diagnostics, ReadableScopeGraph(graph, options.Sheets));
         return (graph, diagnostics, assets);
     }
 
@@ -440,10 +455,51 @@ public sealed class DocumentService
         _ => false,
     };
 
-    private static void AddContentPolicyDiagnostics(ICollection<Diagnostic> diagnostics, DocumentGraph graph, string contentPolicy)
+    private static IReadOnlyList<DocumentNode> ReadableScopeNodes(DocumentGraph graph, IReadOnlyList<string>? includedSheets)
+        => ReadableScopeGraph(graph, includedSheets).Nodes.ToArray();
+
+    private static DocumentGraph ReadableScopeGraph(DocumentGraph graph, IReadOnlyList<string>? includedSheets)
+    {
+        if (graph.Format != DocumentFormatKind.Xlsx || includedSheets is not { Count: > 0 })
+            return graph;
+        return graph with
+        {
+            Partitions = graph.Partitions.Where(partition => IncludedSheet(partition.Id, includedSheets)).ToArray()
+        };
+    }
+
+    private static bool IncludedSheet(string partitionId, IReadOnlyList<string> sheets)
+    {
+        var sheetName = partitionId.Trim();
+        if (sheetName.StartsWith("sheet-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["sheet-".Length..];
+        else if (sheetName.StartsWith("worksheet-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["worksheet-".Length..];
+        else if (sheetName.StartsWith("partition-", StringComparison.OrdinalIgnoreCase)) sheetName = sheetName["partition-".Length..];
+        return sheets.Any(sheet => StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), sheetName));
+    }
+
+    private static bool IncludedXlsxSheet(string sheetName, IReadOnlyList<string>? sheets) =>
+        sheets is not { Count: > 0 } || sheets.Any(sheet =>
+            StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), sheetName.Trim()));
+
+    private static IEnumerable<string> ScopeXlsxWarnings(
+        IReadOnlyList<string> warnings,
+        IReadOnlyList<XlsxWorksheetRecord> worksheets,
+        IReadOnlyList<string>? includedSheets)
+    {
+        if (includedSheets is not { Count: > 0 }) return warnings;
+        var excludedSheets = worksheets.Where(sheet => !IncludedXlsxSheet(sheet.Name, includedSheets))
+            .Select(sheet => sheet.Name).ToArray();
+        return warnings.Where(warning => !excludedSheets.Any(sheet =>
+            warning.StartsWith(sheet + ":", StringComparison.OrdinalIgnoreCase) ||
+            warning.StartsWith($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!", StringComparison.OrdinalIgnoreCase) ||
+            warning.EndsWith($" (worksheet: {sheet})", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static void AddContentPolicyDiagnostics(ICollection<Diagnostic> diagnostics,
+        IReadOnlyList<DocumentNode> scopedNodes, string contentPolicy)
     {
         var policy = DocumentContentPolicyRules.Parse(contentPolicy);
-        var sensitive = graph.Nodes.Where(node => !DocumentContentPolicyRules.Includes(node, DocumentContentPolicy.Visible)).ToArray();
+        var sensitive = scopedNodes.Where(node => !DocumentContentPolicyRules.Includes(node, DocumentContentPolicy.Visible)).ToArray();
         if (policy == DocumentContentPolicy.Complete)
         {
             if (sensitive.Length > 0)
@@ -455,7 +511,7 @@ public sealed class DocumentService
 
         void AddIf(string code, string message, Func<DocumentNode, bool> predicate)
         {
-            var count = graph.Nodes.Count(predicate);
+            var count = scopedNodes.Count(predicate);
             if (count > 0) diagnostics.Add(new Diagnostic(code, $"{message} ({count}).", DiagnosticSeverity.Information));
         }
 

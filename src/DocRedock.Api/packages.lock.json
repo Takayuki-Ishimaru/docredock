@@ -8,58 +8,59 @@
       "docredock.formats.openxml": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )",
-          "DocRedock.Providers.Abstractions": "[0.2.1, )",
-          "DocRedock.VisualInference": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )",
+          "DocRedock.Providers.Abstractions": "[0.2.2, )",
+          "DocRedock.VisualInference": "[0.2.2, )"
         }
       },
       "docredock.formats.pdf": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )",
-          "DocRedock.Providers.Abstractions": "[0.2.1, )",
-          "DocRedock.VisualInference": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )",
+          "DocRedock.Providers.Abstractions": "[0.2.2, )",
+          "DocRedock.VisualInference": "[0.2.2, )"
         }
       },
       "docredock.markdown": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )",
-          "DocRedock.Providers.Abstractions": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )",
+          "DocRedock.Providers.Abstractions": "[0.2.2, )"
         }
       },
       "docredock.ocr.tesseract": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )",
-          "DocRedock.Providers.Abstractions": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )",
+          "DocRedock.Providers.Abstractions": "[0.2.2, )"
         }
       },
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )"
         }
       },
       "docredock.render": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )",
-          "DocRedock.Markdown": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )",
+          "DocRedock.Markdown": "[0.2.2, )"
         }
       },
       "docredock.roundtrip": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )"
         }
       },
       "docredock.visualinference": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.1, )"
+          "DocRedock.Core": "[0.2.2, )"
         }
       }
-    }
+    },
+    "net10.0/osx-arm64": {}
   }
 }

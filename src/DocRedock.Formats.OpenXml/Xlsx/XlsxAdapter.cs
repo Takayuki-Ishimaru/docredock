@@ -11,7 +11,7 @@ using DocRedock.Formats.OpenXml;
 namespace DocRedock.Formats.OpenXml.Xlsx;
 
 public enum XlsxFormulaSafety { Safe, Suspicious, Dangerous }
-public sealed record XlsxFormulaDiagnostic(string CellReference, string Formula, XlsxFormulaSafety Safety, string? Reason = null);
+public sealed record XlsxFormulaDiagnostic(string CellReference, string Formula, XlsxFormulaSafety Safety, string? Reason = null, string? SheetName = null);
 public sealed record XlsxCellRecord(
     string SheetName,
     string CellReference,
@@ -303,7 +303,7 @@ public sealed class XlsxAdapter
                     catch (JsonException) { continue; }
                     foreach (var diagnostic in visualGraph?.Diagnostics ?? [])
                     {
-                        var warning = diagnostic.ToWarning();
+                        var warning = $"{diagnostic.ToWarning()} (worksheet: {sheet.Name})";
                         if (!warnings.Contains(warning, StringComparer.Ordinal)) warnings.Add(warning);
                     }
                 }
@@ -730,8 +730,8 @@ public sealed class XlsxAdapter
             if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) value = sharedValue;
             if (formula is not null)
             {
-                diagnostics.Add(ClassifyFormula(reference, formula));
-                if (value is null)
+                diagnostics.Add(ClassifyFormula(reference, formula) with { SheetName = sheet });
+                if (string.IsNullOrWhiteSpace(value))
                     warnings.Add($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!{reference} has no cached value; DocRedock did not evaluate it.");
             }
             var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count

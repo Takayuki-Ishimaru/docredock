@@ -1,16 +1,22 @@
 # DocRedock
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/docredock/banners/dark/DocRedock-banner-dark-1200x400.png">
-  <source media="(prefers-color-scheme: light)" srcset="assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png">
-  <img alt="DocRedock" src="assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png">
-</picture>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/dark/DocRedock-banner-dark-1200x400.png">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png">
+    <img alt="DocRedock — Office文書をローカルでMarkdownへ" src="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png" width="1200">
+  </picture>
+</p>
+
+<p align="center">
+  <img alt="DocRedockアプリアイコン" src="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" width="96" height="96">
+</p>
 
 Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集は引き続き実験機能です。
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.2.1 Public Betaの対応状況
+## v0.2.2 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -19,7 +25,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.1リリースノート](release-docs/RELEASE_NOTES_v0.2.1.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.2リリースノート](release-docs/RELEASE_NOTES_v0.2.2.md)へ集約します。
 
 ## 30秒で使う
 
@@ -64,7 +70,7 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 
 ## 主な制約
 
-- v0.2.1はPublic Betaであり、本番向けの安定版ではありません。
+- v0.2.2はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -76,9 +82,9 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.2.1の対応状況](docs/ja/supported-features.md)
+- [v0.2.2の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.2.1リリースノート](release-docs/RELEASE_NOTES_v0.2.1.md)
+- [v0.2.2リリースノート](release-docs/RELEASE_NOTES_v0.2.2.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

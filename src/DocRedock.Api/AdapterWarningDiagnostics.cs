@@ -3,6 +3,12 @@ using DocRedock.Core.Reporting;
 
 namespace DocRedock.Api;
 
+public sealed record DiagnosticDisplaySummary(
+    string Code,
+    string Message,
+    DiagnosticSeverity Severity,
+    int Count);
+
 /// <summary>Converts adapter warning strings to stable diagnostics when the adapter supplied one.</summary>
 public static class AdapterWarningDiagnostics
 {
@@ -48,6 +54,23 @@ public static class AdapterWarningDiagnostics
                     Message = $"{result[indexValue].Message.TrimEnd()} (repeated {counts[indexValue]} times)."
                 };
         return result;
+    }
+
+    /// <summary>Builds the default one-line-per-code view while preserving full diagnostics for verbose output.</summary>
+    public static IReadOnlyList<DiagnosticDisplaySummary> SummarizeForDisplay(IEnumerable<Diagnostic> diagnostics)
+    {
+        ArgumentNullException.ThrowIfNull(diagnostics);
+        return diagnostics
+            .GroupBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
+            .Select(group =>
+            {
+                var severity = (DiagnosticSeverity)group.Max(diagnostic => (int)diagnostic.Severity);
+                var representative = group.FirstOrDefault(diagnostic => diagnostic.Severity == severity) ?? group.First();
+                return new DiagnosticDisplaySummary(group.Key, representative.Message, severity, group.Count());
+            })
+            .OrderByDescending(summary => summary.Severity)
+            .ThenBy(summary => summary.Code, StringComparer.Ordinal)
+            .ToArray();
     }
 
     private static string NormalizeMessage(string message) =>
