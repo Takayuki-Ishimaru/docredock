@@ -91,8 +91,15 @@ public sealed class DocumentService
     public IFormatAdapterRegistry Adapters { get; }
 
     public DocumentService(IOcrEngine? ocrEngine = null, IPdfRasterizer? pdfRasterizer = null)
+        : this(ocrEngine, pdfRasterizer, discoverPdfRasterizer: true) { }
+
+    public DocumentService(IOcrEngine? ocrEngine, IPdfRasterizer? pdfRasterizer, bool discoverPdfRasterizer)
     {
-        (ocr, this.pdfRasterizer) = (ocrEngine, pdfRasterizer);
+        ocr = ocrEngine;
+        this.pdfRasterizer = pdfRasterizer ?? (discoverPdfRasterizer
+            ? PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+                Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER") == "1")
+            : null);
         Adapters = BuiltInAdapterCatalog.CreateRegistry();
     }
 
@@ -152,7 +159,9 @@ public sealed class DocumentService
         if (!string.IsNullOrWhiteSpace(options.DocumentId)) graph = graph with { DocumentId = options.DocumentId };
 
         var assets = format == DocumentFormatKind.Pdf
-            ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
+            ? options.EnableOcr
+                ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
+                : Array.Empty<WorkspaceAsset>()
             : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
             options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
@@ -384,7 +393,9 @@ public sealed class DocumentService
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
             diagnostics.AddRange(InspectOfficePackage(source, out _));
         var assets = format == DocumentFormatKind.Pdf
-            ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
+            ? options.EnableOcr
+                ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
+                : Array.Empty<WorkspaceAsset>()
             : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 })
         {
@@ -761,7 +772,7 @@ public sealed class DocumentService
                 var diagnostic = enabled
                     ? new OcrDiagnostic(
                         "PdfRasterizerUnavailable",
-                        "This PDF page has no native text. This build does not include a PDF rasterizer, so OCR could not run for this page.",
+                        "No rasterized image was available for this textless PDF page. Run docredock doctor and configure a working PDF rasterizer and OCR provider.",
                         DiagnosticSeverity.Warning)
                     : new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this textless PDF page.", DiagnosticSeverity.Information);
                 records.Add(new OcrAssetRecord(partition.Id, status, languages, null, [diagnostic]));
@@ -792,8 +803,18 @@ public sealed class DocumentService
             var rasterized = await pdfRasterizer.RasterizeAsync(sourcePath, pages, new PdfRasterizationOptions(), cancellationToken).ConfigureAwait(false);
             var result = new List<WorkspaceAsset>();
             long totalPixels = 0;
+            long totalBytes = 0;
+            var requestedPages = pages.ToHashSet();
+            var returnedPages = new HashSet<int>();
             foreach (var page in rasterized.OrderBy(page => page.PageNumber))
             {
+                if (!requestedPages.Contains(page.PageNumber) || !returnedPages.Add(page.PageNumber))
+                    throw new InvalidDataException("PDF rasterizer returned an unexpected or duplicate page.");
+                totalBytes = checked(totalBytes + page.Content.Length);
+                if (page.Content.Length == 0 || page.Content.Length > 64 * 1024 * 1024 || totalBytes > 256L * 1024 * 1024)
+                    throw new InvalidDataException("PDF rasterizer exceeded the configured image byte budget.");
+                if (page.MediaType is not ("image/png" or "image/jpeg"))
+                    throw new InvalidDataException("PDF rasterizer returned an unsupported image format.");
                 var pixels = checked((long)page.PixelWidth * page.PixelHeight);
                 totalPixels = checked(totalPixels + pixels);
                 if (page.PixelWidth <= 0 || page.PixelHeight <= 0 || pixels > 40_000_000 || totalPixels > 200_000_000)
@@ -803,11 +824,16 @@ public sealed class DocumentService
                 var bytes = page.Content.ToArray();
                 result.Add(new WorkspaceAsset(id, id + extension, page.MediaType, Hash(bytes), bytes, $"pdf:page:{page.PageNumber}"));
             }
+            foreach (var diagnostic in diagnostics.Where(item => item.Code == "PdfRasterizerUnavailable").ToArray())
+                if (rasterized.Any(page => diagnostic.Message.Contains($"PDF page {page.PageNumber}:", StringComparison.Ordinal) ||
+                        diagnostic.Message.Contains($"PDF page {page.PageNumber} ", StringComparison.Ordinal)))
+                    diagnostics.Remove(diagnostic);
             return result;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            diagnostics.Add(new Diagnostic("PdfRasterizationFailed", $"PDF rasterization failed without aborting native extraction: {exception.GetType().Name}.", DiagnosticSeverity.Warning));
+            var reason = exception.Message.Length > 512 ? exception.Message[..512] + "…" : exception.Message;
+            diagnostics.Add(new Diagnostic("PdfRasterizationFailed", $"PDF rasterization failed: {reason} Native text was retained. Check the configured provider or run docredock doctor.", DiagnosticSeverity.Warning));
             return [];
         }
     }
@@ -894,6 +920,10 @@ public sealed class DocumentService
             var output = new List<DocumentNode>();
             foreach (var node in partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
+                if (graph.Format == DocumentFormatKind.Pdf && placements.Any(item => item.PartitionIndex == partitionIndex) &&
+                    node.Extensions?.TryGetValue("pdf_textless_placeholder", out var placeholder) == true &&
+                    placeholder.ValueKind == JsonValueKind.True)
+                    continue;
                 output.Add(node);
                 foreach (var placement in placements.Where(placement =>
                              placement.PartitionIndex == partitionIndex &&

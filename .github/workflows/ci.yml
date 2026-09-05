@@ -40,5 +40,9 @@ jobs:
       # into the public test suite. OCR-only checks are skipped when unavailable.
       - name: Run conversion QA
         run: python3 tools/conversion-qa/run.py --all
+      - name: Verify v0.2.3 quality-gate contracts
+        run: python3 -m unittest tools/test_v023_quality_score.py
+      - name: Run v0.2.3 source semantic suite
+        run: python3 tools/v023_semantic_quality.py --source-cli src/DocRedock.Cli/bin/Release/net10.0/DocRedock.Cli --output artifacts/SOURCE-PDF-SEMANTICS-EVIDENCE.json
       - name: Verify licenses and generate SBOM
         run: dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Release -- --root . --output artifacts

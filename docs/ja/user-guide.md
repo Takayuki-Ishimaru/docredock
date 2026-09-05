@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.2.2 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.2.3 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -81,7 +81,18 @@ DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock render input.md --format pdf \
 
 CFF／CFF2、グリフ不足、不正なcollection、埋め込み禁止フォントは拒否します。選択フォントのライセンス遵守は利用者の責任です。`--verbose`は選択パスを表示し、`--quiet`は情報行だけを抑制します。欠落・切り詰め警告があれば終了コード1です。
 
-## 7. プライバシーと更新確認
+## 7. capability と PDF OCR の診断
+
+環境の capability は doctor で確認できます。doctor は実験機能 gate の外で実行でき、入力ファイルも不要です。
+
+    docredock doctor
+    docredock doctor --json
+
+ready は依存関係を実測して利用可能、partial は一部の機能または OCR 言語だけ利用可能、unavailable は不足または無効化された状態です。ネイティブPDF OCRも内容によってpartialになる場合があります。画像PDFの OCR には OCR engine と PDF rasterizer の両方が必要です。rasterizer は明示パス（DOCREDOCK_PDF_RASTERIZER）、次に PATH 上の pdftoppm、mutool の順で探索します。探索を無効化する場合は DOCREDOCK_DISABLE_PDF_RASTERIZER=1 を設定します。未検出時は pdftoppm または mutool をインストールするか、実行ファイルのパスを設定してください。fallbackはページあたり最大100 path・32,768文字で、圧縮時もネイティブテキストを保持します。
+
+PdfTableInferred は規則的な罫線から表を再構成したこと、PdfTableNative は既存表情報を利用したこと、PdfTableAmbiguous は表として一意に決められなかったことを示します。VisualFallbackCompacted は出力予算に合わせて fallback を省略したことを示します。小さな欠落やノイズを含む図では部分 topology と fallback を保持し、接続を推測できない箇所を診断します。
+
+## 8. プライバシーと更新確認
 
 変換はローカルで行います。アプリ上部には実行中のバージョンが常時表示されます。起動時に公開GitHub Releases APIからPublic Betaを含む非draftの公開版をバックグラウンド確認し、新版があれば現在版と最新版を表示します。「更新を確認」で手動確認でき、オフラインやAPI制限時も変換と起動は継続します。更新は自動インストールされず、信頼済みのGitHubリリースページから利用者がパッケージを選びます。起動前に`DOCREDOCK_DISABLE_UPDATE_CHECK=1`を設定すると自動確認を無効化できます。
 

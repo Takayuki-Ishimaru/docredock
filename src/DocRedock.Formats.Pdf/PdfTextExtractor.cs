@@ -20,7 +20,10 @@ public sealed record PdfExtractionResult(
     int PageCount,
     IReadOnlyList<PdfPageText> Pages,
     IReadOnlyList<string>? Diagnostics = null,
-    IReadOnlyDictionary<int, VisualGraph>? VisualGraphs = null)
+    IReadOnlyDictionary<int, VisualGraph>? VisualGraphs = null,
+    IReadOnlyDictionary<int, IReadOnlyList<PdfTable>>? Tables = null,
+    IReadOnlyDictionary<int, PdfVisualFallbackProjection>? VisualFallbacks = null,
+    IReadOnlyDictionary<int, PdfVisualGraphProjection>? VisualProjections = null)
 {
     public string Text => string.Join("\n\n", Pages.Select(page => page.Text));
 }
@@ -31,7 +34,8 @@ public sealed record PdfExtractionOptions(
     int MaxObjects = 200_000,
     long MaxExpandedStreamBytes = 268_435_456,
     TimeSpan? RegexTimeout = null,
-    TimeSpan? VisualInferenceTimeout = null)
+    TimeSpan? VisualInferenceTimeout = null,
+    PdfVisualOutputBudget? OutputBudget = null)
 {
     public TimeSpan EffectiveRegexTimeout => RegexTimeout is { } value && value > TimeSpan.Zero
         ? value
@@ -106,9 +110,13 @@ public static class PdfTextExtractor
         var pages = new List<PdfPageText>();
         var diagnostics = new List<string>();
         var visualGraphs = new Dictionary<int, VisualGraph>();
+        var tables = new Dictionary<int, IReadOnlyList<PdfTable>>();
+        var visualFallbacks = new Dictionary<int, PdfVisualFallbackProjection>();
+        var visualProjections = new Dictionary<int, PdfVisualGraphProjection>();
         var streamPage = 1;
         foreach (var pageGroup in streams.GroupBy(stream => pageMap.TryGetValue(stream.ObjectId ?? -1, out var mapped) ? mapped : streamPage++).OrderBy(group => group.Key))
         {
+            var pageDiagnosticStart = diagnostics.Count;
             var stream = string.Join("\n", pageGroup.Select(item => item.Payload));
             var regions = ParseOperators(stream, options, fontMaps);
             var vector = ContainsVectorOperators(stream);
@@ -124,7 +132,7 @@ public static class PdfTextExtractor
             }
             if (imageOnly)
             {
-                diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} contains image-only content; rasterizer/OCR may be required.");
+                diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
                 regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
             }
             cancellationToken.ThrowIfCancellationRequested();
@@ -141,22 +149,62 @@ public static class PdfTextExtractor
                 if (partial)
                     diagnostics.Add($"VisualSemanticProjectionUnavailable: PDF page {pageNumber} contains partial vector topology.");
                 visualGraphs[pageNumber] = visualGraph;
+                var inferredTables = PdfTableInference.Infer(pageNumber, regions, visualGraph,
+                    (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxTableCandidatesPerPage,
+                    PdfTableInference.HasNativeTableMarkedContent(stream));
+                if (inferredTables.Count > 0)
+                {
+                    tables[pageNumber] = inferredTables;
+                    foreach (var table in inferredTables)
+                        diagnostics.Add($"{(table.Confidence == PdfTableConfidence.NativeTagged ? "PdfTableNative" : "PdfTableInferred")}: PDF page {pageNumber}: reconstructed {table.Rows.Count}x{table.Rows[0].Cells.Count} table from regular vector grid.");
+                }
+                var readableGraph = inferredTables.Count > 0
+                    ? PdfVisualOutputCompactor.RemoveConsumedTableVisuals(visualGraph, inferredTables)
+                    : visualGraph;
+                var outputGraph = PdfVisualOutputCompactor.ProjectGraph(readableGraph, options.OutputBudget);
+                visualProjections[pageNumber] = outputGraph;
+                var fallback = PdfVisualOutputCompactor.Compact(outputGraph.Graph, options.OutputBudget);
+                visualFallbacks[pageNumber] = fallback;
+                if (fallback.IsCompacted)
+                    diagnostics.Add($"VisualFallbackCompacted: PDF page {pageNumber}: {fallback.TotalFallbackPaths} vector fallback paths; {fallback.OmittedFallbackPaths} omitted from readable output.");
+                // The graph owns one structured diagnostic per primitive. Adapter warning
+                // strings can be coalesced later for display and therefore are not a sound
+                // input to the source-accounting invariant.
+                var invariantIssues = PdfDiagnosticInvariantValidator.Validate(outputGraph.Graph,
+                    (outputGraph.Graph.Diagnostics ?? []).Select(diagnostic => diagnostic.ToWarning()), fallback);
+                if (invariantIssues.Count > 0)
+                    throw new PdfExtractionException(string.Join(" ", invariantIssues));
             }
+            CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
+                (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
             pages.Add(new PdfPageText(pageNumber, SortReadingOrder(regions), vector, imageOnly));
         }
         if (pages.Count == 0)
         {
-            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1 has no native text. This build does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
             pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
         }
         for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
         {
             if (pages.Any(page => page.PageNumber == pageNumber)) continue;
-            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber} has no native text. This build does not include a PDF rasterizer; rasterizer/OCR may be required.");
+            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
             pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
-        return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs);
+        return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs, tables, visualFallbacks, visualProjections);
+    }
+
+    private static void CompactPageDiagnostics(List<string> diagnostics, int start, int pageNumber, int maximumPerCode)
+    {
+        var indexed = diagnostics.Skip(start).Select((message, offset) => (message, Index: start + offset,
+            Code: message.IndexOf(':') is var separator && separator > 0 ? message[..separator] : "PdfDiagnostic"))
+            .GroupBy(item => item.Code, StringComparer.Ordinal).ToArray();
+        var excess = indexed.SelectMany(group => group.Skip(maximumPerCode)).Select(item => item.Index)
+            .OrderDescending().ToArray();
+        foreach (var index in excess) diagnostics.RemoveAt(index);
+        var omitted = excess.Length;
+        if (omitted > 0)
+            diagnostics.Add($"VisualDiagnosticsCompacted: PDF page {pageNumber}: {omitted} repeated diagnostics omitted from readable output.");
     }
 
     private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions,
@@ -759,6 +807,23 @@ public static class PdfTextExtractor
             }
         }
         if (visualInferenceToken.IsCancellationRequested) ReportVisualInferenceTimeout();
+
+        // Endpoint/arrowhead inference can resolve an edge after its initial conservative
+        // unresolved diagnostic was recorded. Keep diagnostics in lockstep with the final
+        // graph, otherwise a fully resolved graph would falsely advertise unavailable
+        // topology to the public reporting contract.
+        var finalUnresolvedEdges = edges.Where(edge => edge.SourceId is null || edge.TargetId is null).ToArray();
+        var unresolvedEdgeIds = finalUnresolvedEdges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        graphDiagnostics.RemoveAll(diagnostic => diagnostic.Code == "VisualConnectorUnresolved" &&
+            diagnostic.SourceObjectId is not null && !unresolvedEdgeIds.Contains(diagnostic.SourceObjectId));
+        var unresolvedDiagnostics = graphDiagnostics.Where(diagnostic => diagnostic.Code == "VisualConnectorUnresolved").ToArray();
+        if (unresolvedDiagnostics.Length > finalUnresolvedEdges.Length)
+        {
+            var retained = unresolvedDiagnostics.Take(finalUnresolvedEdges.Length).ToHashSet();
+            graphDiagnostics.RemoveAll(diagnostic => diagnostic.Code == "VisualConnectorUnresolved" && !retained.Contains(diagnostic));
+        }
+        if (finalUnresolvedEdges.Length == 0)
+            diagnostics.RemoveAll(message => message.StartsWith($"VisualConnectorUnresolved: PDF page {pageNumber}", StringComparison.Ordinal));
 
         foreach (var edge in edges.Where(edge => allowGeometryInference && edge.SourceId is not null && edge.TargetId is not null &&
                      edge.EdgeDirection != VisualEdgeDirection.Directed))

@@ -6,6 +6,14 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.3 Public Beta
+
+- [v0.2.3 release notes](RELEASE_NOTES_v0.2.3.en.md)
+- Regular PDF grids become Markdown tables without duplicated cell text
+- Existing tolerance for small diagram gaps and offsets is preserved; unresolved relations remain notes
+- Bounded visual and diagnostic output, actual environment probes through doctor, and local PDF OCR integration
+- Stronger six-platform package checks and quality gates requiring execution evidence
+
 ### v0.2.2 Public Beta
 
 - [v0.2.2 release notes](RELEASE_NOTES_v0.2.2.en.md)

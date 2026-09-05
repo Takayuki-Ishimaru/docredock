@@ -17,4 +17,4 @@ The app checks non-draft published releases, including Public Beta builds, in th
 - [User guide](docs/en/user-guide.md)
 - [Supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [Changes in this release](release-docs/RELEASE_NOTES_v0.2.2.en.md)
+- [Changes in this release](release-docs/RELEASE_NOTES_v0.2.3.en.md)

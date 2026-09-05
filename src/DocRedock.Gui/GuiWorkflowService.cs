@@ -18,7 +18,9 @@ public sealed record GuiExportResult(
     bool IsReadable = false,
     SidecarForm? SidecarForm = null,
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
-    string? VisualSummary = null)
+    string? VisualSummary = null,
+    CapabilityStatus? PdfRasterizer = null,
+    string? ExportSummary = null)
 {
     public string PackagePath => SidecarPath;
 }
@@ -90,7 +92,7 @@ public sealed class GuiWorkflowService
         if (readable)
         {
             EnsureOutputDoesNotExist(markdownPath);
-            var readableService = new DocumentService(OcrEngineFactory.CreateDefault());
+            var readableService = new DocumentService(OcrEngineFactory.CreateDefault(), DiscoverRasterizer());
             try
             {
                 var exported = await readableService.ExportReadableAsync(new ReadableDocumentExportOptions(
@@ -112,7 +114,10 @@ public sealed class GuiWorkflowService
                     AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
                     IsReadable: true,
                     InferenceMode: exported.InferenceMode,
-                    VisualSummary: SummarizeVisualGraph(exported.Graph));
+                    VisualSummary: SummarizeVisualGraph(exported.Graph),
+                    PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+                        string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
+                    ExportSummary: ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics).ToString());
             }
             catch
             {
@@ -126,7 +131,7 @@ public sealed class GuiWorkflowService
         EnsureOutputDoesNotExist(markdownPath);
         EnsureOutputDoesNotExist(sidecarPath);
         EnsureOutputDoesNotExist(packagePath);
-        var service = new DocumentService(OcrEngineFactory.CreateDefault());
+        var service = new DocumentService(OcrEngineFactory.CreateDefault(), DiscoverRasterizer());
 
         try
         {
@@ -148,7 +153,10 @@ public sealed class GuiWorkflowService
             var fidelity = format == "pdf"
                 ? "F0 baseline / edited PDF is F3"
                 : "F0 baseline / supported edits are F1";
-            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(exported.Graph));
+            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(exported.Graph),
+                PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+                    string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
+                ExportSummary: ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics).ToString());
         }
         catch
         {
@@ -205,7 +213,7 @@ public sealed class GuiWorkflowService
             if (useUniqueName) baseName = NextAvailableRestoreBaseName(outputDirectory, baseName, sourceExtension);
             var outputPath = Path.Combine(outputDirectory, baseName + "-restored" + sourceExtension.ToLowerInvariant());
             EnsureOutputDoesNotExist(outputPath);
-            var service = new DocumentService(OcrEngineFactory.CreateDefault());
+            var service = new DocumentService(OcrEngineFactory.CreateDefault(), DiscoverRasterizer());
             var result = await service.RestoreAsync(new DocumentRestoreOptions(
                 workspacePath,
                 outputPath,
@@ -238,6 +246,10 @@ public sealed class GuiWorkflowService
             "No extractable content was found in the document projection.",
             DiagnosticSeverity.Warning)).ToArray();
     }
+
+    private static DocRedock.Providers.Abstractions.Providers.IPdfRasterizer? DiscoverRasterizer() =>
+        PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+            string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal));
 
     private static string? SummarizeVisualGraph(DocumentGraph graph)
     {

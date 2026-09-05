@@ -16,7 +16,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.2.2 Public Beta support
+## v0.2.3 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -25,7 +25,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.2 release notes](release-docs/RELEASE_NOTES_v0.2.2.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.3 release notes](release-docs/RELEASE_NOTES_v0.2.3.en.md).
 
 ## Use it in 30 seconds
 
@@ -54,7 +54,7 @@ docredock export input.xlsx --content-policy visible --output input.md
 
 When DocRedock can determine a supported flow unambiguously, it emits Mermaid. Otherwise it keeps available text or an image/page fallback and reports what could not be resolved.
 
-Visual inference defaults to `safe`. Choose `native-only` to accept only connections explicitly stored by the source format, or `balanced` to consider additional estimated connections. Ambiguous or contradictory relations remain unresolved. CLI example: `docredock export input.pptx --visual-inference safe --output input.md`.
+Visual inference defaults to `safe`. Choose `native-only` to accept only connections explicitly stored by the source format, or `balanced` to consider a wider set of estimated connections. `safe` accepts only unique high-confidence estimates. Ambiguous, contradictory, duplicate, or low-confidence relations remain unresolved and stay visible through fallback or diagnostics; DocRedock does not invent arrows. CLI example: `docredock export input.pptx --visual-inference safe --output input.md`.
 
 This is not pixel-perfect reconstruction. SmartArt and DOCX/PDF vector topology can remain partial; PDF may use a page preview or placeholder. A warning means the Markdown alone may omit meaning—review the diagnostics/report, generated assets, and source document.
 
@@ -70,7 +70,7 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 ## Important limitations
 
-- v0.2.2 is a Public Beta, not a production-stable release.
+- v0.2.3 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -83,9 +83,9 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.2.2 supported features](docs/en/supported-features.md)
+- [v0.2.3 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.2.2 release notes](release-docs/RELEASE_NOTES_v0.2.2.en.md)
+- [v0.2.3 release notes](release-docs/RELEASE_NOTES_v0.2.3.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

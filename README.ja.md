@@ -16,7 +16,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.2.2 Public Betaの対応状況
+## v0.2.3 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -25,7 +25,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.2リリースノート](release-docs/RELEASE_NOTES_v0.2.2.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.3リリースノート](release-docs/RELEASE_NOTES_v0.2.3.md)へ集約します。
 
 ## 30秒で使う
 
@@ -54,7 +54,7 @@ docredock export input.xlsx --content-policy visible --output input.md
 
 対応するフローの関係を曖昧さなく判断できた場合、DocRedockはMermaidを出力します。それ以外は利用可能なテキストや画像／ページの代替表示を残し、解決できなかった内容を診断で知らせます。
 
-接続推定の既定値は`safe`です。元形式に明示された接続だけを使う場合は`native-only`、追加の推定候補を扱う場合は`balanced`を選べます。曖昧または矛盾する関係は、どのモードでも確定しません。CLI例: `docredock export input.pptx --visual-inference safe --output input.md`。
+接続推定の既定値は`safe`です。元形式に明示された接続だけを使う場合は`native-only`、より広い推定候補を扱う場合は`balanced`を選べます。`safe`は一意で確度の高い推定だけを採用します。曖昧、矛盾、重複、または確度の低い関係は未解決のままfallback／diagnosticに残し、矢印を捏造しません。CLI例: `docredock export input.pptx --visual-inference safe --output input.md`。
 
 pixel-perfect再現ではありません。SmartArtやDOCX／PDFのvector topologyは部分的な場合があり、PDFではpage previewまたはplaceholderを使うことがあります。Warningがある場合、Markdownだけでは意味が欠ける可能性があるため、diagnostic/report、asset、元文書も確認してください。
 
@@ -70,7 +70,7 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 
 ## 主な制約
 
-- v0.2.2はPublic Betaであり、本番向けの安定版ではありません。
+- v0.2.3はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -82,9 +82,9 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.2.2の対応状況](docs/ja/supported-features.md)
+- [v0.2.3の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.2.2リリースノート](release-docs/RELEASE_NOTES_v0.2.2.md)
+- [v0.2.3リリースノート](release-docs/RELEASE_NOTES_v0.2.3.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

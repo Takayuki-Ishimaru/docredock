@@ -34,6 +34,21 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task Readable_export_prints_shared_table_and_fallback_page_summary()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx(withTable: true);
+        var stdout = new StringWriter();
+
+        var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
+            ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+
+        Assert.Equal((int)ExitCode.Success, result);
+        Assert.Contains("Tables reconstructed: 1", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Fallback pages: 0", stdout.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Export_defaults_to_readable_profile_without_creating_a_sidecar()
     {
         using var fixture = new Fixture();
@@ -497,6 +512,44 @@ public sealed class CliApplicationTests : IDisposable
         public void DeleteDirectory(string path, bool recursive) => Directory.Delete(path, recursive);
     }
 
+    [Fact]
+    public async Task Doctor_json_reports_stable_schema_and_can_run_without_experimental_gate()
+    {
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var previous = Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER");
+        Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", "1");
+        try
+        {
+            var code = await new CliApplication(output, error).RunAsync(["doctor", "--json"]);
+            Assert.InRange(code, 0, 1);
+            using var json = System.Text.Json.JsonDocument.Parse(output.ToString());
+            Assert.Equal("1", json.RootElement.GetProperty("schema_version").GetString());
+            Assert.Contains(json.RootElement.GetProperty("capabilities").EnumerateArray(), item => item.GetProperty("id").GetString() == "pdf-rasterizer");
+            Assert.Empty(error.ToString());
+        }
+        finally { Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", previous); }
+    }
+
+    [Theory]
+    [InlineData("export")]
+    [InlineData("render")]
+    [InlineData("restore")]
+    [InlineData("doctor")]
+    public async Task Command_help_succeeds_before_gate_and_input_validation(string command)
+    {
+        var previous = Environment.GetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL");
+        Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", null);
+        try
+        {
+            var output = new StringWriter();
+            var code = await new CliApplication(output, new StringWriter()).RunAsync([command, "--help"]);
+            Assert.Equal(0, code);
+            Assert.Contains("Help is available", output.ToString(), StringComparison.Ordinal);
+        }
+        finally { Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previous); }
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "docredock-cli-tests", Guid.NewGuid().ToString("N"));
@@ -507,14 +560,16 @@ public sealed class CliApplicationTests : IDisposable
 
         public Fixture() => Directory.CreateDirectory(Root);
 
-        public void CreateDocx(bool withImage = false)
+        public void CreateDocx(bool withImage = false, bool withTable = false)
         {
             using var file = File.Create(SourcePath);
             using var archive = new ZipArchive(file, ZipArchiveMode.Create);
             Write(archive, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>");
             var document = withImage
                 ? "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r><w:drawing><a:blip r:embed=\"rIdImage\"/></w:drawing></w:r></w:p></w:body></w:document>"
-                : "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p></w:body></w:document>";
+                : "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body><w:p><w:r><w:t>Before</w:t></w:r></w:p>" +
+                  (withTable ? "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>" : string.Empty) +
+                  "</w:body></w:document>";
             Write(archive, "word/document.xml", document);
             if (withImage)
                 Write(archive, "word/_rels/document.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdImage\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/image1.png\"/></Relationships>");

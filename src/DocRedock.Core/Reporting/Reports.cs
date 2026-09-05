@@ -5,7 +5,11 @@ public enum PackagePreservationLevel { ByteIdentical, PartPayloadIdentical, Slic
 public enum DiagnosticSeverity { Information, Warning, Error }
 public enum OcrProcessingStatus { Completed, NotRequired, SkippedByPolicy, SkippedByBudget, Unavailable, Failed }
 
-public sealed record Diagnostic(string Code, string Message, DiagnosticSeverity Severity, string? NodeId = null, string? PartUri = null);
+public sealed record Diagnostic(string Code, string Message, DiagnosticSeverity Severity, string? NodeId = null, string? PartUri = null)
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, string>? Data { get; init; }
+}
 public sealed record FidelityReport(
     FidelityLevel Level,
     PackagePreservationLevel PackagePreservation,

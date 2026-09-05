@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These command-line workflows are unsupported experiments in the v0.2.2 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
+> These command-line workflows are unsupported experiments in the v0.2.3 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
 
 Set the environment variable before starting the CLI:
 
@@ -20,7 +20,7 @@ The environment gate applies to experimental CLI workflows, including CLI PDF ex
 
 ## PDF input and OCR
 
-PDF extraction preserves native text page partitions. Textless-page OCR requires an explicitly configured rasterizer and OCR provider; DocRedock does not bundle a PDF rasterizer. If unavailable, DocRedock emits `PdfRasterizerUnavailable` instead of implying that OCR ran.
+PDF extraction preserves native text page partitions. Textless-page OCR requires a usable PDF rasterizer and OCR provider. DocRedock checks an explicit `DOCREDOCK_PDF_RASTERIZER` path, then pdftoppm / mutool on PATH; it does not bundle either tool. Use `docredock doctor` to inspect availability and `DOCREDOCK_DISABLE_PDF_RASTERIZER=1` to disable discovery. If rasterization is unavailable, DocRedock emits `PdfRasterizerUnavailable` instead of implying that OCR ran.
 
 ## PDF rendering and fonts
 

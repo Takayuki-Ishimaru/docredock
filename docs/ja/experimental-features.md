@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/experimental-features.md)
 
-> v0.2.2 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
+> v0.2.3 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
 
 CLIを起動する前に環境変数を設定します。
 
@@ -20,7 +20,7 @@ $env:DOCREDOCK_ENABLE_EXPERIMENTAL = "1"
 
 ## PDF入力とOCR
 
-PDF抽出はネイティブテキストをページpartitionに保持します。文字のないページでOCRするには、PDF rasterizerとOCR providerの明示的な構成が必要です。DocRedockはPDF rasterizerを同梱せず、利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
+PDF抽出はネイティブテキストをページ単位で保持します。文字のないページのOCRには、利用可能なPDF rasterizerとOCR providerが必要です。`DOCREDOCK_PDF_RASTERIZER`による明示設定、PATH上のpdftoppm／mutoolの順で探索しますが、これらのツールは同梱しません。利用可否は`docredock doctor`で確認でき、`DOCREDOCK_DISABLE_PDF_RASTERIZER=1`で探索を無効にできます。利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
 
 ## PDF生成とフォント
 

@@ -32,6 +32,32 @@ public sealed class DocumentServiceTests
     }
 
     [Fact]
+    public async Task Pdf_rectangle_table_cells_are_not_duplicated_as_mermaid_nodes_while_adjacent_flow_survives()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "table-flow.pdf");
+        var markdown = Path.Combine(root, "table-flow.md");
+        var content = """
+            BT 1 0 0 1 10 10 Tm (CELL_A) Tj ET BT 1 0 0 1 110 10 Tm (CELL_B) Tj ET
+            BT 1 0 0 1 10 40 Tm (CELL_C) Tj ET BT 1 0 0 1 110 40 Tm (CELL_D) Tj ET
+            0 0 100 30 re S 100 0 100 30 re S 0 30 100 30 re S 100 30 100 30 re S
+            BT 1 0 0 1 410 10 Tm (FLOW_START) Tj ET BT 1 0 0 1 610 10 Tm (FLOW_END) Tj ET
+            400 0 100 30 re S 600 0 100 30 re S 500 15 m 600 15 l S 600 15 m 588 23 l 588 7 l h f
+            """;
+        await File.WriteAllBytesAsync(source, Encoding.Latin1.GetBytes($"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream\n%%EOF"));
+
+        var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown));
+        var readable = await File.ReadAllTextAsync(markdown);
+        var diagram = Assert.Single(exported.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+        var visual = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+
+        Assert.Equal(1, readable.Split("CELL_A", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("CELL_A[", readable, StringComparison.Ordinal);
+        Assert.DoesNotContain(visual.Nodes, node => node.Label.StartsWith("CELL_", StringComparison.Ordinal));
+        Assert.Contains(visual.Nodes, node => node.Label == "FLOW_START");
+    }
+
+    [Fact]
     public async Task Native_only_mode_reaches_pdf_adapter_and_keeps_geometry_relation_unresolved()
     {
         var root = TempDirectory();
@@ -362,6 +388,12 @@ public sealed class DocumentServiceTests
         Assert.Contains("recognized text", await File.ReadAllTextAsync(markdown));
         Assert.Equal(1, exported.Workspace.Manifest.Ocr.StatusSummary.Completed);
         Assert.True(File.Exists(Path.Combine(workspace, "assets", "page-0001.png")));
+        Assert.DoesNotContain(exported.Diagnostics, item => item.Code == "PdfRasterizerUnavailable");
+        var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, Path.Combine(root, "readable.md"), EnableOcr: true));
+        var readableText = await File.ReadAllTextAsync(readable.MarkdownPath);
+        Assert.Contains("recognized text", readableText);
+        Assert.DoesNotContain("rasterizer/OCR unavailable", readableText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -372,7 +404,7 @@ public sealed class DocumentServiceTests
         {
             var source = Path.Combine(root, "scan.pdf");
             await new MarkdownRenderer().RenderAsync(string.Empty, RenderFormat.Pdf, source);
-            var exported = await new DocumentService(new FakeOcrEngine()).ExportAsync(
+            var exported = await new DocumentService(new FakeOcrEngine(), null, discoverPdfRasterizer: false).ExportAsync(
                 new DocumentExportOptions(
                     source,
                     Path.Combine(root, "scan.drmd"),
@@ -382,13 +414,47 @@ public sealed class DocumentServiceTests
 
             var diagnostic = Assert.Single(exported.Diagnostics, item =>
                 item.Code == "PdfRasterizerUnavailable");
-            Assert.Contains("does not include a PDF rasterizer", diagnostic.Message, StringComparison.Ordinal);
+            Assert.Contains("docredock doctor", diagnostic.Message, StringComparison.Ordinal);
             Assert.Empty(exported.Graph.Nodes);
         }
         finally
         {
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData(2, false)]
+    [InlineData(1, true)]
+    public async Task Invalid_rasterizer_page_mapping_falls_back_without_attaching_wrong_ocr(int returnedPage, bool duplicate)
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "scan.pdf");
+            await new MarkdownRenderer().RenderAsync(string.Empty, RenderFormat.Pdf, source);
+            var result = await new DocumentService(new FakeOcrEngine(), new FakePdfRasterizer(returnedPage, duplicate))
+                .ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "scan.md"), EnableOcr: true));
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfRasterizationFailed");
+            Assert.DoesNotContain("recognized text", await File.ReadAllTextAsync(result.MarkdownPath), StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Ocr_disabled_does_not_invoke_an_available_rasterizer()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "scan.pdf");
+            await new MarkdownRenderer().RenderAsync(string.Empty, RenderFormat.Pdf, source);
+            var provider = new FakePdfRasterizer();
+            await new DocumentService(new FakeOcrEngine(), provider).ExportReadableAsync(
+                new ReadableDocumentExportOptions(source, Path.Combine(root, "scan.md"), EnableOcr: false));
+            Assert.Equal(0, provider.Calls);
+        }
+        finally { Directory.Delete(root, recursive: true); }
     }
 
     private static string TempDirectory()
@@ -409,14 +475,19 @@ public sealed class DocumentServiceTests
                 new OcrResult("recognized text", [new OcrTextRegion("recognized text", new Geometry("image-pixels", 0, 0, 10, 10), 0.92)]), []));
     }
 
-    private sealed class FakePdfRasterizer : IPdfRasterizer
+    private sealed class FakePdfRasterizer(int? forcedPage = null, bool duplicate = false) : IPdfRasterizer
     {
+        public int Calls { get; private set; }
         public ProviderDescriptor Descriptor { get; } = new("test.pdf.rasterizer", new Version(1, 0), 1,
             new HashSet<string> { "rasterize.pdf" }, "MIT", "built-in", true);
 
         public ValueTask<IReadOnlyList<RasterizedPdfPage>> RasterizeAsync(string pdfPath, IReadOnlyList<int> pageNumbers,
-            PdfRasterizationOptions options, CancellationToken cancellationToken = default) =>
-            ValueTask.FromResult<IReadOnlyList<RasterizedPdfPage>>(pageNumbers
-                .Select(page => new RasterizedPdfPage(page, "image/png", new byte[] { 1, 2, 3 }, 10, 10)).ToArray());
+            PdfRasterizationOptions options, CancellationToken cancellationToken = default)
+        {
+            Calls++;
+            var pages = pageNumbers.Select(page => new RasterizedPdfPage(forcedPage ?? page, "image/png", new byte[] { 1, 2, 3 }, 10, 10)).ToList();
+            if (duplicate && pages.Count > 0) pages.Add(pages[0]);
+            return ValueTask.FromResult<IReadOnlyList<RasterizedPdfPage>>(pages);
+        }
     }
 }
