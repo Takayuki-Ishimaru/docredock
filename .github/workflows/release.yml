@@ -61,10 +61,12 @@ jobs:
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - name: Install Japanese TrueType font for PDF integration tests
+      - name: Install PDF test font and Japanese/English OCR dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-ipafont-gothic
+          sudo apt-get install -y fonts-ipafont-gothic tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng
+          tesseract --list-langs | grep -Fx jpn
+          tesseract --list-langs | grep -Fx eng
       - name: Restore locked dependencies
         run: dotnet restore DocRedock.sln --locked-mode
       - name: Build
@@ -451,45 +453,10 @@ jobs:
           test "${#smoke[@]}" -eq 6
           args=()
           for file in "${smoke[@]}"; do args+=(--smoke-evidence "$file"); done
-          python3 tools/v023_semantic_quality.py "${args[@]}" --source-evidence release-source-semantic/SOURCE-PDF-SEMANTICS-EVIDENCE.json --output release-files/PDF-SEMANTICS-EVIDENCE.json
-          python3 tools/v023_quality_score.py --conversion-root release-conversion-qa "${args[@]}" --output release-files/QUALITY-SCORE-v0.2.3.json
-      - name: Write checked release evidence
-        shell: bash
-        run: |
-          set -euo pipefail
-          commit=$(git rev-parse HEAD)
-          test -f release-conversion-qa/summary.md
-          cp release-conversion-qa/summary.md release-files/CONVERSION-QA-EVIDENCE.md
-          cat > release-files/RELEASE-EVIDENCE.md <<EOF
-          # Release evidence: $RELEASE_TAG
-
-          - [x] Product source commit: \`$commit\`
-          - [x] Release workflow commit: \`${{ github.workflow_sha }}\`
-          - [x] Locked restore, Release build, unit tests, and conversion QA passed
-          - [x] Conversion-QA evidence is attached as \`CONVERSION-QA-EVIDENCE.md\` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
-          - [x] v0.2.3 quality score is attached as \`QUALITY-SCORE-v0.2.3.json\`; it requires a total score of at least 95, every section at least 90%, and no critical evidence failure
-          - [x] PDF semantic evidence is attached as \`PDF-SEMANTICS-EVIDENCE.json\` with fixture/output hashes, commands, diagnostics, assertions, and all six RID results
-          - [x] License allowlist check passed
-          - [x] Six RID-specific self-contained packages were built
-          - [x] Every archive was extracted before testing
-          - [x] Extracted CLI passed DOCX/XLSX/PPTX/PDF readable export with the documented PDF experimental gate
-          - [x] DOCX/XLSX/PPTX/PDF visual-semantics smoke passed, including resolved connector/vector topology and explicit partial-path fallback diagnostics
-          - [x] Extracted CLI passed DOCX/XLSX/PPTX F0 SHA-256 equality
-          - [x] Extracted CLI passed DOCX/XLSX/PPTX F1 edits
-          - [x] Every package checksum manifest was verified before smoke testing; release-wide SHA-256 values are attached in SHA256SUMS
-          - [x] Pack/unpack and tamper rejection passed
-          - [x] Avalonia headless MainWindow construction passed before packaging
-          - [x] Extracted GUI binary format and CPU architecture passed on every target runner; the actual packaged Linux GUI child process stayed alive under Xvfb
-          - [x] Signing status is recorded inside every archive; unsigned beta packages remain allowed
-          - [x] Artifact-linked CycloneDX SBOM, RID-specific runtime locks, hashes, RID, and commit provenance were generated
-          - [x] Desktop GUI PDF input default availability and the CLI PDF experimental gate passed regression tests
-          - [ ] Round-trip/source-format restore and edited-PDF F3 output are approved as supported user workflows (intentionally pending; do not use)
-
-          Workflow evidence: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
-          EOF
-          grep -F -- "\`$commit\`" release-files/RELEASE-EVIDENCE.md
-          grep -F -- "\`${{ github.workflow_sha }}\`" release-files/RELEASE-EVIDENCE.md
-          grep -F -- '`CONVERSION-QA-EVIDENCE.md`' release-files/RELEASE-EVIDENCE.md
+          mkdir -p "$RUNNER_TEMP/quality-evidence"
+          python3 tools/v023_semantic_quality.py "${args[@]}" --source-evidence release-source-semantic/SOURCE-PDF-SEMANTICS-EVIDENCE.json --output "$RUNNER_TEMP/quality-evidence/pdf-semantics.json"
+          python3 tools/v023_quality_score.py --conversion-root release-conversion-qa "${args[@]}" --output "$RUNNER_TEMP/quality-evidence/quality.json"
+          mv "${smoke[@]}" "$RUNNER_TEMP/quality-evidence/"
       - name: Generate release SBOM, provenance, and checksums
         shell: bash
         run: |
@@ -512,8 +479,6 @@ jobs:
             cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
             printf '\n---\n\n'
             cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md"
-            printf '\n---\n\n'
-            cat release-files/RELEASE-EVIDENCE.md
           } > release-body.md
           python3 - <<'PY'
           import os
@@ -522,6 +487,20 @@ jobs:
           path = Path("release-body.md")
           base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['RELEASE_TAG']}"
           body = path.read_text(encoding="utf-8")
+          forbidden = ("quality score", "quality-score", "品質スコア", "内部指標", "内部メモ",
+                       "pdf-semantics-evidence", "conversion-qa-evidence", "release-evidence",
+                       "95/100", "90%", "124", "focused tests")
+          if any(marker in body.lower() for marker in forbidden):
+              raise SystemExit("Release notes contain internal development information")
+          extensions = {"win-x64": "zip", "win-arm64": "zip",
+                        "osx-x64": "zip", "osx-arm64": "zip",
+                        "linux-x64": "tar.gz", "linux-arm64": "tar.gz"}
+          expected = {f"DocRedock-{os.environ['RELEASE_TAG']}-{rid}.{ext}"
+                      for rid, ext in extensions.items()}
+          expected.update(("SHA256SUMS", "sbom.cdx.json", "RELEASE-PROVENANCE.json"))
+          actual = {item.name for item in Path("release-files").iterdir()}
+          if actual != expected:
+              raise SystemExit("Release assets do not match the public distribution allowlist")
           body = body.replace("](../docs/", f"]({base}/docs/")
           body = body.replace("](ERRATA_", f"]({base}/release-docs/ERRATA_")
           path.write_text(body, encoding="utf-8")

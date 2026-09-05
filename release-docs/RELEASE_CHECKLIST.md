@@ -60,14 +60,6 @@
 - [ ] `native-only`／`safe`／`balanced` のrelation assertion結果を記録した（positive／negativeを含む）
 - [x] DOCX connectorとPDF vector topologyは条件付き対応としてのみ記載し、完全drawing／SmartArt／任意vector graph再構成を対応済みと記載していない
 
-## v0.2.3 品質証跡
-
-- [ ] 6 RIDすべての展開後スモーク証跡が、同一の完全な製品コミットSHAと対象バージョンを示す
-- [ ] `QUALITY-SCORE-v0.2.3.json` が総合95/100以上、各項目90%以上、重大な証跡不備0で成功する
-- [ ] `PDF-SEMANTICS-EVIDENCE.json` に表・大量図形・図無効化・決定性の検証結果と全RIDを記録した
-- [ ] 端点の隙間・回転・移動・ラベル位置ずれ・競合する接続先を含む図の回帰ケースを実行した
-- [ ] doctorのJSON契約、同梱OCRヘルパー、利用不可の場合の案内を配布物から検証した
-
 ## ビルドとテスト
 
 ローカル検証結果は恒久的な公開条件ではありません。clean clone、全RID、署名／notarization、構造化visual evidenceの各ゲートを、対象releaseごとに記録してください。

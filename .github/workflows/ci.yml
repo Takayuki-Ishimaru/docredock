@@ -26,10 +26,12 @@ jobs:
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           dotnet-version: 10.0.x
-      - name: Install Japanese TrueType font for PDF integration tests
+      - name: Install PDF test font and Japanese/English OCR dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fonts-ipafont-gothic
+          sudo apt-get install -y fonts-ipafont-gothic tesseract-ocr tesseract-ocr-jpn tesseract-ocr-eng
+          tesseract --list-langs | grep -Fx jpn
+          tesseract --list-langs | grep -Fx eng
       - name: Restore locked dependencies
         run: dotnet restore DocRedock.sln --locked-mode
       - name: Build
@@ -37,7 +39,7 @@ jobs:
       - name: Test
         run: dotnet test tests/DocRedock.Tests/DocRedock.Tests.csproj --configuration Release --no-build --no-restore
       # Readable conversion regression guard: fixtures are synthetic and checked
-      # into the public test suite. OCR-only checks are skipped when unavailable.
+      # into the public test suite. OCR dependencies are installed above.
       - name: Run conversion QA
         run: python3 tools/conversion-qa/run.py --all
       - name: Verify v0.2.3 quality-gate contracts

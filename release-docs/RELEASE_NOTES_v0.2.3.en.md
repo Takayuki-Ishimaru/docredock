@@ -22,10 +22,4 @@
 - Desktop GUI PDF input is available by default. CLI PDF export, restoration, and rendering still require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.
 - PDF rasterizers, Tesseract, Mermaid CLI, and Japanese PDF fonts are not bundled. Install them as needed. Windows and macOS OCR helpers are included but require the corresponding OS features and runtime.
 - Visual fallback text and repeated diagnostics have output limits. Review omission counts and the source drawing when needed. These limits do not truncate native body text.
-- Check `SIGNING-STATUS.json` inside each package for its signing and notarization status.
-
-## Release validation
-
-Publication requires a clean-source build and tests, Office conversion QA, PDF table and dense-visual checks, 124 diagram regression cases, and extracted-package smoke tests on six targets: Windows, macOS, and Linux, each on x64 and ARM64. The quality gate requires at least 95/100 overall, at least 90% in each section, and no critical evidence failure.
-
-For actual results and the separate product and workflow commits, see the attached `RELEASE-EVIDENCE.md`, `QUALITY-SCORE-v0.2.3.json`, and `PDF-SEMANTICS-EVIDENCE.json`. Checksums, SBOM, and provenance are also attached.
+- Check `SIGNING-STATUS.json` inside each package for its signing and notarization status. Each package includes `BINARY-SHA256SUMS`, an SBOM, and provenance; the release-page `SHA256SUMS` covers the archives.
