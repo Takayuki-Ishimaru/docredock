@@ -1378,7 +1378,9 @@ public sealed partial class ReadableMarkdownSerializer
                     MarkdownDiagnosticSeverity.Info, node.Id));
             return;
         }
-        foreach (var diagnostic in (graph.Diagnostics ?? []).Where(diagnostic => diagnostic is not null))
+        foreach (var diagnostic in (graph.Diagnostics ?? []).Where(diagnostic => diagnostic is not null)
+                     .GroupBy(diagnostic => (diagnostic.Code, diagnostic.PartitionId))
+                     .SelectMany(group => group.Take(10)))
         {
             var message = diagnostic.LocationSummary is { Length: > 0 } location
                 ? diagnostic.Message + " (" + location + ")"
@@ -1407,7 +1409,7 @@ public sealed partial class ReadableMarkdownSerializer
             AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
                 "Visual graph validation failed; the source connector or vector fallback was retained.",
                 MarkdownDiagnosticSeverity.Warning, node.Id));
-            WriteVisualGraphFallbackDetails(output, graph);
+            if (options.IncludeDiagrams) WriteVisualGraphFallbackDetails(output, graph, node);
             return;
         }
         if (!options.IncludeDiagrams)
@@ -1437,53 +1439,33 @@ public sealed partial class ReadableMarkdownSerializer
                 AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial",
                     "Visual metadata did not contain a valid semantic topology; the source connector or vector fallback was retained.",
                     MarkdownDiagnosticSeverity.Warning, node.Id));
-            WriteVisualGraphFallbackDetails(output, graph);
+            if (options.IncludeDiagrams) WriteVisualGraphFallbackDetails(output, graph, node);
             return;
         }
 
         WriteMermaid(output, mermaid);
         var hasUnresolvedEdges = (graph.Edges ?? []).Any(edge => edge.SourceId is null || edge.TargetId is null);
         if (quality is VisualGraphQuality.Partial or VisualGraphQuality.FallbackOnly || hasUnresolvedEdges)
-            WritePartialVisualDetails(output, graph);
+            WritePartialVisualDetails(output, graph, node);
         else if (quality == VisualGraphQuality.HighConfidenceInferred)
             output.AppendLine("> 視覚構造は配置情報から推定されたものであり、内容の意味を保証するものではありません。").AppendLine();
     }
 
-    private static void WritePartialVisualDetails(StringBuilder output, VisualGraph graph)
-    {
-        var unresolved = (graph.Diagnostics ?? []).Where(item => item is not null).ToArray();
-        var unresolvedEdges = (graph.Edges ?? []).Where(edge => edge.SourceId is null || edge.TargetId is null)
-            .OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray();
-        output.AppendLine("#### 未解決の視覚接続").AppendLine();
-        output.AppendLine("以下の接続は抽出結果に基づく未解決・推定情報であり、確定的な意味として解釈しないでください。").AppendLine();
-        if (unresolved.Length == 0 && unresolvedEdges.Length == 0)
-        {
-            output.AppendLine("- 未解決のコネクター情報はありません。").AppendLine();
-            return;
-        }
-        foreach (var diagnostic in unresolved)
-        {
-            var location = diagnostic.LocationSummary is { Length: > 0 } value ? $"（{value}）" : string.Empty;
-            output.Append("- ").Append(InlineText(diagnostic.Message)).Append(location).AppendLine();
-        }
-        foreach (var edge in unresolvedEdges)
-            output.Append("- 接続先未確定: ").AppendLine(InlineText(string.IsNullOrWhiteSpace(edge.Label)
-                ? "接続先を一意に判定できないコネクター" : edge.Label!));
-        output.AppendLine();
-    }
+    private void WritePartialVisualDetails(StringBuilder output, VisualGraph graph, DocumentNode node) =>
+        WriteBoundedVisualDetails(output, graph, node, partial: true);
 
-    private static void WriteVisualGraphFallbackDetails(StringBuilder output, VisualGraph graph)
+    private void WriteVisualGraphFallbackDetails(StringBuilder output, VisualGraph graph, DocumentNode node) =>
+        WriteBoundedVisualDetails(output, graph, node, partial: false);
+
+    private void WriteBoundedVisualDetails(StringBuilder output, VisualGraph graph, DocumentNode node, bool partial)
     {
-        output.AppendLine("### 図の抽出結果（フォールバック）").AppendLine();
-        foreach (var item in (graph.Nodes ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
-            output.Append("- ノード: ").Append(InlineText(string.IsNullOrWhiteSpace(item.Label) ? item.Id : item.Label)).AppendLine();
-        foreach (var item in (graph.SourceItems ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
-            output.Append("- ソース項目: ").Append(item.Id).Append("（").Append(item.Disposition).Append("）").AppendLine();
-        foreach (var path in (graph.Paths ?? []).Where(item => item is not null).OrderBy(item => item.Id, StringComparer.Ordinal))
-            output.Append("- パス: ").Append(path.Id).AppendLine();
-        foreach (var diagnostic in (graph.Diagnostics ?? []).Where(item => item is not null))
-            output.Append("- 診断: ").Append(diagnostic.Code).Append(" — ").AppendLine(InlineText(diagnostic.Message));
-        output.AppendLine();
+        var result = VisualFallbackMarkdownWriter.Write(output, graph, partial,
+            ExtensionInt(node, "visual_output_max_paths") ?? VisualFallbackMarkdownWriter.MaxItems,
+            ExtensionInt(node, "visual_output_max_characters") ?? VisualFallbackMarkdownWriter.MaxCharacters);
+        if (result.Omitted > 0 || result.Shortened)
+            AddDiagnostic(new MarkdownDiagnostic("VisualFallbackCompacted",
+                $"Visual fallback: {result.Emitted} details shown; {result.Omitted} additional details omitted; long fields may be shortened.",
+                MarkdownDiagnosticSeverity.Warning, node.Id));
     }
 
     private static void WriteVisualEdgeFallback(StringBuilder output, VisualGraph graph)
@@ -1662,7 +1644,8 @@ public sealed partial class ReadableMarkdownSerializer
                 continue;
             }
 
-            if (message.Covered.Length > 2 || edge.IsUndirected)
+            // An unresolved endpoint remains a note, even when only two lifelines are nearby.
+            if (message.Covered.Length > 2 || edge.IsUndirected || edge.SourceId is null || edge.TargetId is null)
             {
                 var covered = message.Covered.Length == 0 ? participantCenters : message.Covered;
                 output.Append("    Note over ").Append(covered[0].Alias).Append(',').Append(covered[^1].Alias)

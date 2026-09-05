@@ -21,7 +21,9 @@ public enum ExitCode
 
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
 {
-    private DocumentService Service { get; } = documentService ?? new DocumentService(OcrEngineFactory.CreateDefault());
+    private DocumentService Service { get; } = documentService ?? new DocumentService(OcrEngineFactory.CreateDefault(),
+        PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+            string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)));
     private static string Version => typeof(CliApplication).Assembly
         .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? typeof(CliApplication).Assembly.GetName().Version?.ToString(3)
@@ -30,6 +32,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
         if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { WriteHelp(); return 0; }
+        // Command help is intentionally dispatched before experimental gates and
+        // input validation so every command documents itself in every environment.
+        if (args.Length > 1 && args.Skip(1).Any(argument => argument is "--help" or "-h")) { WriteCommandHelp(args[0]); return 0; }
         if (args[0] == "--version") { await output.WriteLineAsync($"DocRedock {Version}"); return 0; }
         if (!ExperimentalFeatures.IsEnabled && IsExperimentalCommand(args[0]))
             return ExperimentalDisabled(args[0]);
@@ -49,6 +54,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 "unpack" => await UnpackAsync(parsed, cancellationToken),
                 "rules" => await RulesAsync(parsed, cancellationToken),
                 "migrate" => await MigrateAsync(parsed, cancellationToken),
+                "doctor" => await DoctorAsync(parsed),
                 _ => Invalid($"Unknown command '{args[0]}'."),
             };
         }
@@ -67,6 +73,52 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             await error.WriteLineAsync($"Internal error: {ex.GetType().Name}: {ex.Message}");
             return (int)ExitCode.InternalError;
         }
+    }
+
+    private async Task<int> DoctorAsync(Arguments args)
+    {
+        if (args.Positionals.Count != 0) return Invalid("doctor does not accept an input file.");
+        var disabled = string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal);
+        var rasterizer = PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"), disabled);
+        var capabilities = await new CapabilityReporter().ReportAsync(rasterizer);
+        var report = new CapabilityReport("1", Version, capabilities);
+        if (args.HasFlag("json"))
+        {
+            await output.WriteLineAsync(JsonSerializer.Serialize(report, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            return 0;
+        }
+        await output.WriteLineAsync($"DocRedock {Version}"); await output.WriteLineAsync("Readable export");
+        foreach (var item in capabilities.Take(4)) await output.WriteLineAsync($"  {item.Id,-16} {item.Status}");
+        await output.WriteLineAsync("OCR");
+        foreach (var item in capabilities.Where(item => item.Id.StartsWith("ocr-", StringComparison.Ordinal)))
+            await output.WriteLineAsync($"  {item.Id[4..],-16} {item.Status}{(item.Provider is null ? string.Empty : $" ({item.Provider})")}");
+        await output.WriteLineAsync("PDF rasterizer"); await output.WriteLineAsync($"  {rasterizer.Provider ?? "local"}    {rasterizer.Status}{(rasterizer.Path is null ? string.Empty : $" ({rasterizer.Path})")}");
+        if (rasterizer.Action is not null) await output.WriteLineAsync($"  Action: {rasterizer.Action}");
+        var mermaid = capabilities.Single(item => item.Id == "mermaid-render");
+        await output.WriteLineAsync("Mermaid render"); await output.WriteLineAsync($"  {mermaid.Provider ?? "mmdc",-16} {mermaid.Status}");
+        if (mermaid.Action is not null) await output.WriteLineAsync($"  Action: {mermaid.Action}");
+        return capabilities.All(item => item.Status == "ready") ? 0 : 1;
+    }
+
+    private void WriteCommandHelp(string command)
+    {
+        var synopsis = command.ToLowerInvariant() switch
+        {
+            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--visual-inference native-only|safe|balanced]",
+            "restore" => "restore <file.md> [--output file] [--allow-render-fallback]",
+            "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
+            "doctor" => "doctor [--json]",
+            "inspect" => "inspect <source-or-file.md>",
+            "diff" => "diff <file.md> [--json]",
+            "verify" => "verify <file.md|file.drmd|file.drmdpkg>",
+            "rebase" => "rebase <file.md> --source <document> [--output rebased.md]",
+            "pack" => "pack <file.md> [--output file.drmdpkg]",
+            "unpack" => "unpack <file.drmdpkg|file.drmd> [--output directory]",
+            "rules" => "rules",
+            "migrate" => "migrate <file.md> --to-schema 1.1",
+            _ => $"{command} (see docredock --help)",
+        };
+        output.WriteLine($"DocRedock {synopsis}{Environment.NewLine}Help is available without enabling experimental features or supplying input.");
     }
 
     private async Task<int> ExportAsync(Arguments args, CancellationToken token)
@@ -117,6 +169,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             await output.WriteLineAsync("Mode:     Readable Markdown (one-way; no sidecar)");
             await output.WriteLineAsync($"Visual inference: {visualInference} (ambiguous relations remain unresolved)");
             await output.WriteLineAsync(VisualInferenceSummary(readable.Graph));
+            await output.WriteLineAsync(ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics).ToString());
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
@@ -145,6 +198,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         await output.WriteLineAsync(result.Graph.Format == DocumentFormatKind.Pdf
             ? "Fidelity: F0 baseline; edited PDF requires explicit F3 render fallback"
             : "Fidelity: F0 baseline; supported Office edits use F1");
+        await output.WriteLineAsync(ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString());
         await WriteDiagnosticsAsync(result.Diagnostics, quiet, args.HasFlag("verbose"));
         if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return 1; }
         return result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
@@ -521,6 +575,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock unpack <file.drmd> (--in-place | --output directory)
           docredock rules
           docredock migrate <file.md> --to-schema 1.1
+          docredock doctor [--json]
 
         Experimental commands and PDF export require DOCREDOCK_ENABLE_EXPERIMENTAL=1.
         """);

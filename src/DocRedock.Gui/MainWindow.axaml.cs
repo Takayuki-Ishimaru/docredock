@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.Pdf;
@@ -36,6 +37,8 @@ public partial class MainWindow : Window
 
     private readonly GuiWorkflowService _workflow;
     private readonly UpdateCheckService _updateCheckService;
+    private readonly CapabilityReporter _capabilityReporter;
+    private readonly Func<CapabilityStatus> _pdfRasterizerCapability;
     private readonly List<IStorageFile> _sourceFiles = [];
     private IStorageFile? _markdownFile;
     private string? _sidecarPath;
@@ -55,22 +58,32 @@ public partial class MainWindow : Window
 
     // This keeps the window usable by a plain App.axaml.cs while Program may
     // also construct it with its configured GuiWorkflowService instance.
-    public MainWindow() : this(new GuiWorkflowService(), new UpdateCheckService())
+    public MainWindow() : this(new GuiWorkflowService(), new UpdateCheckService(), new CapabilityReporter(), DescribeRasterizer)
     {
     }
 
     public MainWindow(GuiWorkflowService workflow)
-        : this(workflow, new UpdateCheckService())
+        : this(workflow, new UpdateCheckService(), new CapabilityReporter(), DescribeRasterizer)
+    {
+    }
+
+    /// <summary>Allows hosts and UI tests to supply the same local capability probe used by their workflow.</summary>
+    public MainWindow(GuiWorkflowService workflow, CapabilityReporter capabilityReporter, Func<CapabilityStatus> pdfRasterizerCapability)
+        : this(workflow, new UpdateCheckService(), capabilityReporter, pdfRasterizerCapability)
     {
     }
 
     internal MainWindow(
         GuiWorkflowService workflow,
-        UpdateCheckService updateCheckService)
+        UpdateCheckService updateCheckService,
+        CapabilityReporter? capabilityReporter = null,
+        Func<CapabilityStatus>? pdfRasterizerCapability = null)
     {
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _updateCheckService =
             updateCheckService ?? throw new ArgumentNullException(nameof(updateCheckService));
+        _capabilityReporter = capabilityReporter ?? new CapabilityReporter();
+        _pdfRasterizerCapability = pdfRasterizerCapability ?? DescribeRasterizer;
         InitializeComponent();
         _componentsInitialized = true;
         CurrentVersionText.Text = $"v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}";
@@ -207,15 +220,26 @@ public partial class MainWindow : Window
 
     private void ApplyPdfOcrCapability()
     {
-        // The current GUI build has no IPdfRasterizer provider. Keep OCR visibly
-        // disabled rather than implying that image-only PDF OCR will work.
-        OcrToggle.IsEnabled = false;
-        OcrToggle.IsChecked = false;
-        OcrLanguagesPanel.IsVisible = false;
-        OcrUnavailableText.Text =
-            "このビルドではPDFラスタライザーが含まれていないため、画像PDFのOCRは利用できません。";
+        var capability = _pdfRasterizerCapability();
+        var report = _capabilityReporter.ReportAsync(capability).GetAwaiter().GetResult();
+        var engine = report.Single(item => item.Id == "ocr-engine");
+        var native = report.Single(item => item.Id == "ocr-native");
+        var jpn = report.Single(item => item.Id == "ocr-jpn");
+        var eng = report.Single(item => item.Id == "ocr-eng");
+        var available = capability.Status == "ready" && (engine.Status == "ready" || native.Status is "ready" or "partial");
+        OcrToggle.IsEnabled = available;
+        if (!available) OcrToggle.IsChecked = false;
+        OcrLanguagesPanel.IsVisible = available && OcrToggle.IsChecked == true;
+        OcrUnavailableText.Text = available
+            ? native.Status == "partial" && engine.Status != "ready"
+                ? $"PDF OCR: Verification pending ({native.Provider})\n画像の最初のOCR時にネイティブプロバイダーを確認します。失敗時は警告を表示します。"
+                : $"PDF OCR: Ready ({capability.Provider}, {engine.Provider})\n言語: 日本語 {jpn.Status}, English {eng.Status}"
+            : $"画像PDFのOCRは現在 {engine.Status} です。rasterizer: {capability.Status}。{engine.Action ?? capability.Action ?? "Tesseract と対応言語データを構成してください。"}";
         OcrUnavailableText.IsVisible = true;
     }
+
+    private static CapabilityStatus DescribeRasterizer() => PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+        string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal));
 
     private void OnOcrChanged(object? sender, RoutedEventArgs e)
     {
@@ -317,8 +341,8 @@ public partial class MainWindow : Window
                 success: true,
                 title: results.Count == 1 ? "書き出しが完了しました" : $"{results.Count}件の書き出しが完了しました",
                 message: string.Join(Environment.NewLine, results.Select(result => result.IsReadable
-                    ? $"Markdown: {result.MarkdownPath}（推定: {result.InferenceMode}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}"
-                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}） 推定: {result.InferenceMode}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}")),
+                    ? $"Markdown: {result.MarkdownPath}（推定: {result.InferenceMode}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
+                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}） 推定: {result.InferenceMode}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}")),
                 fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? results[0].Fidelity : "複数形式",
                 diagnostics: results.SelectMany(result => result.Diagnostics).ToArray());
         }
@@ -728,6 +752,8 @@ public partial class MainWindow : Window
         "XlsxFormulaCachedValueMissing" => ("保存済みの計算結果がない数式セルがあります。", "Excel等で再計算して保存してから、もう一度変換してください。"),
         "XlsxLegacyCommentsUnsupported" => ("旧形式のXLSXコメントは本文へ展開されません。", "必要なコメントは元ブックで確認してください。"),
         "PdfRasterizerUnavailable" => ("画像PDFの読み取りに必要なrasterizerを利用できません。", "ネイティブテキストを使うか、対応rasterizerを構成してください。"),
+        "PdfRasterizationFailed" => ("PDF rasterizerの実行に失敗しました。", "pdftoppmまたはmutoolの実行ファイルと入力PDFを確認してください。"),
+        "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
         "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
         _ => ($"詳細: {originalMessage}", "元文書と生成結果を確認し、診断コードを添えて報告してください。"),
     };

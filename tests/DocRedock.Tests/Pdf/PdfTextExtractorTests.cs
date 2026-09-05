@@ -760,6 +760,8 @@ public sealed class PdfTextExtractorTests
         Assert.All(graph.Paths!, path => Assert.False(path.IsFallback));
         Assert.Equal(8, graph.SourceItems!.Count(item => item.Disposition == VisualDisposition.IgnoredDecorative &&
             item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true));
+        Assert.Equal(PdfTableConfidence.NativeTagged, Assert.Single(result.Tables![1]).Confidence);
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.StartsWith("PdfTableNative:", StringComparison.Ordinal));
         Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
     }
 
@@ -798,7 +800,327 @@ public sealed class PdfTextExtractorTests
             item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true));
         Assert.All(graph.SourceItems!.Where(item => item.Reason?.Contains("table/grid", StringComparison.Ordinal) == true), item =>
             Assert.Contains("inferred from layout", item.Reason!, StringComparison.Ordinal));
+        Assert.Equal(PdfTableConfidence.HighConfidenceInferred, Assert.Single(PdfTextExtractor.Extract(pdf).Tables![1]).Confidence);
         Assert.True(VisualGraphValidator.Validate(graph).Accounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Regular_grid_is_reconstructed_as_a_top_to_bottom_markdown_table_without_losing_native_text()
+    {
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 520 >> stream
+            BT 1 0 0 1 10 10 Tm (A) Tj ET
+            BT 1 0 0 1 110 10 Tm (B) Tj ET
+            BT 1 0 0 1 10 40 Tm (C) Tj ET
+            BT 1 0 0 1 110 40 Tm (D) Tj ET
+            0 0 m 200 0 l S 0 30 m 200 30 l S 0 60 m 200 60 l S
+            0 0 m 0 60 l S 100 0 m 100 60 l S 200 0 m 200 60 l S
+            endstream
+            %%EOF
+            """);
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        var table = Assert.Single(result.Tables![1]);
+        Assert.Equal(new[] { "C", "D" }, table.Rows[0].Cells.Select(cell => cell.Text));
+        Assert.Equal(new[] { "A", "B" }, table.Rows[1].Cells.Select(cell => cell.Text));
+        Assert.Equal(1, result.Text.Split("A", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain(result.VisualGraphs![1].Edges, edge => edge.EdgeDirection == VisualEdgeDirection.Directed);
+        Assert.Contains(result.Diagnostics!, item => item.StartsWith("PdfTableInferred:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Page_projection_keeps_flow_text_independent_and_removes_table_text_duplicates()
+    {
+        var page = new PdfPageText(1,
+        [
+            new PdfTextRegion("Heading", new Geometry("pdf-user-space", 0, 100, 30, 10), 0),
+            new PdfTextRegion("A", new Geometry("pdf-user-space", 10, 10, 10, 10), 1),
+            new PdfTextRegion("B", new Geometry("pdf-user-space", 110, 10, 10, 10), 2),
+            new PdfTextRegion("C", new Geometry("pdf-user-space", 10, 40, 10, 10), 3),
+            new PdfTextRegion("D", new Geometry("pdf-user-space", 110, 40, 10, 10), 4)
+        ]);
+        var table = new PdfTable("table", 1, new Geometry("pdf-user-space", 0, 0, 200, 60),
+        [
+            new PdfTableRow([new PdfTableCell(0, 0, 1, 1, new Geometry("pdf-user-space", 0, 30, 100, 30), "C", [3]), new PdfTableCell(0, 1, 1, 1, new Geometry("pdf-user-space", 100, 30, 100, 30), "D", [4])]),
+            new PdfTableRow([new PdfTableCell(1, 0, 1, 1, new Geometry("pdf-user-space", 0, 0, 100, 30), "A", [1]), new PdfTableCell(1, 1, 1, 1, new Geometry("pdf-user-space", 100, 0, 100, 30), "B", [2])])
+        ], PdfTableConfidence.HighConfidenceInferred, []);
+
+        var nodes = PdfPageProjection.ToDocumentNodes(page, [table]);
+
+        Assert.Equal(NodeKind.Table, nodes.Single(node => node.Id == "table").Kind);
+        Assert.Equal("Heading", Assert.IsType<TextNodeContent>(nodes.Single(node => node.Kind == NodeKind.Paragraph).Content).Text);
+        Assert.Equal(2, nodes.Count);
+    }
+
+    [Fact]
+    public void Output_compaction_preserves_full_graph_accounting_and_reports_omitted_paths()
+    {
+        var graph = new VisualGraph("many", [], [], Paths: Enumerable.Range(0, 5)
+            .Select(index => new VisualPath($"p{index}", [new VisualPathPoint(0, 0), new VisualPathPoint(1, 1)])).ToArray());
+
+        var projection = PdfVisualOutputCompactor.Compact(graph, new PdfVisualOutputBudget(MaxFallbackPathsPerPage: 2));
+
+        Assert.Equal(5, graph.Accounting.FallbackPaths);
+        Assert.Equal(2, projection.Paths.Count);
+        Assert.Equal(3, projection.OmittedFallbackPaths);
+        Assert.True(projection.IsCompacted);
+    }
+
+    [Fact]
+    public void Output_budget_hard_clamps_custom_limits_and_downgrades_over_budget_graph_with_a_complete_ledger()
+    {
+        var path = new VisualPath("p", [new VisualPathPoint(0, 0), new VisualPathPoint(1, 1)], IsFallback: false);
+        var graph = new VisualGraph("one", [new VisualNode("n", "Node")], [], Paths: [path],
+            SourceItems: [new VisualSourceItem("p", VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode, ProjectedNodeId: "n")]);
+        var limit = new PdfVisualOutputBudget(MaxFallbackPathsPerPage: int.MaxValue, MaxFallbackCharactersPerPage: int.MaxValue,
+            MaxGraphNodesPerPage: 0, MaxGraphEdgesPerPage: int.MaxValue);
+
+        var graphProjection = PdfVisualOutputCompactor.ProjectGraph(graph, limit);
+        var fallback = PdfVisualOutputCompactor.Compact(new VisualGraph("many", [], [], Paths: Enumerable.Range(0, 101)
+            .Select(index => new VisualPath($"p{index}", [new VisualPathPoint(0, 0), new VisualPathPoint(1, 1)])).ToArray()), limit);
+
+        Assert.True(graphProjection.IsDowngraded);
+        Assert.Empty(graphProjection.Graph.Nodes);
+        Assert.True(graphProjection.Graph.SourceAccounting.IsConsistent);
+        Assert.Contains(graphProjection.Graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualOutputBudgetExceeded");
+        Assert.Equal(100, fallback.Paths.Count);
+    }
+
+    [Fact]
+    public void Diagnostic_invariants_reject_unavailable_claim_for_a_complete_graph()
+    {
+        var graph = new VisualGraph("complete", [], []);
+
+        var issues = PdfDiagnosticInvariantValidator.Validate(graph,
+            ["VisualSemanticProjectionUnavailable: this must have a matching partial graph."]);
+
+        Assert.Contains(issues, issue => issue.StartsWith("INV-02:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Diagnostic_invariants_reject_fallback_claim_without_optional_fallback_projection()
+    {
+        var issues = PdfDiagnosticInvariantValidator.Validate(new VisualGraph("complete", [], []), ["VisualFallbackUsed: fallback claimed."], null);
+
+        Assert.Contains(issues, issue => issue.StartsWith("INV-01:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Table_inference_remains_independent_from_a_resolved_flow_elsewhere_on_the_page()
+    {
+        static VisualPath Line(string id, double x1, double y1, double x2, double y2) =>
+            new(id, [new VisualPathPoint(x1, y1), new VisualPathPoint(x2, y2)], IsFallback: false);
+        var graph = new VisualGraph("mixed", [],
+            [new VisualEdge("flow", "n1", "n2", Geometry: new Geometry("pdf-user-space", 300, 0, 50, 0), EdgeDirection: VisualEdgeDirection.Directed)],
+            Paths: [Line("h0", 0, 0, 200, 0), Line("h1", 0, 30, 200, 30), Line("h2", 0, 60, 200, 60),
+                    Line("v0", 0, 0, 0, 60), Line("v1", 100, 0, 100, 60), Line("v2", 200, 0, 200, 60)]);
+        var regions = new[]
+        {
+            new PdfTextRegion("A", new Geometry("pdf-user-space", 10, 10, 10, 10), 0), new PdfTextRegion("B", new Geometry("pdf-user-space", 110, 10, 10, 10), 1),
+            new PdfTextRegion("C", new Geometry("pdf-user-space", 10, 40, 10, 10), 2), new PdfTextRegion("D", new Geometry("pdf-user-space", 110, 40, 10, 10), 3)
+        };
+
+        var table = Assert.Single(PdfTableInference.Infer(1, regions, graph));
+
+        Assert.Equal("C", table.Rows[0].Cells[0].Text);
+    }
+
+    [Fact]
+    public void Table_inference_handles_japanese_text_deterministically_and_rejects_border_and_decorative_grids()
+    {
+        static VisualPath Line(string id, double x1, double y1, double x2, double y2) => new(id,
+            [new VisualPathPoint(x1, y1), new VisualPathPoint(x2, y2)], IsFallback: false);
+        var grid = new[] { Line("h0", 0, 0, 200, 0), Line("h1", 0, 30, 200, 30), Line("h2", 0, 60, 200, 60),
+            Line("v0", 0, 0, 0, 60), Line("v1", 100, 0, 100, 60), Line("v2", 200, 0, 200, 60) };
+        var graph = new VisualGraph("grid", [], [], Paths: grid);
+        var japanese = new[]
+        {
+            new PdfTextRegion("項目", new Geometry("pdf-user-space", 10, 40, 20, 10), 0), new PdfTextRegion("値", new Geometry("pdf-user-space", 110, 40, 10, 10), 1),
+            new PdfTextRegion("売上", new Geometry("pdf-user-space", 10, 10, 20, 10), 2), new PdfTextRegion("100", new Geometry("pdf-user-space", 110, 10, 20, 10), 3)
+        };
+
+        var first = PdfTableInference.Infer(1, japanese, graph);
+        var second = PdfTableInference.Infer(1, japanese, graph);
+        var onBorder = japanese.Append(new PdfTextRegion("境界", new Geometry("pdf-user-space", 95, 10, 10, 10), 4)).ToArray();
+
+        Assert.Equal(System.Text.Json.JsonSerializer.Serialize(first), System.Text.Json.JsonSerializer.Serialize(second));
+        Assert.Equal("項目", Assert.Single(first).Rows[0].Cells[0].Text);
+        Assert.Empty(PdfTableInference.Infer(1, onBorder, graph));
+        Assert.Empty(PdfTableInference.Infer(1, [], graph));
+    }
+
+    [Fact]
+    public void Simple_three_by_four_grid_preserves_every_cell_once_in_reading_order()
+    {
+        static VisualPath Line(string id, double x1, double y1, double x2, double y2) => new(id,
+            [new VisualPathPoint(x1, y1), new VisualPathPoint(x2, y2)], IsFallback: false);
+        var xs = new[] { 0d, 100d, 200d, 300d }; var ys = new[] { 0d, 30d, 60d, 90d, 120d };
+        var paths = ys.Select((y, index) => Line($"h{index}", 0, y, 300, y))
+            .Concat(xs.Select((x, index) => Line($"v{index}", x, 0, x, 120))).ToArray();
+        var regions = ys.Take(4).SelectMany((y, row) => xs.Take(3).Select((x, column) =>
+            new PdfTextRegion($"R{row}C{column}", new Geometry("pdf-user-space", x + 10, y + 10, 20, 10), row * 3 + column))).ToArray();
+
+        var table = Assert.Single(PdfTableInference.Infer(1, regions, new VisualGraph("3x4", [], [], Paths: paths)));
+        var visible = table.Rows.SelectMany(row => row.Cells).Select(cell => cell.Text).ToArray();
+
+        Assert.Equal(4, table.Rows.Count);
+        Assert.All(table.Rows, row => Assert.Equal(3, row.Cells.Count));
+        Assert.Equal(regions.Select(region => region.Text).OrderBy(text => text), visible.OrderBy(text => text));
+        Assert.Equal("R3C0", table.Rows[0].Cells[0].Text);
+        Assert.Equal("R0C2", table.Rows[^1].Cells[^1].Text);
+    }
+
+    [Fact]
+    public void Rectangle_cell_borders_form_a_table_but_bent_paths_do_not()
+    {
+        static VisualPath Rectangle(string id, double x, double y) => new(id,
+            [new VisualPathPoint(x, y), new VisualPathPoint(x + 100, y), new VisualPathPoint(x + 100, y + 30), new VisualPathPoint(x, y + 30), new VisualPathPoint(x, y)], IsFallback: false);
+        var cells = new[] { Rectangle("a", 0, 0), Rectangle("b", 100, 0), Rectangle("c", 0, 30), Rectangle("d", 100, 30) };
+        var text = new[]
+        {
+            new PdfTextRegion("A", new Geometry("pdf-user-space", 10, 10, 10, 10), 0), new PdfTextRegion("B", new Geometry("pdf-user-space", 110, 10, 10, 10), 1),
+            new PdfTextRegion("C", new Geometry("pdf-user-space", 10, 40, 10, 10), 2), new PdfTextRegion("D", new Geometry("pdf-user-space", 110, 40, 10, 10), 3)
+        };
+        var bent = new VisualPath("bent", [new VisualPathPoint(0, 0), new VisualPathPoint(100, 0), new VisualPathPoint(100, 60)], IsFallback: false);
+
+        Assert.Equal(2, Assert.Single(PdfTableInference.Infer(1, text, new VisualGraph("rectangles", [], [], Paths: cells))).Rows.Count);
+        Assert.Empty(PdfTableInference.Infer(1, text, new VisualGraph("bent", [], [], Paths: [bent])));
+    }
+
+    [Fact]
+    public void Disconnected_grids_are_reconstructed_independently()
+    {
+        static IEnumerable<VisualPath> Grid(string prefix, double offset) =>
+        [
+            new VisualPath(prefix + "h0", [new VisualPathPoint(offset, 0), new VisualPathPoint(offset + 200, 0)], IsFallback: false),
+            new VisualPath(prefix + "h1", [new VisualPathPoint(offset, 30), new VisualPathPoint(offset + 200, 30)], IsFallback: false),
+            new VisualPath(prefix + "h2", [new VisualPathPoint(offset, 60), new VisualPathPoint(offset + 200, 60)], IsFallback: false),
+            new VisualPath(prefix + "v0", [new VisualPathPoint(offset, 0), new VisualPathPoint(offset, 60)], IsFallback: false),
+            new VisualPath(prefix + "v1", [new VisualPathPoint(offset + 100, 0), new VisualPathPoint(offset + 100, 60)], IsFallback: false),
+            new VisualPath(prefix + "v2", [new VisualPathPoint(offset + 200, 0), new VisualPathPoint(offset + 200, 60)], IsFallback: false)
+        ];
+        var paths = Grid("a", 0).Concat(Grid("b", 500)).ToArray();
+        var text = new[]
+        {
+            new PdfTextRegion("A1", new Geometry("pdf-user-space", 10, 10, 10, 10), 0), new PdfTextRegion("A2", new Geometry("pdf-user-space", 110, 10, 10, 10), 1), new PdfTextRegion("A3", new Geometry("pdf-user-space", 10, 40, 10, 10), 2), new PdfTextRegion("A4", new Geometry("pdf-user-space", 110, 40, 10, 10), 3),
+            new PdfTextRegion("B1", new Geometry("pdf-user-space", 510, 10, 10, 10), 4), new PdfTextRegion("B2", new Geometry("pdf-user-space", 610, 10, 10, 10), 5), new PdfTextRegion("B3", new Geometry("pdf-user-space", 510, 40, 10, 10), 6), new PdfTextRegion("B4", new Geometry("pdf-user-space", 610, 40, 10, 10), 7)
+        };
+
+        var tables = PdfTableInference.Infer(1, text, new VisualGraph("two", [], [], Paths: paths));
+
+        Assert.Equal(2, tables.Count);
+        Assert.Contains(tables, table => table.Rows.SelectMany(row => row.Cells).Any(cell => cell.Text == "A1"));
+        Assert.Contains(tables, table => table.Rows.SelectMany(row => row.Cells).Any(cell => cell.Text == "B1"));
+    }
+
+    [Fact]
+    public void Dense_unresolved_vectors_downgrade_the_projection_without_losing_native_text_or_throwing()
+    {
+        var content = new StringBuilder("BT 1 0 0 1 72 700 Tm (DENSE_NATIVE_TEXT) Tj ET\n");
+        for (var index = 0; index < 1_025; index++) content.Append("0 0 m 10 10 l S\n");
+        var pdf = Encoding.Latin1.GetBytes($"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}endstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Contains("DENSE_NATIVE_TEXT", result.Text, StringComparison.Ordinal);
+        Assert.True(result.VisualGraphs![1].Edges.Count > 1_024); // complete accounting/evidence graph
+        var projection = result.VisualProjections![1];
+        Assert.True(projection.IsDowngraded);
+        Assert.Empty(projection.Graph.Edges);
+        Assert.True(result.Diagnostics!.Count(item => item.StartsWith("VisualConnectorUnresolved:", StringComparison.Ordinal)) <= 10);
+        Assert.Contains(result.Diagnostics!, item => item.StartsWith("VisualDiagnosticsCompacted:", StringComparison.Ordinal));
+        Assert.Empty(PdfDiagnosticInvariantValidator.Validate(projection.Graph,
+            (projection.Graph.Diagnostics ?? []).Select(diagnostic => diagnostic.ToWarning())));
+    }
+
+    [Fact]
+    public void Table_inference_rejects_single_axis_missing_interior_line_and_rotated_or_curve_rules()
+    {
+        static VisualPath Line(string id, double x1, double y1, double x2, double y2, double? confidence = null) => new(id,
+            [new VisualPathPoint(x1, y1), new VisualPathPoint(x2, y2)], Confidence: confidence, IsFallback: false);
+        var text = new[]
+        {
+            new PdfTextRegion("A", new Geometry("pdf-user-space", 10, 10, 10, 10), 0), new PdfTextRegion("B", new Geometry("pdf-user-space", 110, 10, 10, 10), 1),
+            new PdfTextRegion("C", new Geometry("pdf-user-space", 10, 40, 10, 10), 2), new PdfTextRegion("D", new Geometry("pdf-user-space", 110, 40, 10, 10), 3)
+        };
+        var vertical = new[] { Line("v0", 0, 0, 0, 60), Line("v1", 100, 0, 100, 60), Line("v2", 200, 0, 200, 60) };
+        var missing = vertical.Concat([Line("h0", 0, 0, 200, 0), Line("h2", 0, 60, 200, 60)]).ToArray();
+        var rotated = new[] { Line("r1", 0, 0, 0, 200), Line("r2", 30, 0, 30, 200), Line("r3", 60, 0, 60, 200),
+            Line("r4", 0, 0, 200, 0), Line("r5", 0, 30, 200, 30), Line("r6", 0, 60, 200, 60) };
+        var curve = vertical.Concat([Line("h0", 0, 0, 200, 0, .45), Line("h1", 0, 30, 200, 30, .45), Line("h2", 0, 60, 200, 60, .45)]).ToArray();
+
+        Assert.Empty(PdfTableInference.Infer(1, text, new VisualGraph("single", [], [], Paths: vertical)));
+        Assert.Empty(PdfTableInference.Infer(1, text, new VisualGraph("missing", [], [], Paths: missing)));
+        // A real 90 degree transform produces the same axis-aligned geometry; without page
+        // rotation metadata it remains conservative fallback rather than emitting a rotated table.
+        Assert.Empty(PdfTableInference.Infer(1, text, new VisualGraph("rotated", [], [], Paths: rotated.Select(path => path with
+            { Points = path.Points!.Select(point => new VisualPathPoint(-point.Y, point.X)).ToArray() }).ToArray())));
+        Assert.Empty(PdfTableInference.Infer(1, text, new VisualGraph("curve", [], [], Paths: curve)));
+    }
+
+    [Fact]
+    public void Native_table_tag_is_scoped_and_cannot_upgrade_an_unrelated_grid()
+    {
+        Assert.True(PdfTableInference.HasNativeTableMarkedContent("/Table BMC 0 0 m 1 0 l S EMC"));
+        Assert.False(PdfTableInference.HasNativeTableMarkedContent("/Table BMC EMC 0 0 m 1 0 l S"));
+        Assert.False(PdfTableInference.HasNativeTableMarkedContent("BI /W 1 /H 1 ID /Table BMC EI 0 0 m 1 0 l S"));
+    }
+
+    [Fact]
+    public void Diagnostic_invariants_reject_a_suppressed_table_path_that_still_projects_as_an_edge()
+    {
+        var points = new[] { new VisualPathPoint(0, 0), new VisualPathPoint(10, 0) };
+        var graph = new VisualGraph("invalid", [], [new VisualEdge("e", null, null, Path: points.ToArray())],
+            Paths: [new VisualPath("grid", points)],
+            SourceItems: [new VisualSourceItem("grid", VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative,
+                Reason: "regular table/grid line")]);
+
+        var issues = PdfDiagnosticInvariantValidator.Validate(graph, []);
+
+        Assert.Contains(issues, issue => issue.StartsWith("INV-04:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Table_projection_removes_consumed_cell_nodes_but_keeps_an_independent_flow()
+    {
+        var tablePath = new VisualPath("table-path", [new VisualPathPoint(0, 0), new VisualPathPoint(1, 1)], IsFallback: false);
+        var flowPath = new VisualPath("flow-path", [new VisualPathPoint(300, 0), new VisualPathPoint(400, 0)], IsFallback: false);
+        var flowStartPath = new VisualPath("flow-start-path", [new VisualPathPoint(300, 0), new VisualPathPoint(320, 20)], IsFallback: false);
+        var flowEndPath = new VisualPath("flow-end-path", [new VisualPathPoint(380, 0), new VisualPathPoint(400, 20)], IsFallback: false);
+        var graph = new VisualGraph("mixed", [new VisualNode("cell", "A"), new VisualNode("flow-a", "Start"), new VisualNode("flow-b", "End")],
+            [new VisualEdge("flow", "flow-a", "flow-b", Path: flowPath.Points)], Paths: [tablePath, flowPath, flowStartPath, flowEndPath], SourceItems:
+            [new VisualSourceItem("table-path", VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode, ProjectedNodeId: "cell"),
+             new VisualSourceItem("flow-path", VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedEdge, ProjectedEdgeId: "flow"),
+             new VisualSourceItem("flow-start-path", VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode, ProjectedNodeId: "flow-a"),
+             new VisualSourceItem("flow-end-path", VisualSourceItemKind.VectorPath, VisualDisposition.ProjectedNode, ProjectedNodeId: "flow-b")]);
+        var table = new PdfTable("table", 1, new Geometry("pdf-user-space", 0, 0, 100, 30), [], PdfTableConfidence.HighConfidenceInferred, ["table-path"]);
+
+        var projection = PdfVisualOutputCompactor.RemoveConsumedTableVisuals(graph, [table]);
+
+        Assert.DoesNotContain(projection.Nodes, node => node.Id == "cell");
+        Assert.Contains(projection.Edges, edge => edge.Id == "flow");
+        Assert.DoesNotContain(projection.Paths!, path => path.Id == "table-path");
+        Assert.Contains(projection.SourceItems!, item => item.Id == "table-path" && item.Disposition == VisualDisposition.IgnoredDecorative);
+        Assert.True(projection.SourceAccounting.IsConsistent);
+    }
+
+    [Fact]
+    public void Table_inference_enforces_grid_intersection_and_text_region_hard_limits()
+    {
+        static VisualPath Line(string id, double x1, double y1, double x2, double y2) => new(id,
+            [new VisualPathPoint(x1, y1), new VisualPathPoint(x2, y2)], IsFallback: false);
+        var tooManyCrossings = Enumerable.Range(0, 129).Select(index => Line($"h{index}", 0, index, 200, index))
+            .Concat(Enumerable.Range(0, 129).Select(index => Line($"v{index}", index, 0, index, 200))).ToArray();
+        var tooManyLines = Enumerable.Range(0, 4_097).Select(index => Line($"l{index}", 0, index, 200, index)).ToArray();
+        var tooManyText = Enumerable.Range(0, 10_001).Select(index => new PdfTextRegion("x",
+            new Geometry("pdf-user-space", index, 0, 1, 1), index)).ToArray();
+
+        Assert.Empty(PdfTableInference.Infer(1, [], new VisualGraph("intersections", [], [], Paths: tooManyCrossings)));
+        Assert.Empty(PdfTableInference.Infer(1, [], new VisualGraph("lines", [], [], Paths: tooManyLines)));
+        Assert.Empty(PdfTableInference.Infer(1, tooManyText, new VisualGraph("text", [], [], Paths: [])));
     }
 
     [Fact]

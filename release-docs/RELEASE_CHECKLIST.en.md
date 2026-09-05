@@ -60,6 +60,14 @@ Desktop GUI PDF input is available by default. CLI PDF export, restoration, and 
 - [ ] From published-binary smoke, persist exit code, markers, diagnostics, counts, fixture SHA-256, and output SHA-256 in `RELEASE-EVIDENCE.md`
 - [x] Describe DOCX connector and PDF vector topology as conditional support only; do not claim complete drawing/SmartArt/arbitrary-vector reconstruction
 
+## v0.2.3 quality evidence
+
+- [ ] Extracted-package smoke evidence for all six RIDs records the same full product commit SHA and target version
+- [ ] `QUALITY-SCORE-v0.2.3.json` passes with at least 95/100 overall, at least 90% in every section, and no critical evidence failure
+- [ ] `PDF-SEMANTICS-EVIDENCE.json` records table, dense-visual, diagrams-disabled, and determinism checks with all RIDs
+- [ ] Execute diagram regression cases covering endpoint gaps, rotation, translation, label offsets, and competing endpoints
+- [ ] Verify the doctor JSON contract, bundled OCR helpers, and unavailable-capability guidance from extracted packages
+
 ## Build and test
 
 Local verification is not a permanent publication condition. Record clean-clone, all-RID, signing/notarization, and structured visual-evidence gates for each target release.

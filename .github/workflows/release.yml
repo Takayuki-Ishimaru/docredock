@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.2.2
+        default: v0.2.3
 
 permissions:
   contents: read
@@ -82,6 +82,17 @@ jobs:
           PRODUCT_SOURCE_COMMIT: ${{ steps.quality-source.outputs.commit }}
           RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: python3 tools/conversion-qa/run.py --all
+      - name: Verify v0.2.3 quality-gate contracts
+        run: python3 -m unittest tools/test_v023_quality_score.py
+      - name: Run v0.2.3 source semantic suite
+        run: python3 tools/v023_semantic_quality.py --source-cli src/DocRedock.Cli/bin/Release/net10.0/DocRedock.Cli --output artifacts/SOURCE-PDF-SEMANTICS-EVIDENCE.json
+      - name: Upload source semantic evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quality-source-semantic
+          path: artifacts/SOURCE-PDF-SEMANTICS-EVIDENCE.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Upload conversion QA evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -177,6 +188,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $staging, "release" | Out-Null
           Copy-Item "artifacts/gui/${{ matrix.rid }}/DocRedock.exe" "$staging/DocRedock.exe"
           Copy-Item "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli.exe" "$staging/DocRedock.Cli.exe"
+          Copy-Item "artifacts/cli/${{ matrix.rid }}/windows-ocr.ps1" "$staging/windows-ocr.ps1"
           Copy-Item "artifacts/cli/${{ matrix.rid }}/docredock.cmd" "$staging/docredock.cmd"
           Copy-Item "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/DocRedock-icon.png"
           Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt", "SECURITY.md" $staging
@@ -229,6 +241,8 @@ jobs:
           </dict></plist>
           PLIST
           cp "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "$staging/DocRedock.Cli"
+          cp "artifacts/cli/${{ matrix.rid }}/vision-ocr.swift" "$staging/vision-ocr.swift"
+          cp "artifacts/gui/${{ matrix.rid }}/vision-ocr.swift" "$app/Contents/MacOS/vision-ocr.swift"
           cp "artifacts/cli/${{ matrix.rid }}/docredock" "$staging/docredock"
           chmod 755 "$staging/DocRedock.Cli" "$staging/docredock"
           cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
@@ -351,7 +365,7 @@ jobs:
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
           $root = "artifacts/smoke"
-          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary --expected-version "$($env:RELEASE_TAG.Substring(1))" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
+          python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary --expected-version "$($env:RELEASE_TAG.Substring(1))" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
         shell: bash
@@ -364,7 +378,7 @@ jobs:
           mkdir -p artifacts/smoke
           ditto -x -k "release/$name.zip" artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary --expected-version "${RELEASE_TAG#v}" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
         shell: bash
@@ -379,7 +393,7 @@ jobs:
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
-          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
+          python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Stage visual semantics evidence with package
         shell: bash
         run: cp "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json" release/
@@ -424,6 +438,21 @@ jobs:
         with:
           name: quality-conversion-qa
           path: release-conversion-qa
+      - name: Download source semantic evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: quality-source-semantic
+          path: release-source-semantic
+      - name: Assemble and gate v0.2.3 quality evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t smoke < <(find release-files -name 'visual-semantics-evidence-*.json' -type f | sort)
+          test "${#smoke[@]}" -eq 6
+          args=()
+          for file in "${smoke[@]}"; do args+=(--smoke-evidence "$file"); done
+          python3 tools/v023_semantic_quality.py "${args[@]}" --source-evidence release-source-semantic/SOURCE-PDF-SEMANTICS-EVIDENCE.json --output release-files/PDF-SEMANTICS-EVIDENCE.json
+          python3 tools/v023_quality_score.py --conversion-root release-conversion-qa "${args[@]}" --output release-files/QUALITY-SCORE-v0.2.3.json
       - name: Write checked release evidence
         shell: bash
         run: |
@@ -438,6 +467,8 @@ jobs:
           - [x] Release workflow commit: \`${{ github.workflow_sha }}\`
           - [x] Locked restore, Release build, unit tests, and conversion QA passed
           - [x] Conversion-QA evidence is attached as \`CONVERSION-QA-EVIDENCE.md\` with separate product/workflow commits, tier metrics, fixture/output hashes, and decisions
+          - [x] v0.2.3 quality score is attached as \`QUALITY-SCORE-v0.2.3.json\`; it requires a total score of at least 95, every section at least 90%, and no critical evidence failure
+          - [x] PDF semantic evidence is attached as \`PDF-SEMANTICS-EVIDENCE.json\` with fixture/output hashes, commands, diagnostics, assertions, and all six RID results
           - [x] License allowlist check passed
           - [x] Six RID-specific self-contained packages were built
           - [x] Every archive was extracted before testing

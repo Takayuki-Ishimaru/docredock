@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.2 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.3 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -81,7 +81,18 @@ DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock render input.md --format pdf \
 
 The resolver rejects unsupported CFF/CFF2 outlines, missing glyph coverage, invalid collections, and embedding-restricted fonts. The user must comply with the selected font's license. `--verbose` includes the selected path; `--quiet` suppresses informational lines, not warnings. A render with omissions/truncation returns exit code 1.
 
-## 7. Privacy and updates
+## 7. Capability and PDF OCR diagnostics
+
+Check local capabilities with doctor. It is outside the experimental gate and requires no input file.
+
+    docredock doctor
+    docredock doctor --json
+
+ready means the dependency was probed and is available, partial means only some functions (or OCR languages) are available, and unavailable means a dependency is missing or disabled. Native PDF OCR may still be partial when page content is unclear. Image-only PDF OCR needs both an OCR engine and a PDF rasterizer. Discovery checks an explicit path (DOCREDOCK_PDF_RASTERIZER), then pdftoppm, then mutool on PATH. Set DOCREDOCK_DISABLE_PDF_RASTERIZER=1 to disable discovery. If unavailable, install pdftoppm or mutool, or configure the executable path. Processing remains local and does not use the network. Raster fallback is bounded to 100 paths and 32,768 characters per page; native text is retained when fallback is compacted.
+
+PdfTableInferred means a regular ruled grid was reconstructed as a table; PdfTableNative means existing table information was used; PdfTableAmbiguous means evidence was not unique enough to classify as a table. VisualFallbackCompacted means fallback output was reduced to fit the output budget while retaining partial topology. Small gaps and noise in human-drawn diagrams may remain as partial topology and fallback; unresolved connections are reported instead of silently guessed.
+
+## 8. Privacy and updates
 
 Conversion runs locally. The app always shows its running version. At startup it checks non-draft published releases, including Public Beta builds, through the public GitHub Releases API in the background and shows current/latest versions when an update exists. **Check for updates** runs a manual check; offline and API-limit failures never block startup or conversion. Updates are not auto-installed: the user chooses a package from the trusted GitHub release page. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable automatic checks.
 

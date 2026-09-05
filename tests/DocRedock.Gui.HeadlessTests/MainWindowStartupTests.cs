@@ -7,6 +7,7 @@ using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
 using DocRedock.Core.Reporting;
 using DocRedock.Gui;
+using DocRedock.Api;
 using Xunit;
 
 [assembly: AvaloniaTestApplication(typeof(DocRedock.Gui.HeadlessTests.GuiTestAppBuilder))]
@@ -77,21 +78,46 @@ public sealed class MainWindowStartupTests
     [AvaloniaFact]
     public void Pdf_ocr_capability_is_explicitly_disabled_when_rasterizer_is_unavailable()
     {
-        var window = new MainWindow();
+        var previous = Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER");
+        Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", "1");
+        MainWindow? window = null;
         try
         {
+            window = new MainWindow();
             var ocrToggle = Get<ToggleSwitch>(window, "OcrToggle");
             var unavailable = Get<TextBlock>(window, "OcrUnavailableText");
 
             Assert.False(ocrToggle.IsEnabled);
             Assert.NotEqual(true, ocrToggle.IsChecked);
             Assert.True(unavailable.IsVisible);
-            Assert.Contains("画像PDFのOCRは利用できません", unavailable.Text, StringComparison.Ordinal);
+            Assert.Contains("rasterizer: unavailable", unavailable.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("PDF OCR: Ready", unavailable.Text, StringComparison.Ordinal);
         }
         finally
         {
-            window.Close();
+            window?.Close();
+            Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", previous);
         }
+    }
+
+    [AvaloniaFact]
+    public void Pdf_ocr_stays_available_when_a_native_provider_is_configured_but_unverified()
+    {
+        var reporter = new CapabilityReporter(
+            _ => null,
+            (_, _, _) => Task.FromResult(new CapabilityProbeResult(false, string.Empty)),
+            () => new CapabilityStatus("ocr-native", "partial", "apple-vision", "/tools/swift"));
+        var window = new MainWindow(new GuiWorkflowService(), reporter,
+            () => new CapabilityStatus("pdf-rasterizer", "ready", "pdftoppm", "/tools/pdftoppm"));
+        try
+        {
+            var ocrToggle = Get<ToggleSwitch>(window, "OcrToggle");
+            var status = Get<TextBlock>(window, "OcrUnavailableText");
+
+            Assert.True(ocrToggle.IsEnabled);
+            Assert.Contains("Verification pending", status.Text, StringComparison.Ordinal);
+        }
+        finally { window.Close(); }
     }
 
     [AvaloniaFact]

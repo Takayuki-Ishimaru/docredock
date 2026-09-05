@@ -382,6 +382,18 @@ def inspect_distribution(root: Path, *, require_checksum: bool = True) -> str | 
     ]
     if font_files:
         raise RuntimeError(f"release package contains font files: {', '.join(sorted(font_files))}")
+    # These helpers are loaded beside the app host at runtime.  Publishing only
+    # the executable silently disables native OCR, so verify the package shape
+    # without requiring PowerShell, Swift, or platform OCR services to be present.
+    if sys.platform.startswith("win") and not (root / "windows-ocr.ps1").is_file():
+        raise RuntimeError("release package is missing windows-ocr.ps1")
+    if sys.platform == "darwin":
+        helper = root / "vision-ocr.swift"
+        if not helper.is_file():
+            raise RuntimeError("release package is missing vision-ocr.swift beside the CLI")
+        app_helper = root / "DocRedock.app" / "Contents" / "MacOS" / "vision-ocr.swift"
+        if (root / "DocRedock.app").is_dir() and not app_helper.is_file():
+            raise RuntimeError("release package is missing vision-ocr.swift beside the GUI")
 
     checksum_file = root / "BINARY-SHA256SUMS"
     if not checksum_file.is_file():
@@ -409,7 +421,9 @@ def inspect_distribution(root: Path, *, require_checksum: bool = True) -> str | 
     return digest(checksum_file)
 
 
-def exercise_pdf_render(root: Path, cli: Path) -> None:
+def exercise_pdf_render(root: Path, cli: Path) -> list[dict]:
+    """Exercise actual PDF projection behaviours and retain release-grade evidence."""
+    evidence: list[dict] = []
     sentinel = "DocRedock 日本語PDF検証 ABC123"
     markdown = root / "japanese-pdf.md"
     pdf = root / "japanese-pdf.pdf"
@@ -485,6 +499,18 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
             "untagged PDF table grid regressed into connector fallback\n"
             f"Diagnostics:\n{table_result.stdout}\nMarkdown:\n{table_markdown}"
         )
+    if (table_markdown.count("A") != 1 or table_markdown.count("B") != 1
+            or table_markdown.count("C") != 1 or table_markdown.count("D") != 1
+            or table_markdown.count("|") < 6):
+        raise RuntimeError("regular PDF grid was not reconstructed as a Markdown table")
+    evidence.append({
+        "kind": "table", "fixture": "synthetic-2x2-grid", "status": "pass", "critical": True,
+        "command": ["export", "review-table-grid.pdf", "--profile", "readable"],
+        "fixture_sha256": hashlib.sha256(table_pdf.read_bytes()).hexdigest(),
+        "output_sha256": hashlib.sha256(table_markdown_path.read_bytes()).hexdigest(),
+        "exit_code": table_result.returncode, "diagnostics": table_result.stdout.splitlines(),
+        "assertions": ["markdown-table", "no-table-connectors"],
+    })
 
     flow_pdf = root / "review-directed-flow.pdf"
     flow_markdown_path = root / "review-directed-flow.md"
@@ -498,14 +524,22 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
         b"300 135 m 400 205 l S 400 205 m 384 204 l 392 190 l h f "
         b"300 115 m 400 45 l S 400 45 m 392 60 l 384 46 l h f\nendstream\n%%EOF"
     )
-    invoke(cli, ["export", str(flow_pdf), "--profile", "readable",
-                 "--output", str(flow_markdown_path), "--ocr", "off"],
-           allowed=(0, 1), experimental=True)
+    flow_result = invoke(cli, ["export", str(flow_pdf), "--profile", "readable",
+                               "--output", str(flow_markdown_path), "--ocr", "off"],
+                         allowed=(0, 1), experimental=True)
     flow_markdown = flow_markdown_path.read_text(encoding="utf-8")
     if flow_markdown.count(" -->") != 3 or " ---" in flow_markdown:
         raise RuntimeError("review PDF arrows were not projected as three directed edges")
     if "|YES|" not in flow_markdown or "|NO|" not in flow_markdown:
         raise RuntimeError("review PDF edge labels were not preserved")
+    evidence.append({
+        "kind": "diagram", "fixture": "synthetic-directed-flow", "status": "pass", "critical": True,
+        "command": ["export", "review-directed-flow.pdf", "--profile", "readable", "--output", "review-directed-flow.md", "--ocr", "off"],
+        "fixture_sha256": hashlib.sha256(flow_pdf.read_bytes()).hexdigest(),
+        "output_sha256": hashlib.sha256(flow_markdown_path.read_bytes()).hexdigest(),
+        "exit_code": flow_result.returncode, "diagnostics": flow_result.stdout.splitlines(),
+        "assertions": ["three-directed-edges", "yes-no-labels"],
+    })
 
     partial_pdf = root / "partial-vector-pdf.pdf"
     partial_extracted = root / "partial-vector-pdf-extracted.md"
@@ -524,6 +558,60 @@ def exercise_pdf_render(root: Path, cli: Path) -> None:
     partial_markdown = partial_extracted.read_text(encoding="utf-8")
     if not any(code in partial_result.stdout for code in stable_visual_codes) and "[PDF visual content:" not in partial_markdown:
         raise RuntimeError("partial vector PDF smoke did not retain diagnostic or source fallback")
+    evidence.append({
+        "kind": "diagnostic", "fixture": "partial-vector", "status": "pass", "critical": True,
+        "command": ["export", "partial-vector-pdf.pdf", "--profile", "readable"],
+        "fixture_sha256": hashlib.sha256(partial_pdf.read_bytes()).hexdigest(),
+        "output_sha256": hashlib.sha256(partial_extracted.read_bytes()).hexdigest(),
+        "exit_code": partial_result.returncode, "diagnostics": partial_result.stdout.splitlines(),
+        "assertions": ["fallback-or-stable-diagnostic"],
+    })
+    # The output budget is a product contract.  Generate a real vector-heavy
+    # PDF instead of trusting a fixture name or a unit-test-only counter.
+    dense_pdf = root / "dense-vector.pdf"
+    dense_markdown = root / "dense-vector.md"
+    dense_paths = b"BT 1 0 0 1 10 10 Tm (DENSE_NATIVE_TEXT) Tj ET\n" + b"".join(b"0 0 m 10 10 l S\n" for _ in range(10_000))
+    dense_pdf.write_bytes(b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length "
+                          + str(len(dense_paths)).encode("ascii") + b" >> stream\n"
+                          + dense_paths + b"endstream\n%%EOF")
+    dense_started = time.monotonic()
+    dense_result = invoke(cli, ["export", str(dense_pdf), "--profile", "readable", "--output", str(dense_markdown), "--ocr", "off"],
+                          allowed=(0, 1), experimental=True)
+    dense_duration_ms = round((time.monotonic() - dense_started) * 1000)
+    dense_bytes = dense_markdown.stat().st_size if dense_markdown.is_file() else None
+    if (dense_result.returncode not in (0, 1) or dense_bytes is None or dense_bytes > 128 * 1024
+            or dense_duration_ms > 5000 or "DENSE_NATIVE_TEXT" not in dense_markdown.read_text(encoding="utf-8")):
+        raise RuntimeError(f"dense vector PDF violated bounded/native-text/runtime contract (exit={dense_result.returncode}, markdown_bytes={dense_bytes}, duration_ms={dense_duration_ms})")
+    evidence.append({
+        "kind": "bounded", "fixture": "dense-vector-10000", "status": "pass", "critical": True,
+        "command": ["export", "dense-vector.pdf", "--profile", "readable"],
+        "fixture_sha256": hashlib.sha256(dense_pdf.read_bytes()).hexdigest(),
+        "output_sha256": hashlib.sha256(dense_markdown.read_bytes()).hexdigest(),
+        "exit_code": dense_result.returncode, "diagnostics": dense_result.stdout.splitlines(),
+        "markdown_bytes": dense_bytes, "duration_ms": dense_duration_ms, "max_duration_ms": 5000,
+        "assertions": ["markdown-at-most-128KiB", "native-text-retained", "runtime-bound"],
+    })
+    return evidence
+
+
+def exercise_capability_ux(cli: Path) -> str:
+    """Capability guidance and help are public CLI contracts, including without OCR."""
+    doctor = invoke(cli, ["doctor", "--json"], allowed=(0, 1))
+    help_results = [invoke(cli, command, allowed=(0,)) for command in (["--help"], ["export", "--help"], ["doctor", "--help"], ["render", "--help"], ["restore", "--help"])]
+    try:
+        payload = json.loads(doctor.stdout)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"doctor --json did not emit JSON: {error}") from error
+    capabilities = payload.get("capabilities") if isinstance(payload, dict) else None
+    required_ids = {"docx-readable", "xlsx-readable", "pptx-readable", "pdf-text", "ocr-engine", "ocr-jpn", "ocr-eng", "ocr-native", "pdf-rasterizer", "mermaid-render"}
+    valid_statuses = {"ready", "partial", "unavailable"}
+    ids = [item.get("id") for item in capabilities if isinstance(item, dict)] if isinstance(capabilities, list) else []
+    valid_capabilities = (isinstance(payload, dict) and payload.get("schema_version") == "1"
+                          and len(ids) == len(capabilities) == len(set(ids)) and required_ids.issubset(ids)
+                          and all(isinstance(item, dict) and item.get("status") in valid_statuses for item in capabilities))
+    if not valid_capabilities or any(not result.stdout.strip() for result in help_results):
+        raise RuntimeError("doctor/help capability contract was not satisfied")
+    return "passed"
 
 
 
@@ -729,6 +817,7 @@ def main() -> int:
     parser.add_argument("--gui-mode", choices=("startup", "binary"), default="startup")
     parser.add_argument("--expected-version", required=True, help="release version without the v prefix")
     parser.add_argument("--evidence-json", type=Path, default=Path("artifacts/visual-semantics-evidence.json"))
+    parser.add_argument("--rid", default=os.environ.get("RELEASE_RID", "unknown"))
     args = parser.parse_args()
     cli = args.cli.resolve()
     gui = args.gui.resolve()
@@ -767,11 +856,12 @@ def main() -> int:
         exercise_format(root, cli, "xlsx", "xl/worksheets/sheet1.xml", create_xlsx)
         exercise_format(root, cli, "pptx", "ppt/slides/slide1.xml", create_pptx)
         visual_evidence = exercise_visual_semantics(root, cli)
-        exercise_pdf_render(root, cli)
+        pdf_semantic_cases = exercise_pdf_render(root, cli)
         exercise_pack_and_tamper(root, cli, docx_projection)
         inspect_gui_binary(gui)
         if args.gui_mode == "startup":
             exercise_gui(gui)
+    doctor_capability_status = exercise_capability_ux(cli)
 
     gui_result = "GUI binary integrity/architecture and startup" if args.gui_mode == "startup" else "GUI binary integrity/architecture"
     qa_evidence = build_evidence(
@@ -797,9 +887,11 @@ def main() -> int:
         "commit": os.environ.get("GITHUB_SHA", "local"),
         "product_source_commit": os.environ.get("PRODUCT_SOURCE_COMMIT", os.environ.get("GITHUB_SHA", "local")),
         "release_workflow_commit": os.environ.get("RELEASE_WORKFLOW_COMMIT", os.environ.get("GITHUB_SHA", "local")),
-        "rid": os.environ.get("RUNNER_ARCH", "unknown"),
+        "rid": args.rid,
         "distribution_kind": distribution_kind,
         "package_checksum_sha256": package_checksum,
+        "doctor_capability_status": doctor_capability_status,
+        "pdf_semantic_cases": pdf_semantic_cases,
         "visual_semantics": {
             "fixture_families": ["docx", "xlsx", "pptx", "pdf"],
             "assertion": "structured Mermaid graph smoke plus fallback diagnostics",

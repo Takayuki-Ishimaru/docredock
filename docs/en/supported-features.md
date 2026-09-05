@@ -1,10 +1,10 @@
-# v0.2.2 Supported Features
+# v0.2.3 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.2.2 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
+DocRedock v0.2.3 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
 
-| Feature | v0.2.2 status |
+| Feature | v0.2.3 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta; CLI default |
 | `visible`, `complete`, `sanitized` content policies | Supported |
@@ -43,4 +43,4 @@ DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It con
 
 Readable Markdown is one-way output. `.drmd` and `.drmdpkg` are experimental and may contain source-derived information. Keep the source document as the authoritative copy.
 
-This document is the canonical public-support statement. See the [v0.2.2 release notes](../../release-docs/RELEASE_NOTES_v0.2.2.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
+This document is the canonical public-support statement. See the [v0.2.3 release notes](../../release-docs/RELEASE_NOTES_v0.2.3.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
