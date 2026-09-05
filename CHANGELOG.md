@@ -2,6 +2,15 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.2.3] - 2026-09-05
+
+- Reconstructed regular PDF grids as Markdown tables while avoiding duplicated cell text.
+- Added bounded visual fallback that preserves resolved partial connections and keeps unresolved relations visible through notes and diagnostics.
+- Added `docredock doctor` capability and runtime detection for OCR, PDF rasterizers, and related optional tools, including bundled OCR helpers where applicable.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.3.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.3.md)
+
 ## [0.2.2] - 2026-09-04
 
 - Improved PDF table-grid recognition while keeping irregular diagram lattices and labelled triangular nodes available for semantic projection, and reporting when an untagged grid is inferred from layout.
@@ -120,6 +129,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.2.3]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.0

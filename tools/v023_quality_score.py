@@ -218,7 +218,7 @@ def main() -> int:
         result = {"schema_version": 1, "version": VERSION, "passed": False, "critical_failures": [str(error)]}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"Quality score: {result.get('total', 0)}/100 ({'passed' if result['passed'] else 'failed'})")
+    print(f"Release quality gate: {'passed' if result['passed'] else 'failed'}")
     return 0 if result["passed"] else 1
 
 

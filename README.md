@@ -2,14 +2,14 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/dark/DocRedock-banner-dark-1200x400.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png">
-    <img alt="DocRedock — local-first Office to Markdown" src="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png" width="1200">
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/docredock/banners/dark/DocRedock-banner-dark-1200x400.png">
+    <source media="(prefers-color-scheme: light)" srcset="assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png">
+    <img alt="DocRedock — local-first Office to Markdown" src="assets/brand/docredock/banners/light/DocRedock-banner-light-1200x400.png" width="1200">
   </picture>
 </p>
 
 <p align="center">
-  <img alt="DocRedock app icon" src="https://raw.githubusercontent.com/Takayuki-Ishimaru/docredock/main/assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" width="96" height="96">
+  <img alt="DocRedock app icon" src="assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" width="96" height="96">
 </p>
 
 A local-first Office-to-Markdown converter for AI workflows. Round-trip editing remains experimental.

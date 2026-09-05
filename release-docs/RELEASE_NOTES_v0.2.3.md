@@ -22,10 +22,4 @@
 - GUIのPDF入力は既定で利用できます。CLIのPDF変換・復元・生成には引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。
 - PDF rasterizer、Tesseract、Mermaid CLI、日本語PDFフォントは同梱しません。必要な機能に応じて別途用意してください。Windows／macOSのOCRヘルパーは同梱しますが、対応するOS機能・実行環境が必要です。
 - 図形の代替テキストと反復診断には出力上限があります。省略数を診断で確認し、必要に応じて原図を参照してください。ネイティブ本文はこの上限で切り詰めません。
-- 署名・公証の適用状況は各パッケージの`SIGNING-STATUS.json`で確認してください。
-
-## リリース検証
-
-公開処理は、クリーンなソースからのビルド・テスト、Office変換QA、PDFの表と大量図形、図の124回帰ケース、および6環境（Windows／macOS／Linuxのx64・ARM64）の展開後スモークを必須にしています。品質ゲートは総合95/100以上、各項目90%以上、重大な証跡不備0を要求します。
-
-実際の判定と製品／ワークフローのコミットは、このリリースに添付される`RELEASE-EVIDENCE.md`、`QUALITY-SCORE-v0.2.3.json`、`PDF-SEMANTICS-EVIDENCE.json`を参照してください。チェックサム、SBOM、provenanceも添付します。
+- 署名・公証の適用状況は各パッケージの`SIGNING-STATUS.json`で確認してください。各パッケージには`BINARY-SHA256SUMS`、SBOM、provenanceを同梱し、リリースページの`SHA256SUMS`はアーカイブを対象とします。
