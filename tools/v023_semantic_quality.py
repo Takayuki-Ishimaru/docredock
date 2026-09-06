@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the PDF semantic portion of v0.2.3 package-smoke evidence."""
+"""Assemble the PDF semantic portion of v0.2.4 package-smoke evidence."""
 from __future__ import annotations
 
 import argparse
@@ -85,7 +85,7 @@ def run_source_suite(cli: Path, output: Path) -> int:
         _, records = run_materialized_corpus(root / "jitter", generate_perturbation_corpus(), runner, parse_markdown)
         cases = list(records)
         errors.extend(f"semantic case failed: {r['case_id']}" for r in records if r["status"] != "passed")
-    document = {"schema_version": 1, "version": "0.2.3", "status": "pass" if not errors else "fail", "errors": errors,
+    document = {"schema_version": 1, "version": "0.2.4", "status": "pass" if not errors else "fail", "errors": errors,
                 "producer_pdf": str(producer), "producer_hashes": hashes, "producer_deterministic": len(set(hashes)) == 1,
                 "producer_duration_median_ms": sorted(durations)[len(durations)//2] if durations else None,
                 "table_fixture": {"rows": 3, "columns": 4, "text_cells": 12, "markdown_bytes": len(table_text.encode("utf-8")), "exit_code": table_result.returncode, "passed": table_passed, "assertions": ["all-12-cell-labels-exactly-once", "markdown-table"]},
@@ -130,7 +130,7 @@ def main() -> int:
             errors.append(f"{path}: invalid or duplicate RID {rid!r}"); continue
         seen.add(rid)
         version, commit = item.get("version"), item.get("product_source_commit")
-        if version != "0.2.3" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
+        if version != "0.2.4" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
             errors.append(f"{rid}: stale or unverifiable version/commit evidence")
         elif provenance is None:
             provenance = (version, commit)
@@ -148,7 +148,7 @@ def main() -> int:
         if missing_kinds: errors.append(f"{rid}: missing semantic evidence: " + ", ".join(sorted(missing_kinds)))
     missing = RIDS - seen
     if missing: errors.append("missing package evidence: " + ", ".join(sorted(missing)))
-    output = {"schema_version": 1, "version": "0.2.3", "cases": records, "source_suite": source_suite,
+    output = {"schema_version": 1, "version": "0.2.4", "cases": records, "source_suite": source_suite,
               "rids": sorted(seen), "status": "pass" if not errors else "fail", "errors": errors}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
