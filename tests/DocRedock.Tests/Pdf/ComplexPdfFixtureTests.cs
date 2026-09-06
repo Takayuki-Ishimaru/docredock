@@ -75,6 +75,50 @@ public sealed class ComplexPdfFixtureTests
         }
     }
 
+    [Fact]
+    public void Page_two_two_column_business_spec_block_is_not_swallowed_by_table_inference_and_reads_column_aware()
+    {
+        // F-03 regression: page 2's "4. 左右カラムの業務仕様" section is a 2-cell reportlab
+        // Table with a grid (see generate_complex_pdf.py's `columns2`), so it might plausibly be
+        // consumed by table inference. In this fixture it is not - PdfTableInference rejects the
+        // single-row 2-cell grid - so the block is flow text and goes through SortReadingOrder's
+        // column detection.
+        var extraction = PdfTextExtractor.Extract(FixturePath());
+        var page2 = extraction.Pages[1];
+        var page2Tables = extraction.Tables?.GetValueOrDefault(2) ?? [];
+        var capturedByTable = page2Tables.Any(table => table.Rows.SelectMany(row => row.Cells)
+            .Any(cell => cell.Text.Contains("申請者向け", StringComparison.Ordinal)));
+        Assert.False(capturedByTable,
+            "the two-column business-spec block was unexpectedly captured by table inference; " +
+            "update this test to assert the table keeps each column's lines together instead");
+        Assert.Contains(page2.Regions, region => region.Text.Contains("4.1 申請者向け", StringComparison.Ordinal));
+
+        // The whole left column ("4.1"/"4.2" and their bullets) still precedes the right column's
+        // "4.2 API境界" heading in page text - true regardless of column detection, but a basic
+        // regression guard that the block was not scrambled or lost.
+        var text = extraction.Text;
+        var left41 = text.IndexOf("4.1 申請者向け", StringComparison.Ordinal);
+        var left42 = text.IndexOf("4.2 API境界", StringComparison.Ordinal);
+        Assert.True(left41 >= 0 && left42 >= 0 && left41 < left42,
+            $"expected '4.1 申請者向け' before '4.2 API境界' in: {text}");
+
+        // Page 2 also carries a short-label / long-value two-column list (注記A/B/C) later in the
+        // same "6. 付録" section, with clean baseline-aligned rows (unlike the wrapped paragraph
+        // block above): SortReadingOrder's gutter detection confirms and reorders it column-major,
+        // which is the clearest positive demonstration on this real fixture that detection fires
+        // and the whole label column precedes the whole value column.
+        Assert.True(page2.ColumnCount >= 2,
+            "expected the extractor to detect at least one column block on page 2");
+        var noteA = text.IndexOf("注記A", StringComparison.Ordinal);
+        var noteB = text.IndexOf("注記B", StringComparison.Ordinal);
+        var noteC = text.IndexOf("注記C", StringComparison.Ordinal);
+        var noteAValue = text.IndexOf("画像の文字は本文テキストではなく", StringComparison.Ordinal);
+        Assert.True(noteA >= 0 && noteB >= 0 && noteC >= 0 && noteAValue >= 0,
+            $"expected to find all three note labels and the first note's value in: {text}");
+        Assert.True(noteA < noteB && noteB < noteC && noteC < noteAValue,
+            $"expected all three note labels (column 1) before their values (column 2) in: {text}");
+    }
+
     private static string FixturePath()
     {
         var current = new DirectoryInfo(Directory.GetCurrentDirectory());

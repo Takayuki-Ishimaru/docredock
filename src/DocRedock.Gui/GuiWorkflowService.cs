@@ -1,5 +1,4 @@
 using System.Text;
-using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
@@ -106,6 +105,9 @@ public sealed class GuiWorkflowService
                     IncludeDiagrams: includeDiagrams,
                     EmbedImages: embedReadableImages,
                     InferenceMode: inferenceMode), cancellationToken).ConfigureAwait(false);
+                // Built once so the two GUI summary lines (this one and ExportSummary below) can
+                // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
+                var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
                 return new GuiExportResult(
                     markdownPath,
                     string.Empty,
@@ -114,10 +116,10 @@ public sealed class GuiWorkflowService
                     AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
                     IsReadable: true,
                     InferenceMode: exported.InferenceMode,
-                    VisualSummary: SummarizeVisualGraph(exported.Graph),
+                    VisualSummary: SummarizeVisualGraph(summary),
                     PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
                         string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
-                    ExportSummary: ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics).ToString());
+                    ExportSummary: summary.ToString());
             }
             catch
             {
@@ -153,10 +155,13 @@ public sealed class GuiWorkflowService
             var fidelity = format == "pdf"
                 ? "F0 baseline / edited PDF is F3"
                 : "F0 baseline / supported edits are F1";
-            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(exported.Graph),
+            // Built once so the two GUI summary lines (this one and ExportSummary below) can
+            // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
+            var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
+            return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(summary),
                 PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
                     string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
-                ExportSummary: ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics).ToString());
+                ExportSummary: summary.ToString());
         }
         catch
         {
@@ -251,14 +256,13 @@ public sealed class GuiWorkflowService
         PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
             string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal));
 
-    private static string? SummarizeVisualGraph(DocumentGraph graph)
+    // Renders from the same finalized ExportSummary the CLI's "Visual summary:" line uses (F-05),
+    // so DiagramsReconstructed/FallbackPaths/etc. mean the same thing in both surfaces and this
+    // line can never disagree with the ExportSummary line shown right below it in the GUI.
+    private static string? SummarizeVisualGraph(ExportSummary summary)
     {
-        var visual = graph.Nodes.Select(node => node.Extensions?.TryGetValue("visual_graph", out var value) == true
-            ? value.Deserialize<VisualGraph>() : null).OfType<VisualGraph>().ToArray();
-        if (visual.Length == 0) return null;
-        var edges = visual.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
-        var fallback = visual.SelectMany(item => item.Paths ?? []).Count(path => path?.IsFallback == true);
-        return $"図: {visual.Length}件 / native {edges.Count(edge => edge.Resolution == VisualEdgeResolution.NativeConnection)} / high {edges.Count(edge => edge.Evidence?.ConfidenceBand == "High")} / medium {edges.Count(edge => edge.Evidence?.ConfidenceBand == "Medium")} / unresolved {edges.Count(edge => edge.SourceId is null || edge.TargetId is null)} / fallback {fallback}";
+        if (summary.VectorPages == 0) return null;
+        return $"図: {summary.DiagramsReconstructed}件（vector page {summary.VectorPages}） / native {summary.NativeEdges} / high {summary.HighConfidenceEdges} / medium {summary.MediumConfidenceEdges} / unresolved {summary.UnresolvedRelations} / fallback {summary.FallbackPaths}";
     }
 
     public static string SafeFileName(string untrustedName, string fallbackBaseName)

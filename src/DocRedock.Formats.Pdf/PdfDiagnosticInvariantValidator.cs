@@ -10,12 +10,13 @@ public static class PdfDiagnosticInvariantValidator
     {
         var messages = diagnostics?.ToArray() ?? [];
         var issues = new List<string>();
-        var accounting = graph?.Accounting;
-        if (messages.Any(Is("VisualFallbackUsed")) && (accounting is null ||
-            (accounting.FallbackPaths == 0 && (fallback?.OmittedFallbackPaths ?? 0) <= 0)))
+        if (messages.Any(Is("VisualFallbackUsed")) && (graph is null ||
+            (graph.FallbackPathCount == 0 && (fallback?.OmittedFallbackPaths ?? 0) <= 0)))
             issues.Add("INV-01: VisualFallbackUsed requires fallback accounting or a compacted fallback count.");
-        if (messages.Any(Is("VisualSemanticProjectionUnavailable")) && graph is not null &&
-            graph.Accounting.UnresolvedEdges == 0 && graph.Accounting.FallbackPaths == 0 && graph.Accounting.Diagnostics == 0)
+        // Partiality is judged the same way the diagnostic itself is derived (VisualGraph.
+        // IsPartialProjection: source-item ledger first, else raw accounting) so this invariant
+        // never disagrees with the rule that decided whether to emit the diagnostic (F-05).
+        if (messages.Any(Is("VisualSemanticProjectionUnavailable")) && graph is not null && !graph.IsPartialProjection)
             issues.Add("INV-02: complete visual graph cannot report semantic projection unavailable.");
         var unresolved = messages.Count(Is("VisualConnectorUnresolved"));
         if (graph is not null && unresolved > graph.Accounting.UnresolvedEdges)

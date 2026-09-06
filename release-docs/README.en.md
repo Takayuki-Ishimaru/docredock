@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.4 Public Beta
+
+- [v0.2.4 release notes](RELEASE_NOTES_v0.2.4.en.md)
+- Preserved PDF body text outside tables and improved two-column reading order and multi-rule-path table reconstruction
+- Made XLSX sheet selection strict and clarified doctor exit codes and strict mode
+- Aligned CLI and GUI visual/fallback summaries and removed false warnings
+
 ### v0.2.3 Public Beta
 
 - [v0.2.3 release notes](RELEASE_NOTES_v0.2.3.en.md)

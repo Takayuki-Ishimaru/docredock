@@ -51,19 +51,20 @@ public static class PdfTableInference
         for (var column = 0; column < xs.Length - 1; column++)
         {
             var cell = new Geometry("pdf-user-space", xs[column], ys[row], xs[column + 1] - xs[column], ys[row + 1] - ys[row]);
-            var indexes = regions.Select((region, index) => (region, index))
-                .Where(item => IsInside(cell, item.region.BoundingBox)).Select(item => item.index).ToArray();
-            if (indexes.Any(index => !assigned.Add(index))) return [];
-            var text = string.Join(" ", indexes.Select(index => regions[index].Text).Where(text => !string.IsNullOrWhiteSpace(text)));
-            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text, indexes));
+            var inside = regions.Where(region => IsInside(cell, region.BoundingBox)).ToArray();
+            var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
+            if (ids.Any(id => !assigned.Add(id))) return [];
+            var text = string.Join(" ", inside.Select(region => region.Text).Where(value => !string.IsNullOrWhiteSpace(value)));
+            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text, ids));
         }
         var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
         // Text touching a cell boundary has no unique owner. Do not silently leave it in
         // native flow while also emitting the surrounding table.
-        if (regions.Select((region, index) => (region, index)).Any(item => Intersects(candidateBounds, item.region.BoundingBox) && !assigned.Contains(item.index))) return [];
+        if (regions.Any(region => Intersects(candidateBounds, region.BoundingBox) &&
+            region.SourceTextIds.Any(id => !assigned.Contains(id)))) return [];
         // At least a 2x2 grid and four independently located text regions avoid promoting
         // decorative grids or a single-axis ruled list.
-        if (assigned.Count < 4 || assigned.Select(index => CellFor(cells, index)).Distinct().Count() < 4) return [];
+        if (assigned.Count < 4 || assigned.Select(id => CellFor(cells, id)).Distinct().Count() < 4) return [];
         var ordered = cells.GroupBy(cell => cell.Row).OrderByDescending(group => group.Key)
             .Select((group, outputRow) => new PdfTableRow(group.OrderBy(cell => cell.Column)
                 .Select(cell => cell with { Row = outputRow }).ToArray())).ToArray();
@@ -152,7 +153,11 @@ public static class PdfTableInference
         }
     }
 
-    private static int CellFor(IEnumerable<PdfTableCell> cells, int region) => cells.First(cell => cell.TextRegionIndexes.Contains(region)).Row * 10000 + cells.First(cell => cell.TextRegionIndexes.Contains(region)).Column;
+    private static int CellFor(IEnumerable<PdfTableCell> cells, int sourceTextId)
+    {
+        var cell = cells.First(candidate => candidate.SourceTextIds.Contains(sourceTextId));
+        return cell.Row * 10000 + cell.Column;
+    }
     private static bool IsInside(Geometry cell, Geometry text)
     {
         var x = text.X + text.Width / 2; var y = text.Y + text.Height / 2;

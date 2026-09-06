@@ -301,16 +301,22 @@ flowchart LR
         self.assertFalse(records[0]["deterministic"])
 
     def test_pdf_partial_vector_topology_warning_does_not_discard_a_resolved_relation(self):
-        # PdfTextExtractor.Extract() (src/DocRedock.Formats.Pdf/PdfTextExtractor.cs) raises
-        # VisualSemanticProjectionUnavailable whenever VisualGraph.Accounting.FallbackPaths > 0,
+        # PdfTextExtractor.Extract() (src/DocRedock.Formats.Pdf/PdfTextExtractor.cs) used to raise
+        # VisualSemanticProjectionUnavailable whenever raw VisualGraph.Accounting.FallbackPaths > 0,
         # and a connector's own raw open-stroke VisualPath is *always* recorded IsFallback=true
         # (BuildVisualGraph: IsFallback = curveSeen || !isClosed || !painted) even once the
-        # semantic edge built from that path resolves correctly with high confidence. So this
-        # diagnostic fires on virtually every PDF connector diagram, resolved or not.
-        # evaluate_cli_result() must not treat it as proof that nothing resolved (it used to,
-        # which zeroed every PDF case's observed relations unconditionally -- see the F3-3
-        # investigation notes and tools/release-smoke-test.py's exercise_pdf_render, which
-        # already tolerates this exact code on a resolved vector PDF).
+        # semantic edge built from that path resolves correctly with high confidence. That fired
+        # the diagnostic on virtually every PDF connector diagram, resolved or not (F-05).
+        # It is now derived from the finalized output graph's source-item ledger instead
+        # (VisualGraph.IsPartialProjection: a source item's disposition, not the raw path flag,
+        # decides whether it is genuine fallback), so a fully resolved connector page no longer
+        # reports it -- see src/DocRedock.Core/Documents/VisualGraph.cs and
+        # src/DocRedock.Formats.Pdf/PdfDiagnosticInvariantValidator.cs (INV-02).
+        # evaluate_cli_result() must still not treat a *present* VisualSemanticProjectionUnavailable
+        # as proof that nothing resolved (it used to, which zeroed every PDF case's observed
+        # relations unconditionally -- see the F3-3 investigation notes and
+        # tools/release-smoke-test.py's exercise_pdf_render, which tolerates this code appearing on
+        # a genuinely partial vector PDF).
         spec = next(item for item in generate_perturbation_corpus(("pdf",))
                     if item.operation == "endpoint-gap" and item.parameter == 0)
         markdown = """\

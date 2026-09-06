@@ -16,7 +16,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.2.3 Public Beta support
+## v0.2.4 Public Beta support
 
 | Feature | Status |
 | --- | --- |
@@ -25,7 +25,7 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.3 release notes](release-docs/RELEASE_NOTES_v0.2.3.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.2.4 release notes](release-docs/RELEASE_NOTES_v0.2.4.en.md).
 
 ## Use it in 30 seconds
 
@@ -68,9 +68,11 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 | `complete` | Includes hidden and metadata content and emits a warning. |
 | `sanitized` | Applies the visible filter and additionally removes privacy-sensitive metadata, derived/OCR content, and document furniture. |
 
+XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
+
 ## Important limitations
 
-- v0.2.3 is a Public Beta, not a production-stable release.
+- v0.2.4 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -83,9 +85,9 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.2.3 supported features](docs/en/supported-features.md)
+- [v0.2.4 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.2.3 release notes](release-docs/RELEASE_NOTES_v0.2.3.en.md)
+- [v0.2.4 release notes](release-docs/RELEASE_NOTES_v0.2.4.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

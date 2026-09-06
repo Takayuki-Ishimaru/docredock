@@ -21,6 +21,8 @@ public sealed record PdfTableCell(
     int ColumnSpan,
     Geometry Bounds,
     string Text,
-    IReadOnlyList<int> TextRegionIndexes);
+    /// <summary>Stable ids of the parsed text fragments assigned to this cell. These are never list
+    /// positions: the region list is re-ordered and merged after inference runs.</summary>
+    IReadOnlyList<int> SourceTextIds);
 
 public enum PdfTableConfidence { NativeTagged, HighConfidenceInferred }

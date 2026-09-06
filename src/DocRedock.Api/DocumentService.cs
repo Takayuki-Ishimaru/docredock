@@ -364,6 +364,11 @@ public sealed class DocumentService
                 {
                     var extraction = xlsx.Extract(stream, cancellationToken);
                     graph = extraction.Graph;
+                    if (options.Sheets is { Count: > 0 })
+                    {
+                        ValidateXlsxSheetSelection(options.Sheets, extraction.Worksheets);
+                        diagnostics.AddRange(XlsxSheetSelectionPolicyDiagnostics(options.Sheets, extraction.Worksheets, options.ContentPolicy));
+                    }
                     AddFormulaDiagnostics(diagnostics, extraction.FormulaDiagnostics.Where(item =>
                         item.SheetName is null || IncludedXlsxSheet(item.SheetName, options.Sheets)).ToArray());
                     diagnostics.AddRange(ScopeXlsxWarnings(extraction.Warnings, extraction.Worksheets, options.Sheets).Select(warning =>
@@ -491,6 +496,49 @@ public sealed class DocumentService
     private static bool IncludedXlsxSheet(string sheetName, IReadOnlyList<string>? sheets) =>
         sheets is not { Count: > 0 } || sheets.Any(sheet =>
             StringComparer.OrdinalIgnoreCase.Equals(sheet.Trim(), sheetName.Trim()));
+
+    /// <summary>
+    /// Fails the export when <c>--sheets</c> names one or more worksheets that do not
+    /// exist in the workbook. A partial mismatch (some requested names exist, some do
+    /// not) also fails: unknown names are never silently dropped, since doing so is
+    /// exactly what let a typo previously produce an empty but "successful" export.
+    /// </summary>
+    private static void ValidateXlsxSheetSelection(IReadOnlyList<string> requestedSheets, IReadOnlyList<XlsxWorksheetRecord> worksheets)
+    {
+        var unknown = requestedSheets
+            .Where(requested => !worksheets.Any(sheet => StringComparer.OrdinalIgnoreCase.Equals(sheet.Name.Trim(), requested.Trim())))
+            .ToArray();
+        if (unknown.Length == 0) return;
+        var available = worksheets
+            .Select(sheet => StringComparer.OrdinalIgnoreCase.Equals(sheet.SheetState, "visible") ? sheet.Name : $"{sheet.Name} (hidden)")
+            .ToArray();
+        throw new SheetSelectionException(requestedSheets, unknown, available);
+    }
+
+    /// <summary>
+    /// A requested sheet name that matches a real, hidden worksheet is not an error
+    /// (the name is valid) but under the visible/sanitized content policies its
+    /// content is excluded, which can make the export look emptily "successful" for
+    /// no obvious reason. Emit a Warning-severity diagnostic (raising the CLI exit
+    /// code to SuccessWithWarnings) naming the sheet and the policy so the cause is
+    /// visible. Under the complete policy the hidden sheet is exported as usual
+    /// (paired with the existing HiddenContentIncluded warning), so nothing is added.
+    /// </summary>
+    private static IEnumerable<Diagnostic> XlsxSheetSelectionPolicyDiagnostics(
+        IReadOnlyList<string> requestedSheets, IReadOnlyList<XlsxWorksheetRecord> worksheets, string contentPolicy)
+    {
+        if (DocumentContentPolicyRules.Parse(contentPolicy) == DocumentContentPolicy.Complete) yield break;
+        foreach (var requested in requestedSheets)
+        {
+            var sheet = worksheets.FirstOrDefault(candidate =>
+                StringComparer.OrdinalIgnoreCase.Equals(candidate.Name.Trim(), requested.Trim()));
+            if (sheet is null || StringComparer.OrdinalIgnoreCase.Equals(sheet.SheetState, "visible")) continue;
+            yield return new Diagnostic("XlsxSheetExcludedByPolicy",
+                $"Sheet '{sheet.Name}' is hidden and excluded by the '{contentPolicy}' content policy; no content " +
+                "from it will appear in the output. Use --content-policy complete to include it.",
+                DiagnosticSeverity.Warning);
+        }
+    }
 
     private static IEnumerable<string> ScopeXlsxWarnings(
         IReadOnlyList<string> warnings,

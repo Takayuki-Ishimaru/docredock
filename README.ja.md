@@ -16,7 +16,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.2.3 Public Betaの対応状況
+## v0.2.4 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -25,7 +25,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.3リリースノート](release-docs/RELEASE_NOTES_v0.2.3.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.4リリースノート](release-docs/RELEASE_NOTES_v0.2.4.md)へ集約します。
 
 ## 30秒で使う
 
@@ -68,9 +68,11 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 | `complete` | 非表示情報とメタデータを含め、警告を出します。 |
 | `sanitized` | `visible`に加え、メタデータ、派生・OCR情報、ヘッダー等をさらに除外します。 |
 
+XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけを書き出せます。指定した名前は既存のシート名と（大文字小文字を区別せず）完全一致する必要があります。存在しない名前を指定するとexit code 2で失敗し、出力ファイルは作成されません。一部の名前だけ一致しない場合（部分的な不一致）も、その名前を黙って無視せず失敗します。指定したシートが非表示で`visible`/`sanitized`ポリシーにより除外される場合はエラーにはなりませんが、`XlsxSheetExcludedByPolicy`という警告（exit code 1）を出し、出力が空に見える理由を説明します。含めるには`--content-policy complete`を使用してください。
+
 ## 主な制約
 
-- v0.2.3はPublic Betaであり、本番向けの安定版ではありません。
+- v0.2.4はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -82,9 +84,9 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.2.3の対応状況](docs/ja/supported-features.md)
+- [v0.2.4の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.2.3リリースノート](release-docs/RELEASE_NOTES_v0.2.3.md)
+- [v0.2.4リリースノート](release-docs/RELEASE_NOTES_v0.2.4.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

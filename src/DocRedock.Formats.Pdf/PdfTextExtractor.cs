@@ -7,14 +7,27 @@ using DocRedock.VisualInference;
 
 namespace DocRedock.Formats.Pdf;
 
-public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int ReadingOrder);
+public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int ReadingOrder, IReadOnlyList<int>? SourceIds = null)
+{
+    /// <summary>Stable identities of the parsed text fragments this region represents. Positions in
+    /// <see cref="PdfPageText.Regions"/> shift when fragments are merged into readable lines, so
+    /// table membership must be recorded by these ids and never by a list index.</summary>
+    public IReadOnlyList<int> SourceTextIds => SourceIds is { Count: > 0 } ids ? ids : [ReadingOrder];
+}
 public sealed record PdfPageText(
     int PageNumber,
     IReadOnlyList<PdfTextRegion> Regions,
     bool HasVectorContent = false,
-    bool IsImageOnly = false)
+    bool IsImageOnly = false,
+    /// <summary>How many side-by-side text columns <see cref="SortReadingOrder"/> detected and
+    /// unrolled into column-major order on this page (1 when no column layout was detected).</summary>
+    int ColumnCount = 1)
 {
-    public string Text => string.Join("\n", Regions.OrderByDescending(region => region.BoundingBox.Y).ThenBy(region => region.BoundingBox.X).Select(region => region.Text));
+    // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
+    // final order - including any column-major unrolling - so sorting by ReadingOrder here (rather
+    // than re-sorting by raw Y/X) is what lets a detected two-column block reach this text as the
+    // whole left column followed by the whole right column instead of interleaved by baseline.
+    public string Text => string.Join("\n", Regions.OrderBy(region => region.ReadingOrder).Select(region => region.Text));
 }
 public sealed record PdfExtractionResult(
     int PageCount,
@@ -117,6 +130,7 @@ public static class PdfTextExtractor
         foreach (var pageGroup in streams.GroupBy(stream => pageMap.TryGetValue(stream.ObjectId ?? -1, out var mapped) ? mapped : streamPage++).OrderBy(group => group.Key))
         {
             var pageDiagnosticStart = diagnostics.Count;
+            IReadOnlyList<PdfTable> pageTables = [];
             var stream = string.Join("\n", pageGroup.Select(item => item.Payload));
             var regions = ParseOperators(stream, options, fontMaps);
             var vector = ContainsVectorOperators(stream);
@@ -142,12 +156,6 @@ public static class PdfTextExtractor
             cancellationToken.ThrowIfCancellationRequested();
             if (vector && visualGraph is not null)
             {
-                var accounting = visualGraph.Accounting;
-                var partial = accounting.UnresolvedEdges > 0 || accounting.FallbackPaths > 0 || accounting.Diagnostics > 0;
-                if (vectorPlaceholder && !partial)
-                    regions.RemoveAll(region => region.Text.StartsWith("[PDF visual content:", StringComparison.Ordinal));
-                if (partial)
-                    diagnostics.Add($"VisualSemanticProjectionUnavailable: PDF page {pageNumber} contains partial vector topology.");
                 visualGraphs[pageNumber] = visualGraph;
                 var inferredTables = PdfTableInference.Infer(pageNumber, regions, visualGraph,
                     (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxTableCandidatesPerPage,
@@ -155,6 +163,7 @@ public static class PdfTextExtractor
                 if (inferredTables.Count > 0)
                 {
                     tables[pageNumber] = inferredTables;
+                    pageTables = inferredTables;
                     foreach (var table in inferredTables)
                         diagnostics.Add($"{(table.Confidence == PdfTableConfidence.NativeTagged ? "PdfTableNative" : "PdfTableInferred")}: PDF page {pageNumber}: reconstructed {table.Rows.Count}x{table.Rows[0].Cells.Count} table from regular vector grid.");
                 }
@@ -165,6 +174,16 @@ public static class PdfTextExtractor
                 visualProjections[pageNumber] = outputGraph;
                 var fallback = PdfVisualOutputCompactor.Compact(outputGraph.Graph, options.OutputBudget);
                 visualFallbacks[pageNumber] = fallback;
+                // Partiality is judged from the finalized output graph's source-item ledger, not a
+                // raw VisualPath.IsFallback flag: a connector's own open stroke is always recorded
+                // IsFallback=true even after it resolves into a semantic edge (its source item's
+                // disposition becomes ProjectedEdge), so that flag alone cannot tell a fully
+                // resolved diagram from a genuinely partial one (F-05).
+                var partial = outputGraph.Graph.IsPartialProjection;
+                if (vectorPlaceholder && !partial)
+                    regions.RemoveAll(region => region.Text.StartsWith("[PDF visual content:", StringComparison.Ordinal));
+                if (partial)
+                    diagnostics.Add($"VisualSemanticProjectionUnavailable: {DescribePartialProjection(pageNumber, outputGraph.Graph)}");
                 if (fallback.IsCompacted)
                     diagnostics.Add($"VisualFallbackCompacted: PDF page {pageNumber}: {fallback.TotalFallbackPaths} vector fallback paths; {fallback.OmittedFallbackPaths} omitted from readable output.");
                 // The graph owns one structured diagnostic per primitive. Adapter warning
@@ -175,9 +194,10 @@ public static class PdfTextExtractor
                 if (invariantIssues.Count > 0)
                     throw new PdfExtractionException(string.Join(" ", invariantIssues));
             }
+            var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
-            pages.Add(new PdfPageText(pageNumber, SortReadingOrder(regions), vector, imageOnly));
+            pages.Add(new PdfPageText(pageNumber, flow, vector, imageOnly, columnCount));
         }
         if (pages.Count == 0)
         {
@@ -192,6 +212,56 @@ public static class PdfTextExtractor
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
         return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs, tables, visualFallbacks, visualProjections);
+    }
+
+    /// <summary>Describes exactly what is partial about a page's vector projection and where to
+    /// look in the original, e.g. "PDF page 3: 2 of 5 connectors unresolved and 4 vector paths kept
+    /// as fallback; compare with page 3 of the original."  Only called once <see
+    /// cref="VisualGraph.IsPartialProjection"/> is true, so at least one clause always applies.</summary>
+    private static string DescribePartialProjection(int pageNumber, VisualGraph graph)
+    {
+        var accounting = graph.Accounting;
+        var fallbackCount = graph.FallbackPathCount;
+        var clauses = new List<string>();
+        if (accounting.UnresolvedEdges > 0)
+            clauses.Add($"{accounting.UnresolvedEdges} of {accounting.RecognizedEdges} connector{(accounting.RecognizedEdges == 1 ? "" : "s")} unresolved");
+        if (fallbackCount > 0)
+            clauses.Add($"{fallbackCount} vector path{(fallbackCount == 1 ? "" : "s")} kept as fallback");
+        var detail = clauses.Count > 0
+            ? string.Join(" and ", clauses)
+            : $"{accounting.Diagnostics} vector diagnostic{(accounting.Diagnostics == 1 ? "" : "s")} recorded during reconstruction";
+        return $"PDF page {pageNumber}: {detail}; compare with page {pageNumber} of the original.";
+    }
+
+    /// <summary>Merges parsed fragments into readable flow lines without letting a reconstructed
+    /// table swallow unrelated native text, then reconciles every parsed fragment against the two
+    /// places it may legitimately live: a table cell, or a surviving flow region.</summary>
+    private static IReadOnlyList<PdfTextRegion> BuildFlowRegions(IReadOnlyList<PdfTextRegion> regions,
+        IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount)
+    {
+        var tableSourceIds = PdfTextAccounting.TableSourceIds(tables);
+        var flow = SortReadingOrder(regions, tableSourceIds, out columnCount);
+        if (tables.Count == 0) return flow;
+        var accounting = PdfTextAccounting.Reconcile(regions.SelectMany(region => region.SourceTextIds).ToArray(), flow, tables);
+        if (accounting.IsComplete) return flow;
+        if (accounting.UnaccountedSourceIds.Count > 0)
+        {
+            // Conservative recovery. A fragment that neither a cell nor a flow region represents
+            // stays in the readable flow: silently deleting native text is never an acceptable
+            // outcome of table inference, and the diagnostic below makes the gap visible.
+            var unaccounted = accounting.UnaccountedSourceIds.ToHashSet();
+            var recovered = flow.Concat(regions.Where(region => region.SourceTextIds.Any(unaccounted.Contains)))
+                .OrderByDescending(region => region.BoundingBox.Y).ThenBy(region => region.BoundingBox.X)
+                .ThenBy(region => region.ReadingOrder).ToArray();
+            // This fallback is a text-integrity safety net, not a layout decision, so it does not
+            // preserve column-major order; reassign a fresh sequential ReadingOrder over its own
+            // (purely geometric) output so list position and ReadingOrder stay consistent for
+            // PdfPageText.Text and PdfPageProjection.
+            flow = recovered.Select((region, index) => region with { ReadingOrder = index }).ToArray();
+            columnCount = 1;
+        }
+        foreach (var message in accounting.Describe(pageNumber)) diagnostics.Add(message);
+        return flow;
     }
 
     private static void CompactPageDiagnostics(List<string> diagnostics, int start, int pageNumber, int maximumPerCode)
@@ -220,6 +290,7 @@ public static class PdfTextExtractor
         var operands = new List<double>();
         var current = new List<VisualPathPoint>();
         var pendingClosedSubpaths = new List<IReadOnlyList<VisualPathPoint>>();
+        var pendingOpenSubpaths = new List<(IReadOnlyList<VisualPathPoint> Points, bool CurveSeen)>();
         var arrowheadMatches = new List<(string PathId, string EdgeId, VisualPathPoint Tip, bool AtEnd)>();
         var suppressedGridPathIds = new HashSet<string>(StringComparer.Ordinal);
         var inferredGridPathIds = new HashSet<string>(StringComparer.Ordinal);
@@ -295,7 +366,7 @@ public static class PdfTextExtractor
                     if (current.Count > 1)
                     {
                         if (closed) pendingClosedSubpaths.Add(current.ToArray());
-                        else RetainSubpath();
+                        else pendingOpenSubpaths.Add((current.ToArray(), curveSeen));
                     }
                     current.Clear(); current.Add(Transform(operands[^2], operands[^1])); closed = false; curveSeen = false; break;
                 case "l" when operands.Count >= 2:
@@ -312,52 +383,66 @@ public static class PdfTextExtractor
                     if (current.Count > 1)
                     {
                         if (closed) pendingClosedSubpaths.Add(current.ToArray());
-                        else RetainSubpath();
+                        else pendingOpenSubpaths.Add((current.ToArray(), curveSeen));
                     }
                     var x = operands[^4]; var y = operands[^3]; var w = operands[^2]; var h = operands[^1];
                     current.Clear(); current.Add(Transform(x, y)); current.Add(Transform(x + w, y));
                     current.Add(Transform(x + w, y + h)); current.Add(Transform(x, y + h)); current.Add(Transform(x, y)); closed = true; break;
                 case "h": if (current.Count > 1) { current.Add(current[0]); closed = true; } break;
                 case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "n":
-                    if (current.Count > 1)
+                    // A final move-only subpath must not prevent earlier subpaths from
+                    // receiving this paint operation or being cleared by a no-paint operation.
+                    if (current.Count > 1 || pendingOpenSubpaths.Count > 0 || pendingClosedSubpaths.Count > 0)
                     {
                         // `re` starts a new subpath; promote prior closed rectangles only when the
                         // following paint operator confirms that the compound path is painted.
                         foreach (var subpath in pendingClosedSubpaths)
                             AddPaintedClosedSubpath(subpath);
                         pendingClosedSubpaths.Clear();
-                        var points = current.ToArray();
-                        var isClosed = closed || token is "s" or "b" or "b*" or "f" or "F" or "f*" or "B" or "B*" ||
-                            (points[0].X == points[^1].X && points[0].Y == points[^1].Y);
-                        var painted = token is not "n";
-                        var isStroke = token is "S" or "s" or "B" or "B*" or "b" or "b*";
-                        var minX = points.Min(point => point.X); var minY = points.Min(point => point.Y);
-                        var maxX = points.Max(point => point.X); var maxY = points.Max(point => point.Y);
-                        var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
-                        paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
-                            curveSeen ? 0.45 : 0.9, curveSeen || !isClosed || !painted, SourceNodeId: null));
-                        if (isClosed && painted) AddClosedNode(points);
-                        else if (isStroke)
+                        // A painting operator applies to every subpath of the current path, not
+                        // just the last one (PDF 32000-1 8.5.3): an earlier open subpath drawn
+                        // before a later `m` is painted exactly like an individually stroked line.
+                        if (pendingOpenSubpaths.Count > 0)
                         {
-                            // Edge labels are assigned only after all closed paths have claimed
-                            // their text regions as node labels. PDF content streams routinely
-                            // paint a connector before its endpoint rectangles and text.
-                            edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", null, null,
-                                null, VisualEdgeResolution.Unresolved, Direction: "undirected",
-                                Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: 0.2,
-                                Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
-                            diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
-                            graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2));
+                            if (token is "S" or "s" or "B" or "B*" or "b" or "b*")
+                            {
+                                foreach (var pending in pendingOpenSubpaths)
+                                    EmitPaintedPath(pending.Points, pending.CurveSeen, token);
+                            }
+                            else if (token is "f" or "F" or "f*")
+                            {
+                                // A filled subpath is implicitly closed by a straight line back to
+                                // its start point; a degenerate (< 3 distinct points) subpath has
+                                // no area to fill and is retained as unpainted fallback instead.
+                                foreach (var pending in pendingOpenSubpaths)
+                                {
+                                    if (pending.Points.Distinct().Count() >= 3)
+                                        EmitPaintedPath(pending.Points, pending.CurveSeen, token);
+                                    else
+                                        RetainOpenSubpath(pending.Points, pending.CurveSeen);
+                                }
+                            }
+                            else
+                            {
+                                foreach (var pending in pendingOpenSubpaths)
+                                    RetainOpenSubpath(pending.Points, pending.CurveSeen);
+                            }
+                            pendingOpenSubpaths.Clear();
                         }
-                        if (curveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
+                        if (current.Count > 1)
+                            EmitPaintedPath(current.ToArray(), curveSeen, token);
                     }
                     current.Clear(); operands.Clear(); closed = false; curveSeen = false; break;
                 default: operands.Clear(); break;
             }
         }
         if (!visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null)
+        {
             foreach (var subpath in pendingClosedSubpaths)
                 RetainClosedSubpath(subpath);
+            foreach (var pending in pendingOpenSubpaths)
+                RetainOpenSubpath(pending.Points, pending.CurveSeen);
+        }
         var pathBuildCompleted = !visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null;
         var preInferenceNodes = new List<VisualNode>(nodes);
         var preInferenceEdges = new List<VisualEdge>(edges);
@@ -939,6 +1024,14 @@ public static class PdfTextExtractor
             sourceItems = BuildSourceItems();
         }
         cancellationToken.ThrowIfCancellationRequested();
+        // A late ledger decision (for example a duplicate without a canonical reference)
+        // can retain a formerly semantic path as fallback. Keep raw geometry consumers
+        // in sync without clearing the raw strokes of already-resolved connectors.
+        var fallbackPathIds = sourceItems.Where(item => item.Disposition == VisualDisposition.VisualFallback)
+            .Select(item => item.FallbackPathId).ToHashSet(StringComparer.Ordinal);
+        for (var index = 0; index < paths.Count; index++)
+            if (fallbackPathIds.Contains(paths[index].Id) && !paths[index].IsFallback)
+                paths[index] = paths[index] with { IsFallback = true };
         var graph = new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
             SourceItems: sourceItems);
         return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
@@ -1489,14 +1582,41 @@ public static class PdfTextExtractor
             return gaps.All(gap => gap >= median * .4 && gap <= median * 2.5);
         }
 
-        void RetainSubpath()
+        void RetainOpenSubpath(IReadOnlyList<VisualPathPoint> subpath, bool subpathCurveSeen)
         {
-            var minX = current.Min(point => point.X); var minY = current.Min(point => point.Y);
-            var maxX = current.Max(point => point.X); var maxY = current.Max(point => point.Y);
-            paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", current.ToArray(),
+            var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
+            var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
+            paths.Add(new VisualPath($"pdf_p{pageNumber}_subpath{paths.Count + 1}", subpath,
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
-                curveSeen ? 0.25 : 0.35, IsFallback: true, SourceNodeId: null));
+                subpathCurveSeen ? 0.25 : 0.35, IsFallback: true, SourceNodeId: null));
             graphDiagnostics.Add(Diag("VisualPathPartial", "Unpainted PDF subpath retained as fallback.", 0.35));
+        }
+
+        void EmitPaintedPath(IReadOnlyList<VisualPathPoint> points, bool subpathCurveSeen, string paintToken)
+        {
+            var isClosedSubpath = paintToken is "s" or "b" or "b*" or "f" or "F" or "f*" or "B" or "B*" ||
+                (points[0].X == points[^1].X && points[0].Y == points[^1].Y);
+            var paintedSubpath = paintToken is not "n";
+            var isStrokeSubpath = paintToken is "S" or "s" or "B" or "B*" or "b" or "b*";
+            var minX = points.Min(point => point.X); var minY = points.Min(point => point.Y);
+            var maxX = points.Max(point => point.X); var maxY = points.Max(point => point.Y);
+            var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
+            paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
+                subpathCurveSeen ? 0.45 : 0.9, subpathCurveSeen || !isClosedSubpath || !paintedSubpath, SourceNodeId: null));
+            if (isClosedSubpath && paintedSubpath) AddClosedNode(points);
+            else if (isStrokeSubpath)
+            {
+                // Edge labels are assigned only after all closed paths have claimed
+                // their text regions as node labels. PDF content streams routinely
+                // paint a connector before its endpoint rectangles and text.
+                edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", null, null,
+                    null, VisualEdgeResolution.Unresolved, Direction: "undirected",
+                    Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: 0.2,
+                    Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
+                diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
+                graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2));
+            }
+            if (subpathCurveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
         }
 
         void RetainClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
@@ -1841,7 +1961,7 @@ public static class PdfTextExtractor
                     var width = Math.Max(1, Math.Sqrt(Math.Pow(right.X - point.X, 2) + Math.Pow(right.Y - point.Y, 2)));
                     var height = Math.Max(1, Math.Sqrt(Math.Pow(top.X - point.X, 2) + Math.Pow(top.Y - point.Y, 2)));
                     regions.Add(new PdfTextRegion(text,
-                        new Geometry("pdf-user-space", point.X, point.Y, width, height), regions.Count));
+                        new Geometry("pdf-user-space", point.X, point.Y, width, height), regions.Count, [regions.Count]));
                 }
                 x += text.Length * 6;
                 actualTextCursor = match.Index + match.Length;
@@ -1923,10 +2043,37 @@ public static class PdfTextExtractor
         return bytes.Length % 2 == 0 ? Encoding.BigEndianUnicode.GetString(bytes) : Encoding.Latin1.GetString(bytes);
     }
 
-    private static IReadOnlyList<PdfTextRegion> SortReadingOrder(IEnumerable<PdfTextRegion> regions)
+    /// <summary>Sorts fragments into reading order, first unrolling any detected column layout
+    /// (see <see cref="ApplyColumnLayout"/>) so a later per-baseline merge (see
+    /// <see cref="MergeAdjacentIntoLines"/>) emits a whole column before the next one instead of
+    /// interleaving side-by-side columns baseline by baseline. <paramref name="columnCount"/>
+    /// reports how many side-by-side columns were detected (1 when the page is single-column).</summary>
+    private static IReadOnlyList<PdfTextRegion> SortReadingOrder(IEnumerable<PdfTextRegion> regions,
+        IReadOnlySet<int>? tableSourceIds, out int columnCount)
     {
-        var ordered = regions.OrderByDescending(region => region.BoundingBox.Y)
+        var geometric = regions.OrderByDescending(region => region.BoundingBox.Y)
             .ThenBy(region => region.BoundingBox.X).ThenBy(region => region.ReadingOrder).ToArray();
+        var ordered = ApplyColumnLayout(geometric, tableSourceIds, out columnCount);
+        var lines = MergeAdjacentIntoLines(ordered, tableSourceIds);
+        // PdfPageText.Text and PdfPageProjection.ToDocumentNodes key their own ordering off
+        // ReadingOrder rather than re-deriving it from geometry (row-major and column-major
+        // layouts can otherwise share the same page-level Y/X extents), so the final emitted
+        // sequence - including any column-major unrolling above - is captured here as the
+        // authoritative order.
+        var final = new PdfTextRegion[lines.Count];
+        for (var index = 0; index < lines.Count; index++) final[index] = lines[index] with { ReadingOrder = index };
+        return final;
+    }
+
+    /// <summary>The original per-baseline merge: fragments sharing a Y baseline are glued into one
+    /// readable line (joined with a space across a wide gap, left untouched otherwise), except a
+    /// table-owned fragment never merges with a non-table one, and an overlapping fragment (nested
+    /// coordinate frames, e.g. table cells, sharing a local Y) is kept separate. Operates purely on
+    /// the order it is given, so a caller controls reading order - including column-major
+    /// unrolling - by controlling the order of <paramref name="ordered"/>.</summary>
+    private static List<PdfTextRegion> MergeAdjacentIntoLines(IReadOnlyList<PdfTextRegion> ordered,
+        IReadOnlySet<int>? tableSourceIds)
+    {
         var lines = new List<PdfTextRegion>();
         foreach (var region in ordered)
         {
@@ -1936,6 +2083,14 @@ public static class PdfTextExtractor
                 continue;
             }
             var previous = lines[^1];
+            // Table cells and unrelated body text routinely share a baseline. Gluing them into one
+            // line would force the table projection to either drop native body text or duplicate a
+            // cell, so the two families never join the same readable line.
+            if (PdfTextAccounting.IsTableOwned(previous, tableSourceIds) != PdfTextAccounting.IsTableOwned(region, tableSourceIds))
+            {
+                lines.Add(region);
+                continue;
+            }
             var previousRight = previous.BoundingBox.X + previous.BoundingBox.Width;
             var gap = region.BoundingBox.X - previousRight;
             var overlapTolerance = Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height) * 0.5;
@@ -1953,9 +2108,185 @@ public static class PdfTextExtractor
             lines[^1] = new PdfTextRegion(previous.Text + separator + region.Text,
                 new Geometry(previous.BoundingBox.CoordinateSpace, previous.BoundingBox.X,
                     Math.Max(previous.BoundingBox.Y, region.BoundingBox.Y), right - previous.BoundingBox.X,
-                    Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height)), previous.ReadingOrder);
+                    Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height)), previous.ReadingOrder,
+                [.. previous.SourceTextIds, .. region.SourceTextIds]);
         }
         return lines;
+    }
+
+    /// <summary>How a fragment sits relative to a candidate gutter interval [start, end).</summary>
+    private enum GutterSide { Left, Right, Straddle }
+
+    private static GutterSide ClassifyGutterSide(PdfTextRegion fragment, double start, double end)
+    {
+        var right = fragment.BoundingBox.X + fragment.BoundingBox.Width;
+        if (right <= start) return GutterSide.Left;
+        if (fragment.BoundingBox.X >= end) return GutterSide.Right;
+        return GutterSide.Straddle;
+    }
+
+    /// <summary>Tracks one candidate vertical whitespace gutter as it is followed down consecutive
+    /// baselines. <see cref="TrueMatchCount"/> only counts baselines with fragments confirmed on
+    /// both sides of the (progressively tightened) interval; a baseline with fragments on only one
+    /// side (a ragged, shorter column) extends the run's reach without counting toward
+    /// confirmation, so a run needs real bilateral evidence at least three times before it is
+    /// trusted, while still absorbing a trailing ragged tail once trusted.</summary>
+    private sealed class GutterRun
+    {
+        public double Start;
+        public double End;
+        public int FirstBaseline;
+        public int LastBaseline;
+        public int TrueMatchCount;
+        public Dictionary<int, int> SplitByBaseline { get; } = [];
+    }
+
+    /// <summary>Detects a persistent vertical whitespace gutter - a horizontal gap at least
+    /// ~3x the local line height or ~8% of the page's text span, recurring at the same horizontal
+    /// position across at least three consecutive baselines with fragments confirmed on both
+    /// sides - and, when found, reorders the affected (non-table) fragments so the whole left
+    /// column precedes the whole right column, each top-to-bottom. A single wide gap on one
+    /// baseline (a "Label ... value" row, a title with a trailing page number, or widely spaced
+    /// flow-diagram labels sharing one baseline) never accumulates the three confirmations a run
+    /// needs, so it is left exactly as the plain geometric sort produced it. Table-owned fragments
+    /// are excluded from detection entirely and keep the position the geometric sort gave them;
+    /// only the surrounding non-table fragments move.</summary>
+    private static PdfTextRegion[] ApplyColumnLayout(IReadOnlyList<PdfTextRegion> geometric,
+        IReadOnlySet<int>? tableSourceIds, out int columnCount)
+    {
+        columnCount = 1;
+        var isTableOwned = new bool[geometric.Count];
+        for (var index = 0; index < geometric.Count; index++)
+            isTableOwned[index] = PdfTextAccounting.IsTableOwned(geometric[index], tableSourceIds);
+        var flowRegions = geometric.Where((_, index) => !isTableOwned[index]).ToArray();
+        if (flowRegions.Length == 0) return [.. geometric];
+
+        // Baselines are contiguous runs of the geometric (Y desc) flow sequence sharing a Y
+        // coordinate, using the same tolerance as the per-baseline merge that follows.
+        var baselines = new List<List<PdfTextRegion>>();
+        foreach (var region in flowRegions)
+        {
+            if (baselines.Count == 0 ||
+                Math.Abs(baselines[^1][0].BoundingBox.Y - region.BoundingBox.Y) > Math.Max(1, region.BoundingBox.Height * 0.35))
+                baselines.Add([region]);
+            else
+                baselines[^1].Add(region);
+        }
+        if (baselines.Count < 3) return [.. geometric];
+
+        var minX = flowRegions.Min(region => region.BoundingBox.X);
+        var maxX = flowRegions.Max(region => region.BoundingBox.X + region.BoundingBox.Width);
+        var pageSpan = Math.Max(1, maxX - minX);
+        double GutterThreshold(PdfTextRegion left, PdfTextRegion right) =>
+            Math.Max(Math.Max(left.BoundingBox.Height, right.BoundingBox.Height) * 3, pageSpan * 0.08);
+
+        var openRuns = new List<GutterRun>();
+        var confirmedRuns = new List<GutterRun>();
+        for (var baselineIndex = 0; baselineIndex < baselines.Count; baselineIndex++)
+        {
+            var baseline = baselines[baselineIndex];
+            var stillOpen = new List<GutterRun>();
+            foreach (var run in openRuns)
+            {
+                var sides = baseline.Select(fragment => ClassifyGutterSide(fragment, run.Start, run.End)).ToArray();
+                if (Array.IndexOf(sides, GutterSide.Straddle) >= 0)
+                {
+                    // A fragment now spans where the gutter used to be - a genuine full-width
+                    // line (title, footer, or unrelated paragraph) ends the run here.
+                    if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+                    continue;
+                }
+                var lastLeftIndex = Array.LastIndexOf(sides, GutterSide.Left);
+                var hasRight = Array.IndexOf(sides, GutterSide.Right) >= 0;
+                run.LastBaseline = baselineIndex;
+                run.SplitByBaseline[baselineIndex] = lastLeftIndex;
+                if (lastLeftIndex >= 0 && hasRight)
+                {
+                    var leftFragment = baseline[lastLeftIndex];
+                    var rightFragment = baseline[Array.IndexOf(sides, GutterSide.Right)];
+                    run.Start = Math.Max(run.Start, leftFragment.BoundingBox.X + leftFragment.BoundingBox.Width);
+                    run.End = Math.Min(run.End, rightFragment.BoundingBox.X);
+                    run.TrueMatchCount++;
+                }
+                // Else: every fragment on this baseline sits on one side only (a ragged, shorter
+                // column) - the run's reach extends without new confirmation evidence.
+                stillOpen.Add(run);
+            }
+            for (var fragmentIndex = 0; fragmentIndex < baseline.Count - 1; fragmentIndex++)
+            {
+                var left = baseline[fragmentIndex];
+                var right = baseline[fragmentIndex + 1];
+                var gapStart = left.BoundingBox.X + left.BoundingBox.Width;
+                var gapEnd = right.BoundingBox.X;
+                if (gapEnd - gapStart < GutterThreshold(left, right)) continue;
+                if (stillOpen.Any(run => run.Start < gapEnd && gapStart < run.End)) continue;
+                var seeded = new GutterRun
+                {
+                    Start = gapStart, End = gapEnd, FirstBaseline = baselineIndex, LastBaseline = baselineIndex,
+                    TrueMatchCount = 1
+                };
+                seeded.SplitByBaseline[baselineIndex] = fragmentIndex;
+                stillOpen.Add(seeded);
+            }
+            openRuns = stillOpen;
+        }
+        foreach (var run in openRuns) if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+        if (confirmedRuns.Count == 0) return [.. geometric];
+
+        // Reassemble the flow fragments: a baseline outside every confirmed block keeps its plain
+        // top-to-bottom position; a block's baselines are re-emitted column by column instead.
+        var reorderedFlow = new List<PdfTextRegion>(flowRegions.Length);
+        var cursor = 0;
+        while (cursor < baselines.Count)
+        {
+            var covering = confirmedRuns.Where(run => run.FirstBaseline <= cursor && cursor <= run.LastBaseline)
+                .OrderBy(run => run.Start).ToArray();
+            if (covering.Length == 0)
+            {
+                reorderedFlow.AddRange(baselines[cursor]);
+                cursor++;
+                continue;
+            }
+            var blockEnd = covering.Max(run => run.LastBaseline);
+            var columns = covering.Length + 1;
+            columnCount = Math.Max(columnCount, columns);
+            var columnLines = new List<PdfTextRegion>[columns];
+            for (var column = 0; column < columns; column++) columnLines[column] = [];
+            for (var baselineIndex = cursor; baselineIndex <= blockEnd; baselineIndex++)
+            {
+                var baseline = baselines[baselineIndex];
+                var splits = covering.Where(run => run.SplitByBaseline.ContainsKey(baselineIndex))
+                    .Select(run => run.SplitByBaseline[baselineIndex]).OrderBy(splitIndex => splitIndex).ToArray();
+                var segmentStart = 0;
+                for (var segment = 0; segment <= splits.Length; segment++)
+                {
+                    var segmentEndExclusive = segment < splits.Length
+                        ? Math.Clamp(splits[segment] + 1, segmentStart, baseline.Count)
+                        : baseline.Count;
+                    var column = Math.Min(segment, columns - 1);
+                    for (var itemIndex = segmentStart; itemIndex < segmentEndExclusive; itemIndex++)
+                        columnLines[column].Add(baseline[itemIndex]);
+                    segmentStart = segmentEndExclusive;
+                }
+            }
+            foreach (var column in columnLines) reorderedFlow.AddRange(column);
+            cursor = blockEnd + 1;
+        }
+
+        // Finish each body line before inserting table fragments. Otherwise a table slot
+        // can split two fragments that became adjacent when the columns were reordered.
+        // Emit a whole line at its first fragment's slot and skip its consumed fragments.
+        var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds)
+            .ToDictionary(line => line.SourceTextIds[0]);
+        var result = new List<PdfTextRegion>(geometric.Count);
+        var flowCursor = 0;
+        for (var index = 0; index < geometric.Count; index++)
+        {
+            if (isTableOwned[index]) result.Add(geometric[index]);
+            else if (flowLineStarts.TryGetValue(reorderedFlow[flowCursor++].SourceTextIds[0], out var line))
+                result.Add(line);
+        }
+        return result.ToArray();
     }
 
     private static PdfToUnicodeMap? FindFontMap(IReadOnlyDictionary<string, PdfToUnicodeMap> maps, string? font) =>

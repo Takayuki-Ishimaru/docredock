@@ -457,6 +457,118 @@ public sealed class DocumentServiceTests
         finally { Directory.Delete(root, recursive: true); }
     }
 
+    [Fact]
+    public async Task Xlsx_readable_export_with_unknown_sheet_name_throws_and_writes_nothing()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "source.xlsx");
+        WriteXlsxWorkbook(source, ("Overview", "visible", "Overview text"), ("Secret", "hidden", "Secret text"));
+        var markdown = Path.Combine(root, "source.md");
+
+        var exception = await Assert.ThrowsAsync<SheetSelectionException>(() =>
+            new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown, Sheets: ["DoesNotExist"])));
+
+        Assert.Equal(["DoesNotExist"], exception.UnknownSheets);
+        Assert.Contains("DoesNotExist", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Overview", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("Secret (hidden)", exception.Message, StringComparison.Ordinal);
+        Assert.False(File.Exists(markdown));
+    }
+
+    [Fact]
+    public async Task Xlsx_readable_export_with_a_partial_sheet_name_mismatch_throws_instead_of_ignoring_the_unknown_name()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "source.xlsx");
+        WriteXlsxWorkbook(source, ("Overview", "visible", "Overview text"), ("Secret", "hidden", "Secret text"));
+        var markdown = Path.Combine(root, "source.md");
+
+        var exception = await Assert.ThrowsAsync<SheetSelectionException>(() =>
+            new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+                source, markdown, Sheets: ["Overview", "DoesNotExist"])));
+
+        Assert.Equal(["DoesNotExist"], exception.UnknownSheets);
+        Assert.False(File.Exists(markdown));
+    }
+
+    [Fact]
+    public async Task Xlsx_hidden_sheet_requested_under_visible_policy_warns_instead_of_erroring()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "source.xlsx");
+        WriteXlsxWorkbook(source, ("Overview", "visible", "Overview text"), ("Secret", "hidden", "Secret text"));
+        var markdown = Path.Combine(root, "source.md");
+
+        var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, ContentPolicy: "visible", Sheets: ["Secret"]));
+
+        var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "XlsxSheetExcludedByPolicy");
+        Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
+        Assert.Contains("Secret", diagnostic.Message, StringComparison.Ordinal);
+        Assert.Contains("visible", diagnostic.Message, StringComparison.Ordinal);
+        Assert.True(File.Exists(markdown));
+        Assert.DoesNotContain("Secret text", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Xlsx_hidden_sheet_requested_under_complete_policy_is_exported_without_the_policy_warning()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "source.xlsx");
+        WriteXlsxWorkbook(source, ("Overview", "visible", "Overview text"), ("Secret", "hidden", "Secret text"));
+        var markdown = Path.Combine(root, "source.md");
+
+        var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, markdown, ContentPolicy: "complete", Sheets: ["Secret"]));
+
+        Assert.DoesNotContain(result.Diagnostics, item => item.Code == "XlsxSheetExcludedByPolicy");
+        Assert.Contains(result.Diagnostics, item => item.Code == "HiddenContentIncluded");
+        Assert.Contains("Secret text", await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+    }
+
+    private static void WriteXlsxWorkbook(string path, params (string Name, string State, string Text)[] sheets)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var file = File.Create(path);
+        using var archive = new ZipArchive(file, ZipArchiveMode.Create);
+        void Write(string entryPath, string content)
+        {
+            using var writer = new StreamWriter(archive.CreateEntry(entryPath).Open(), new UTF8Encoding(false));
+            writer.Write(content);
+        }
+
+        Write("[Content_Types].xml", """
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+            </Types>
+            """);
+        Write("_rels/.rels", """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+            </Relationships>
+            """);
+        var sheetElements = string.Join(string.Empty, sheets.Select((sheet, index) =>
+            $"<sheet name=\"{sheet.Name}\" sheetId=\"{index + 1}\"" +
+            (StringComparer.OrdinalIgnoreCase.Equals(sheet.State, "visible") ? string.Empty : $" state=\"{sheet.State}\"") +
+            $" r:id=\"rId{index + 1}\"/>"));
+        Write("xl/workbook.xml", $"""
+            <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheets>{sheetElements}</sheets>
+            </workbook>
+            """);
+        var relationshipElements = string.Join(string.Empty, sheets.Select((_, index) =>
+            $"<Relationship Id=\"rId{index + 1}\" Type=\"worksheet\" Target=\"worksheets/sheet{index + 1}.xml\"/>"));
+        Write("xl/_rels/workbook.xml.rels", $"""
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{relationshipElements}</Relationships>
+            """);
+        for (var index = 0; index < sheets.Length; index++)
+            Write($"xl/worksheets/sheet{index + 1}.xml", $"""
+                <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
+                  <row r="1"><c r="A1" t="inlineStr"><is><t>{sheets[index].Text}</t></is></c></row>
+                </sheetData></worksheet>
+                """);
+    }
+
     private static string TempDirectory()
     {
         var path = Path.Combine(Path.GetTempPath(), "docredock-service-tests", Guid.NewGuid().ToString("N"));

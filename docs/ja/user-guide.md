@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.2.3 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.2.4 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -18,6 +18,8 @@ GitHub ReleasesからOS／CPUに合うパッケージを取得し、公開され
 6. 出力先を選んで変換し、Markdown、診断、assetを確認します。
 
 デスクトップGUIはPDFを既定で受け付けます。ネイティブPDFテキストを抽出し、文字のないページのOCRや図的ページのpreviewにはrasterizer／OCR providerの構成が必要な場合があります。利用できない場合もpage placeholderと診断を確認してください。
+
+二段組のページは、3行以上連続して段間の余白を確認できた場合に、左の段を上から下まで読んでから右の段を読みます。項目名と値、タイトルとページ番号のように1行だけ広く空いた箇所は段として扱いません。表を再構成したページでも、表の外の本文はそのまま保持され、説明できない欠落があれば`PdfNativeTextUnaccounted`で警告します。
 
 CLIのPDF変換（export）・復元・生成（render）は、他の実験的CLIワークフローと同様に`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
 
@@ -48,6 +50,8 @@ Mermaidは、接続関係が明確で矛盾しない場合だけ出力します�
 - **visible**（既定）: 認識できる非表示テキスト、シート・行・列、スライド・オブジェクト、ノート、コメント、変更履歴を除外します。
 - **complete**: 非表示情報とメタデータを含め、警告を出します。
 - **sanitized**: メタデータ、派生・OCR情報、ヘッダー／フッター等も除外します。
+
+XLSXの書き出しでは、`--sheets Sheet1,Sheet2`（CLI限定）で指定したシートだけを対象にできます。指定した名前は既存のシート名と（大文字小文字を区別せず）完全一致する必要があります。存在しない名前を指定するとexit code 2で失敗し、出力ファイルは作成されません。一部の名前だけ一致しない場合（部分的な不一致）も、その名前を黙って無視せず失敗します。指定したシートが非表示で`visible`/`sanitized`ポリシーにより除外される場合はエラーにはなりませんが、`XlsxSheetExcludedByPolicy`という警告（exit code 1）を出し、出力が空に見える理由を説明します。含めるには`--content-policy complete`を使用してください。
 
 OCRテキストは親画像の可視性を引き継ぎます。親partitionを解決できない場合は専用の`derived-assets`へ配置し、`OcrParentPartitionUnresolved`を出します。
 
@@ -86,9 +90,12 @@ CFF／CFF2、グリフ不足、不正なcollection、埋め込み禁止フォン
 環境の capability は doctor で確認できます。doctor は実験機能 gate の外で実行でき、入力ファイルも不要です。
 
     docredock doctor
+    docredock doctor [--strict]
     docredock doctor --json
 
 ready は依存関係を実測して利用可能、partial は一部の機能または OCR 言語だけ利用可能、unavailable は不足または無効化された状態です。ネイティブPDF OCRも内容によってpartialになる場合があります。画像PDFの OCR には OCR engine と PDF rasterizer の両方が必要です。rasterizer は明示パス（DOCREDOCK_PDF_RASTERIZER）、次に PATH 上の pdftoppm、mutool の順で探索します。探索を無効化する場合は DOCREDOCK_DISABLE_PDF_RASTERIZER=1 を設定します。未検出時は pdftoppm または mutool をインストールするか、実行ファイルのパスを設定してください。fallbackはページあたり最大100 path・32,768文字で、圧縮時もネイティブテキストを保持します。
+
+各 capability には tier（`required`: docx-readable、xlsx-readable、pptx-readable、pdf-text／それ以外はすべて `optional`。OCR、PDF rasterizer、mermaid-render を含む）が付きます。素の `docredock doctor` と `docredock doctor --json` は常に同じ終了コードを返します。必須 capability がすべて ready なら 0、そうでなければ 1 です。optional な不足は出力に表示されますが終了コードには影響しません。`--strict` を付けると、optional を含めどれか1つでも ready でない capability があれば終了コード1になります。ただし、その optional な不足がすでに ready な代替手段で満たされている場合（`satisfied_by` で表示）は例外です。たとえばネイティブ OCR ヘルパーが同梱されないプラットフォームでは、Tesseract が ready になると `ocr-native` は `satisfied_by: "tesseract"` を報告し、`--strict` でもこの不足では失敗しません。`partial` な代替手段は満たしたことにはなりません。JSON レポートには既存フィールドに加えて `tier`・`satisfied_by`・`strict`・`exit_code`・`summary`（`required_ready`・`optional_gaps`・`strict_failures`）が追加されます。
 
 PdfTableInferred は規則的な罫線から表を再構成したこと、PdfTableNative は既存表情報を利用したこと、PdfTableAmbiguous は表として一意に決められなかったことを示します。VisualFallbackCompacted は出力予算に合わせて fallback を省略したことを示します。小さな欠落やノイズを含む図では部分 topology と fallback を保持し、接続を推測できない箇所を診断します。
 

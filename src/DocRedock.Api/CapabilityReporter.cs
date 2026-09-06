@@ -24,12 +24,14 @@ public sealed class CapabilityReporter
     {
         var capabilities = new List<CapabilityStatus>
         {
-            new("docx-readable", "ready"), new("xlsx-readable", "ready"), new("pptx-readable", "ready"), new("pdf-text", "ready"),
+            new("docx-readable", "ready", Tier: "required"), new("xlsx-readable", "ready", Tier: "required"),
+            new("pptx-readable", "ready", Tier: "required"), new("pdf-text", "ready", Tier: "required"),
         };
+        CapabilityStatus engine;
         var tesseract = resolveExecutable("tesseract");
         if (tesseract is null)
         {
-            capabilities.Add(new("ocr-engine", "unavailable", "tesseract", Action: "Install Tesseract OCR and its language data."));
+            engine = new("ocr-engine", "unavailable", "tesseract", Action: "Install Tesseract OCR and its language data.", Tier: "optional");
             capabilities.AddRange(LanguageCapabilities("unavailable", null));
         }
         else
@@ -37,7 +39,7 @@ public sealed class CapabilityReporter
             var probe = await run(tesseract, ["--list-langs"], cancellationToken).ConfigureAwait(false);
             if (!probe.Succeeded)
             {
-                capabilities.Add(new("ocr-engine", "partial", "tesseract", tesseract, "Tesseract was found but language probing failed; run 'tesseract --list-langs'."));
+                engine = new("ocr-engine", "partial", "tesseract", tesseract, "Tesseract was found but language probing failed; run 'tesseract --list-langs'.", Tier: "optional");
                 capabilities.AddRange(LanguageCapabilities("partial", tesseract));
             }
             else
@@ -45,24 +47,57 @@ public sealed class CapabilityReporter
                 var languages = probe.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                     .Where(line => !line.StartsWith("List of available languages", StringComparison.OrdinalIgnoreCase))
                     .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                capabilities.Add(new("ocr-engine", "ready", "tesseract", tesseract));
+                engine = new("ocr-engine", "ready", "tesseract", tesseract, Tier: "optional");
                 capabilities.Add(Language("jpn", languages, tesseract));
                 capabilities.Add(Language("eng", languages, tesseract));
             }
         }
-        capabilities.Add(nativeOcr?.Invoke() ?? NativeOcr());
+        var native = nativeOcr?.Invoke() ?? NativeOcr();
+        (engine, native) = ReconcileOcrFunction(engine, native);
+        capabilities.Add(engine);
+        capabilities.Add(native);
         capabilities.Add(rasterizer);
         capabilities.Add(await MermaidAsync(cancellationToken).ConfigureAwait(false));
         return capabilities;
     }
 
+    /// <summary>
+    /// ocr-engine (tesseract) and ocr-native are two independent providers of the same OCR
+    /// function. When exactly one of them is genuinely ready, the other's gap is not a defect —
+    /// it is an optional provider the user does not need. `partial` never counts as satisfying;
+    /// only a fully `ready` provider does.
+    /// </summary>
+    private static (CapabilityStatus Engine, CapabilityStatus Native) ReconcileOcrFunction(CapabilityStatus engine, CapabilityStatus native)
+    {
+        if (engine.Status == "ready" && native.Status != "ready")
+            return (engine, native with
+            {
+                SatisfiedBy = engine.Provider,
+                Action = $"Optional: OCR is provided by {engine.Provider}; {NativeUnavailableReason(native)}.",
+            });
+        if (native.Status == "ready" && engine.Status != "ready")
+            return (engine with
+            {
+                SatisfiedBy = native.Provider,
+                Action = $"Optional: OCR is provided by {native.Provider}; install Tesseract OCR and its language data for offline/batch use.",
+            }, native);
+        return (engine, native);
+    }
+
+    private static string NativeUnavailableReason(CapabilityStatus native) => native.Provider switch
+    {
+        "apple-vision" => "no ready native OCR provider (Apple Vision) is currently available on this platform",
+        "windows-media" => "no ready native OCR provider (Windows Media OCR) is currently available on this platform",
+        _ => "no native OCR provider is bundled for this platform",
+    };
+
     private static IEnumerable<CapabilityStatus> LanguageCapabilities(string status, string? path) =>
-        [new("ocr-jpn", status, "tesseract", path, "Install the jpn traineddata package."),
-         new("ocr-eng", status, "tesseract", path, "Install the eng traineddata package.")];
+        [new("ocr-jpn", status, "tesseract", path, "Install the jpn traineddata package.", Tier: "optional"),
+         new("ocr-eng", status, "tesseract", path, "Install the eng traineddata package.", Tier: "optional")];
 
     private static CapabilityStatus Language(string language, ISet<string> available, string path) => available.Contains(language)
-        ? new("ocr-" + language, "ready", "tesseract", path)
-        : new("ocr-" + language, "unavailable", "tesseract", path, $"Install the {language} traineddata package.");
+        ? new("ocr-" + language, "ready", "tesseract", path, Tier: "optional")
+        : new("ocr-" + language, "unavailable", "tesseract", path, $"Install the {language} traineddata package.", Tier: "optional");
 
     private CapabilityStatus NativeOcr()
     {
@@ -71,18 +106,18 @@ public sealed class CapabilityReporter
             var helper = Path.Combine(AppContext.BaseDirectory, "vision-ocr.swift");
             var swift = resolveExecutable("swift");
             return File.Exists(helper) && swift is not null
-                ? new("ocr-native", "partial", "apple-vision", swift, "The helper and Swift were found; native OCR is not marked ready until an image invocation succeeds.")
-                : new("ocr-native", "unavailable", "apple-vision", Action: "Install Swift and keep vision-ocr.swift beside the application.");
+                ? new("ocr-native", "partial", "apple-vision", swift, "The helper and Swift were found; native OCR is not marked ready until an image invocation succeeds.", Tier: "optional")
+                : new("ocr-native", "unavailable", "apple-vision", Action: "Install Swift and keep vision-ocr.swift beside the application.", Tier: "optional");
         }
         if (OperatingSystem.IsWindows())
         {
             var helper = Path.Combine(AppContext.BaseDirectory, "windows-ocr.ps1");
             var shell = resolveExecutable(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
             return File.Exists(helper) && shell is not null
-                ? new("ocr-native", "partial", "windows-media", shell, "Windows Media OCR is configured but its installed language packs are not probed.")
-                : new("ocr-native", "unavailable", "windows-media", Action: "Keep windows-ocr.ps1 beside the application and enable Windows PowerShell.");
+                ? new("ocr-native", "partial", "windows-media", shell, "Windows Media OCR is configured but its installed language packs are not probed.", Tier: "optional")
+                : new("ocr-native", "unavailable", "windows-media", Action: "Keep windows-ocr.ps1 beside the application and enable Windows PowerShell.", Tier: "optional");
         }
-        return new("ocr-native", "unavailable", "system", Action: "No native OCR provider is bundled for this platform; install Tesseract.");
+        return new("ocr-native", "unavailable", "system", Action: "No native OCR provider is bundled for this platform; install Tesseract.", Tier: "optional");
     }
 
     private async Task<CapabilityStatus> MermaidAsync(CancellationToken cancellationToken)
@@ -92,13 +127,13 @@ public sealed class CapabilityReporter
         {
             var probe = await run(executable, ["--version"], cancellationToken).ConfigureAwait(false);
             return probe.Succeeded
-                ? new("mermaid-render", "ready", "mmdc", executable)
-                : new("mermaid-render", "partial", "mmdc", executable, "mmdc was found but its version probe failed.");
+                ? new("mermaid-render", "ready", "mmdc", executable, Tier: "optional")
+                : new("mermaid-render", "partial", "mmdc", executable, "mmdc was found but its version probe failed.", Tier: "optional");
         }
         // A .cmd shim is deliberately never launched through a shell. It is a useful configuration hint, not readiness evidence.
         if (OperatingSystem.IsWindows() && FindPathFile("mmdc.cmd") is not null)
-            return new("mermaid-render", "partial", "mmdc", Action: "A Windows .cmd shim was found but is not executed; configure an mmdc.exe path.");
-        return new("mermaid-render", "unavailable", "mmdc", Action: "Install @mermaid-js/mermaid-cli or configure --mermaid-cli.");
+            return new("mermaid-render", "partial", "mmdc", Action: "A Windows .cmd shim was found but is not executed; configure an mmdc.exe path.", Tier: "optional");
+        return new("mermaid-render", "unavailable", "mmdc", Action: "Install @mermaid-js/mermaid-cli or configure --mermaid-cli.", Tier: "optional");
     }
 
     private static string? FindPathFile(string name) => (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
