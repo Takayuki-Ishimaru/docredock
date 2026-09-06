@@ -78,7 +78,7 @@ class QualityScoreTests(unittest.TestCase):
             case.update({"command": ["export"], "fixture_sha256": "b" * 64, "output_sha256": "c" * 64,
                          "exit_code": 0, "diagnostics": [], "assertions": ["contract"]})
         if not table: cases[0]["status"] = "fail"
-        document = {"rid": rid, "version": "0.2.4", "product_source_commit": "a" * 40, "status": status, "distribution_kind": "extracted-package", "package_checksum_sha256": "a" * 64,
+        document = {"rid": rid, "version": "0.2.5", "product_source_commit": "a" * 40, "status": status, "distribution_kind": "extracted-package", "package_checksum_sha256": "a" * 64,
                                     "doctor_capability_status": "passed", "pdf_semantic_cases": cases,
                                     "visual_semantics": {"determinism_failures": [], "relation_assertions": [{"status": "passed", "operation": "endpoint-gap", "expected_relations": [["START", "END", "directed", None]], "deterministic": True}]}}
         if not checksum:

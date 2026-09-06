@@ -112,6 +112,7 @@ public sealed class DocumentService
         var diagnostics = new List<Diagnostic>();
         if (IsOfficeFormat(format)) PreflightOfficePackage(source);
         DocumentGraph graph;
+        IReadOnlyList<PdfPageText> pdfPages = [];
         IReadOnlyList<RawSliceRef> slices = Array.Empty<RawSliceRef>();
         var macro = false;
         switch (format)
@@ -145,6 +146,7 @@ public sealed class DocumentService
                 {
                     var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: false, cancellationToken);
                     graph = pdf.Graph;
+                    pdfPages = pdf.Pages;
                     diagnostics.AddRange(pdf.Diagnostics);
                     break;
                 }
@@ -158,11 +160,14 @@ public sealed class DocumentService
         }
         if (!string.IsNullOrWhiteSpace(options.DocumentId)) graph = graph with { DocumentId = options.DocumentId };
 
-        var assets = format == DocumentFormatKind.Pdf
-            ? options.EnableOcr
-                ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
-                : Array.Empty<WorkspaceAsset>()
-            : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<WorkspaceAsset> assets;
+        if (format == DocumentFormatKind.Pdf)
+        {
+            (assets, graph) = options.EnableOcr
+                ? await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken).ConfigureAwait(false)
+                : (Array.Empty<WorkspaceAsset>(), graph);
+        }
+        else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
             options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
         graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
@@ -350,6 +355,7 @@ public sealed class DocumentService
         var diagnostics = new List<Diagnostic>();
         if (IsOfficeFormat(format)) PreflightOfficePackage(source);
         DocumentGraph graph;
+        IReadOnlyList<PdfPageText> pdfPages = [];
         switch (format)
         {
             case DocumentFormatKind.Docx:
@@ -388,6 +394,7 @@ public sealed class DocumentService
                 {
                     var pdf = PdfGraph(source, includeTextlessPlaceholderNodes: true, cancellationToken);
                     graph = pdf.Graph;
+                    pdfPages = pdf.Pages;
                     diagnostics.AddRange(pdf.Diagnostics);
                     break;
                 }
@@ -397,11 +404,14 @@ public sealed class DocumentService
 
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
             diagnostics.AddRange(InspectOfficePackage(source, out _));
-        var assets = format == DocumentFormatKind.Pdf
-            ? options.EnableOcr
-                ? await RasterizeTextlessPdfPagesAsync(source, graph, diagnostics, cancellationToken).ConfigureAwait(false)
-                : Array.Empty<WorkspaceAsset>()
-            : await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
+        IReadOnlyList<WorkspaceAsset> assets;
+        if (format == DocumentFormatKind.Pdf)
+        {
+            (assets, graph) = options.EnableOcr
+                ? await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken).ConfigureAwait(false)
+                : (Array.Empty<WorkspaceAsset>(), graph);
+        }
+        else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 })
         {
             var selectedImageReferences = ReadableScopeNodes(graph, options.Sheets)
@@ -749,7 +759,7 @@ public sealed class DocumentService
         };
     }
 
-    private static (DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics) PdfGraph(string path,
+    private static (DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, IReadOnlyList<PdfPageText> Pages) PdfGraph(string path,
         bool includeTextlessPlaceholderNodes, CancellationToken cancellationToken)
     {
         PdfExtractionResult extraction;
@@ -759,7 +769,11 @@ public sealed class DocumentService
             throw new InvalidDataException($"PDF text extraction failed: {exception.Message}", exception);
         }
         var sourceHash = HashFile(path);
-        return (PdfDocumentGraphProjection.CreateGraph(extraction, sourceHash, includeTextlessPlaceholderNodes), PdfDocumentGraphProjection.Diagnostics(extraction));
+        // The pages travel alongside the graph because the crop path needs what the graph does not
+        // carry: each embedded image's own rectangle, and the page box and rotation that say how
+        // user space maps onto the rasterized page.
+        return (PdfDocumentGraphProjection.CreateGraph(extraction, sourceHash, includeTextlessPlaceholderNodes),
+            PdfDocumentGraphProjection.Diagnostics(extraction), extraction.Pages);
     }
 
     private static ProviderSet ProvidersFor(DocumentFormatKind format, ProviderDescriptor? ocrDescriptor)
@@ -835,21 +849,30 @@ public sealed class DocumentService
         return records;
     }
 
-    private async Task<IReadOnlyList<WorkspaceAsset>> RasterizeTextlessPdfPagesAsync(
+    /// <summary>Rasterizes every PDF page whose text alone cannot represent it: a textless
+    /// (image-only) page, and a page that mixes native text with an embedded image the extractor
+    /// could not decode. Where the extractor resolved the image rectangles and the page geometry,
+    /// each image is cut out of the page raster and becomes its own asset, so OCR reads the picture
+    /// alone; the whole-page raster is then only an intermediate and is not kept. Otherwise the
+    /// page raster itself stands in for the image, as before.</summary>
+    private async Task<(IReadOnlyList<WorkspaceAsset> Assets, DocumentGraph Graph)> RasterizePdfImagePagesAsync(
         string sourcePath,
         DocumentGraph graph,
+        IReadOnlyList<PdfPageText> pdfPages,
         ICollection<Diagnostic> diagnostics,
         CancellationToken cancellationToken)
     {
         var pages = graph.Partitions.Where(partition => partition.Nodes.Count == 0 ||
-                partition.Nodes.Any(node => node.Content is TextNodeContent text && text.Text.StartsWith("[PDF page ", StringComparison.Ordinal)))
+                partition.Nodes.Any(IsPdfImagePlaceholder))
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
             .ToArray();
-        if (pages.Length == 0 || pdfRasterizer is null) return [];
+        if (pages.Length == 0 || pdfRasterizer is null) return ([], graph);
         try
         {
             var rasterized = await pdfRasterizer.RasterizeAsync(sourcePath, pages, new PdfRasterizationOptions(), cancellationToken).ConfigureAwait(false);
+            var plans = BuildPdfCropPlans(graph, pdfPages, pdfRasterizer.Descriptor.ProviderId);
             var result = new List<WorkspaceAsset>();
+            var cropped = new Dictionary<int, IReadOnlyList<PdfCroppedImage>>();
             long totalPixels = 0;
             long totalBytes = 0;
             var requestedPages = pages.ToHashSet();
@@ -867,24 +890,225 @@ public sealed class DocumentService
                 totalPixels = checked(totalPixels + pixels);
                 if (page.PixelWidth <= 0 || page.PixelHeight <= 0 || pixels > 40_000_000 || totalPixels > 200_000_000)
                     throw new InvalidDataException("PDF rasterizer exceeded the configured pixel budget.");
-                var extension = page.MediaType == "image/jpeg" ? ".jpg" : ".png";
-                var id = $"page-{page.PageNumber:D4}";
                 var bytes = page.Content.ToArray();
+                var crops = CropPdfEmbeddedImages(page, bytes, plans.GetValueOrDefault(page.PageNumber), diagnostics);
+                if (crops is { Count: > 0 })
+                {
+                    cropped[page.PageNumber] = crops;
+                    result.AddRange(crops.Select(crop => crop.Asset));
+                    continue;
+                }
+                var id = $"page-{page.PageNumber:D4}";
+                var extension = page.MediaType == "image/jpeg" ? ".jpg" : ".png";
                 result.Add(new WorkspaceAsset(id, id + extension, page.MediaType, Hash(bytes), bytes, $"pdf:page:{page.PageNumber}"));
             }
-            foreach (var diagnostic in diagnostics.Where(item => item.Code == "PdfRasterizerUnavailable").ToArray())
+            foreach (var diagnostic in diagnostics.Where(item =>
+                         item.Code is "PdfRasterizerUnavailable" or "PdfEmbeddedImageOmitted").ToArray())
                 if (rasterized.Any(page => diagnostic.Message.Contains($"PDF page {page.PageNumber}:", StringComparison.Ordinal) ||
                         diagnostic.Message.Contains($"PDF page {page.PageNumber} ", StringComparison.Ordinal)))
                     diagnostics.Remove(diagnostic);
-            return result;
+            return (result, BindPdfPageRasters(graph, result, cropped, diagnostics));
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
             var reason = exception.Message.Length > 512 ? exception.Message[..512] + "…" : exception.Message;
             diagnostics.Add(new Diagnostic("PdfRasterizationFailed", $"PDF rasterization failed: {reason} Native text was retained. Check the configured provider or run docredock doctor.", DiagnosticSeverity.Warning));
-            return [];
+            return ([], graph);
         }
     }
+
+    /// <summary>What cutting one page's embedded images out of its raster needs: the rectangles in
+    /// user space, how many images the page really has (fewer rectangles than images means the
+    /// crop would silently drop one), the box the rasterizer drew, and the page rotation.</summary>
+    private sealed record PdfPageCropPlan(IReadOnlyList<Geometry> Rects, int ImageCount, Geometry? Box, int Rotation);
+
+    /// <summary>One embedded image cut out of a page raster, with the user-space rectangle it came
+    /// from so the image node can be positioned exactly where the page draws it.</summary>
+    private sealed record PdfCroppedImage(WorkspaceAsset Asset, Geometry Bounds);
+
+    /// <summary>An image must map to at least this many pixels on a side to be worth cutting out;
+    /// anything smaller is a rule or a spacer, not a picture OCR can read.</summary>
+    private const int MinimumPdfCropPixels = 4;
+
+    /// <summary>Plans a crop for every page that carries an embedded-image placeholder. A textless
+    /// page has no placeholder and gets no plan: its whole partition is the image, so the page
+    /// raster is the right asset for it.</summary>
+    private static IReadOnlyDictionary<int, PdfPageCropPlan> BuildPdfCropPlans(
+        DocumentGraph graph, IReadOnlyList<PdfPageText> pdfPages, string rasterizerProviderId)
+    {
+        var plans = new Dictionary<int, PdfPageCropPlan>();
+        if (pdfPages.Count == 0) return plans;
+        // pdftoppm renders the MediaBox and mutool the CropBox; an unrecognized provider is assumed
+        // to follow the more common MediaBox default. Mapping against the wrong box would place
+        // every rectangle at an offset, so the box choice has to follow the provider.
+        var preferCropBox = rasterizerProviderId.EndsWith(".mutool", StringComparison.Ordinal);
+        foreach (var partition in graph.Partitions)
+        {
+            if (!partition.Nodes.Any(node => HasTrueExtension(node, "pdf_embedded_image_placeholder"))) continue;
+            var pageNumber = int.TryParse(partition.Id.AsSpan("page-".Length), out var parsed) ? parsed : partition.Order + 1;
+            var page = pdfPages.FirstOrDefault(item => item.PageNumber == pageNumber);
+            if (page is null) continue;
+            plans[pageNumber] = new PdfPageCropPlan(page.EmbeddedImages ?? [], page.EmbeddedImageCount,
+                (preferCropBox ? page.CropBox ?? page.MediaBox : page.MediaBox ?? page.CropBox), page.Rotation);
+        }
+        return plans;
+    }
+
+    /// <summary>Cuts every embedded image out of one page raster, or returns null and says why it
+    /// could not. It is all-or-nothing on purpose: cropping only some of a page's images would drop
+    /// the rest with nothing left behind, so any obstacle sends the whole page back to the
+    /// whole-page raster, where OCR still sees every image.</summary>
+    private static IReadOnlyList<PdfCroppedImage>? CropPdfEmbeddedImages(
+        RasterizedPdfPage page, byte[] bytes, PdfPageCropPlan? plan, ICollection<Diagnostic> diagnostics)
+    {
+        if (plan is null) return null;
+        var reason = plan.Rotation != 0
+            ? $"the page is rotated {plan.Rotation}°"
+            : plan.Box is null
+                ? "the page declares no /MediaBox or /CropBox"
+                : plan.Rects.Count == 0 || plan.Rects.Count != plan.ImageCount
+                    ? $"only {plan.Rects.Count} of {plan.ImageCount} image rectangle(s) could be resolved"
+                    : page.MediaType != "image/png"
+                        ? $"the rasterizer returned {page.MediaType}"
+                        : null;
+        List<PdfCroppedImage>? crops = null;
+        if (reason is null)
+        {
+            var box = plan.Box!;
+            var boxTop = box.Y + box.Height;
+            try
+            {
+                var source = PngRasterImage.Decode(bytes);
+                // Scale from the decoded image, not from the reported PixelWidth/PixelHeight: the
+                // pixels being cut are the decoded ones, and a provider that misreports its own
+                // dimensions would otherwise shift every rectangle.
+                var scaleX = source.Width / box.Width;
+                var scaleY = source.Height / box.Height;
+                crops = [];
+                // PDF user space grows upward, the raster downward, so the rectangle's top edge is
+                // measured from the box's top. Reading order on the page is top-first.
+                foreach (var rect in plan.Rects.OrderByDescending(rect => rect.Y + rect.Height).ThenBy(rect => rect.X))
+                {
+                    // Outside the drawn box there are no pixels, so a rectangle that overhangs is
+                    // kept only where it overlaps.
+                    var left = Math.Clamp((int)Math.Floor((rect.X - box.X) * scaleX), 0, source.Width);
+                    var top = Math.Clamp((int)Math.Floor((boxTop - (rect.Y + rect.Height)) * scaleY), 0, source.Height);
+                    var right = Math.Clamp((int)Math.Ceiling((rect.X + rect.Width - box.X) * scaleX), 0, source.Width);
+                    var bottom = Math.Clamp((int)Math.Ceiling((boxTop - rect.Y) * scaleY), 0, source.Height);
+                    if (right - left < MinimumPdfCropPixels || bottom - top < MinimumPdfCropPixels)
+                    {
+                        reason = $"an image maps to {Math.Max(0, right - left)}x{Math.Max(0, bottom - top)} pixels inside the rendered page";
+                        crops = null;
+                        break;
+                    }
+                    var id = $"page-{page.PageNumber:D4}-img-{crops.Count + 1:D2}";
+                    var cropped = source.Crop(left, top, right - left, bottom - top);
+                    crops.Add(new PdfCroppedImage(
+                        new WorkspaceAsset(id, id + ".png", "image/png", Hash(cropped.PngBytes), cropped.PngBytes,
+                            $"pdf:page:{page.PageNumber}"),
+                        rect));
+                }
+            }
+            catch (Exception exception) when (exception is InvalidDataException or ArgumentException or OverflowException)
+            {
+                reason = exception.Message;
+                crops = null;
+            }
+        }
+        if (crops is { Count: > 0 })
+        {
+            diagnostics.Add(new Diagnostic("PdfEmbeddedImageRasterized",
+                $"PDF page {page.PageNumber}: {crops.Count} embedded image(s) rasterized for OCR.",
+                DiagnosticSeverity.Information, $"page-{page.PageNumber:D4}", $"pdf:page:{page.PageNumber}"));
+            return crops;
+        }
+        diagnostics.Add(new Diagnostic("PdfEmbeddedImageCropUnavailable",
+            $"PDF page {page.PageNumber}: the embedded image(s) could not be cut out of the rendered page because {reason}; the whole page was rasterized instead and OCR text that repeats the page's native text is dropped.",
+            DiagnosticSeverity.Information, $"page-{page.PageNumber:D4}", $"pdf:page:{page.PageNumber}"));
+        return null;
+    }
+
+    private static bool IsPdfImagePlaceholder(DocumentNode node) =>
+        HasTrueExtension(node, "pdf_textless_placeholder") ||
+        HasTrueExtension(node, "pdf_embedded_image_placeholder") ||
+        node.Content is TextNodeContent text && text.Text.StartsWith("[PDF page ", StringComparison.Ordinal);
+
+    private static bool HasTrueExtension(DocumentNode node, string key) =>
+        node.Extensions?.TryGetValue(key, out var value) == true && value.ValueKind == JsonValueKind.True;
+
+    /// <summary>Swaps each embedded-image placeholder for the image node(s) that now stand for it:
+    /// one node per cut-out image where cropping worked, otherwise a single node bound to the whole
+    /// page raster. The placeholder's position is the image's reading position, so OCR attached to
+    /// an image node lands where the image sits rather than at the end of the page. Textless pages
+    /// are left alone: their whole partition is the image, and OCR is placed against the partition
+    /// itself.</summary>
+    private static DocumentGraph BindPdfPageRasters(
+        DocumentGraph graph,
+        IReadOnlyList<WorkspaceAsset> assets,
+        IReadOnlyDictionary<int, IReadOnlyList<PdfCroppedImage>> cropped,
+        ICollection<Diagnostic> diagnostics)
+    {
+        var byPage = assets.ToDictionary(asset => asset.Id, StringComparer.Ordinal);
+        var partitions = graph.Partitions.ToArray();
+        for (var index = 0; index < partitions.Length; index++)
+        {
+            var partition = partitions[index];
+            var pageNumber = int.TryParse(partition.Id.AsSpan("page-".Length), out var parsed) ? parsed : partition.Order + 1;
+            var crops = cropped.GetValueOrDefault(pageNumber);
+            if (crops is not { Count: > 0 } && !byPage.TryGetValue(partition.Id, out _)) continue;
+            var asset = byPage.GetValueOrDefault(partition.Id);
+            var replaced = false;
+            var nodes = new List<DocumentNode>();
+            foreach (var node in partition.Nodes)
+            {
+                if (!HasTrueExtension(node, "pdf_embedded_image_placeholder")) { nodes.Add(node); continue; }
+                replaced = true;
+                if (crops is { Count: > 0 })
+                {
+                    nodes.AddRange(crops.Select((crop, position) => CreatePdfEmbeddedImageNode(node, crop, position + 1, pageNumber)));
+                    continue;
+                }
+                if (asset is null) { nodes.Add(node); continue; }
+                var extensions = new Dictionary<string, JsonElement>(
+                    node.Extensions ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal), StringComparer.Ordinal);
+                extensions.Remove("pdf_embedded_image_placeholder");
+                extensions["pdf_page_raster"] = JsonSerializer.SerializeToElement(true);
+                nodes.Add(node with
+                {
+                    Kind = NodeKind.Image,
+                    Content = new ReferenceNodeContent(asset.Id, $"PDF page {pageNumber} image"),
+                    Editability = NodeEditability.RenderOnly,
+                    Extensions = extensions
+                });
+            }
+            if (!replaced) continue;
+            if (crops is not { Count: > 0 })
+                diagnostics.Add(new Diagnostic("PdfEmbeddedImageRasterized",
+                    $"PDF page {pageNumber}: the embedded image was recovered by rasterizing the whole page; only text that is not already native is reported as image text.",
+                    DiagnosticSeverity.Information, asset!.Id, partition.SourcePartUri));
+            // One placeholder can become several nodes, so Order has to be reassigned: a duplicated
+            // Order would make every later ordering step non-deterministic.
+            partitions[index] = partition with { Nodes = nodes.Select((node, order) => node with { Order = order }).ToArray() };
+        }
+        return graph with { Partitions = partitions };
+    }
+
+    /// <summary>The image node for one cut-out embedded image, at the placeholder's reading
+    /// position and carrying the rectangle the PDF draws it at.</summary>
+    private static DocumentNode CreatePdfEmbeddedImageNode(
+        DocumentNode placeholder, PdfCroppedImage crop, int imageIndex, int pageNumber) =>
+        new($"{placeholder.Id}_{imageIndex}", NodeKind.Image, placeholder.ParentId,
+            placeholder.Order + imageIndex - 1, placeholder.Layer,
+            new ReferenceNodeContent(crop.Asset.Id, $"PDF page {pageNumber} image {imageIndex}"),
+            placeholder.Source, Geometry: crop.Bounds, Editability: NodeEditability.RenderOnly,
+            Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: pageNumber, Bbox: crop.Bounds)],
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["pdf_embedded_image"] = JsonSerializer.SerializeToElement(true),
+                ["pdf_image_index"] = JsonSerializer.SerializeToElement(imageIndex),
+                ["pdf_embedded_image_rect"] = JsonSerializer.SerializeToElement(
+                    new[] { crop.Bounds.X, crop.Bounds.Y, crop.Bounds.Width, crop.Bounds.Height })
+            });
 
     private static DocumentGraph AttachAssetsAndOcr(
         DocumentGraph graph,
@@ -912,7 +1136,7 @@ public sealed class DocumentService
         // Resolve every OCR item independently. In particular, never use the last
         // partition as an implicit target: that caused slide/page OCR to leak into
         // an unrelated trailing partition (including hidden slides).
-        var placements = new List<(int PartitionIndex, DocumentNode? Parent, OcrAssetRecord Item)>();
+        var placements = new List<(int PartitionIndex, DocumentNode? Parent, OcrAssetRecord Item, string Text)>();
         foreach (var item in completed)
         {
             var asset = assets.FirstOrDefault(candidate =>
@@ -955,7 +1179,18 @@ public sealed class DocumentService
                 parent = null;
             }
 
-            placements.Add((partitionIndex, parent, item));
+            // Recovering an embedded image means rasterizing the whole page, so OCR re-reads the
+            // native body text too. Reporting that back as image text would duplicate the page, so
+            // keep only what the page's own text does not already contain; when nothing survives,
+            // the image carried no text of its own and gets no ImageText node at all.
+            var text = item.Result!.Text;
+            if (graph.Format == DocumentFormatKind.Pdf && asset is not null && IsPdfPageAsset(asset) &&
+                !IsPdfCroppedImageAsset(asset))
+            {
+                text = OcrTextBeyondNativePage(partitions[partitionIndex], item.Result);
+                if (text.Length == 0) continue;
+            }
+            placements.Add((partitionIndex, parent, item, text));
         }
 
         // Rebuild each partition in source order, inserting OCR immediately after
@@ -977,14 +1212,14 @@ public sealed class DocumentService
                              placement.PartitionIndex == partitionIndex &&
                              placement.Parent?.Id == node.Id)
                              .OrderBy(placement => placement.Item.AssetId, StringComparer.Ordinal))
-                    output.Add(CreateOcrNode(graph, placement.Item, placement.Parent));
+                    output.Add(CreateOcrNode(graph, placement.Item, placement.Parent, placement.Text));
             }
 
             foreach (var placement in placements.Where(placement =>
                          placement.PartitionIndex == partitionIndex &&
                          placement.Parent is null)
                          .OrderBy(placement => placement.Item.AssetId, StringComparer.Ordinal))
-                output.Add(CreateOcrNode(graph, placement.Item, null));
+                output.Add(CreateOcrNode(graph, placement.Item, null, placement.Text));
 
             partitions[partitionIndex] = partition with
             {
@@ -995,10 +1230,44 @@ public sealed class DocumentService
         return graph with { Partitions = partitions, Assets = descriptors };
     }
 
+    /// <summary>The OCR text a PDF page raster adds over the page's own native text, rebuilt from
+    /// the regions that survive de-duplication. Whitespace is ignored on both sides because a
+    /// rasterized line rarely reproduces the original's spacing. An empty result means every region
+    /// was already native text.</summary>
+    private static string OcrTextBeyondNativePage(DocumentPartition partition, OcrResult result)
+    {
+        var native = NormalizeForOcrComparison(string.Join("\n", partition.Nodes
+            .Where(node => node.Kind != NodeKind.ImageText && !IsPdfImagePlaceholder(node))
+            .Select(NodePlainText)));
+        if (native.Length == 0) return result.Text;
+        if (result.Regions is not { Count: > 0 } regions)
+        {
+            var whole = NormalizeForOcrComparison(result.Text);
+            return whole.Length == 0 || native.Contains(whole, StringComparison.Ordinal) ? string.Empty : result.Text;
+        }
+        return string.Join("\n", regions
+            .Where(region => NormalizeForOcrComparison(region.Text) is { Length: > 0 } normalized &&
+                !native.Contains(normalized, StringComparison.Ordinal))
+            .Select(region => region.Text.Trim())
+            .Where(text => text.Length > 0));
+    }
+
+    private static string NormalizeForOcrComparison(string value) =>
+        string.Concat(value.Where(character => !char.IsWhiteSpace(character)));
+
+    private static string NodePlainText(DocumentNode node) => node.Content switch
+    {
+        TextNodeContent text => text.Text,
+        RichTextNodeContent rich => string.Concat(rich.Runs.Select(run => run.Text)),
+        TableNodeContent table => string.Join("\n", table.Rows.SelectMany(row => row).Select(cell => cell.Text)),
+        _ => string.Empty
+    };
+
     private static DocumentNode CreateOcrNode(
         DocumentGraph graph,
         OcrAssetRecord item,
-        DocumentNode? parent)
+        DocumentNode? parent,
+        string text)
     {
         var confidence = item.Result!.Regions
             .Where(region => region.Confidence is not null)
@@ -1013,7 +1282,7 @@ public sealed class DocumentService
             parent?.Layer is ContentLayer.Hidden or ContentLayer.Metadata
                 ? parent.Layer
                 : ContentLayer.Derived,
-            new TextNodeContent(item.Result.Text),
+            new TextNodeContent(text),
             new SourceAnchor(
                 graph.Format.ToString().ToLowerInvariant(),
                 parent?.Source?.PartUri ?? "asset:" + item.AssetId,
@@ -1143,6 +1412,14 @@ public sealed class DocumentService
     private static bool IsPdfPageAsset(WorkspaceAsset asset) =>
         asset.SourcePartUri?.StartsWith("pdf:page:", StringComparison.OrdinalIgnoreCase) == true ||
         asset.Id.StartsWith("page-", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Whether the asset is one embedded image cut out of a page rather than the page
+    /// itself. Its OCR is the picture's own text, so the de-duplication that strips a page raster's
+    /// re-reading of the native body text must not touch it - that comparison exists only because a
+    /// whole-page raster necessarily contains the page's text.</summary>
+    private static bool IsPdfCroppedImageAsset(WorkspaceAsset asset) =>
+        asset.Id.StartsWith("page-", StringComparison.OrdinalIgnoreCase) &&
+        asset.Id.Contains("-img-", StringComparison.OrdinalIgnoreCase);
 
     private static WorkspaceAsset? FindAsset(string reference, IReadOnlyList<WorkspaceAsset> assets)
     {

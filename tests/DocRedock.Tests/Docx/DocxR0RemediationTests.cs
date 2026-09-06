@@ -137,7 +137,10 @@ public sealed class DocxR0RemediationTests
   var e=await E(Node("n1",0,"DOC_FLOW_START")+Node("n2",1000,"DOC_FLOW_CHECK")+Node("n3",2000,"DOC_FLOW_DONE")+Line("l1",420)+Line("l2",1420));
   var markdown=new ReadableMarkdownSerializer(new ReadableMarkdownOptions(IncludeDiagrams:false)).Serialize(e.Graph);
   Assert.DoesNotContain("```mermaid",markdown,StringComparison.Ordinal);
-  Assert.Equal(1,Count(markdown,"### 図の接続関係")); Assert.Equal(1,Count(markdown,"DOC_FLOW_START"));
+  // F-Issue7: the relation list now backslash-escapes the literal "_" in node labels
+  // ("DOC_FLOW_START" -> "DOC\_FLOW\_START"); de-escape before counting occurrences.
+  var deEscaped=markdown.Replace("\\",string.Empty,StringComparison.Ordinal);
+  Assert.Equal(1,Count(markdown,"### 図の接続関係")); Assert.Equal(1,Count(deEscaped,"DOC_FLOW_START"));
  }
  static string Node(string id,int x,string t,int y=0,int w=400,int h=200)=>$"<w:p><w:r><w:drawing><wps:wsp><a:cNvPr id=\"{id}\"/><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{w}\" cy=\"{h}\"/></a:xfrm><w:txbxContent><w:p><w:r><w:t>{t}</w:t></w:r></w:p></w:txbxContent></wps:wsp></w:drawing></w:r></w:p>";
  static string Line(string id,int x,int y=90,bool arrow=false,bool noArrowFlip=false)=>$"<w:p><w:r><w:drawing><wps:wsp><a:cNvPr id=\"{id}\"/><a:prstGeom prst=\"line\"/><a:xfrm{(noArrowFlip||arrow?" flipH=\"1\"":"")}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"560\" cy=\"0\"/></a:xfrm>{(arrow?"<a:ln><a:tailEnd type=\"triangle\"/></a:ln>":"")}</wps:wsp></w:drawing></w:r></w:p>";

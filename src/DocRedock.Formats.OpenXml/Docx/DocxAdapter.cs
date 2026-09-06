@@ -30,6 +30,7 @@ public sealed class DocxAdapter : IFormatProbe
     private static readonly XNamespace WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
     private static readonly XNamespace WPG = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
     private static readonly XNamespace MC = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    private static readonly XNamespace M = "http://schemas.openxmlformats.org/officeDocument/2006/math";
     private static readonly HashSet<string> SupportedMarkupNamespaces = new(StringComparer.Ordinal)
     {
         W.NamespaceName, A.NamespaceName, WP.NamespaceName, V.NamespaceName, W14.NamespaceName, WPS.NamespaceName, WPG.NamespaceName,
@@ -91,23 +92,88 @@ public sealed class DocxAdapter : IFormatProbe
         var doc = SafeXml.LoadDocument(documentBytes);
         var relationships = ReadRelationships(archive, "word/_rels/document.xml.rels", cancellationToken);
         var numberingInfo = ReadNumberingInfo(archive, cancellationToken);
+        var hiddenStyles = ReadHiddenStyles(archive, cancellationToken);
         var listCounters = new Dictionary<(int NumId, int Ilvl), int>();
         var nodes = new List<DocumentNode>();
         var sliceMap = new Dictionary<string, RawSliceRef>(StringComparer.Ordinal);
         var runMaps = new Dictionary<string, DocxRunCharacterMap>(StringComparer.Ordinal);
         var ordinal = 0;
         var originalBodyElements = (doc.Root?.Element(W + "body")?.Elements() ?? Enumerable.Empty<XElement>()).ToArray();
-        var blockByOrdinal = slices.Blocks.OrderBy(slice => slice.Start).ToArray();
-        var sourceBlockIndex = 0;
-        var bodyEntries = new List<(XElement Element, RawSliceRef? Slice)>();
+        var blockLedger = slices.Blocks.OrderBy(slice => slice.Start).ToArray();
+        var ledgerIndex = 0;
+        var ledgerAligned = true;
+        var bodyEntries = new List<(XElement Element, RawSliceRef? Slice, DocxContentControl? Control, XElement? Original)>();
+        var alternateMirrors = new Dictionary<long, DocxAlternateMirror>();
+        var alternateOrdinal = 0;
+        // The text boxes the scanner cut, grouped by the block they sit in. A projected block finds
+        // its own boxes here by the start offset of the slice it was handed.
+        var textBoxLedger = slices.TextBoxes.ToLookup(item => item.HostBlockStart);
+        // A block-level content control (w:sdt) is a wrapper, not content: the paragraphs and
+        // tables it holds live under w:sdtContent. Unwrapping it first - recursively, and on the
+        // *original* tree, which is the tree XmlSliceScanner walked - keeps that content in its
+        // body position and lets each unwrapped block claim its own slice, so an edit inside a
+        // control rewrites only that block. Markup-compatibility resolution then runs per block:
+        // a body-level mc:AlternateContent claims no slice of its own but owns the run of slices
+        // the scanner cut inside its branches, and hands the selected branch's blocks theirs.
         foreach (var originalElement in originalBodyElements)
+        foreach (var (originalBlock, control) in ExpandContentControls(originalElement, null))
         {
-            var slice = originalElement.Name is var name && (name == W + "p" || name == W + "tbl")
-                ? blockByOrdinal.ElementAtOrDefault(sourceBlockIndex++)?.Reference
-                : null;
-            var selected = SelectSupportedAlternateContentBlocks(originalElement).ToArray();
+            RawSliceRef? slice = null;
+            if (ledgerAligned && IsSliceableBlock(originalBlock))
+            {
+                // Scanner and projection must enumerate the same blocks in the same order for a
+                // slice to address the element it was cut from. If they ever disagree, stop handing
+                // slices out: the blocks then project read-only instead of risking a splice into
+                // the wrong element.
+                var ledgerBlock = blockLedger.ElementAtOrDefault(ledgerIndex);
+                if (ledgerBlock is not null && ledgerBlock.AlternateContent < 0 &&
+                    StringComparer.Ordinal.Equals(ledgerBlock.LocalName, originalBlock.Name.LocalName))
+                {
+                    slice = ledgerBlock.Reference;
+                    ledgerIndex++;
+                }
+                else ledgerAligned = false;
+            }
+            var selected = SelectSupportedAlternateContentBlocks(originalBlock)
+                .SelectMany(candidate => ExpandContentControls(candidate, control)).ToArray();
+            var selectedSlices = new RawSliceRef?[selected.Length];
+            // The element in the *original* tree each projected block was resolved from. It is the
+            // only place mc:Choice/@Requires still resolves, so it - not the resolved clone - is
+            // what says which branch a text box inside the block came out of.
+            var selectedOriginals = new XElement?[selected.Length];
+            var isAlternateContent = originalBlock.Name == MC + "AlternateContent";
+            if (selected.Length > 0)
+            {
+                selectedSlices[0] = slice;
+                // Outside a fork the projection is a resolved clone of this one block, so the
+                // original is this element; inside one, AssignAlternateContentSlices says which
+                // branch each projected block was resolved from.
+                if (!isAlternateContent) selectedOriginals[0] = originalBlock;
+            }
+            if (isAlternateContent)
+            {
+                var alternateIndex = alternateOrdinal++;
+                var group = new List<XmlSliceScanner.BlockSlice>();
+                while (ledgerIndex < blockLedger.Length && blockLedger[ledgerIndex].AlternateContent == alternateIndex)
+                    group.Add(blockLedger[ledgerIndex++]);
+                if (ledgerAligned && group.Count > 0 &&
+                    !AssignAlternateContentSlices(originalBlock, alternateIndex, group, selected, selectedSlices, selectedOriginals, alternateMirrors, hiddenStyles))
+                    ledgerAligned = false;
+            }
             for (var selectedIndex = 0; selectedIndex < selected.Length; selectedIndex++)
-                bodyEntries.Add((selected[selectedIndex], selectedIndex == 0 ? slice : null));
+                bodyEntries.Add((selected[selectedIndex].Element, selectedSlices[selectedIndex], selected[selectedIndex].Control, selectedOriginals[selectedIndex]));
+        }
+        // A ledger that was not fully consumed means the two walks disagreed somewhere earlier than
+        // the name check caught it: drop every slice rather than trust any of them, and say so
+        // instead of quietly projecting a whole document read-only.
+        if (!ledgerAligned || ledgerIndex != blockLedger.Length)
+        {
+            diagnostics.Add(new("DocxSliceLedgerMismatch",
+                "DOCX block slices did not line up with the parsed body; in-place edits are disabled for this document.",
+                DiagnosticSeverity.Warning, PartUri: "/word/document.xml"));
+            for (var entryIndex = 0; entryIndex < bodyEntries.Count; entryIndex++)
+                bodyEntries[entryIndex] = (bodyEntries[entryIndex].Element, null, bodyEntries[entryIndex].Control, bodyEntries[entryIndex].Original);
+            alternateMirrors.Clear();
         }
         var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
         var landscapeSectionStarts = FindLandscapeSectionStarts(doc, bodyElements);
@@ -124,29 +190,36 @@ public sealed class DocxAdapter : IFormatProbe
             if (element.Name == W + "p")
             {
                 var paragraphOrder = ordinal++;
-                AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters);
+                var textBoxes = BindHostTextBoxes(entry.Original, entry.Slice, textBoxLedger, alternateMirrors, hiddenStyles);
+                AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes);
             }
             else if (element.Name == W + "tbl")
             {
                 var tableOrder = ordinal++;
-                AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal);
+                AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal, hiddenStyles, entry.Control);
+            }
+            else if (IsMathRoot(element))
+            {
+                // OOXML lets an equation stand as a block-level sibling of w:p. Give it its own
+                // Paragraph node rather than folding it into an unrelated neighbouring block.
+                AddMathParagraph(element, "/word/document.xml", entry.Slice, ordinal++, nodes, sliceMap, entry.Control);
             }
         }
         // Word stores floating nodes and connectors in separate paragraphs surprisingly often.
         // Build one document-level visual canvas so a flow is reconstructed across paragraph
         // boundaries; unresolved primitives remain represented by the visual fallback/diagnostic
         // data carried by the derived Diagram node.
-        AddDocumentVisualGraph(bodyElements, nodes, ref ordinal, VisualInferenceTimeout, cancellationToken);
+        AddDocumentVisualGraph(bodyElements, nodes, ref ordinal, hiddenStyles, VisualInferenceTimeout, cancellationToken);
         if (options.IncludeFurniture)
-            ordinal = await AddRelatedTextPartsAsync(archive, relationships, "header", NodeKind.Header, ContentLayer.Furniture, nodes, ordinal, cancellationToken).ConfigureAwait(false);
+            ordinal = await AddRelatedTextPartsAsync(archive, relationships, "header", NodeKind.Header, ContentLayer.Furniture, nodes, ordinal, hiddenStyles, cancellationToken).ConfigureAwait(false);
         if (options.IncludeFurniture)
-            ordinal = await AddRelatedTextPartsAsync(archive, relationships, "footer", NodeKind.Footer, ContentLayer.Furniture, nodes, ordinal, cancellationToken).ConfigureAwait(false);
+            ordinal = await AddRelatedTextPartsAsync(archive, relationships, "footer", NodeKind.Footer, ContentLayer.Furniture, nodes, ordinal, hiddenStyles, cancellationToken).ConfigureAwait(false);
         if (options.IncludeFootnotes && archive.GetEntry("word/footnotes.xml") is { } footnotes)
-            AddFootnotes(await ReadEntryAsync(footnotes, cancellationToken).ConfigureAwait(false), nodes, ref ordinal);
+            AddFootnotes(await ReadEntryAsync(footnotes, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
         if (options.IncludeFootnotes && archive.GetEntry("word/endnotes.xml") is { } endnotes)
-            AddEndnotes(await ReadEntryAsync(endnotes, cancellationToken).ConfigureAwait(false), nodes, ref ordinal);
+            AddEndnotes(await ReadEntryAsync(endnotes, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
         if (options.IncludeFootnotes && archive.GetEntry("word/comments.xml") is { } comments)
-            AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal);
+            AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
 
         var sourceHash = await HashFileAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() ||
@@ -156,11 +229,19 @@ public sealed class DocxAdapter : IFormatProbe
             archive.GetEntry("word/vbaProject.bin") is not null,
             archive.Entries.Any(entry => entry.FullName.StartsWith("_xmlsignatures/", StringComparison.OrdinalIgnoreCase)),
             hasDocumentProtection,
-            hasTrackedRevisions);
+            hasTrackedRevisions,
+            alternateMirrors);
         if (index.HasMacro) diagnostics.Add(new("MacroPresent", "DOCX contains a macro project; it was not executed.", DiagnosticSeverity.Warning));
         if (index.HasSignature) diagnostics.Add(new("SignaturePresent", "DOCX contains package signatures; edited restore is strict-rejected.", DiagnosticSeverity.Warning));
         if (index.HasDocumentProtection) diagnostics.Add(new("DocumentProtected", "DOCX has document protection; protected edits are strict-rejected.", DiagnosticSeverity.Warning));
         if (index.HasTrackedRevisions) diagnostics.Add(new("TrackedRevisionsPresent", "DOCX contains tracked revisions; edits crossing revision markup are strict-rejected.", DiagnosticSeverity.Warning));
+        // One document-level notice, not one per equation: OMML is structured markup that only
+        // approximates as linear text, so the reader is told once that layout may have changed.
+        var linearizedEquations = bodyElements.Sum(CountMathRoots);
+        if (linearizedEquations > 0)
+            diagnostics.Add(new("DocxMathLinearized",
+                $"{linearizedEquations} equation(s) were converted to linear text; layout may differ from the original.",
+                DiagnosticSeverity.Warning, PartUri: "/word/document.xml"));
         var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_" + sourceHash[..16], DocumentFormatKind.Docx,
             [new DocumentPartition("part-0001", 0, nodes, "/word/document.xml")], Capabilities: new(new HashSet<string>(StringComparer.Ordinal)
             { "extract.text", "extract.images", "restore.byte_identical", "restore.text_in_place", "restore.insert_node", "restore.delete_node", "preserve.raw_xml_slice", "preserve.unknown_parts" }));
@@ -199,7 +280,15 @@ public sealed class DocxAdapter : IFormatProbe
             return Failure("ProtectedPackage", "Strict restore refuses edits to macro, signed, or protected packages.");
 
         var changes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        // The blocks of an mc:AlternateContent branch the extractor did not project. They carry no
+        // node, so they cannot come out of the diff; the same edit is applied to them here so Word
+        // shows it whichever branch it resolves.
+        var mirrored = new List<(RawSliceRef Slice, byte[] Data)>();
+        var mirrors = extraction.SourceIndex.AlternateMirrors;
         var additions = new List<byte[]>();
+        // A text box's slice sits *inside* its host block's slice, so the two can only be spliced
+        // one at a time. Every slice an operation claims is kept here to catch that up front.
+        var claimed = new List<(RawSliceRef Slice, string NodeId)>();
         foreach (var operation in diff.PatchSet.Operations.Where(operation => operation.MutatesOriginal))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -210,24 +299,76 @@ public sealed class DocxAdapter : IFormatProbe
                 additions.Add(CreateParagraphXml(TextOf(operation.After), operation.After.Kind == NodeKind.Heading, operation.After.Kind == NodeKind.ListItem, operation.After.Kind == NodeKind.CodeBlock));
                 continue;
             }
-            if (operation.Before is null || operation.Before.Kind is not (NodeKind.Paragraph or NodeKind.Heading or NodeKind.ListItem or NodeKind.CodeBlock or NodeKind.Table) || operation.Before.RawSlice is null)
-                return Failure("UnsupportedPatch", "Only anchored paragraph, list-item, and table changes are supported by DOCX F1 restore.", operation.NodeId);
+            if (operation.Before is null || operation.Before.Kind is not (NodeKind.Paragraph or NodeKind.Heading or NodeKind.ListItem or NodeKind.CodeBlock or NodeKind.Table or NodeKind.TextBox) || operation.Before.RawSlice is null)
+                return Failure("UnsupportedPatch", "Only anchored paragraph, list-item, text-box, and table changes are supported by DOCX F1 restore.", operation.NodeId);
             var slice = operation.Before.RawSlice;
             if (!StringComparer.Ordinal.Equals(slice.PartUri, "/word/document.xml"))
                 return Failure("ProtectedBoundary", "Edit crosses a non-body DOCX part boundary.", operation.NodeId);
+            if (claimed.FirstOrDefault(item => Overlaps(item.Slice, slice)) is { NodeId: not null } clash)
+                return Failure("OverlappingEdits", "Edit the text box and its host paragraph in separate restores.",
+                    slice.EndOffset - slice.StartOffset <= clash.Slice.EndOffset - clash.Slice.StartOffset ? operation.NodeId : clash.NodeId);
+            claimed.Add((slice, operation.NodeId));
             var original = await ReadDocumentSliceAsync(sourcePath, slice, cancellationToken).ConfigureAwait(false);
             if (!StringComparer.Ordinal.Equals(SafeXml.Sha256(original), slice.Sha256))
                 return Failure("SliceHashMismatch", "Original XML slice no longer matches baseline hash.", operation.NodeId);
-            if (operation.Kind == PatchOperationKind.ExplicitDelete) changes[operation.NodeId] = Array.Empty<byte>();
+            var mirror = mirrors is not null && mirrors.TryGetValue(slice.StartOffset, out var found) ? found : null;
+            if (operation.Kind == PatchOperationKind.ExplicitDelete)
+            {
+                // Dropping a w:txbxContent leaves a shape with no body, which is not what the node
+                // stands for: the box is a place to put text, not a body position that can go away.
+                if (operation.Before.Kind == NodeKind.TextBox)
+                    return Failure("UnsupportedDelete", "A DOCX text box cannot be deleted by F1 restore; only its text can be replaced.", operation.NodeId);
+                changes[operation.NodeId] = Array.Empty<byte>();
+                foreach (var companion in mirror?.Slices ?? []) mirrored.Add((companion, Array.Empty<byte>()));
+            }
             else if (operation.After is not null)
-                changes[operation.NodeId] = operation.Before.Kind == NodeKind.Table
-                    ? ReplaceTableCells(original, operation.After.Content)
-                    : ReplaceParagraphContent(original, operation.After.Content);
+            {
+                var edits = default(DocxParagraphEditResult);
+                changes[operation.NodeId] = operation.Before.Kind switch
+                {
+                    NodeKind.Table => ReplaceTableCells(original, operation.After.Content, out edits),
+                    NodeKind.TextBox => ReplaceTextBoxContent(original, operation.After.Content, out edits),
+                    _ => ReplaceParagraphContent(original, operation.After.Content, out edits),
+                };
+                // OMML is structured markup that only projects as one linear string. An edit that
+                // no longer contains that string has retyped the equation, so the original markup
+                // is dropped rather than left stranded beside the new text - and said so here.
+                if (edits.ReplacedEquations > 0)
+                    diagnostics.Add(new("DocxMathReplaced",
+                        $"{edits.ReplacedEquations} equation(s) on paragraph {operation.NodeId} were replaced by plain text; OMML cannot be rebuilt from an edited linear form.",
+                        DiagnosticSeverity.Warning, operation.NodeId, "/word/document.xml"));
+                // An inline control's wrapper can only be kept when the edit stayed on one side of
+                // its boundary. An edit that rewrote its text together with the text around it
+                // leaves nothing to put back inside, so the control's content becomes plain runs.
+                if (edits.UnwrappedContainers > 0)
+                    diagnostics.Add(new("DocxInlineContainerUnwrapped",
+                        $"{edits.UnwrappedContainers} inline content control(s) on paragraph {operation.NodeId} were unwrapped because their text was edited together with the surrounding text.",
+                        DiagnosticSeverity.Warning, operation.NodeId, "/word/document.xml"));
+                if (mirror is not null)
+                    foreach (var companion in mirror.Slices)
+                    {
+                        var companionOriginal = await ReadDocumentSliceAsync(sourcePath, companion, cancellationToken).ConfigureAwait(false);
+                        if (!StringComparer.Ordinal.Equals(SafeXml.Sha256(companionOriginal), companion.Sha256)) continue;
+                        mirrored.Add((companion, operation.Before.Kind switch
+                        {
+                            NodeKind.Table => ReplaceTableCells(companionOriginal, operation.After.Content, out _),
+                            NodeKind.TextBox => ReplaceTextBoxContent(companionOriginal, operation.After.Content, out _),
+                            _ => ReplaceParagraphContent(companionOriginal, operation.After.Content, out _),
+                        }));
+                    }
+            }
+            // Nothing in the other branches said the same thing, so the edit reaches only the
+            // branch Word resolves the way this build does.
+            if (mirror is { Slices.Count: 0 })
+                diagnostics.Add(new("DocxAlternateContentFallbackStale",
+                    $"Block {operation.NodeId} was patched, but the unselected branch of AlternateContent #{mirror.AlternateContentOrdinal} was left unchanged.",
+                    DiagnosticSeverity.Information, operation.NodeId, "/word/document.xml"));
         }
 
         var documentBytes = await ReadZipEntryAsync(sourcePath, "word/document.xml", cancellationToken).ConfigureAwait(false);
         var replacements = baselineGraph.Nodes.Where(node => node.RawSlice is not null && changes.ContainsKey(node.Id))
-            .Select(node => (Slice: node.RawSlice!, Data: changes[node.Id])).OrderBy(item => item.Slice.StartOffset).ToArray();
+            .Select(node => (Slice: node.RawSlice!, Data: changes[node.Id]))
+            .Concat(mirrored).OrderBy(item => item.Slice.StartOffset).ToArray();
         var patchedDocument = SpliceDocument(documentBytes, replacements, additions);
         await WritePatchedPackageAsync(sourcePath, outputPath, patchedDocument, cancellationToken).ConfigureAwait(false);
         diagnostics.Add(new("PatchedDocumentXml", "Changed DOCX blocks were regenerated; unrelated package payloads were copied verbatim.", DiagnosticSeverity.Information, PartUri: "/word/document.xml"));
@@ -245,14 +386,16 @@ public sealed class DocxAdapter : IFormatProbe
     private static void AddParagraph(XElement paragraph, string partUri, RawSliceRef? slice, int order,
         ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, IDictionary<string, DocxRunCharacterMap> runMaps,
         IReadOnlyDictionary<string, string> relationships, ContentLayer layer,
-        NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters, bool includeVisualGraph = true)
+        NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters,
+        DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, bool includeVisualGraph = true,
+        IReadOnlyList<DocxTextBoxBinding?>? textBoxSlices = null)
     {
         var paraId = (string?)paragraph.Attribute(W14 + "paraId");
         var anchor = new SourceAnchor("docx", partUri,
             paraId is null ? [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))] : [new("w14_para_id", paraId)], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-        var text = ParagraphText(paragraph);
-        var hiddenText = HiddenParagraphText(paragraph);
+        var text = ParagraphText(paragraph, hiddenStyles);
+        var hiddenText = HiddenParagraphText(paragraph, hiddenStyles);
         var style = (string?)paragraph.Element(W + "pPr")?.Element(W + "pStyle")?.Attribute(W + "val");
         // Word commonly stores list semantics through a paragraph style (ListBullet /
         // ListNumber) while other producers emit an explicit w:numPr.  Treat both as
@@ -265,9 +408,9 @@ public sealed class DocxAdapter : IFormatProbe
         // paragraph styles classify the whole paragraph as a Markdown code block.
         var isCode = IsCodeStyle(style);
         var kind = isList ? NodeKind.ListItem : headingLevel > 0 || isDocumentTitle ? NodeKind.Heading : isCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
-        var map = BuildRunMap(id, paragraph);
+        var map = BuildRunMap(id, paragraph, hiddenStyles);
         var projectionLayer = string.IsNullOrWhiteSpace(text) ? ContentLayer.Hidden : layer;
-        var richRuns = ExtractRichTextRuns(paragraph, relationships);
+        var richRuns = ExtractRichTextRuns(paragraph, relationships, hiddenStyles);
         // Preserve the simple text projection for ordinary paragraphs: it keeps existing
         // graph clients compatible while only opting into rich text when the OOXML contains
         // a supported direct run property or an inline break/tab.
@@ -288,10 +431,21 @@ public sealed class DocxAdapter : IFormatProbe
             }
         }
         if (isCode) extensions["code_style"] = JsonSerializer.SerializeToElement(style);
-        var node = new DocumentNode(id, kind, null, order, projectionLayer, content, anchor, slice, StyleId: style,
-            Editability: NodeEditability.EditableInPlace, Provenance: [new(EvidenceKind.Native)], Extensions: extensions);
+        AddContentControlExtensions(extensions, contentControl);
+        var equations = RelevantDescendants(paragraph).Where(IsMathRoot).ToArray();
+        if (equations.Length > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
+        // An equation is opaque markup that only projects as one linear string, so the F1 patcher
+        // keeps it as an anchor and rewrites the runs around it (see ReplaceParagraphRuns). That
+        // needs the equation to sit directly under its w:p; one buried in another inline container
+        // gives the surrounding runs no stable place to reattach, so such a paragraph stays
+        // read-only rather than losing its equation on the next edit.
+        var restorable = equations.All(element => element.Parent?.Name == W + "p");
+        var effectiveSlice = restorable ? slice : null;
+        var node = new DocumentNode(id, kind, null, order, projectionLayer, content, anchor, effectiveSlice, StyleId: style,
+            Editability: restorable ? NodeEditability.EditableInPlace : NodeEditability.Protected,
+            Provenance: [new(EvidenceKind.Native)], Extensions: extensions);
         nodes.Add(node);
-        if (slice is not null) sliceMap[id] = slice;
+        if (effectiveSlice is not null) sliceMap[id] = effectiveSlice;
         runMaps[id] = map;
         if (!string.IsNullOrWhiteSpace(hiddenText))
         {
@@ -315,7 +469,7 @@ public sealed class DocxAdapter : IFormatProbe
             if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var target)) continue;
             var linkAnchor = anchor with { Locators = [new("hyperlink", relationshipId)] };
             var linkId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, linkAnchor);
-            nodes.Add(new(linkId, NodeKind.Link, id, order, layer, new ReferenceNodeContent(target, ParagraphText(link)), linkAnchor,
+            nodes.Add(new(linkId, NodeKind.Link, id, order, layer, new ReferenceNodeContent(target, ParagraphText(link, hiddenStyles)), linkAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
         foreach (var (blip, visualIndex) in paragraph.Descendants(A + "blip").Select((item, index) => (item, index)))
@@ -327,7 +481,7 @@ public sealed class DocxAdapter : IFormatProbe
             var docPr = blip.Ancestors().SelectMany(ancestor => ancestor.Elements(WP + "docPr")).FirstOrDefault()
                 ?? blip.Ancestors().Descendants(WP + "docPr").FirstOrDefault();
             var description = FirstNonEmptyAttribute(docPr, "descr", "title", "name");
-            var imageLayer = IsHiddenContentElement(blip) ? ContentLayer.Hidden : layer;
+            var imageLayer = IsHiddenContentElement(blip, hiddenStyles) ? ContentLayer.Hidden : layer;
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer, new ReferenceNodeContent(target, description), imageAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
@@ -339,7 +493,7 @@ public sealed class DocxAdapter : IFormatProbe
             var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
             var shape = imageData.Ancestors(V + "shape").FirstOrDefault();
             var description = FirstNonEmptyAttribute(shape, "alt", "title", "id");
-            var imageLayer = IsHiddenContentElement(imageData) ? ContentLayer.Hidden : layer;
+            var imageLayer = IsHiddenContentElement(imageData, hiddenStyles) ? ContentLayer.Hidden : layer;
             var imageExtensions = imageLayer == ContentLayer.Hidden
                 ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                 {
@@ -351,8 +505,15 @@ public sealed class DocxAdapter : IFormatProbe
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
                 Extensions: imageExtensions));
         }
+        // Only the outer boxes are addressable, so only they consume a binding; the index the node
+        // id is built from still counts every box, keeping ids stable across this change.
+        var outerTextBoxIndex = 0;
         foreach (var (textBox, textboxIndex) in paragraph.Descendants(W + "txbxContent").Select((item, index) => (item, index)))
         {
+            var isOuterTextBox = !textBox.Ancestors(W + "txbxContent").Any();
+            var binding = isOuterTextBox
+                ? (textBoxSlices ?? []).ElementAtOrDefault(outerTextBoxIndex++)
+                : null;
             // The ancestor depth is not an identity: sibling textboxes have the same depth.
             // Use the source-order index so repeated visual objects receive stable unique IDs.
             var shapeId = TextBoxShapeId(textBox);
@@ -369,8 +530,15 @@ public sealed class DocxAdapter : IFormatProbe
                 {
                     ["shape_id"] = JsonSerializer.SerializeToElement(shapeId),
                 };
-            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(TextBoxText(textBox)), boxAnchor,
-                Editability: NodeEditability.EditableWithConstraints, Provenance: [new(EvidenceKind.Native)], Extensions: boxExtensions));
+            // A bound box owns the bytes of its w:txbxContent, so an edit to its text splices only
+            // that element and leaves the shape, the drawing anchor and the host paragraph around
+            // it byte-identical. Without a binding - a box in a header, or one the two walks
+            // disagree about - it projects exactly as it used to: text, but no way back.
+            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(TextBoxText(textBox, hiddenStyles)), boxAnchor,
+                binding?.Slice,
+                Editability: binding is null ? NodeEditability.EditableWithConstraints : NodeEditability.EditableInPlace,
+                Provenance: [new(EvidenceKind.Native)], Extensions: boxExtensions));
+            if (binding is not null) sliceMap[boxId] = binding.Slice;
         }
         // D18: an explicit page break (w:br type="page") gets its own PageBreak marker node so
         // readable can render a chapter separator (---) instead. ParagraphText/ExtractRichTextRuns/
@@ -391,41 +559,306 @@ public sealed class DocxAdapter : IFormatProbe
 
     private static IReadOnlyList<XElement> SelectSupportedAlternateContentBlocks(XElement source)
     {
-        var clone = new XElement(source);
-        if (clone.Name == MC + "AlternateContent")
+        if (source.Name == MC + "AlternateContent")
         {
-            var selected = SelectMarkupChoice(clone);
+            var selected = SelectMarkupChoice(source);
             return selected is null ? Array.Empty<XElement>()
                 : selected.Elements().SelectMany(SelectSupportedAlternateContentBlocks).ToArray();
         }
-        while (clone.Descendants(MC + "AlternateContent").FirstOrDefault() is { } alternate)
-        {
-            var selected = SelectMarkupChoice(alternate);
-            if (selected is null) { alternate.Remove(); continue; }
-            alternate.ReplaceWith(selected.Nodes().Select(node => node is XElement element ? new XElement(element) : node));
-        }
-        return [clone];
+        return source.Descendants(MC + "AlternateContent").Any()
+            ? [new XElement(source.Name, source.Attributes(), source.Nodes().Select(ResolveMarkupNode))]
+            : [new XElement(source)];
+    }
 
-        static XElement? SelectMarkupChoice(XElement alternate)
+    /// <summary>Rebuilds one node with every mc:AlternateContent under it replaced by the branch
+    /// this build supports. The walk is over the *original* tree on purpose: mc:Choice/@Requires
+    /// names markup by prefix, and a detached clone no longer has the xmlns declaration w:document
+    /// made - which is where Word declares every one of them - so a choice resolved on a clone
+    /// would read as unsupported and silently fall back.</summary>
+    private static object? ResolveMarkupNode(XNode node)
+    {
+        if (node is not XElement element) return node;
+        if (element.Name == MC + "AlternateContent")
+            return SelectMarkupChoice(element) is { } selected ? selected.Nodes().Select(ResolveMarkupNode).ToArray() : null;
+        return new XElement(element.Name, element.Attributes(), element.Nodes().Select(ResolveMarkupNode));
+    }
+
+    private static XElement? SelectMarkupChoice(XElement alternate) =>
+        alternate.Elements(MC + "Choice").FirstOrDefault(IsSupportedMarkupChoice) ?? alternate.Element(MC + "Fallback");
+
+    /// <summary>Whether every namespace prefix an mc:Choice demands is one this build understands.</summary>
+    private static bool IsSupportedMarkupChoice(XElement choice)
+    {
+        var requires = ((string?)choice.Attribute("Requires") ?? string.Empty)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        return requires.All(prefix =>
         {
-            return alternate.Elements(MC + "Choice").FirstOrDefault(item =>
-            {
-                var requires = ((string?)item.Attribute("Requires") ?? string.Empty)
-                    .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-                return requires.All(prefix =>
-                {
-                    var ns = item.GetNamespaceOfPrefix(prefix);
-                    return ns is not null && SupportedMarkupNamespaces.Contains(ns.NamespaceName);
-                });
-            }) ?? alternate.Element(MC + "Fallback");
+            var ns = choice.GetNamespaceOfPrefix(prefix);
+            return ns is not null && SupportedMarkupNamespaces.Contains(ns.NamespaceName);
+        });
+    }
+
+    /// <summary>The branch label <see cref="XmlSliceScanner"/> tagged the branch this extractor
+    /// selects, so the two walks address the same slices.</summary>
+    private static string? SelectedBranchLabel(XElement alternate)
+    {
+        var index = 0;
+        foreach (var choice in alternate.Elements(MC + "Choice"))
+        {
+            if (IsSupportedMarkupChoice(choice)) return "Choice#" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            index++;
+        }
+        return alternate.Element(MC + "Fallback") is null ? null : "Fallback";
+    }
+
+    /// <summary>The mc:Choice / mc:Fallback children of one fork, labelled the way
+    /// <see cref="XmlSliceScanner"/> labelled them.</summary>
+    private static IEnumerable<(string Label, XElement Branch)> AlternateBranches(XElement alternate)
+    {
+        var choiceIndex = 0;
+        foreach (var child in alternate.Elements())
+        {
+            if (child.Name == MC + "Choice")
+                yield return ("Choice#" + (choiceIndex++).ToString(System.Globalization.CultureInfo.InvariantCulture), child);
+            else if (child.Name == MC + "Fallback") yield return ("Fallback", child);
         }
     }
 
-    private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, ICollection<DocumentNode> nodes, ref int ordinal, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+    /// <summary>What one mc:Choice / mc:Fallback holds at body positions, in the order and with the
+    /// content-control transparency <see cref="XmlSliceScanner"/> recorded: the sliceable blocks it
+    /// owns directly, and the nested forks that stand for a body position of their own.</summary>
+    private static IReadOnlyList<XElement> BranchChildren(XElement branch) =>
+        branch.Elements().SelectMany(child => ExpandContentControls(child, null))
+            .Select(item => item.Element).ToArray();
+
+    /// <summary>One block the extractor projected out of an mc:AlternateContent: the original
+    /// element it came from, the slice the scanner cut for it, and the same-position, same-text
+    /// blocks of every branch that was not taken - at each level of a nested fork - which an F1
+    /// edit is mirrored into. <paramref name="HasSiblingBranch"/> says the block came out of a fork
+    /// that had somewhere to mirror to, so an empty companion list is worth reporting.</summary>
+    private sealed record DocxAlternateProjection(XElement Element, RawSliceRef Slice,
+        List<RawSliceRef> Companions, bool HasSiblingBranch);
+
+    /// <summary>Hands the slices cut inside one body-level mc:AlternateContent to the blocks the
+    /// selected branch projected, and records - per selected block - the same-position, same-text
+    /// blocks of the other branches so an edit can be mirrored into them. A fork nested inside a
+    /// branch is resolved the same way one level down, so the walk descends into the branch that
+    /// fork selects and a block only reachable through two choices still gets its slice, with
+    /// companions collected from the branches passed over at *both* levels. The slices of a branch
+    /// that was not selected are consumed either way: they address real markup, just markup no node
+    /// stands for. Returns false when the two walks disagree, which disables slicing document-wide.</summary>
+    private static bool AssignAlternateContentSlices(
+        XElement alternate, int alternateIndex, IReadOnlyList<XmlSliceScanner.BlockSlice> group,
+        IReadOnlyList<(XElement Element, DocxContentControl? Control)> selected, RawSliceRef?[] selectedSlices,
+        XElement?[] selectedOriginals, IDictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
+    {
+        var slicesByPath = group.GroupBy(item => item.Branch ?? string.Empty, StringComparer.Ordinal)
+            .ToDictionary(item => item.Key, item => (IReadOnlyList<XmlSliceScanner.BlockSlice>)item.OrderBy(entry => entry.Start).ToArray(), StringComparer.Ordinal);
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        if (!ValidateAlternateBranchPaths(alternate, null, slicesByPath, paths)) return false;
+        // A slice the scanner cut on a path the parse never walked means the two disagree about the
+        // shape of the fork, so no slice inside it can be trusted.
+        if (slicesByPath.Keys.Any(path => !paths.Contains(path))) return false;
+        var projected = ResolveAlternateContentBlocks(alternate, null, slicesByPath, hiddenStyles);
+        var blockIndex = 0;
+        for (var index = 0; index < selected.Count && blockIndex < projected.Count; index++)
+        {
+            var element = selected[index].Element;
+            if (!IsSliceableBlock(element)) continue;
+            var projection = projected[blockIndex];
+            if (!StringComparer.Ordinal.Equals(element.Name.LocalName, projection.Element.Name.LocalName)) return false;
+            selectedSlices[index] = projection.Slice;
+            selectedOriginals[index] = projection.Element;
+            if (projection.HasSiblingBranch) mirrors[projection.Slice.StartOffset] = new(alternateIndex, projection.Companions);
+            blockIndex++;
+        }
+        return true;
+    }
+
+    /// <summary>Checks, for one fork and every fork nested in it, that the blocks the parse sees on
+    /// a branch are exactly the slices the scanner cut for that branch path, and collects the paths
+    /// walked so a slice on an unknown path can be caught.</summary>
+    private static bool ValidateAlternateBranchPaths(XElement alternate, string? prefix,
+        IReadOnlyDictionary<string, IReadOnlyList<XmlSliceScanner.BlockSlice>> slicesByPath, ISet<string> paths)
+    {
+        foreach (var (label, branch) in AlternateBranches(alternate))
+        {
+            var path = prefix is null ? label : prefix + "/" + label;
+            paths.Add(path);
+            var children = BranchChildren(branch);
+            var blocks = children.Where(IsSliceableBlock).ToArray();
+            var branchSlices = slicesByPath.TryGetValue(path, out var found) ? found : [];
+            if (branchSlices.Count != blocks.Length) return false;
+            for (var index = 0; index < blocks.Length; index++)
+                if (!StringComparer.Ordinal.Equals(branchSlices[index].LocalName, blocks[index].Name.LocalName)) return false;
+            foreach (var nested in children.Where(child => child.Name == MC + "AlternateContent"))
+                if (!ValidateAlternateBranchPaths(nested, path, slicesByPath, paths)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>The blocks one fork projects, in document order, each already carrying the
+    /// companions the branches it passed over offer. Recursing before mirroring means an inner
+    /// fork's own counterpart and the outer fork's counterpart both end up on the same block.</summary>
+    private static List<DocxAlternateProjection> ResolveAlternateContentBlocks(XElement alternate, string? prefix,
+        IReadOnlyDictionary<string, IReadOnlyList<XmlSliceScanner.BlockSlice>> slicesByPath, DocxHiddenStyles hiddenStyles)
+    {
+        var branches = AlternateBranches(alternate).ToArray();
+        var projections = new Dictionary<string, List<DocxAlternateProjection>>(StringComparer.Ordinal);
+        foreach (var (label, branch) in branches)
+            projections[label] = ProjectAlternateBranch(branch, prefix is null ? label : prefix + "/" + label, slicesByPath, hiddenStyles);
+        if (SelectedBranchLabel(alternate) is not { } selectedLabel ||
+            !projections.TryGetValue(selectedLabel, out var chosen)) return [];
+        if (branches.Length <= 1) return chosen;
+        foreach (var (label, other) in projections)
+        {
+            if (StringComparer.Ordinal.Equals(label, selectedLabel)) continue;
+            for (var index = 0; index < chosen.Count && index < other.Count; index++)
+            {
+                if (!StringComparer.Ordinal.Equals(chosen[index].Element.Name.LocalName, other[index].Element.Name.LocalName)) continue;
+                if (!StringComparer.Ordinal.Equals(ParagraphText(chosen[index].Element, hiddenStyles),
+                        ParagraphText(other[index].Element, hiddenStyles))) continue;
+                chosen[index].Companions.Add(other[index].Slice);
+                chosen[index].Companions.AddRange(other[index].Companions);
+            }
+        }
+        return chosen.Select(item => item with { HasSiblingBranch = true }).ToList();
+    }
+
+    /// <summary>What one branch stands for at body positions: its own sliceable blocks paired with
+    /// the slices cut for its path, and - for a nested fork - whatever that fork projects.</summary>
+    private static List<DocxAlternateProjection> ProjectAlternateBranch(XElement branch, string path,
+        IReadOnlyDictionary<string, IReadOnlyList<XmlSliceScanner.BlockSlice>> slicesByPath, DocxHiddenStyles hiddenStyles)
+    {
+        var result = new List<DocxAlternateProjection>();
+        var branchSlices = slicesByPath.TryGetValue(path, out var found) ? found : [];
+        var sliceIndex = 0;
+        foreach (var child in BranchChildren(branch))
+        {
+            if (IsSliceableBlock(child))
+            {
+                if (sliceIndex < branchSlices.Count) result.Add(new(child, branchSlices[sliceIndex].Reference, [], false));
+                sliceIndex++;
+                continue;
+            }
+            if (child.Name == MC + "AlternateContent")
+                result.AddRange(ResolveAlternateContentBlocks(child, path, slicesByPath, hiddenStyles));
+        }
+        return result;
+    }
+
+    /// <summary>The slice one projected text box is addressed by, plus the same-position, same-text
+    /// boxes of the paragraph-level branches that were not taken.</summary>
+    private sealed record DocxTextBoxBinding(RawSliceRef Slice, IReadOnlyList<RawSliceRef> Companions,
+        int AlternateOrdinal, bool HasSiblingBranch);
+
+    /// <summary>One text box the projection kept, before its slice is known: the original
+    /// w:txbxContent, the paragraph-level fork path it came out of, and its counterparts in the
+    /// branches that fork passed over.</summary>
+    private sealed record DocxTextBoxProjection(XElement Box, string? Path, List<XElement> Companions,
+        int AlternateOrdinal, bool HasSiblingBranch);
+
+    /// <summary>Pairs the text boxes one projected block still shows with the slices the scanner cut
+    /// for them, in projection order, so a caller can hand the k-th w:txbxContent of the resolved
+    /// block the bytes it came from. The scanner numbered every outer box in the host in document
+    /// order - the branches it did not take included - so the walk here is over the *original*
+    /// block, resolving each mc:AlternateContent exactly as the projection did; a box the two walks
+    /// disagree about is left unbound and stays read-only. Mirrors for the branches passed over are
+    /// registered on the way through.</summary>
+    private static IReadOnlyList<DocxTextBoxBinding?> BindHostTextBoxes(
+        XElement? original, RawSliceRef? hostSlice, ILookup<int, XmlSliceScanner.TextBoxSlice> textBoxLedger,
+        IDictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
+    {
+        if (original is null || hostSlice is null) return [];
+        var recorded = textBoxLedger[(int)hostSlice.StartOffset].OrderBy(item => item.Start).ToArray();
+        if (recorded.Length == 0) return [];
+        var outer = original.Descendants(W + "txbxContent")
+            .Where(box => !box.Ancestors(W + "txbxContent").Any()).ToArray();
+        if (outer.Length != recorded.Length) return [];
+        var ordinals = new Dictionary<XElement, int>();
+        for (var index = 0; index < outer.Length; index++) ordinals[outer[index]] = index;
+        var alternateOrdinals = new Dictionary<XElement, int>();
+        var alternateIndex = 0;
+        foreach (var element in original.Descendants(MC + "AlternateContent")) alternateOrdinals[element] = alternateIndex++;
+
+        var bindings = new List<DocxTextBoxBinding?>();
+        foreach (var projection in CollectProjectedTextBoxes(original, null, -1, false, alternateOrdinals, hiddenStyles))
+        {
+            if (!ordinals.TryGetValue(projection.Box, out var ordinal) ||
+                recorded[ordinal].OrdinalInHost != ordinal ||
+                !StringComparer.Ordinal.Equals(recorded[ordinal].InlineAlternatePath, projection.Path))
+            { bindings.Add(null); continue; }
+            var companions = new List<RawSliceRef>();
+            var bound = true;
+            foreach (var companion in projection.Companions)
+            {
+                if (!ordinals.TryGetValue(companion, out var companionOrdinal)) { bound = false; break; }
+                companions.Add(recorded[companionOrdinal].Reference);
+            }
+            if (!bound) { bindings.Add(null); continue; }
+            var binding = new DocxTextBoxBinding(recorded[ordinal].Reference, companions,
+                projection.AlternateOrdinal, projection.HasSiblingBranch);
+            if (binding.HasSiblingBranch) mirrors[binding.Slice.StartOffset] = new(binding.AlternateOrdinal, companions);
+            bindings.Add(binding);
+        }
+        return bindings;
+    }
+
+    /// <summary>The outer text boxes a block still shows once every mc:AlternateContent under it is
+    /// resolved, in document order, each carrying the same-position, same-text boxes of the branches
+    /// that fork passed over. A box inside a box is not walked into: only the outer one is
+    /// addressable, exactly as <see cref="XmlSliceScanner"/> recorded it.</summary>
+    private static List<DocxTextBoxProjection> CollectProjectedTextBoxes(XContainer container, string? path,
+        int alternateOrdinal, bool hasSiblingBranch, IReadOnlyDictionary<XElement, int> alternateOrdinals,
+        DocxHiddenStyles hiddenStyles)
+    {
+        var result = new List<DocxTextBoxProjection>();
+        foreach (var child in container.Elements())
+        {
+            if (child.Name == MC + "AlternateContent")
+            {
+                if (!alternateOrdinals.TryGetValue(child, out var ordinal)) continue;
+                var branches = AlternateBranches(child).ToArray();
+                var projections = new Dictionary<string, List<DocxTextBoxProjection>>(StringComparer.Ordinal);
+                foreach (var (label, branch) in branches)
+                    projections[label] = CollectProjectedTextBoxes(branch,
+                        ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + label,
+                        ordinal, branches.Length > 1, alternateOrdinals, hiddenStyles);
+                if (SelectedBranchLabel(child) is not { } selectedLabel ||
+                    !projections.TryGetValue(selectedLabel, out var chosen)) continue;
+                if (branches.Length > 1)
+                    foreach (var (label, other) in projections)
+                    {
+                        if (StringComparer.Ordinal.Equals(label, selectedLabel)) continue;
+                        for (var index = 0; index < chosen.Count && index < other.Count; index++)
+                        {
+                            if (!StringComparer.Ordinal.Equals(TextBoxText(chosen[index].Box, hiddenStyles),
+                                    TextBoxText(other[index].Box, hiddenStyles))) continue;
+                            chosen[index].Companions.Add(other[index].Box);
+                            chosen[index].Companions.AddRange(other[index].Companions);
+                        }
+                    }
+                result.AddRange(branches.Length > 1
+                    ? chosen.Select(item => item with { HasSiblingBranch = true })
+                    : chosen);
+                continue;
+            }
+            if (child.Name == W + "txbxContent")
+            {
+                result.Add(new(child, path, [], alternateOrdinal, hasSiblingBranch));
+                continue;
+            }
+            result.AddRange(CollectProjectedTextBoxes(child, path, alternateOrdinal, hasSiblingBranch, alternateOrdinals, hiddenStyles));
+        }
+        return result;
+    }
+
+    private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, ICollection<DocumentNode> nodes, ref int ordinal,
+        DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
         var visualRoot = new XElement(W + "p", bodyElements.Select(element => new XElement(element)));
         var anchor = new SourceAnchor("docx", "/word/document.xml", [new AnchorLocator("visual_graph", "document")], ordinal);
-        if (BuildDocxVisualGraph(visualRoot, anchor, "doc_document", inferenceTimeout, cancellationToken) is not { } visualGraph) return;
+        if (BuildDocxVisualGraph(visualRoot, anchor, "doc_document", hiddenStyles, inferenceTimeout, cancellationToken) is not { } visualGraph) return;
 
         if (visualGraph.HasTopology && nodes is List<DocumentNode> nodeList)
         {
@@ -574,7 +1007,8 @@ public sealed class DocxAdapter : IFormatProbe
         }).ToArray();
     }
 
-    private static VisualGraph? BuildDocxVisualGraph(XElement paragraph, SourceAnchor anchor, string sourceNodeId, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+    private static VisualGraph? BuildDocxVisualGraph(XElement paragraph, SourceAnchor anchor, string sourceNodeId,
+        DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
         static bool IsVmlConnector(XElement item)
         {
@@ -614,7 +1048,7 @@ public sealed class DocxAdapter : IFormatProbe
             var nodeAnchor = anchor with { Locators = [new AnchorLocator("shape_id", shapeId)] };
             var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
             var geometry = ReadVisualGeometry(shape);
-            var label = TextBoxText(shape).Trim();
+            var label = TextBoxText(shape, hiddenStyles).Trim();
             if (label.Length == 0) label = "Shape " + shapeId;
             return (shapeId, PrimitiveId: "docx-primitive-" + index.ToString("D6", System.Globalization.CultureInfo.InvariantCulture), Geometry: geometry,
                 IsTextBox: shape.Name == A + "sp" && shape.Descendants(W + "txbxContent").Any(),
@@ -1181,11 +1615,14 @@ public sealed class DocxAdapter : IFormatProbe
     // keeps the extracted shape byte-for-byte faithful to the physical tr/tc layout (row count
     // and per-row cell count are unchanged from today), so ReplaceTableCells's same-shape F1
     // restore path is unaffected; only the readable serializer needs to know about spans.
-    // A nested w:tbl inside a cell (D08) is *not* folded into that cell's own text (ParagraphText
-    // already skips w:tbl subtrees) — it is instead extracted as its own sibling Table node,
+    // A nested w:tbl inside a cell (D08) is *not* folded into that cell's own text (CellText only
+    // reads the cell's own paragraphs) — it is instead extracted as its own sibling Table node,
     // ordered immediately after this table by consuming further slots from the shared ordinal.
+    // That sibling now records where it came from (nested_table_parent/_row/_column) so a reader
+    // can put it back inside its host cell instead of guessing from document order alone.
     private static void AddTable(XElement table, string partUri, RawSliceRef? slice, int order,
-        ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, ref int ordinal)
+        ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, ref int ordinal,
+        DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, DocxNestedTable? nested = null)
     {
         var anchor = new SourceAnchor("docx", partUri, [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
@@ -1205,7 +1642,7 @@ public sealed class DocxAdapter : IFormatProbe
                 // A vMerge element with no w:val (or w:val="continue") marks a placeholder cell
                 // that inherits the cell above; only w:val="restart" starts a new merge region.
                 var isContinuation = vMerge is not null && !StringComparer.OrdinalIgnoreCase.Equals((string?)vMerge.Attribute(W + "val"), "restart");
-                var text = ParagraphText(tc);
+                var text = CellText(tc, hiddenStyles);
                 if (isContinuation)
                 {
                     if (openVerticalMerges.TryGetValue(gridColumn, out var origin))
@@ -1225,25 +1662,156 @@ public sealed class DocxAdapter : IFormatProbe
             }
             grid.Add(rowCells);
         }
-        nodes.Add(new(id, NodeKind.Table, null, order, ContentLayer.Body, new TableNodeContent(grid), anchor, slice,
-            Editability: NodeEditability.EditableWithConstraints, Provenance: [new(EvidenceKind.Native)]));
-        if (slice is not null) sliceMap[id] = slice;
+        var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        AddContentControlExtensions(extensions, contentControl);
+        if (nested is not null)
+        {
+            extensions["nested_table_parent"] = JsonSerializer.SerializeToElement(nested.ParentNodeId);
+            extensions["nested_table_row"] = JsonSerializer.SerializeToElement(nested.Row);
+            extensions["nested_table_column"] = JsonSerializer.SerializeToElement(nested.Column);
+            extensions["nested_table_paragraph_offset"] = JsonSerializer.SerializeToElement(nested.ParagraphOffset);
+            extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
+        }
+        if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
+        // Same rule as AddParagraph: an equation directly under a cell paragraph is preserved as an
+        // anchor by the cell rewrite, so the table stays editable; one nested deeper cannot be
+        // addressed, and the table is read-only rather than losing it on the next edit.
+        var restorable = RelevantDescendants(table).Where(IsMathRoot).All(element => element.Parent?.Name == W + "p");
+        var effectiveSlice = restorable ? slice : null;
+        nodes.Add(new(id, NodeKind.Table, null, order, ContentLayer.Body, new TableNodeContent(grid), anchor, effectiveSlice,
+            Editability: restorable ? NodeEditability.EditableWithConstraints : NodeEditability.Protected,
+            Provenance: [new(EvidenceKind.Native)], Extensions: extensions.Count == 0 ? null : extensions));
+        if (effectiveSlice is not null) sliceMap[id] = effectiveSlice;
 
-        // Direct tc children only: a deeper nested table is discovered when we recurse into this
-        // one, so scanning only one level down here avoids visiting (and re-adding) it twice.
-        foreach (var tc in table.Elements(W + "tr").Elements(W + "tc"))
-            foreach (var nestedTable in tc.Elements(W + "tbl"))
+        // Direct tc children only (a block content control inside the cell is transparent): a
+        // deeper nested table is discovered when we recurse into this one, so scanning only one
+        // level down here avoids visiting (and re-adding) it twice. Row/column are indices into
+        // this table's own TableNodeContent.Rows so a consumer can address the host cell directly.
+        var rowIndex = 0;
+        foreach (var row in table.Elements(W + "tr"))
+        {
+            var cellIndex = 0;
+            foreach (var tc in row.Elements(W + "tc"))
             {
-                var nestedOrder = ordinal++;
-                AddTable(nestedTable, partUri, null, nestedOrder, nodes, sliceMap, ref ordinal);
+                var cellBlocks = CellBlocks(tc).ToArray();
+                var keptParagraph = KeptCellParagraphs(cellBlocks, hiddenStyles);
+                for (var blockIndex = 0; blockIndex < cellBlocks.Length; blockIndex++)
+                {
+                    if (cellBlocks[blockIndex].Name != W + "tbl") continue;
+                    // How many of the host cell's own (kept) paragraphs precede this table, so a
+                    // reader can put the nested rows back between "before" and "after" instead of
+                    // after everything the cell says.
+                    // The cell's text joins paragraphs with "\n", and a w:br inside a paragraph also
+                    // becomes "\n", so a reader splitting that text by line cannot tell the two
+                    // apart. Record the position in both units: kept paragraphs, and the "\n"-lines
+                    // those paragraphs occupy in CellText's output.
+                    var paragraphOffset = 0;
+                    var lineOffset = 0;
+                    for (var preceding = 0; preceding < blockIndex; preceding++)
+                    {
+                        if (!keptParagraph[preceding]) continue;
+                        paragraphOffset++;
+                        lineOffset += 1 + ParagraphText(cellBlocks[preceding], hiddenStyles).Count(character => character == '\n');
+                    }
+                    var nestedOrder = ordinal++;
+                    AddTable(cellBlocks[blockIndex], partUri, null, nestedOrder, nodes, sliceMap, ref ordinal, hiddenStyles,
+                        contentControl, new DocxNestedTable(id, rowIndex, cellIndex, paragraphOffset, lineOffset));
+                }
+                cellIndex++;
             }
+            rowIndex++;
+        }
+    }
+
+    /// <summary>Where a nested table sat inside its host table's cell grid, and after how many of
+    /// the host cell's own kept paragraphs (see <see cref="CellText"/>) it appeared.</summary>
+    private sealed record DocxNestedTable(string ParentNodeId, int Row, int Column, int ParagraphOffset, int LineOffset);
+
+    /// <summary>Marks, per cell block, whether a paragraph survives <see cref="CellText"/>'s trimming
+    /// of leading and trailing empty paragraphs (tables are never "kept" paragraphs).</summary>
+    private static bool[] KeptCellParagraphs(IReadOnlyList<XElement> blocks, DocxHiddenStyles hiddenStyles)
+    {
+        var kept = new bool[blocks.Count];
+        var paragraphs = new List<int>();
+        for (var index = 0; index < blocks.Count; index++) if (blocks[index].Name == W + "p") paragraphs.Add(index);
+        var first = 0;
+        var last = paragraphs.Count - 1;
+        while (first <= last && ParagraphText(blocks[paragraphs[first]], hiddenStyles).Length == 0) first++;
+        while (last >= first && ParagraphText(blocks[paragraphs[last]], hiddenStyles).Length == 0) last--;
+        for (var position = first; position <= last; position++) kept[paragraphs[position]] = true;
+        return kept;
+    }
+
+    /// <summary>The nearest block-level content control (w:sdt) a node came out of.</summary>
+    private sealed record DocxContentControl(string? Alias, string? Tag);
+
+    // A w:sdt is a wrapper around body content, so it is unwrapped rather than projected: the
+    // w:p/w:tbl (and nested w:sdt) under its w:sdtContent become ordinary body elements. The
+    // control's identity travels with them as content_control/sdt_alias/sdt_tag extensions, and
+    // an inner control's alias/tag wins over an outer one's.
+    private static IEnumerable<(XElement Element, DocxContentControl? Control)> ExpandContentControls(
+        XElement element, DocxContentControl? inherited)
+    {
+        if (element.Name != W + "sdt")
+        {
+            yield return (element, inherited);
+            yield break;
+        }
+        var properties = element.Element(W + "sdtPr");
+        var control = new DocxContentControl(
+            (string?)properties?.Element(W + "alias")?.Attribute(W + "val") ?? inherited?.Alias,
+            (string?)properties?.Element(W + "tag")?.Attribute(W + "val") ?? inherited?.Tag);
+        foreach (var child in element.Element(W + "sdtContent")?.Elements() ?? Enumerable.Empty<XElement>())
+            foreach (var expanded in ExpandContentControls(child, control)) yield return expanded;
+    }
+
+    private static void AddContentControlExtensions(IDictionary<string, JsonElement> extensions, DocxContentControl? control)
+    {
+        if (control is null) return;
+        extensions["content_control"] = JsonSerializer.SerializeToElement(true);
+        if (!string.IsNullOrEmpty(control.Alias)) extensions["sdt_alias"] = JsonSerializer.SerializeToElement(control.Alias);
+        if (!string.IsNullOrEmpty(control.Tag)) extensions["sdt_tag"] = JsonSerializer.SerializeToElement(control.Tag);
+    }
+
+    // A cell's text is its own paragraphs joined by "\n" so a multi-paragraph cell keeps its line
+    // structure (the readable serializer renders "\n" inside a cell as <br>). Concatenating every
+    // w:t in the subtree instead — the previous behaviour — silently glued "A", "B", "C" into
+    // "ABC". Leading and trailing empty paragraphs are dropped because Word always leaves one
+    // after a nested table, and they would otherwise show up as stray blank lines.
+    private static string CellText(XElement cell, DocxHiddenStyles hiddenStyles)
+    {
+        var texts = CellBlocks(cell).Where(block => block.Name == W + "p")
+            .Select(block => ParagraphText(block, hiddenStyles)).ToList();
+        while (texts.Count > 0 && texts[0].Length == 0) texts.RemoveAt(0);
+        while (texts.Count > 0 && texts[^1].Length == 0) texts.RemoveAt(texts.Count - 1);
+        return string.Join("\n", texts);
+    }
+
+    /// <summary>The block-level children of a cell, seeing through content-control wrappers.</summary>
+    private static IEnumerable<XElement> CellBlocks(XContainer cell)
+    {
+        foreach (var child in cell.Elements())
+        {
+            if (child.Name == W + "sdt")
+            {
+                if (child.Element(W + "sdtContent") is { } content)
+                    foreach (var nested in CellBlocks(content)) yield return nested;
+                continue;
+            }
+            if (child.Name == W + "customXml")
+            {
+                foreach (var nested in CellBlocks(child)) yield return nested;
+                continue;
+            }
+            yield return child;
+        }
     }
 
     private static int? ParsePositiveInt(string? value) =>
         int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed > 0 ? parsed : null;
 
     private static async Task<int> AddRelatedTextPartsAsync(ZipArchive archive, IReadOnlyDictionary<string, string> relationships, string relationshipFragment,
-        NodeKind kind, ContentLayer layer, ICollection<DocumentNode> nodes, int ordinal, CancellationToken cancellationToken)
+        NodeKind kind, ContentLayer layer, ICollection<DocumentNode> nodes, int ordinal, DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
     {
         foreach (var target in relationships.Values.Where(target => target.Contains(relationshipFragment, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.Ordinal))
         {
@@ -1255,7 +1823,7 @@ public sealed class DocxAdapter : IFormatProbe
             {
                 var anchor = new SourceAnchor("docx", partUri, [new("part_paragraph_ordinal", ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture))], ordinal);
                 var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-                nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(ParagraphText(paragraph)), anchor,
+                nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(ParagraphText(paragraph, hiddenStyles)), anchor,
                     Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
             }
         }
@@ -1303,7 +1871,7 @@ public sealed class DocxAdapter : IFormatProbe
             Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
     }
 
-    private static void AddFootnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal)
+    private static void AddFootnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
         foreach (var footnote in xml.Descendants(W + "footnote"))
@@ -1311,14 +1879,14 @@ public sealed class DocxAdapter : IFormatProbe
             var noteId = (string?)footnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var anchor = new SourceAnchor("docx", "/word/footnotes.xml", [new("footnote_id", noteId)], ordinal);
             var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-            nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(footnote)), anchor,
+            nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(footnote, hiddenStyles)), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
         }
     }
 
     // D16: word/endnotes.xml mirrors word/footnotes.xml but was never read at all, so an
     // endnote's text disappeared entirely rather than merely losing its number.
-    private static void AddEndnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal)
+    private static void AddEndnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
         foreach (var endnote in xml.Descendants(W + "endnote"))
@@ -1326,14 +1894,14 @@ public sealed class DocxAdapter : IFormatProbe
             var noteId = (string?)endnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var anchor = new SourceAnchor("docx", "/word/endnotes.xml", [new("endnote_id", noteId)], ordinal);
             var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-            nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(endnote)), anchor,
+            nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(endnote, hiddenStyles)), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
         }
     }
 
     // D17: word/comments.xml was never read, so a reviewer comment's text disappeared entirely.
     // w:author is captured as a comment_author extension so readable can label who wrote it.
-    private static void AddComments(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal)
+    private static void AddComments(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
         foreach (var comment in xml.Descendants(W + "comment"))
@@ -1345,7 +1913,7 @@ public sealed class DocxAdapter : IFormatProbe
             var extensions = string.IsNullOrWhiteSpace(author)
                 ? null
                 : new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["comment_author"] = JsonSerializer.SerializeToElement(author) };
-            nodes.Add(new(id, NodeKind.Comment, null, ordinal++, ContentLayer.Metadata, new TextNodeContent(ParagraphText(comment)), anchor,
+            nodes.Add(new(id, NodeKind.Comment, null, ordinal++, ContentLayer.Metadata, new TextNodeContent(ParagraphText(comment, hiddenStyles)), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
         }
     }
@@ -1364,9 +1932,204 @@ public sealed class DocxAdapter : IFormatProbe
         {
             if (OpaqueParagraphContainers.Contains(child.Name)) continue;
             yield return child;
+            // An equation is a third kind of opaque content, but unlike a table or a text box it
+            // has no node of its own: it is projected as one linearized string inside the owning
+            // paragraph. The element itself is therefore still yielded (so callers can linearize
+            // it in place) while its m:* subtree is not walked — otherwise its inner w:t/m:t would
+            // be emitted a second time, next to the linearization.
+            if (IsMathRoot(child)) continue;
             foreach (var descendant in RelevantDescendants(child)) yield return descendant;
         }
     }
+
+    private static bool IsMathRoot(XElement element) => element.Name == M + "oMathPara" || element.Name == M + "oMath";
+
+    /// <summary>Counts the outermost equations under <paramref name="element"/>, matching what
+    /// <see cref="LinearizeMath"/> converts (an m:oMathPara and its inner m:oMath count once).</summary>
+    private static int CountMathRoots(XElement element) =>
+        IsMathRoot(element) ? 1 : element.Elements().Sum(CountMathRoots);
+
+    // A block-level equation (m:oMathPara / m:oMath as a sibling of w:p) becomes its own Paragraph
+    // node, and its slice is that OMML element itself. There is no w:p to rewrite inside it, so an
+    // edit to its linear text can only replace the whole equation with an ordinary paragraph -
+    // which restore does, reporting the lost markup as DocxMathReplaced.
+    private static void AddMathParagraph(XElement math, string partUri, RawSliceRef? slice, int order,
+        ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, DocxContentControl? contentControl)
+    {
+        var anchor = new SourceAnchor("docx", partUri,
+            [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
+        var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
+        var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["math_linear"] = JsonSerializer.SerializeToElement(true),
+        };
+        AddContentControlExtensions(extensions, contentControl);
+        nodes.Add(new(id, NodeKind.Paragraph, null, order, ContentLayer.Body, new TextNodeContent(LinearizeMath(math)), anchor, slice,
+            Editability: slice is null ? NodeEditability.Protected : NodeEditability.EditableInPlace,
+            Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
+        if (slice is not null) sliceMap[id] = slice;
+    }
+
+    /// <summary>The block kinds <see cref="XmlSliceScanner"/> records at a body position, and so
+    /// the only elements an F1 splice can address.</summary>
+    private static bool IsSliceableBlock(XElement element) =>
+        element.Name == W + "p" || element.Name == W + "tbl" || IsMathRoot(element);
+
+    /// <summary>Inline markup an edit carries over instead of rewriting, paired with the text the
+    /// projection rendered it as. Two shapes qualify: an equation, whose OMML cannot be rebuilt from
+    /// the single linear string it projects as, and an inline content control / smart tag /
+    /// custom-XML element, whose wrapper carries identity (an alias, a tag, a schema binding) that
+    /// its text does not. <paramref name="Offset"/> is where its text starts in the paragraph's own
+    /// projection and <paramref name="TemplateSpan"/> how many run templates its content
+    /// contributed, so the runs after it keep taking their formatting from the right place.</summary>
+    private sealed record DocxInlineAnchor(XElement Element, string Text, int Offset, bool IsContainer, int TemplateSpan);
+
+    /// <summary>Inline containers: markup that holds runs without being a run. Their content is
+    /// projected as ordinary text (see <see cref="RelevantDescendants"/>), so an edit has to put it
+    /// back inside the wrapper rather than beside it.</summary>
+    private static bool IsInlineContainer(XElement element) =>
+        element.Name == W + "sdt" || element.Name == W + "smartTag" || element.Name == W + "customXml";
+
+    /// <summary>What one paragraph offers a rewrite: the text it projects, the run templates its
+    /// character positions map onto, and the inline anchors an edit must route around. Built from
+    /// the paragraph's direct children in order, which is the order
+    /// <see cref="ParagraphText"/> walks, so anchor offsets index the projected text directly.</summary>
+    private sealed record DocxParagraphLayout(string Text, IReadOnlyList<OriginalRunTemplate> Templates,
+        IReadOnlyList<DocxInlineAnchor> Anchors);
+
+    private static DocxParagraphLayout ReadParagraphLayout(XElement paragraph)
+    {
+        var templates = new List<OriginalRunTemplate>();
+        var anchors = new List<DocxInlineAnchor>();
+        var offset = 0;
+        foreach (var child in paragraph.Elements())
+        {
+            if (OpaqueParagraphContainers.Contains(child.Name)) continue;
+            if (IsMathRoot(child))
+            {
+                // An equation contributes no template: its runs are m:r, not w:r, and nothing the
+                // editor wrote is ever formatted from them.
+                var linear = LinearizeMath(child);
+                anchors.Add(new(child, linear, offset, false, 0));
+                offset += linear.Length;
+                continue;
+            }
+            if (IsInlineContainer(child))
+            {
+                var start = templates.Count;
+                foreach (var run in RelevantDescendants(child).Where(element => element.Name == W + "r"))
+                    AddRunTemplates(templates, run);
+                var contained = InlineText(child);
+                anchors.Add(new(child, contained, offset, true, templates.Count - start));
+                offset += contained.Length;
+                continue;
+            }
+            if (child.Name == W + "r") AddRunTemplates(templates, child);
+            offset += InlineText(child).Length;
+        }
+        return new(InlineText(paragraph), templates, anchors);
+    }
+
+    private static IReadOnlyList<DocxInlineAnchor> ParagraphInlineAnchors(XElement paragraph) =>
+        ReadParagraphLayout(paragraph).Anchors;
+
+    /// <summary>Restore-side <see cref="ParagraphText"/>. A slice is reparsed on its own, with no
+    /// styles.xml at hand to resolve style-driven hiding, and tracked-change markup is refused
+    /// before an edit reaches here, so the two walks agree on every paragraph an edit can touch.</summary>
+    private static string InlineText(XContainer container)
+    {
+        var output = new StringBuilder();
+        foreach (var element in RelevantDescendants(container))
+        {
+            if (IsMathRoot(element)) output.Append(LinearizeMath(element));
+            else if (element.Name == W + "t") output.Append(element.Value);
+            else if (element.Name is var name && (name == W + "br" || name == W + "cr"))
+            {
+                if (IsPageBreakElement(element)) continue;
+                output.Append('\n');
+            }
+            else if (element.Name == W + "tab") output.Append('\t');
+        }
+        return output.ToString();
+    }
+
+    /// <summary>Splits a plain-text edit around the anchor texts it still contains, so a text-only
+    /// rewrite (a table cell, a paragraph that never projected rich runs) keeps the OMML and the
+    /// inline controls the editor left alone.</summary>
+    private static IReadOnlyList<TextRun> SplitTextAroundAnchors(string text, IReadOnlyList<DocxInlineAnchor> anchors)
+    {
+        var runs = new List<TextRun>();
+        var cursor = 0;
+        foreach (var anchor in anchors)
+        {
+            if (anchor.Text.Length == 0) continue;
+            var found = text.IndexOf(anchor.Text, cursor, StringComparison.Ordinal);
+            if (found < 0) continue;
+            if (found > cursor) runs.Add(new TextRun(text[cursor..found]));
+            runs.Add(new TextRun(anchor.Text));
+            cursor = found + anchor.Text.Length;
+        }
+        if (cursor < text.Length || runs.Count == 0) runs.Add(new TextRun(text[cursor..]));
+        return runs;
+    }
+
+    // Word stores a native equation as structured OMML whose text leaves are m:t, not w:t, so a
+    // w:t-only projection dropped every equation without a trace. This renders the common OMML
+    // constructs as linear text (the same convention Word itself uses in its linear input mode):
+    // E=mc² becomes "E=mc^2". Anything unrecognised still contributes its text leaves, so an
+    // exotic construct degrades to its characters rather than to nothing.
+    private static string LinearizeMath(XElement element)
+    {
+        var name = element.Name;
+        if (name == M + "t" || name == W + "t") return element.Value;
+        if (name == M + "oMathPara") return string.Join(" ", element.Elements(M + "oMath").Select(LinearizeMath));
+        if (name == M + "f") return MathOperand(MathPart(element, "num")) + "/" + MathOperand(MathPart(element, "den"));
+        if (name == M + "sSup") return MathPart(element, "e") + "^" + MathGroup(MathPart(element, "sup"));
+        if (name == M + "sSub") return MathPart(element, "e") + "_" + MathGroup(MathPart(element, "sub"));
+        if (name == M + "sSubSup")
+            return MathPart(element, "e") + "_" + MathGroup(MathPart(element, "sub")) + "^" + MathGroup(MathPart(element, "sup"));
+        if (name == M + "rad") return MathPart(element, "deg") + "√(" + MathPart(element, "e") + ")";
+        if (name == M + "d")
+        {
+            var properties = element.Element(M + "dPr");
+            var open = (string?)properties?.Element(M + "begChr")?.Attribute(M + "val") ?? "(";
+            var close = (string?)properties?.Element(M + "endChr")?.Attribute(M + "val") ?? ")";
+            var separator = (string?)properties?.Element(M + "sepChr")?.Attribute(M + "val") ?? ",";
+            return open + string.Join(separator, element.Elements(M + "e").Select(LinearizeMath)) + close;
+        }
+        if (name == M + "nary")
+        {
+            var symbol = (string?)element.Element(M + "naryPr")?.Element(M + "chr")?.Attribute(M + "val") ?? "∫";
+            var sub = MathPart(element, "sub");
+            var sup = MathPart(element, "sup");
+            return symbol + (sub.Length == 0 ? string.Empty : "_" + MathGroup(sub)) +
+                (sup.Length == 0 ? string.Empty : "^" + MathGroup(sup)) + "(" + MathPart(element, "e") + ")";
+        }
+        if (name == M + "func") return MathPart(element, "fName") + "(" + MathPart(element, "e") + ")";
+        if (name == M + "eqArr") return string.Join("\n", element.Elements(M + "e").Select(LinearizeMath));
+        if (name == M + "m")
+            return "[" + string.Join(";", element.Elements(M + "mr")
+                .Select(row => string.Join(",", row.Elements(M + "e").Select(LinearizeMath)))) + "]";
+        // m:bar, m:acc, m:box and m:groupChr pass their content through unchanged; m:oMath, m:e,
+        // m:r and every unknown construct simply concatenate their children. Property elements
+        // (anything ending in "Pr") carry formatting, never text, and are skipped.
+        return string.Concat(element.Elements()
+            .Where(child => !child.Name.LocalName.EndsWith("Pr", StringComparison.Ordinal))
+            .Select(LinearizeMath));
+    }
+
+    private static string MathPart(XElement element, string localName) =>
+        string.Concat(element.Elements(M + localName).Select(LinearizeMath));
+
+    /// <summary>Parenthesizes a sub/superscript that is longer than a single character, so
+    /// <c>c^2</c> stays readable while <c>x^(n+1)</c> keeps its grouping unambiguous.</summary>
+    private static string MathGroup(string value) => value.Length > 1 ? "(" + value + ")" : value;
+
+    /// <summary>Parenthesizes a fraction operand only when it contains an operator or a space, so
+    /// <c>(a+b)/2</c> and <c>x/y</c> read naturally while <c>(x^2)/(n+1)</c> keeps its grouping.</summary>
+    private static string MathOperand(string value) =>
+        value.Length > 1 && value.Any(character => char.IsWhiteSpace(character) || "+-*/=^_±×÷·".Contains(character))
+            ? "(" + value + ")" : value;
 
     // D18 (coordinator-adjudicated): only w:br type="page" is excluded here — an explicit page
     // break already gets its own PageBreak marker node (see AddParagraph), so it must not also
@@ -1385,24 +2148,25 @@ public sealed class DocxAdapter : IFormatProbe
             (string?)owner?.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
     }
 
-    private static string TextBoxText(XElement textBox)
+    private static string TextBoxText(XElement textBox, DocxHiddenStyles hiddenStyles)
     {
         var boxes = textBox.Name == W + "txbxContent"
             ? [textBox]
             : textBox.Descendants(W + "txbxContent").ToArray();
         var paragraphs = boxes.SelectMany(box => box.Elements(W + "p")).ToArray();
         return paragraphs.Length == 0
-            ? ParagraphText(textBox)
-            : string.Join("\n", paragraphs.Select(ParagraphText));
+            ? ParagraphText(textBox, hiddenStyles)
+            : string.Join("\n", paragraphs.Select(paragraph => ParagraphText(paragraph, hiddenStyles)));
     }
 
-    private static string ParagraphText(XContainer container)
+    private static string ParagraphText(XContainer container, DocxHiddenStyles hiddenStyles)
     {
         var output = new StringBuilder();
         foreach (var element in RelevantDescendants(container))
         {
-            if (IsHiddenContentElement(element)) continue;
-            if (element.Name == W + "t") output.Append(element.Value);
+            if (IsHiddenContentElement(element, hiddenStyles)) continue;
+            if (IsMathRoot(element)) output.Append(LinearizeMath(element));
+            else if (element.Name == W + "t") output.Append(element.Value);
             else if (element.Name is var name && (name == W + "br" || name == W + "cr"))
             {
                 if (IsPageBreakElement(element)) continue;
@@ -1413,30 +2177,40 @@ public sealed class DocxAdapter : IFormatProbe
         return output.ToString();
     }
 
-    private static string HiddenParagraphText(XContainer container)
+    private static string HiddenParagraphText(XContainer container, DocxHiddenStyles hiddenStyles)
     {
         var output = new StringBuilder();
         foreach (var element in RelevantDescendants(container))
         {
-            if (element.Name == W + "delText" || element.Name == W + "t" && IsHiddenContentElement(element))
+            if (element.Name == W + "delText" || element.Name == W + "t" && IsHiddenContentElement(element, hiddenStyles))
                 output.Append(element.Value);
         }
         return output.ToString();
     }
 
-    private static bool IsHiddenContentElement(XElement element) =>
+    private static bool IsHiddenContentElement(XElement element, DocxHiddenStyles hiddenStyles) =>
         element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "del") ||
-        element.AncestorsAndSelf().FirstOrDefault(ancestor => ancestor.Name == W + "r") is { } run && IsHiddenRun(run);
+        element.AncestorsAndSelf().FirstOrDefault(ancestor => ancestor.Name == W + "r") is { } run && IsHiddenRun(run, hiddenStyles);
 
-    private static bool IsHiddenRun(XElement run) =>
-        run.Ancestors(W + "del").Any() || IsEnabled(run.Element(W + "rPr")?.Element(W + "vanish"));
+    private static bool IsHiddenRun(XElement run, DocxHiddenStyles hiddenStyles) =>
+        run.Ancestors(W + "del").Any() || hiddenStyles.IsHiddenRun(run);
 
-    private static IReadOnlyList<TextRun> ExtractRichTextRuns(XElement paragraph, IReadOnlyDictionary<string, string> relationships)
+    private static IReadOnlyList<TextRun> ExtractRichTextRuns(XElement paragraph, IReadOnlyDictionary<string, string> relationships,
+        DocxHiddenStyles hiddenStyles)
     {
         var runs = new List<TextRun>();
-        foreach (var run in RelevantDescendants(paragraph).Where(element => element.Name == W + "r"))
+        foreach (var element in RelevantDescendants(paragraph))
         {
-            if (IsHiddenRun(run)) continue;
+            if (IsMathRoot(element))
+            {
+                // The linearized equation is one inline unit, marked Code so the readable
+                // projection renders ^, _ and / verbatim instead of as Markdown syntax.
+                runs.Add(new TextRun(LinearizeMath(element), Code: true));
+                continue;
+            }
+            if (element.Name != W + "r") continue;
+            var run = element;
+            if (IsHiddenRun(run, hiddenStyles)) continue;
             var properties = ReadRunProperties(run);
             var linkTarget = ResolveEnclosingHyperlinkTarget(run, relationships);
             foreach (var child in run.Elements())
@@ -1501,23 +2275,133 @@ public sealed class DocxAdapter : IFormatProbe
                !StringComparer.OrdinalIgnoreCase.Equals(value, "false");
     }
 
+    /// <summary>Reads one level's <c>w:vanish</c> as a tri-state: <c>null</c> means "says nothing,
+    /// keep inheriting", so a nearer level's explicit <c>w:val="0|false|off"</c> can switch an
+    /// inherited hide back off.</summary>
+    private static bool? VanishState(XElement? runProperties)
+    {
+        var vanish = runProperties?.Element(W + "vanish");
+        if (vanish is null) return null;
+        return !StringComparer.OrdinalIgnoreCase.Equals((string?)vanish.Attribute(W + "val"), "off") && IsEnabled(vanish);
+    }
+
+    /// <summary>
+    /// Resolves whether a run is hidden, following the OOXML property-inheritance chain rather
+    /// than only the run's own <c>w:rPr/w:vanish</c>: <c>w:docDefaults</c>, then the paragraph
+    /// style chain (<c>w:basedOn</c>, falling back to the <c>w:default="1"</c> paragraph style),
+    /// then the character style chain, then the run's direct properties. Text hidden through a
+    /// style is therefore excluded from the visible/sanitized projections exactly like directly
+    /// vanished text. A <c>w:vanish</c> inside <c>w:pPr/w:rPr</c> is deliberately ignored: it
+    /// formats the paragraph <em>mark</em>, not the paragraph's runs.
+    /// </summary>
+    private sealed class DocxHiddenStyles
+    {
+        public static readonly DocxHiddenStyles Empty = new(false,
+            new Dictionary<string, bool?>(StringComparer.Ordinal), new Dictionary<string, bool?>(StringComparer.Ordinal), null);
+
+        private readonly bool documentDefault;
+        private readonly IReadOnlyDictionary<string, bool?> paragraphStyles;
+        private readonly IReadOnlyDictionary<string, bool?> characterStyles;
+        private readonly string? defaultParagraphStyleId;
+        private readonly bool hasStyleVanish;
+
+        public DocxHiddenStyles(bool documentDefault, IReadOnlyDictionary<string, bool?> paragraphStyles,
+            IReadOnlyDictionary<string, bool?> characterStyles, string? defaultParagraphStyleId)
+        {
+            this.documentDefault = documentDefault;
+            this.paragraphStyles = paragraphStyles;
+            this.characterStyles = characterStyles;
+            this.defaultParagraphStyleId = defaultParagraphStyleId;
+            hasStyleVanish = documentDefault || paragraphStyles.Values.Any(value => value is not null) ||
+                characterStyles.Values.Any(value => value is not null);
+        }
+
+        public bool IsHiddenRun(XElement run)
+        {
+            var properties = run.Element(W + "rPr");
+            // Overwhelmingly the common case: no style anywhere in the document mentions w:vanish,
+            // so only the run's own properties can hide it and no ancestor walk is needed.
+            if (!hasStyleVanish) return VanishState(properties) ?? false;
+            var effective = documentDefault;
+            var paragraphStyleId = (string?)run.Ancestors(W + "p").FirstOrDefault()?.Element(W + "pPr")?
+                .Element(W + "pStyle")?.Attribute(W + "val") ?? defaultParagraphStyleId;
+            if (paragraphStyleId is not null && paragraphStyles.TryGetValue(paragraphStyleId, out var fromParagraph) &&
+                fromParagraph is { } paragraphVanish) effective = paragraphVanish;
+            var characterStyleId = (string?)properties?.Element(W + "rStyle")?.Attribute(W + "val");
+            if (characterStyleId is not null && characterStyles.TryGetValue(characterStyleId, out var fromCharacter) &&
+                fromCharacter is { } characterVanish) effective = characterVanish;
+            return VanishState(properties) ?? effective;
+        }
+    }
+
+    /// <summary>Guards against a hand-written or corrupt styles.xml whose w:basedOn chain is
+    /// cyclic or absurdly deep; a chain longer than this simply stops inheriting.</summary>
+    private const int MaxStyleChainDepth = 32;
+
+    private static DocxHiddenStyles ReadHiddenStyles(ZipArchive archive, CancellationToken cancellationToken)
+    {
+        if (archive.GetEntry("word/styles.xml") is not { } entry) return DocxHiddenStyles.Empty;
+        var root = SafeXml.LoadDocument(ReadEntryAsync(entry, cancellationToken).GetAwaiter().GetResult()).Root;
+        if (root is null) return DocxHiddenStyles.Empty;
+        var documentDefault = VanishState(root.Element(W + "docDefaults")?.Element(W + "rPrDefault")?.Element(W + "rPr")) ?? false;
+        var declared = new Dictionary<string, (string? Type, string? BasedOn, bool? Vanish)>(StringComparer.Ordinal);
+        string? defaultParagraphStyleId = null;
+        foreach (var style in root.Elements(W + "style"))
+        {
+            if ((string?)style.Attribute(W + "styleId") is not { } styleId) continue;
+            var type = (string?)style.Attribute(W + "type");
+            declared[styleId] = (type, (string?)style.Element(W + "basedOn")?.Attribute(W + "val"), VanishState(style.Element(W + "rPr")));
+            if (defaultParagraphStyleId is null && StringComparer.OrdinalIgnoreCase.Equals(type, "paragraph") &&
+                (string?)style.Attribute(W + "default") is { } flag &&
+                !StringComparer.OrdinalIgnoreCase.Equals(flag, "0") && !StringComparer.OrdinalIgnoreCase.Equals(flag, "false") &&
+                !StringComparer.OrdinalIgnoreCase.Equals(flag, "off")) defaultParagraphStyleId = styleId;
+        }
+
+        var resolved = new Dictionary<string, bool?>(StringComparer.Ordinal);
+        var paragraphStyles = new Dictionary<string, bool?>(StringComparer.Ordinal);
+        var characterStyles = new Dictionary<string, bool?>(StringComparer.Ordinal);
+        foreach (var (styleId, style) in declared)
+        {
+            var value = Resolve(styleId, new HashSet<string>(StringComparer.Ordinal), 0);
+            if (StringComparer.OrdinalIgnoreCase.Equals(style.Type, "character")) characterStyles[styleId] = value;
+            else if (style.Type is null || StringComparer.OrdinalIgnoreCase.Equals(style.Type, "paragraph")) paragraphStyles[styleId] = value;
+        }
+        return new DocxHiddenStyles(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId);
+
+        // The nearest declaration in a w:basedOn chain wins, so a style that says nothing inherits
+        // its base's answer and one that says w:val="0" cancels it.
+        bool? Resolve(string styleId, HashSet<string> visiting, int depth)
+        {
+            if (resolved.TryGetValue(styleId, out var cached)) return cached;
+            if (depth >= MaxStyleChainDepth || !visiting.Add(styleId) || !declared.TryGetValue(styleId, out var style)) return null;
+            var value = style.Vanish ?? (style.BasedOn is null ? null : Resolve(style.BasedOn, visiting, depth + 1));
+            visiting.Remove(styleId);
+            resolved[styleId] = value;
+            return value;
+        }
+    }
+
     private static bool IsMonospaceFont(string? fontName) => fontName is not null &&
         (fontName.Contains("consolas", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("courier", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("menlo", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("monaco", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("source code", StringComparison.OrdinalIgnoreCase));
-    private static DocxRunCharacterMap BuildRunMap(string nodeId, XElement paragraph)
+    private static DocxRunCharacterMap BuildRunMap(string nodeId, XElement paragraph, DocxHiddenStyles hiddenStyles)
     {
         var spans = new List<RunCharacterSpan>();
         var start = 0;
         var ordinal = 0;
-        foreach (var run in RelevantDescendants(paragraph).Where(element => element.Name == W + "r"))
+        // An equation contributes its linearization to the paragraph's character stream (see
+        // ParagraphText), so it needs a span of its own: omitting it left every later run mapped to
+        // an offset short by the equation's length.
+        foreach (var run in RelevantDescendants(paragraph).Where(element => element.Name == W + "r" || IsMathRoot(element)))
         {
-            if (IsHiddenRun(run)) continue;
-            var text = string.Concat(run.Elements().Select(element => element.Name == W + "t" ? element.Value :
-                element.Name is var name && (name == W + "br" || name == W + "cr") ? (IsPageBreakElement(element) ? string.Empty : "\n") :
-                element.Name == W + "tab" ? "\t" : string.Empty));
+            if (IsHiddenContentElement(run, hiddenStyles)) continue;
+            var text = IsMathRoot(run) ? LinearizeMath(run)
+                : string.Concat(run.Elements().Select(element => element.Name == W + "t" ? element.Value :
+                    element.Name is var name && (name == W + "br" || name == W + "cr") ? (IsPageBreakElement(element) ? string.Empty : "\n") :
+                    element.Name == W + "tab" ? "\t" : string.Empty));
             spans.Add(new(start, start + text.Length, ordinal++, text));
             start += text.Length;
         }
@@ -1584,64 +2468,217 @@ public sealed class DocxAdapter : IFormatProbe
         return document.AsSpan((int)slice.StartOffset, checked((int)(slice.EndOffset - slice.StartOffset))).ToArray();
     }
 
-    private static byte[] ReplaceParagraphContent(byte[] originalSlice, NodeContent content)
+    /// <summary>What an edited block could not carry back: equations whose OMML the edit typed over,
+    /// and inline containers whose wrapper the edit dissolved.</summary>
+    private readonly record struct DocxParagraphEditResult(int ReplacedEquations, int UnwrappedContainers)
     {
-        return content switch
-        {
-            TextNodeContent text => ReplaceParagraphText(originalSlice, text.Text),
-            RichTextNodeContent rich => ReplaceParagraphRichText(originalSlice, rich.Runs),
-            _ => throw new InvalidDataException("An edited DOCX paragraph must retain text or supported rich text content.")
-        };
+        public static DocxParagraphEditResult operator +(DocxParagraphEditResult left, DocxParagraphEditResult right) =>
+            new(left.ReplacedEquations + right.ReplacedEquations, left.UnwrappedContainers + right.UnwrappedContainers);
     }
 
-    private static byte[] ReplaceParagraphText(byte[] originalSlice, string text)
+    /// <summary>Rewrites one block slice from its edited content, reporting through
+    /// <paramref name="edits"/> the inline markup the edit did not carry back.</summary>
+    private static byte[] ReplaceParagraphContent(byte[] originalSlice, NodeContent content, out DocxParagraphEditResult edits)
     {
-        var fragment = Encoding.UTF8.GetString(originalSlice);
-        var wrapper = $"<drmd:root xmlns:drmd=\"urn:drmd\" xmlns:w=\"{W}\" xmlns:w14=\"{W14}\" xmlns:r=\"{R}\" xmlns:a=\"{A}\" xmlns:wp=\"{WP}\">{fragment}</drmd:root>";
-        var paragraph = SafeXml.LoadDocument(SafeXml.Utf8(wrapper)).Root?.Elements().SingleOrDefault()
-            ?? throw new InvalidDataException("DOCX paragraph slice is empty.");
-        RejectUnsupportedPlainTextParagraph(paragraph);
-        var textElements = paragraph.Descendants(W + "t").ToArray();
+        var block = LoadSliceElement(originalSlice);
+        // A block-level equation's slice *is* the OMML: there is no w:p around it to rewrite, so an
+        // edited linear form can only become an ordinary paragraph carrying that text.
+        if (IsMathRoot(block))
+        {
+            edits = new(1, 0);
+            return Serialize(new XElement(W + "p", CreateRichRun(new TextRun(PlainTextOf(content)))));
+        }
+        if (content is RichTextNodeContent rich)
+        {
+            RejectUnsupportedRichTextParagraph(block);
+            edits = ReplaceParagraphRuns(block, rich.Runs);
+            return Serialize(block);
+        }
+        if (content is not TextNodeContent plain)
+            throw new InvalidDataException("An edited DOCX paragraph must retain text or supported rich text content.");
+        RejectUnsupportedPlainTextParagraph(block);
+        var anchors = ParagraphInlineAnchors(block);
+        // A plain-text edit carries an equation or a content control only as the text it projected,
+        // so the text is split around the projections it still contains and the run rewrite matches
+        // them back onto the markup they came from.
+        if (anchors.Count > 0)
+        {
+            edits = ReplaceParagraphRuns(block, SplitTextAroundAnchors(plain.Text, anchors));
+            return Serialize(block);
+        }
+        edits = default;
+        ReplaceParagraphText(block, plain.Text);
+        return Serialize(block);
+    }
+
+    private static string PlainTextOf(NodeContent content) => content switch
+    {
+        TextNodeContent text => text.Text,
+        RichTextNodeContent rich => string.Concat(rich.Runs.Select(run => run.Text)),
+        _ => throw new InvalidDataException("An edited DOCX paragraph must retain text or supported rich text content.")
+    };
+
+    private static byte[] Serialize(XElement element) => SafeXml.Utf8(element.ToString(SaveOptions.DisableFormatting));
+
+    private static void ReplaceParagraphText(XElement paragraph, string text)
+    {
+        // RelevantDescendants, not Descendants: a text box in this paragraph projects as its own
+        // TextBox node and its characters were never part of this paragraph's text, so writing the
+        // edit across them would blank a box on every edit to the paragraph around it.
+        var textElements = RelevantDescendants(paragraph).Where(element => element.Name == W + "t").ToArray();
+        if (textElements.Length == 0) paragraph.Add(new XElement(W + "r", new XElement(W + "t", text)));
+        else WriteTextAcross(textElements, text);
+    }
+
+    /// <summary>Preserve existing run/text boundaries where possible. This is the minimal
+    /// character-offset-map policy: original character spans remain assigned to their original
+    /// formatting runs; growth is assigned to the final run.</summary>
+    private static void WriteTextAcross(IReadOnlyList<XElement> textElements, string text)
+    {
+        var originalLengths = textElements.Select(element => element.Value.Length).ToArray();
+        var offset = 0;
+        for (var index = 0; index < textElements.Count; index++)
+        {
+            var length = index == textElements.Count - 1
+                ? text.Length - offset
+                : Math.Min(originalLengths[index], Math.Max(0, text.Length - offset));
+            var replacement = text.Substring(offset, length);
+            textElements[index].Value = replacement;
+            if (!StringComparer.Ordinal.Equals(replacement, replacement.Trim())) textElements[index].SetAttributeValue(XNamespace.Xml + "space", "preserve");
+            offset += length;
+        }
+    }
+
+    /// <summary>Where one inline anchor ends up in the edited text. <c>Start &lt; 0</c> means the
+    /// edit typed over it and the markup is dropped; a non-null <see cref="InnerText"/> means the
+    /// wrapper is kept and only its own content was rewritten.</summary>
+    private sealed record DocxAnchorPlacement(DocxInlineAnchor Anchor, int Start, int Length, string? InnerText)
+    {
+        public int End => Start + Length;
+    }
+
+    /// <summary>Locates every inline anchor inside the edited text, in order. Neither OMML nor an
+    /// inline control can be rebuilt from the text it projects as, so each is looked for verbatim in
+    /// what the editor wrote: found, the original markup is simply left where it stands. A control
+    /// the search missed had its own text edited - if everything around it came back untouched the
+    /// difference is its new content and goes back inside the wrapper; otherwise the edit ran
+    /// across the wrapper's boundary and the wrapper cannot survive it.</summary>
+    private static IReadOnlyList<DocxAnchorPlacement> PlaceInlineAnchors(DocxParagraphLayout layout, string combined)
+    {
+        var placements = new List<DocxAnchorPlacement>();
+        var cursor = 0;
+        foreach (var anchor in layout.Anchors)
+        {
+            if (anchor.Text.Length == 0) { placements.Add(new(anchor, cursor, 0, null)); continue; }
+            var found = cursor <= combined.Length ? combined.IndexOf(anchor.Text, cursor, StringComparison.Ordinal) : -1;
+            if (found >= 0)
+            {
+                placements.Add(new(anchor, found, anchor.Text.Length, null));
+                cursor = found + anchor.Text.Length;
+                continue;
+            }
+            if (anchor.IsContainer && CanRewriteContainerText(anchor.Element))
+            {
+                var prefix = layout.Text[..Math.Min(anchor.Offset, layout.Text.Length)];
+                var suffix = layout.Text[Math.Min(anchor.Offset + anchor.Text.Length, layout.Text.Length)..];
+                if (prefix.Length >= cursor && combined.Length >= prefix.Length + suffix.Length &&
+                    combined.StartsWith(prefix, StringComparison.Ordinal) && combined.EndsWith(suffix, StringComparison.Ordinal))
+                {
+                    var inner = combined[prefix.Length..(combined.Length - suffix.Length)];
+                    placements.Add(new(anchor, prefix.Length, inner.Length, inner));
+                    cursor = prefix.Length + inner.Length;
+                    continue;
+                }
+            }
+            placements.Add(new(anchor, -1, 0, null));
+        }
+        return placements;
+    }
+
+    /// <summary>A control whose text comes from w:t alone can take a new string back; one holding a
+    /// break, a tab, or an equation cannot, because the string carries no record of where they sat.</summary>
+    private static bool CanRewriteContainerText(XElement container) =>
+        RelevantDescendants(container).All(element =>
+            element.Name != W + "br" && element.Name != W + "cr" && element.Name != W + "tab" && !IsMathRoot(element));
+
+    private static void WriteContainerText(XElement container, string text)
+    {
+        var textElements = RelevantDescendants(container).Where(element => element.Name == W + "t").ToArray();
         if (textElements.Length == 0)
         {
-            paragraph.Add(new XElement(W + "r", new XElement(W + "t", text)));
+            (container.Element(W + "sdtContent") ?? container).Add(new XElement(W + "r", new XElement(W + "t", text)));
+            return;
         }
-        else
-        {
-            // Preserve existing run/text boundaries where possible. This is the minimal
-            // character-offset-map policy: original character spans remain assigned to
-            // their original formatting runs; growth is assigned to the final run.
-            var originalLengths = textElements.Select(element => element.Value.Length).ToArray();
-            var offset = 0;
-            for (var index = 0; index < textElements.Length; index++)
-            {
-                var length = index == textElements.Length - 1
-                    ? text.Length - offset
-                    : Math.Min(originalLengths[index], Math.Max(0, text.Length - offset));
-                var replacement = text.Substring(offset, length);
-                textElements[index].Value = replacement;
-                if (!StringComparer.Ordinal.Equals(replacement, replacement.Trim())) textElements[index].SetAttributeValue(XNamespace.Xml + "space", "preserve");
-                offset += length;
-            }
-        }
-        return SafeXml.Utf8(paragraph.ToString(SaveOptions.DisableFormatting));
+        WriteTextAcross(textElements, text);
     }
 
-    private static byte[] ReplaceParagraphRichText(byte[] originalSlice, IReadOnlyList<TextRun> runs)
+    /// <summary>Rewrites a paragraph's direct w:r children from <paramref name="runs"/>, keeping in
+    /// place every equation and inline control those runs still spell out. Returns the markup the
+    /// edit could not carry back.</summary>
+    private static DocxParagraphEditResult ReplaceParagraphRuns(XElement paragraph, IReadOnlyList<TextRun> runs)
     {
-        var paragraph = LoadParagraphSlice(originalSlice);
-        RejectUnsupportedRichTextParagraph(paragraph);
-        var templates = BuildOriginalRunTemplates(paragraph);
+        var layout = ReadParagraphLayout(paragraph);
+        var templates = layout.Templates;
+        var combined = string.Concat(runs.Select(run => run.Text));
+        var placements = PlaceInlineAnchors(layout, combined);
+        var lost = new DocxParagraphEditResult(
+            placements.Count(item => item.Start < 0 && !item.Anchor.IsContainer),
+            placements.Count(item => item.Start < 0 && item.Anchor.IsContainer));
 
         // Paragraph properties stay untouched.  We replace only the direct w:r children,
         // preserving surrounding bookmark/comment anchors and the paragraph's layout,
         // numbering, alignment, and style properties.  Each replacement run starts from
         // the original run properties at the same character position, so unprojected
         // typography (font family, size, color, language, kerning, etc.) survives an edit.
+        // An anchor is not a direct w:r, so it stays exactly where it was and the rewritten runs
+        // are threaded around it - which is what keeps "before <anchor> after" in its own order.
         paragraph.Elements(W + "r").Remove();
+        foreach (var placement in placements)
+        {
+            if (placement.Start < 0) placement.Anchor.Element.Remove();
+            else if (placement.InnerText is not null) WriteContainerText(placement.Anchor.Element, placement.InnerText);
+        }
+        var kept = placements.Where(item => item.Start >= 0).ToArray();
+
         var insertionPoint = paragraph.Element(W + "pPr");
         var templateIndex = 0;
+        var keptIndex = 0;
+        var position = 0;
         foreach (var run in runs)
+        {
+            var length = run.Text.Length;
+            var consumed = 0;
+            while (true)
+            {
+                var absolute = position + consumed;
+                if (keptIndex < kept.Length && kept[keptIndex].Start == absolute && kept[keptIndex].Length == 0)
+                { PlaceAnchor(kept[keptIndex++]); continue; }
+                if (consumed >= length) break;
+                if (keptIndex < kept.Length && absolute >= kept[keptIndex].Start && absolute < kept[keptIndex].End)
+                {
+                    // These characters are the anchor's own projection: the markup already spells
+                    // them out, so no run is written for them.
+                    consumed += Math.Min(length - consumed, kept[keptIndex].End - absolute);
+                    if (position + consumed >= kept[keptIndex].End) PlaceAnchor(kept[keptIndex++]);
+                    continue;
+                }
+                var limit = keptIndex < kept.Length ? Math.Min(length, kept[keptIndex].Start - position) : length;
+                if (limit <= consumed) break;
+                EmitRun(run with { Text = run.Text[consumed..limit] });
+                consumed = limit;
+            }
+            position += length;
+        }
+        while (keptIndex < kept.Length) PlaceAnchor(kept[keptIndex++]);
+        return lost;
+
+        void PlaceAnchor(DocxAnchorPlacement placement)
+        {
+            insertionPoint = placement.Anchor.Element;
+            templateIndex += placement.Anchor.TemplateSpan;
+        }
+
+        void EmitRun(TextRun run)
         {
             var matchedIndex = FindMatchingTemplate(templates, templateIndex, run);
             if (matchedIndex >= 0) templateIndex = matchedIndex;
@@ -1654,24 +2691,21 @@ public sealed class DocxAdapter : IFormatProbe
                 for (var index = templateIndex; index < groupEnd && textOffset < run.Text.Length; index++)
                 {
                     var template = templates[index];
-                    var length = index == groupEnd - 1
+                    var span = index == groupEnd - 1
                         ? run.Text.Length - textOffset
                         : Math.Min(template.Length, run.Text.Length - textOffset);
-                    var replacement = CreateRichRun(run with { Text = run.Text.Substring(textOffset, length) }, template.Properties);
-                    Insert(replacement);
-                    textOffset += length;
+                    Insert(CreateRichRun(run with { Text = run.Text.Substring(textOffset, span) }, template.Properties));
+                    textOffset += span;
                 }
                 if (textOffset < run.Text.Length)
                     Insert(CreateRichRun(run with { Text = run.Text[textOffset..] }, templates.Count == 0 ? null : templates[Math.Min(templateIndex, templates.Count - 1)].Properties));
                 templateIndex = groupEnd;
-                continue;
+                return;
             }
-
             var specialTemplate = templateIndex < templates.Count ? templates[templateIndex] : templates.LastOrDefault();
             Insert(CreateRichRun(run, specialTemplate?.Properties));
             if (templateIndex < templates.Count) templateIndex++;
         }
-        return SafeXml.Utf8(paragraph.ToString(SaveOptions.DisableFormatting));
 
         void Insert(XElement replacement)
         {
@@ -1683,27 +2717,24 @@ public sealed class DocxAdapter : IFormatProbe
 
     private sealed record OriginalRunTemplate(int Length, XElement? Properties, string? StyleId, bool Bold, bool Italic, bool Underline, bool Strike, bool Code, TextRunKind Kind);
 
-    private static IReadOnlyList<OriginalRunTemplate> BuildOriginalRunTemplates(XElement paragraph)
+    /// <summary>Appends the templates one w:r contributes: one per projected character span, so a
+    /// character offset in the edited text maps back onto the formatting it originally carried.</summary>
+    private static void AddRunTemplates(ICollection<OriginalRunTemplate> result, XElement run)
     {
-        var result = new List<OriginalRunTemplate>();
-        foreach (var run in paragraph.Elements(W + "r"))
+        var properties = run.Element(W + "rPr");
+        var formatting = ReadRunProperties(run);
+        foreach (var child in run.Elements())
         {
-            var properties = run.Element(W + "rPr");
-            var formatting = ReadRunProperties(run);
-            foreach (var child in run.Elements())
-            {
-                var length = child.Name == W + "t" ? child.Value.Length
-                    : child.Name is var name && (name == W + "br" || name == W + "cr" || name == W + "tab") ? 1
-                    : 0;
-                if (length == 0) continue;
-                var kind = child.Name == W + "tab" ? TextRunKind.Tab
-                    : child.Name is var childName && (childName == W + "br" || childName == W + "cr") ? TextRunKind.LineBreak
-                    : TextRunKind.Text;
-                result.Add(new OriginalRunTemplate(length, properties is null ? null : new XElement(properties), formatting.StyleId,
-                    formatting.Bold, formatting.Italic, formatting.Underline, formatting.Strike, formatting.Code, kind));
-            }
+            var length = child.Name == W + "t" ? child.Value.Length
+                : child.Name is var name && (name == W + "br" || name == W + "cr" || name == W + "tab") ? 1
+                : 0;
+            if (length == 0) continue;
+            var kind = child.Name == W + "tab" ? TextRunKind.Tab
+                : child.Name is var childName && (childName == W + "br" || childName == W + "cr") ? TextRunKind.LineBreak
+                : TextRunKind.Text;
+            result.Add(new OriginalRunTemplate(length, properties is null ? null : new XElement(properties), formatting.StyleId,
+                formatting.Bold, formatting.Italic, formatting.Underline, formatting.Strike, formatting.Code, kind));
         }
-        return result;
     }
 
     private static int FindMatchingTemplate(IReadOnlyList<OriginalRunTemplate> templates, int start, TextRun run)
@@ -1717,10 +2748,18 @@ public sealed class DocxAdapter : IFormatProbe
         template.Kind == run.Kind && template.StyleId == run.StyleId && template.Bold == run.Bold && template.Italic == run.Italic &&
         template.Underline == run.Underline && template.Strike == run.Strike && template.Code == run.Code;
 
-    private static XElement LoadParagraphSlice(byte[] originalSlice)
+    /// <summary>Reparses one recorded slice. The wrapper carries every prefix a body block or a
+    /// text box may use without redeclaring - m:, for an equation, above all, and the drawing and
+    /// VML prefixes a shape sits in - since Word declares each of them once on w:document and never
+    /// again on the block that uses it. A prefix the fragment does not use costs nothing: LINQ to
+    /// XML only writes back the declarations the serialized subtree actually needs.</summary>
+    private static XElement LoadSliceElement(byte[] originalSlice)
     {
         var fragment = Encoding.UTF8.GetString(originalSlice);
-        var wrapper = $"<drmd:root xmlns:drmd=\"urn:drmd\" xmlns:w=\"{W}\" xmlns:w14=\"{W14}\" xmlns:r=\"{R}\" xmlns:a=\"{A}\" xmlns:wp=\"{WP}\">{fragment}</drmd:root>";
+        var wrapper = $"<drmd:root xmlns:drmd=\"urn:drmd\" xmlns:w=\"{W}\" xmlns:w14=\"{W14}\" xmlns:r=\"{R}\" xmlns:a=\"{A}\" xmlns:wp=\"{WP}\" xmlns:m=\"{M}\" " +
+            $"xmlns:v=\"{V}\" xmlns:wps=\"{WPS}\" xmlns:wpg=\"{WPG}\" xmlns:mc=\"{MC}\" " +
+            "xmlns:o=\"urn:schemas-microsoft-com:office:office\" xmlns:w10=\"urn:schemas-microsoft-com:office:word\">" +
+            $"{fragment}</drmd:root>";
         return SafeXml.LoadDocument(SafeXml.Utf8(wrapper)).Root?.Elements().SingleOrDefault()
             ?? throw new InvalidDataException("DOCX paragraph slice is empty.");
     }
@@ -1931,39 +2970,143 @@ public sealed class DocxAdapter : IFormatProbe
         return (true, next);
     }
 
-    private static byte[] ReplaceTableCells(byte[] originalSlice, NodeContent content)
+    private static byte[] ReplaceTableCells(byte[] originalSlice, NodeContent content, out DocxParagraphEditResult edits)
     {
         if (content is not TableNodeContent edited) throw new InvalidDataException("An edited DOCX table must retain table cell content.");
-        var fragment = Encoding.UTF8.GetString(originalSlice);
-        var wrapper = $"<drmd:root xmlns:drmd=\"urn:drmd\" xmlns:w=\"{W}\" xmlns:w14=\"{W14}\" xmlns:r=\"{R}\" xmlns:a=\"{A}\" xmlns:wp=\"{WP}\">{fragment}</drmd:root>";
-        var table = SafeXml.LoadDocument(SafeXml.Utf8(wrapper)).Root?.Elements().SingleOrDefault()
-            ?? throw new InvalidDataException("DOCX table slice is empty.");
+        var table = LoadSliceElement(originalSlice);
         if (table.Descendants(W + "fldChar").Any()) throw new InvalidDataException("A field boundary cannot be edited in a table.");
         var rows = table.Elements(W + "tr").ToArray();
         if (rows.Length != edited.Rows.Count) throw new InvalidDataException("DOCX table row count changed; F1 table structure edits are not supported.");
+        edits = default;
         for (var rowIndex = 0; rowIndex < rows.Length; rowIndex++)
         {
             var cells = rows[rowIndex].Elements(W + "tc").ToArray();
             if (cells.Length != edited.Rows[rowIndex].Count) throw new InvalidDataException("DOCX table cell count changed; F1 table structure edits are not supported.");
-            for (var cellIndex = 0; cellIndex < cells.Length; cellIndex++) ReplaceCellText(cells[cellIndex], edited.Rows[rowIndex][cellIndex].Text);
+            for (var cellIndex = 0; cellIndex < cells.Length; cellIndex++)
+                edits += ReplaceCellText(cells[cellIndex], edited.Rows[rowIndex][cellIndex].Text);
         }
-        return SafeXml.Utf8(table.ToString(SaveOptions.DisableFormatting));
+        return Serialize(table);
     }
 
-    private static void ReplaceCellText(XElement cell, string text)
+    // Writes a cell's text back paragraph by paragraph. Two things matter here: the cell's own
+    // paragraphs are the only targets — a nested table's w:t sits in the same subtree but belongs
+    // to its own Table node, and blanking it (the previous cell.Descendants(w:t) sweep did) would
+    // erase the nested table on any edit to the host table — and "\n" is the cell's paragraph
+    // separator (see CellText), so each segment goes back into the paragraph it came from.
+    private static DocxParagraphEditResult ReplaceCellText(XElement cell, string text)
     {
-        var textElements = cell.Descendants(W + "t").ToArray();
+        var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").ToArray();
+        if (paragraphs.Length == 0)
+        {
+            var paragraph = new XElement(W + "p", new XElement(W + "r", new XElement(W + "t", text)));
+            cell.Add(paragraph);
+            return default;
+        }
+        var segments = text.Split('\n');
+        if (segments.Length == paragraphs.Length)
+        {
+            var replaced = default(DocxParagraphEditResult);
+            for (var index = 0; index < paragraphs.Length; index++) replaced += ReplaceCellParagraphText(paragraphs[index], segments[index]);
+            return replaced;
+        }
+        // A cell whose paragraph count changed cannot be mapped back unambiguously. Splitting or
+        // merging paragraphs is refused rather than guessed at, matching the row/cell count checks.
+        if (segments.Length > 1)
+            throw new InvalidDataException("DOCX table cell paragraph count changed; F1 cell paragraph structure edits are not supported.");
+        return paragraphs.Skip(1).Aggregate(ReplaceCellParagraphText(paragraphs[0], text),
+            (replaced, paragraph) => replaced + ReplaceCellParagraphText(paragraph, string.Empty));
+    }
+
+    private static DocxParagraphEditResult ReplaceCellParagraphText(XElement paragraph, string text)
+    {
+        // A cell paragraph holding an equation or an inline content control goes through the
+        // anchor-preserving run rewrite, so untouched markup survives an edit to a neighbouring cell
+        // instead of being duplicated as the text it already projected. ReplaceTableCells rewrites
+        // every cell on every table edit, so this runs for unchanged cells too.
+        var anchors = ParagraphInlineAnchors(paragraph);
+        if (anchors.Count > 0) return ReplaceParagraphRuns(paragraph, SplitTextAroundAnchors(text, anchors));
+        var textElements = paragraph.Descendants(W + "t").ToArray();
         if (textElements.Length == 0)
         {
-            var paragraph = cell.Element(W + "p") ?? new XElement(W + "p");
-            if (paragraph.Parent is null) cell.Add(paragraph);
+            if (text.Length == 0) return default;
             paragraph.Add(new XElement(W + "r", new XElement(W + "t", text)));
-            return;
+            return default;
         }
         textElements[0].Value = text;
         if (!StringComparer.Ordinal.Equals(text, text.Trim())) textElements[0].SetAttributeValue(XNamespace.Xml + "space", "preserve");
         foreach (var element in textElements.Skip(1)) element.Value = string.Empty;
+        return default;
     }
+
+    /// <summary>Rewrites one w:txbxContent slice from the edited text of its TextBox node. The
+    /// projection joined the box's own w:p children with "\n" (see <see cref="TextBoxText"/>), so the
+    /// edit is split on "\n" and each segment goes back into the paragraph it came from; a segment
+    /// with no paragraph left duplicates the last one - its w:pPr and the first w:rPr of its runs, so
+    /// a new line keeps the box's formatting - and a paragraph with no segment left is dropped. An
+    /// empty edit leaves one empty paragraph: a text box with no w:p at all is not valid
+    /// WordprocessingML.</summary>
+    private static byte[] ReplaceTextBoxContent(byte[] originalSlice, NodeContent content, out DocxParagraphEditResult edits)
+    {
+        var box = LoadSliceElement(originalSlice);
+        if (box.Name != W + "txbxContent")
+            throw new InvalidDataException("An edited DOCX text box must be anchored on its w:txbxContent element.");
+        if (box.Descendants(W + "fldChar").Any() || box.Descendants(W + "instrText").Any())
+            throw new InvalidDataException("A field boundary cannot be edited in a text box.");
+        var paragraphs = box.Elements(W + "p").ToList();
+        // A break inside a box paragraph projects as the same "\n" that separates the box's
+        // paragraphs, so an edited string no longer says which of the two a "\n" now means.
+        if (paragraphs.Any(paragraph => InlineText(paragraph).Contains('\n', StringComparison.Ordinal)))
+            throw new InvalidDataException("A DOCX text box paragraph holding a line break cannot be rewritten from its linear text.");
+        var segments = PlainTextOf(content).Split('\n');
+        edits = default;
+        if (paragraphs.Count == 0)
+        {
+            foreach (var segment in segments) box.Add(new XElement(W + "p", new XElement(W + "r", new XElement(W + "t", segment))));
+            return Serialize(box);
+        }
+        while (paragraphs.Count > segments.Length)
+        {
+            paragraphs[^1].Remove();
+            paragraphs.RemoveAt(paragraphs.Count - 1);
+        }
+        while (paragraphs.Count < segments.Length)
+        {
+            var template = paragraphs[^1];
+            var added = new XElement(W + "p");
+            if (template.Element(W + "pPr") is { } paragraphProperties) added.Add(new XElement(paragraphProperties));
+            var runProperties = template.Elements(W + "r").Select(run => run.Element(W + "rPr")).FirstOrDefault(item => item is not null);
+            added.Add(new XElement(W + "r", runProperties is null ? null : new XElement(runProperties), new XElement(W + "t")));
+            template.AddAfterSelf(added);
+            paragraphs.Add(added);
+        }
+        for (var index = 0; index < segments.Length; index++) edits += ReplaceTextBoxParagraphText(paragraphs[index], segments[index]);
+        return Serialize(box);
+    }
+
+    /// <summary>Writes one segment back into one text-box paragraph, keeping every anchor the
+    /// projection only spelled out - an equation, an inline content control - where it stood. The
+    /// w:t sweep is <see cref="RelevantDescendants"/>, the walk the projection itself used, so a
+    /// table or a further text box inside this paragraph keeps its own text.</summary>
+    private static DocxParagraphEditResult ReplaceTextBoxParagraphText(XElement paragraph, string text)
+    {
+        var anchors = ParagraphInlineAnchors(paragraph);
+        if (anchors.Count > 0) return ReplaceParagraphRuns(paragraph, SplitTextAroundAnchors(text, anchors));
+        var textElements = RelevantDescendants(paragraph).Where(element => element.Name == W + "t").ToArray();
+        if (textElements.Length == 0)
+        {
+            if (text.Length == 0) return default;
+            paragraph.Add(new XElement(W + "r", new XElement(W + "t", text)));
+            return default;
+        }
+        WriteTextAcross(textElements, text);
+        return default;
+    }
+
+    /// <summary>Whether two slices claim any of the same bytes - a text box and the block it sits
+    /// in, above all, which no single ordered splice can rewrite.</summary>
+    private static bool Overlaps(RawSliceRef left, RawSliceRef right) =>
+        StringComparer.Ordinal.Equals(left.PartUri, right.PartUri) &&
+        left.StartOffset < right.EndOffset && right.StartOffset < left.EndOffset;
 
     private static string TextOf(DocumentNode node) => node.Content switch
     {

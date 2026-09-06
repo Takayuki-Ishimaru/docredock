@@ -208,9 +208,12 @@ def exercise_format(root: Path, cli: Path, extension: str, member: str, creator)
         experimental=True,
     )
     sentinel = HIDDEN_SENTINELS[extension]
-    if sentinel in readable.read_text(encoding="utf-8") or sentinel in sanitized.read_text(encoding="utf-8"):
+    escaped_sentinel = sentinel.replace("_", r"\_")
+    readable_text = readable.read_text(encoding="utf-8")
+    sanitized_text = sanitized.read_text(encoding="utf-8")
+    if any(value in readable_text or value in sanitized_text for value in (sentinel, escaped_sentinel)):
         raise RuntimeError(f"{extension} hidden content leaked through a safe readable policy")
-    if sentinel not in complete.read_text(encoding="utf-8") or "HiddenContentIncluded" not in complete_result.stdout:
+    if escaped_sentinel not in complete.read_text(encoding="utf-8") or "HiddenContentIncluded" not in complete_result.stdout:
         raise RuntimeError(f"{extension} complete policy did not include and warn about hidden content")
 
     invoke(
@@ -494,7 +497,8 @@ def exercise_pdf_render(root: Path, cli: Path) -> list[dict]:
                                 "--output", str(table_markdown_path), "--ocr", "off"],
                           allowed=(0, 1), experimental=True)
     table_markdown = table_markdown_path.read_text(encoding="utf-8")
-    if "VisualConnectorUnresolved" in table_result.stdout or "pdf_p1_path" in table_markdown:
+    if ("VisualConnectorUnresolved" in table_result.stdout
+            or any(marker in table_markdown for marker in ("pdf_p1_path", r"pdf\_p1\_path"))):
         raise RuntimeError(
             "untagged PDF table grid regressed into connector fallback\n"
             f"Diagnostics:\n{table_result.stdout}\nMarkdown:\n{table_markdown}"
@@ -580,7 +584,7 @@ def exercise_pdf_render(root: Path, cli: Path) -> list[dict]:
     dense_duration_ms = round((time.monotonic() - dense_started) * 1000)
     dense_bytes = dense_markdown.stat().st_size if dense_markdown.is_file() else None
     if (dense_result.returncode not in (0, 1) or dense_bytes is None or dense_bytes > 128 * 1024
-            or dense_duration_ms > 5000 or "DENSE_NATIVE_TEXT" not in dense_markdown.read_text(encoding="utf-8")):
+            or dense_duration_ms > 5000 or r"DENSE\_NATIVE\_TEXT" not in dense_markdown.read_text(encoding="utf-8")):
         raise RuntimeError(f"dense vector PDF violated bounded/native-text/runtime contract (exit={dense_result.returncode}, markdown_bytes={dense_bytes}, duration_ms={dense_duration_ms})")
     evidence.append({
         "kind": "bounded", "fixture": "dense-vector-10000", "status": "pass", "critical": True,

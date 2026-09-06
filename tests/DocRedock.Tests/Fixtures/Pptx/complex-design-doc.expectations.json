@@ -84,7 +84,7 @@
       "desc": "棒グラフのタイトル/データがテキストとして変換される（現状は完全に失われる）",
       "severity": "guard",
       "type": "contains",
-      "value": "テスト実施サマリー（07_テストシナリオ 7.2）"
+      "value": "テスト実施サマリー（07\\_テストシナリオ 7.2）"
     },
     {
       "id": "P06-3",
@@ -120,7 +120,7 @@
       "desc": "TR-09詳細テーブル（グループ/コネクタが失われても事実は残る保険）",
       "severity": "guard",
       "type": "contains",
-      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+      "value": "| TR-09 | PAYMENT\\_PENDING | 連携失敗 | retry\\_count >= 5 | ERROR | DLQ登録・運用アラート |"
     },
     {
       "id": "P08-3",
@@ -242,21 +242,21 @@
       "desc": "TR-09: 遷移元/イベント/ガード/遷移先/副作用",
       "severity": "guard",
       "type": "contains",
-      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+      "value": "| TR-09 | PAYMENT\\_PENDING | 連携失敗 | retry\\_count >= 5 | ERROR | DLQ登録・運用アラート |"
     },
     {
       "id": "QA4a",
       "desc": "TX-01: 書き込み対象(expense_claim/outbox_event)",
       "severity": "guard",
       "type": "contains",
-      "value": "書き込み対象: expense_claim（status=SUBMITTED）と outbox_event を同一トランザクションで確定する。"
+      "value": "書き込み対象: expense\\_claim（status=SUBMITTED）と outbox\\_event を同一トランザクションで確定する。"
     },
     {
       "id": "QA4b",
       "desc": "TX-01: HTTP応答後のイベント配送は非同期",
       "severity": "guard",
       "type": "contains",
-      "value": "HTTP応答後のイベント配送は非同期。Event Bus障害時はNFR-OPS-04の間隔で最大5回再送し、承認サービスはevent_idで冪等に処理する。"
+      "value": "HTTP応答後のイベント配送は非同期。Event Bus障害時はNFR-OPS-04の間隔で最大5回再送し、承認サービスはevent\\_idで冪等に処理する。"
     },
     {
       "id": "QA5",
@@ -403,14 +403,14 @@
       "desc": "outbox_event.status候補",
       "severity": "guard",
       "type": "contains",
-      "value": "outbox_event.status: NEW/SENDING/SENT/FAILED"
+      "value": "outbox\\_event.status: NEW/SENDING/SENT/FAILED"
     },
     {
       "id": "QA11b",
       "desc": "retry_count上限5",
       "severity": "guard",
       "type": "contains",
-      "value": "retry_count: 初期値0、上限5"
+      "value": "retry\\_count: 初期値0、上限5"
     },
     {
       "id": "QA12",

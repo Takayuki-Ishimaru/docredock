@@ -171,8 +171,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             var embedImages = args.HasFlag("embed-images");
             var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
             using var stagedOutputs = embedImages
-                ? new StagedOutputTransaction([markdown], force)
-                : new StagedOutputTransaction([markdown], force, [readableAssets]);
+                ? new StagedOutputTransaction([markdown], force, protectedInputs: [source])
+                : new StagedOutputTransaction([markdown], force, [readableAssets], protectedInputs: [source]);
             var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var sheets = args.Option("sheets")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             // An explicit --sheets that resolves to nothing ("", ",", " , ") is a user
@@ -212,7 +212,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         }
 
         var sidecarPath = SidecarFor(markdown);
-        using var stagedRoundTrip = new StagedOutputTransaction([markdown, sidecarPath], force);
+        using var stagedRoundTrip = new StagedOutputTransaction([markdown, sidecarPath], force, protectedInputs: [source]);
         var stagedRoundTripMarkdown = stagedRoundTrip.PathFor(markdown);
         var stagedSidecar = stagedRoundTrip.PathFor(sidecarPath);
         var result = await Service.ExportAsync(new DocumentExportOptions(source, stagedSidecar, stagedRoundTripMarkdown,
@@ -273,7 +273,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var workspace = await RoundTripWorkspace.OpenAsync(lease.RootPath, token);
         var destination = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(markdown)!,
             Path.GetFileNameWithoutExtension(markdown) + "-restored" + Path.GetExtension(workspace.Manifest.Source.FileName)));
-        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"), protectedInputs: [markdown, workspacePath]);
         var stagedDestination = stagedOutput.PathFor(destination);
         var result = await Service.RestoreAsync(new DocumentRestoreOptions(lease.RootPath, stagedDestination, markdown,
             args.HasFlag("allow-render-fallback")), token);
@@ -305,7 +305,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             fontFaceIndex = parsedFace;
         }
 
-        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"), protectedInputs: [input]);
         var result = await Service.RenderAsync(new DocumentRenderOptions(await File.ReadAllTextAsync(input, token), stagedOutput.PathFor(destination), format,
             new RenderOptions(
                 TemplatePath: args.Option("template"),
@@ -441,6 +441,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         await using var lease = await SidecarContainer.OpenAsync(currentPath, token);
         var current = await RoundTripWorkspace.OpenAsync(lease.RootPath, token);
         var outputMarkdown = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + "-rebased.md"));
+        OutputCollisionGuard.EnsureNoCollision([outputMarkdown, SidecarFor(outputMarkdown)], [markdown, source, currentPath]);
         var result = await Service.RebaseAsync(new DocumentRebaseOptions(source, SidecarFor(outputMarkdown), outputMarkdown, current.Manifest.DocumentId), token);
         await output.WriteLineAsync($"Rebased baseline: {result.MarkdownPath}"); await output.WriteLineAsync("The previous baseline was not modified."); return 0;
     }
@@ -462,16 +463,19 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             }
             else
             {
-                var packed = await SidecarContainer.PackToAsync(sidecar, markdown, Path.GetFullPath(args.Option("output")!), token);
+                var packDestination = Path.GetFullPath(args.Option("output")!);
+                OutputCollisionGuard.EnsureNoCollision([packDestination], [markdown, sidecar]);
+                var packed = await SidecarContainer.PackToAsync(sidecar, markdown, packDestination, token);
                 await output.WriteLineAsync($"Packed sidecar: {packed} (zip)");
             }
             return 0;
         }
-        var package = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(markdown, ".drmdpkg"));
-        using var stagedOutput = new StagedOutputTransaction([package], args.HasFlag("force"));
         var markdownDocument = await ParseMarkdownAsync(markdown, token);
         if (!markdownDocument.IsComplete) { WriteMarkdownDiagnostics(markdownDocument); return 3; }
-        var result = await RoundTripPackage.PackAsync(markdown, ResolveWorkspace(markdown, markdownDocument.RoundTripStore), stagedOutput.PathFor(package), token);
+        var workspacePath = ResolveWorkspace(markdown, markdownDocument.RoundTripStore);
+        var package = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(markdown, ".drmdpkg"));
+        using var stagedOutput = new StagedOutputTransaction([package], args.HasFlag("force"), protectedInputs: [markdown, workspacePath]);
+        var result = await RoundTripPackage.PackAsync(markdown, workspacePath, stagedOutput.PathFor(package), token);
         stagedOutput.Commit();
         await output.WriteLineAsync($"Packed: {package} ({result.EntryCount} entries)"); return 0;
     }
@@ -482,7 +486,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (SidecarContainer.IsBundle(package))
         {
             var destination = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(package)!, Path.GetFileNameWithoutExtension(package)));
-            using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"));
+            using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"), protectedInputs: [package]);
             var result = await RoundTripPackage.UnpackAsync(package, stagedOutput.PathFor(destination), token);
             stagedOutput.Commit();
             await output.WriteLineAsync($"Unpacked: {destination} ({result.EntryCount} entries)"); return 0;
@@ -500,7 +504,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         }
         else
         {
-            var unpacked = await SidecarContainer.UnpackToAsync(package, markdown, Path.GetFullPath(args.Option("output")!), token);
+            var unpackDestination = Path.GetFullPath(args.Option("output")!);
+            OutputCollisionGuard.EnsureNoCollision([unpackDestination], [package, markdown]);
+            var unpacked = await SidecarContainer.UnpackToAsync(package, markdown, unpackDestination, token);
             await output.WriteLineAsync($"Unpacked sidecar: {unpacked} (directory)");
         }
         return 0;

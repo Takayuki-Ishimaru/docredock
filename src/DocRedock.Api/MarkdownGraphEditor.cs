@@ -308,11 +308,21 @@ public sealed class MarkdownGraphEditor
         text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n')
             .Split('\n')
             .Where(line => line.Length > 0)
-            .Select(ParseTableRow)
+            .Select(line => ParseTableRow(line).Select(DecodeTableCell).ToArray())
             .Where(row => !row.All(cell => cell.All(character => character is '-' or ':' or ' ')))
             .Select(row => (IReadOnlyList<TableCell>)row.Select(cell => (TableCell)cell).ToArray())
             .ToArray());
 
+    // Splits on unescaped '|' only ('\|' keeps the pair intact, so it neither
+    // splits here nor loses its backslash). Every returned cell keeps its
+    // escaping (backslash sequences, entities, literal '<br>') exactly as
+    // written -- decoding is left to the caller. This matters because
+    // DecodeSpreadsheetCell's backtick-wrapper decision depends on telling a
+    // raw structural backtick apart from one that started as an escaped "\`" in
+    // the cell's own value; if this method unescaped eagerly (as it used to),
+    // that distinction would already be destroyed by the time the wrapper
+    // decision runs. A normal table cell instead goes through DecodeTableCell
+    // right after this returns.
     private static IReadOnlyList<string> ParseTableRow(string line)
     {
         var normalized = line.Trim();
@@ -324,42 +334,117 @@ public sealed class MarkdownGraphEditor
         foreach (var character in normalized)
         {
             if (escaped) { current.Append(character); escaped = false; continue; }
-            if (character == '\\') { escaped = true; continue; }
-            if (character == '|') { cells.Add(DecodeTableCell(current)); current.Clear(); continue; }
+            if (character == '\\') { current.Append(character); escaped = true; continue; }
+            if (character == '|') { cells.Add(current.ToString().Trim()); current.Clear(); continue; }
             current.Append(character);
         }
-        if (escaped) current.Append('\\');
-        cells.Add(DecodeTableCell(current));
+        cells.Add(current.ToString().Trim());
         return cells;
     }
 
-    private static string DecodeTableCell(System.Text.StringBuilder value) =>
-        value.ToString().Trim().Replace("<br>", "\n", StringComparison.Ordinal);
+    // Mirrors DocRedockMarkdown.EscapePlainText's escape set: the base rich-text
+    // character set ('\ * _ ~ `') plus the extra line-leading markers it also
+    // backslash-escapes ('# > + - . ) [ ] | ='). '>', '|' and '=' are included so
+    // a hand-typed "\>", "\|" or "\=" in a plain-text block still decodes even
+    // though this writer never emits '>'/'|' that way ('>' goes out as "&gt;",
+    // '|' only matters inside table cells, which ParseTableRow leaves escaped
+    // for DecodeTableCell/DecodeSpreadsheetCell to unescape below); '=' IS
+    // emitted this way, for a bare "===" line (the setext heading / thematic
+    // break counterpart to "---"). Kept private/self-contained here rather than
+    // reusing DocRedockInlineMarkdown.Escape's internal counterpart, which is
+    // not visible across the DocRedock.Api/DocRedock.Markdown assembly boundary.
+    private static readonly HashSet<char> PlainTextEscapableChars =
+        ['\\', '*', '_', '~', '`', '#', '>', '+', '-', '.', ')', '[', ']', '|', '='];
+
+    // Inverse of DocRedockMarkdown.EscapePlainText/EscapeTableCell. A single
+    // left-to-right pass: because Escape always doubles a literal backslash
+    // ('\' -> '\\', and '\' is itself in PlainTextEscapableChars), an escaped
+    // "\\" is consumed as one recognized pair like any other, which is what
+    // makes Unescape(Escape(x)) == x hold for every x, including text that
+    // itself contains backslashes.
+    private static string Unescape(string text)
+    {
+        var output = new System.Text.StringBuilder(text.Length);
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (text[index] == '\\' && index + 1 < text.Length && PlainTextEscapableChars.Contains(text[index + 1]))
+            {
+                output.Append(text[index + 1]);
+                index++;
+                continue;
+            }
+            output.Append(text[index]);
+        }
+        return DecodeEntities(output.ToString());
+    }
+
+    private static string DecodeEntities(string value) => value.Replace("&lt;", "<", StringComparison.Ordinal)
+        .Replace("&gt;", ">", StringComparison.Ordinal).Replace("&amp;", "&", StringComparison.Ordinal);
+
+    // Inverse of DocRedockMarkdown.EscapeTableCell for one raw cell produced by
+    // ParseTableRow. A literal "<br>" substring can only be the newline marker
+    // EscapeTableCell inserts -- real '<'/'>' characters in cell content always
+    // come out as entities -- so restoring it before Unescape (which also
+    // decodes entities) is safe regardless of ordering. Unescape then reverses
+    // the backslash escapes, including the escaped '|' ParseTableRow left alone.
+    private static string DecodeTableCell(string value) =>
+        Unescape(value.Replace("<br>", "\n", StringComparison.Ordinal));
 
     private static string DecodeBlockText(TypedMarkdownBlock block)
     {
         var text = block.Text.TrimEnd();
         return block.Kind.ToLowerInvariant() switch
         {
-            "heading" or "title" => text.TrimStart().TrimStart('#').TrimStart(),
+            "heading" or "title" => Unescape(text.TrimStart().TrimStart('#').TrimStart()),
             "quote" => string.Join("\n", text.Replace("\r\n", "\n", StringComparison.Ordinal)
-                .Split('\n').Select(line => line.StartsWith("> ", StringComparison.Ordinal) ? line[2..] : line.TrimStart('>'))),
-            "code-block" when text.StartsWith("```", StringComparison.Ordinal) && text.EndsWith("```", StringComparison.Ordinal) =>
-                text[3..^3].Trim('\r', '\n'),
+                .Split('\n').Select(line => Unescape(line.StartsWith("> ", StringComparison.Ordinal) ? line[2..] : line.TrimStart('>')))),
+            "code-block" => DecodeCodeBlock(text),
             "diagram" => DecodeDiagram(text),
-            "list-item" or "listitem" => DecodeListItem(text),
+            // DecodeListItem/DecodeShapeText are shared with DecodeInlineBlockMarkdown
+            // (the rich-text path, where DocRedockInlineMarkdown.Parse does its own
+            // unescaping) so Unescape is applied here at the plain-text dispatch site
+            // rather than inside those shared helpers.
+            "list-item" or "listitem" => Unescape(DecodeListItem(text)),
             "cell" => DecodeCellText(text),
             "image" or "link" => DecodeLinkLabel(text),
-            "shape" => DecodeShapeText(text, block.Attributes.TryGetValue("role", out var role) ? role : null),
-            _ => text,
+            "shape" => Unescape(DecodeShapeText(text, block.Attributes.TryGetValue("role", out var role) ? role : null)),
+            // Table markdown is decoded verbatim: ParseTable/ParseTableRow do their
+            // own backslash/entity handling per cell, so it must not also be run
+            // through the plain-text Unescape below.
+            "table" => text,
+            _ => Unescape(text),
         };
+    }
+
+    // The writer sizes the fence to (longest backtick run in the body + 1, min 3)
+    // so it can never be closed early by backticks inside the body; decode must
+    // therefore read the actual opening run length back off the text instead of
+    // assuming a fixed 3, and only accept a closing run of that same length.
+    private static int LeadingBacktickRun(string text)
+    {
+        var count = 0;
+        while (count < text.Length && text[count] == '`') count++;
+        return count;
+    }
+
+    private static string DecodeCodeBlock(string text)
+    {
+        var fenceLength = LeadingBacktickRun(text);
+        if (fenceLength < 3) return text;
+        var fence = new string('`', fenceLength);
+        if (text.Length < fenceLength * 2 || !text.EndsWith(fence, StringComparison.Ordinal)) return text;
+        return text[fenceLength..^fenceLength].Trim('\r', '\n');
     }
 
     private static string DecodeDiagram(string text)
     {
-        if (!text.StartsWith("```", StringComparison.Ordinal) || !text.EndsWith("```", StringComparison.Ordinal)) return text;
         var firstNewline = text.IndexOf('\n');
-        return firstNewline < 0 ? text : text[(firstNewline + 1)..^3].Trim('\r', '\n');
+        if (firstNewline < 0) return text;
+        var fenceLength = LeadingBacktickRun(text[..firstNewline]);
+        if (fenceLength < 3) return text;
+        var fence = new string('`', fenceLength);
+        if (text.Length < firstNewline + 1 + fenceLength || !text.EndsWith(fence, StringComparison.Ordinal)) return text;
+        return text[(firstNewline + 1)..^fenceLength].Trim('\r', '\n');
     }
 
     private static string DecodeInlineBlockMarkdown(TypedMarkdownBlock block)
@@ -386,8 +471,17 @@ public sealed class MarkdownGraphEditor
     private static string DecodeCellText(string text)
     {
         var match = System.Text.RegularExpressions.Regex.Match(text, @"^- \*\*[^:]+:\*\*\s*(?<value>.*)$");
+        // A standalone cell line never passes through ParseTableRow, so it keeps
+        // ProjectSpreadsheetCell's escaping verbatim here. Reuse the sheet-table
+        // grid's own DecodeSpreadsheetCell (fence-length aware, and aware of the
+        // " -> <display value>" suffix) so the raw-backtick-wrapper decision runs
+        // BEFORE anything is unescaped -- the same fix as the sheet grid, and for
+        // the same reason: unescaping first would turn an escaped "\`" that is
+        // part of the cell's own value into a bare backtick indistinguishable
+        // from the wrapper ProjectSpreadsheetCell added around a formula or
+        // display value.
         var value = match.Success ? match.Groups["value"].Value : text;
-        return value.Length >= 2 && value[0] == (char)96 && value[^1] == (char)96 ? value[1..^1] : value;
+        return DecodeSpreadsheetCell(value);
     }
 
     private static string DecodeListItem(string text)
@@ -746,20 +840,55 @@ public sealed class MarkdownGraphEditor
             maxColumn >= minColumn && maxRow >= minRow;
     }
 
+    // Decodes one raw (still-escaped) sheet-grid or standalone "- **A1:**" cell.
+    // ProjectSpreadsheetCell only ever wraps a formula, a display value, or a
+    // leading '=' in a code span, and always does so with RAW backticks --
+    // Escape() escapes every backtick that is genuinely part of the value or
+    // expression to "\`", so it never leaves a bare backtick in its output.
+    // That means a bare (unescaped) backtick found here can only be a wrapper
+    // fence, never content, PROVIDED the search for the closing fence also
+    // skips backticks that are themselves the escaped half of an "\`" pair (an
+    // escaped backtick from the cell's own value). The scan below tracks
+    // escape state exactly like ParseTableRow: a backslash always escapes
+    // exactly the next character, so a "raw" backtick is one that is not the
+    // second half of such a pair.
     private static string DecodeSpreadsheetCell(string value)
     {
-        if (value.Length < 2 || value[0] != '`') return value;
+        if (value.Length < 2 || value[0] != '`') return DecodePlainSpreadsheetCell(value);
+        // The opening run can never itself be escaped: nothing precedes
+        // position 0, and a run of backticks contains no backslash that could
+        // escape any of the backticks after the first, so a plain character
+        // scan is enough here (unlike the closing fence search below).
         var opening = 0;
         while (opening < value.Length && value[opening] == '`') opening++;
         var fence = new string('`', opening);
-        var closing = value.IndexOf(fence, opening, StringComparison.Ordinal);
-        if (closing < 0) return value;
+        var closing = -1;
+        var escaped = false;
+        for (var index = opening; index < value.Length; index++)
+        {
+            if (escaped) { escaped = false; continue; }
+            if (value[index] == '\\') { escaped = true; continue; }
+            if (value[index] == '`' && MatchesFence(value, index, fence)) { closing = index; break; }
+        }
+        if (closing < 0) return DecodePlainSpreadsheetCell(value);
         var code = value[opening..closing];
         var suffix = value[(closing + opening)..];
         if (suffix.Length == 0 || suffix.StartsWith(" → ", StringComparison.Ordinal))
-            return code;
-        return value;
+            return Unescape(code);
+        return DecodePlainSpreadsheetCell(value);
     }
+
+    private static bool MatchesFence(string value, int index, string fence) =>
+        index + fence.Length <= value.Length &&
+        string.CompareOrdinal(value, index, fence, 0, fence.Length) == 0;
+
+    // Not a code-span wrapper (or too short to be one): the whole cell is the
+    // value. '<br>' is restored to a newline before Unescape for the same
+    // reason as DecodeTableCell -- a literal "<br>" substring can only be that
+    // marker, since real '<'/'>' characters in cell content always come out as
+    // entities.
+    private static string DecodePlainSpreadsheetCell(string value) =>
+        Unescape(value.Replace("<br>", "\n", StringComparison.Ordinal));
 
     private static string? CellAddress(DocumentNode node) =>
         node.Source?.Locators.FirstOrDefault(locator => locator.Kind == "cell_address")?.Value?.ToUpperInvariant();

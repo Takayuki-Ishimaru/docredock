@@ -21,7 +21,35 @@ public sealed record PdfPageText(
     bool IsImageOnly = false,
     /// <summary>How many side-by-side text columns <see cref="SortReadingOrder"/> detected and
     /// unrolled into column-major order on this page (1 when no column layout was detected).</summary>
-    int ColumnCount = 1)
+    int ColumnCount = 1,
+    /// <summary>Which text fragments a visual node actually consumed as its label, keyed by the
+    /// stable <see cref="PdfTextRegion.SourceTextIds"/> value and mapped to the consuming node's
+    /// id. A readable projection suppresses exactly these fragments when it renders the diagram;
+    /// text elsewhere on the page that merely repeats a node's caption is ordinary body text and
+    /// must survive (comparing rendered strings instead silently deletes it).</summary>
+    IReadOnlyDictionary<int, string>? VisualLabelNodeIds = null,
+    /// <summary>How many embedded raster images this page draws: Image XObjects invoked with
+    /// <c>Do</c> plus inline <c>BI ... ID ... EI</c> images. Form XObjects are excluded whenever the
+    /// page's <c>/Resources /XObject</c> dictionary can be resolved; when it cannot, a <c>Do</c> is
+    /// counted only if the document declares at least one <c>/Subtype /Image</c> object. Counted on
+    /// every page, including <see cref="IsImageOnly"/> ones.</summary>
+    int EmbeddedImageCount = 0,
+    /// <summary>Placement rectangles in PDF user space for those embedded images whose CTM at the
+    /// draw operator could be resolved. This may hold fewer entries than
+    /// <see cref="EmbeddedImageCount"/> - never more - so a consumer must position from these and
+    /// count from <see cref="EmbeddedImageCount"/>.</summary>
+    IReadOnlyList<Geometry>? EmbeddedImages = null,
+    /// <summary>The page's <c>/MediaBox</c> in user space, resolved through the <c>/Pages</c>
+    /// inheritance chain, or null when the document declares none. A consumer that maps user space
+    /// onto a rasterized page needs this: it is the area pdftoppm draws by default.</summary>
+    Geometry? MediaBox = null,
+    /// <summary>The page's <c>/CropBox</c>, resolved the same way, or null when absent. This is the
+    /// area mutool draws by default.</summary>
+    Geometry? CropBox = null,
+    /// <summary>The page's <c>/Rotate</c>, normalized to 0, 90, 180 or 270 clockwise degrees. A
+    /// non-zero value means user space and the rasterized image do not share an axis orientation,
+    /// so a consumer must not map rectangles between them without applying the rotation.</summary>
+    int Rotation = 0)
 {
     // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
     // final order - including any column-major unrolling - so sorting by ReadingOrder here (rather
@@ -120,6 +148,18 @@ public static class PdfTextExtractor
         catch (RegexMatchTimeoutException exception) { throw new PdfExtractionException("PDF font encoding matching exceeded its time limit.", exception); }
         var streams = ReadStreams(raw, latin, options, contentObjectIds).ToArray();
         var pageMap = ReadContentObjectPages(structure, options.EffectiveRegexTimeout);
+        IReadOnlyDictionary<int, PdfPageAttributes> pageAttributes;
+        IReadOnlyDictionary<int, PdfFormXObject> formXObjects;
+        bool documentHasImageXObject;
+        try
+        {
+            var index = ReadObjectIndex(structure, options.EffectiveRegexTimeout);
+            pageAttributes = ReadPageAttributes(index, options.EffectiveRegexTimeout);
+            formXObjects = ReadFormXObjects(index, raw, latin, options);
+            documentHasImageXObject = Regex.IsMatch(structure, @"/Subtype\s*/Image\b", RegexOptions.None, options.EffectiveRegexTimeout);
+        }
+        catch (RegexMatchTimeoutException exception) { throw new PdfExtractionException("PDF image resource matching exceeded its time limit.", exception); }
+        var formScanBudget = new PdfFormScanBudget(Math.Min(options.MaxExpandedStreamBytes, MaxFormScanBytes));
         var pages = new List<PdfPageText>();
         var diagnostics = new List<string>();
         var visualGraphs = new Dictionary<int, VisualGraph>();
@@ -137,6 +177,15 @@ public static class PdfTextExtractor
             var image = ContainsImageOperator(stream);
             var pageNumber = Math.Min(pageGroup.Key, pageCount);
             var imageOnly = image && regions.Count == 0;
+            var attributes = pageAttributes.GetValueOrDefault(pageNumber);
+            // An image that shares a page with native text used to disappear without a trace: the
+            // `Do` operator only ever fed the image-only decision above. Resolve every image draw
+            // (and its CTM) here so a mixed page can carry a placeholder plus a diagnostic, and so
+            // the OCR path knows which pages are worth rasterizing.
+            var embeddedImages = image || stream.Contains("BI", StringComparison.Ordinal)
+                ? ResolveEmbeddedImages(stream, attributes?.Resources, documentHasImageXObject || imageOnly,
+                    formXObjects, formScanBudget)
+                : [];
             if (!imageOnly && regions.Count == 0 && !vector) continue;
             var vectorPlaceholder = false;
             if (vector && regions.Count == 0)
@@ -149,9 +198,16 @@ public static class PdfTextExtractor
                 diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
                 regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
             }
+            // An image-only page already reports PdfRasterizerUnavailable; only the mixed page - the
+            // one that silently lost its image because native text made the page look complete -
+            // needs its own warning.
+            if (!imageOnly && embeddedImages.Count > 0)
+                diagnostics.Add($"PdfEmbeddedImageOmitted: PDF page {pageNumber}: {embeddedImages.Count} embedded image(s) were not extracted; native text was retained. Run with --ocr on and a configured rasterizer to recover image text.");
             cancellationToken.ThrowIfCancellationRequested();
+            IReadOnlyDictionary<int, string> visualLabelNodeIds = new Dictionary<int, string>();
             VisualGraph? visualGraph = vector
-                ? BuildVisualGraph(pageNumber, stream, regions, diagnostics, options.EffectiveVisualInferenceTimeout, cancellationToken)
+                ? BuildVisualGraph(pageNumber, stream, regions, diagnostics, options.EffectiveVisualInferenceTimeout,
+                    cancellationToken, out visualLabelNodeIds)
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
             if (vector && visualGraph is not null)
@@ -197,18 +253,26 @@ public static class PdfTextExtractor
             var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
-            pages.Add(new PdfPageText(pageNumber, flow, vector, imageOnly, columnCount));
+            var embeddedBounds = embeddedImages.Where(bounds => bounds is not null).Select(bounds => bounds!).ToArray();
+            pages.Add(new PdfPageText(pageNumber, flow, vector, imageOnly, columnCount,
+                visualLabelNodeIds.Count == 0 ? null : visualLabelNodeIds,
+                embeddedImages.Count, embeddedBounds.Length == 0 ? null : embeddedBounds,
+                attributes?.MediaBox, attributes?.CropBox, attributes?.Rotation ?? 0));
         }
         if (pages.Count == 0)
         {
+            var attributes = pageAttributes.GetValueOrDefault(1);
             diagnostics.Add("PdfRasterizerUnavailable: PDF page 1: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
-            pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
+            pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
+                MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
         {
             if (pages.Any(page => page.PageNumber == pageNumber)) continue;
+            var attributes = pageAttributes.GetValueOrDefault(pageNumber);
             diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
-            pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true));
+            pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
+                MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
         return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs, tables, visualFallbacks, visualProjections);
@@ -278,7 +342,8 @@ public static class PdfTextExtractor
     }
 
     private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions,
-        List<string> diagnostics, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+        List<string> diagnostics, TimeSpan? inferenceTimeout, CancellationToken cancellationToken,
+        out IReadOnlyDictionary<int, string> visualLabelNodeIds)
     {
         var allowGeometryInference = VisualInferenceContext.Current != VisualInferenceMode.NativeOnly;
         var nodes = new List<VisualNode>();
@@ -299,6 +364,17 @@ public static class PdfTextExtractor
         var provisionalUnlabelledNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var provisionalTriangleNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var assignedLabelRegions = new HashSet<int>();
+        // Which text fragment a node's label was actually taken from, keyed by the fragment's
+        // stable source text id. Only these fragments are graph members; a page can legitimately
+        // repeat a node's caption as a heading or in a sentence, and matching on the rendered
+        // string alone would let a readable projection delete that text without a diagnostic.
+        var nodeLabelSourceIds = new Dictionary<int, string>();
+        void RecordNodeLabel(int regionIndex, string nodeId)
+        {
+            if (regionIndex < 0 || regionIndex >= regions.Count) return;
+            var sourceIds = regions[regionIndex].SourceTextIds;
+            if (sourceIds.Count > 0) nodeLabelSourceIds[sourceIds[0]] = nodeId;
+        }
         var duplicatePathIds = new HashSet<string>(StringComparer.Ordinal);
         var arrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
         var mergedArrowheadPathIds = new HashSet<string>(StringComparer.Ordinal);
@@ -450,6 +526,7 @@ public static class PdfTextExtractor
         var preInferenceDiagnostics = new List<string>(diagnostics);
         var preInferenceGraphDiagnostics = new List<VisualDiagnostic>(graphDiagnostics);
         var preInferenceAssignedLabelRegions = new HashSet<int>(assignedLabelRegions);
+        var preInferenceNodeLabelSourceIds = new Dictionary<int, string>(nodeLabelSourceIds);
         var preInferenceProvisionalUnlabelledNodeIds = new HashSet<string>(provisionalUnlabelledNodeIds, StringComparer.Ordinal);
         var preInferenceProvisionalTriangleNodeIds = new HashSet<string>(provisionalTriangleNodeIds, StringComparer.Ordinal);
         var preInferenceArrowheadMatches = new List<(string PathId, string EdgeId, VisualPathPoint Tip, bool AtEnd)>(arrowheadMatches);
@@ -576,6 +653,7 @@ public static class PdfTextExtractor
                         assignedLabelRegions.Add(embeddedLabel.index);
                         nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", embeddedLabel.region.Text,
                             VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor));
+                        RecordNodeLabel(embeddedLabel.index, nodes[^1].Id);
                         if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .9, IsFallback = false };
                         continue;
                     }
@@ -630,6 +708,7 @@ public static class PdfTextExtractor
                             assignedLabelRegions.Add(label.index);
                             nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label.region.Text,
                                 VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor));
+                            RecordNodeLabel(label.index, nodes[^1].Id);
                             if (pathIndex >= 0) paths[pathIndex] = paths[pathIndex] with { Confidence = .9, IsFallback = false };
                             continue;
                         }
@@ -1034,6 +1113,11 @@ public static class PdfTextExtractor
                 paths[index] = paths[index] with { IsFallback = true };
         var graph = new VisualGraph($"pdf-page-{pageNumber}-visual", nodes, edges, graphDiagnostics, "LR", Paths: paths,
             SourceItems: sourceItems);
+        // A node can be dropped after label assignment (rollback, budget downgrade, or a table
+        // consuming its grid). Only report labels whose consuming node actually survived.
+        var survivingNodeIds = nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        visualLabelNodeIds = nodeLabelSourceIds.Where(entry => survivingNodeIds.Contains(entry.Value))
+            .ToDictionary(entry => entry.Key, entry => entry.Value);
         return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
 
         IEnumerable<string> Tokens(string value)
@@ -1084,6 +1168,8 @@ public static class PdfTextExtractor
             diagnostics.Clear(); diagnostics.AddRange(preInferenceDiagnostics);
             graphDiagnostics.Clear(); graphDiagnostics.AddRange(preInferenceGraphDiagnostics);
             assignedLabelRegions.Clear(); assignedLabelRegions.UnionWith(preInferenceAssignedLabelRegions);
+            nodeLabelSourceIds.Clear();
+            foreach (var entry in preInferenceNodeLabelSourceIds) nodeLabelSourceIds[entry.Key] = entry.Value;
             provisionalUnlabelledNodeIds.Clear(); provisionalUnlabelledNodeIds.UnionWith(preInferenceProvisionalUnlabelledNodeIds);
             provisionalTriangleNodeIds.Clear(); provisionalTriangleNodeIds.UnionWith(preInferenceProvisionalTriangleNodeIds);
             arrowheadMatches.Clear(); arrowheadMatches.AddRange(preInferenceArrowheadMatches);
@@ -1096,6 +1182,7 @@ public static class PdfTextExtractor
             {
                 nodes.Clear();
                 assignedLabelRegions.Clear();
+                nodeLabelSourceIds.Clear();
                 provisionalUnlabelledNodeIds.Clear();
                 provisionalTriangleNodeIds.Clear();
                 triangleCandidates.Clear();
@@ -1193,21 +1280,103 @@ public static class PdfTextExtractor
                     horizontal.Fixed >= vertical.Minimum - tolerance && horizontal.Fixed <= vertical.Maximum + tolerance;
             }
 
-            var activeHorizontal = horizontalLines.Where(horizontal =>
-                verticalLines.Count(vertical => Crosses(horizontal, vertical)) >= 3).ToArray();
-            var activeVertical = verticalLines.Where(vertical =>
-                horizontalLines.Count(horizontal => Crosses(horizontal, vertical)) >= 3).ToArray();
-            if (activeHorizontal.Length < 3 || activeVertical.Length < 3) return;
-            long crossingCount = activeHorizontal.Sum(horizontal => (long)activeVertical.Count(vertical => Crosses(horizontal, vertical)));
-            var density = crossingCount / ((double)activeHorizontal.Length * activeVertical.Length);
-            var hasMarkedTableEvidence = HasMarkedTableEvidence();
-            if (density < .70 || !hasMarkedTableEvidence &&
-                (!HasRegularSpacing(activeHorizontal.Select(line => line.Fixed)) ||
-                 !HasRegularSpacing(activeVertical.Select(line => line.Fixed)))) return;
+            // Independent grids must be judged independently. Testing the page as one lattice made
+            // two unrelated tables disqualify each other: their combined line spacing is irregular,
+            // so HasRegularSpacing failed, nothing was suppressed, and every table rule stayed in
+            // the connector population - where each rule became a phantom relation and a
+            // VisualConnectorUnresolved warning. Decompose the axis-parallel lines into
+            // crossing-connected components (the same separation PdfTableInference applies to table
+            // candidates) and run the whole lattice test on each component alone. Crossings only
+            // ever exist inside a component, so a line's crossing count - and therefore whether it
+            // is an active lattice member - is the same number either way: a page carrying a single
+            // grid yields one component and an unchanged outcome.
+            var crossing = new bool[horizontalLines.Length, verticalLines.Length];
+            var horizontalCrossings = new int[horizontalLines.Length];
+            var verticalCrossings = new int[verticalLines.Length];
+            var componentOf = new int[horizontalLines.Length + verticalLines.Length];
+            for (var index = 0; index < componentOf.Length; index++) componentOf[index] = index;
+            int FindComponent(int index)
+            {
+                while (componentOf[index] != index) index = componentOf[index] = componentOf[componentOf[index]];
+                return index;
+            }
+            for (var h = 0; h < horizontalLines.Length; h++)
+            for (var v = 0; v < verticalLines.Length; v++)
+            {
+                if (!Crosses(horizontalLines[h], verticalLines[v])) continue;
+                crossing[h, v] = true;
+                horizontalCrossings[h]++;
+                verticalCrossings[v]++;
+                var left = FindComponent(h);
+                var right = FindComponent(horizontalLines.Length + v);
+                if (left != right) componentOf[left] = right;
+            }
+            // Only lines that cross at least three of the opposite axis take part; the surviving
+            // members are grouped by component in a stable order so suppression is deterministic.
+            var grids = new List<(List<int> Horizontal, List<int> Vertical)>();
+            var gridByComponent = new Dictionary<int, int>();
+            (List<int> Horizontal, List<int> Vertical) GridFor(int root)
+            {
+                if (gridByComponent.TryGetValue(root, out var existing)) return grids[existing];
+                gridByComponent[root] = grids.Count;
+                grids.Add(([], []));
+                return grids[^1];
+            }
+            for (var h = 0; h < horizontalLines.Length; h++)
+                if (horizontalCrossings[h] >= 3) GridFor(FindComponent(h)).Horizontal.Add(h);
+            for (var v = 0; v < verticalLines.Length; v++)
+                if (verticalCrossings[v] >= 3) GridFor(FindComponent(horizontalLines.Length + v)).Vertical.Add(v);
 
-            var gridLines = activeHorizontal.Concat(activeVertical).ToArray();
             var semanticNodes = nodes.Where(node => node.Geometry is not null).ToArray();
-            if (!TrySpend((long)gridLines.Length * semanticNodes.Length)) return;
+            var hasMarkedTableEvidence = false;
+            var markedTableEvidenceResolved = false;
+            var gridLines = new List<(VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum)>();
+            foreach (var (horizontalIndexes, verticalIndexes) in grids)
+            {
+                if (horizontalIndexes.Count < 3 || verticalIndexes.Count < 3) continue;
+                var activeHorizontal = horizontalIndexes.Select(index => horizontalLines[index]).ToArray();
+                var activeVertical = verticalIndexes.Select(index => verticalLines[index]).ToArray();
+                long crossingCount = 0;
+                foreach (var h in horizontalIndexes)
+                foreach (var v in verticalIndexes)
+                    if (crossing[h, v]) crossingCount++;
+                var density = crossingCount / ((double)activeHorizontal.Length * activeVertical.Length);
+                if (!markedTableEvidenceResolved)
+                {
+                    // Marked-content evidence is a property of the page's content stream, so it is
+                    // scanned at most once and then shared by every component.
+                    hasMarkedTableEvidence = HasMarkedTableEvidence();
+                    markedTableEvidenceResolved = true;
+                }
+                if (density < .70 || !hasMarkedTableEvidence &&
+                    (!HasRegularSpacing(activeHorizontal.Select(line => line.Fixed)) ||
+                     !HasRegularSpacing(activeVertical.Select(line => line.Fixed)))) continue;
+
+                var componentGrid = activeHorizontal.Concat(activeVertical).ToArray();
+                if (!TrySpend((long)componentGrid.Length * semanticNodes.Length)) return;
+                if (componentGrid.Any(TouchesSemanticNode)) continue;
+
+                var xBoundaries = activeVertical.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
+                var yBoundaries = activeHorizontal.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
+                if (!TrySpend((long)regions.Count * (xBoundaries.Length + yBoundaries.Length))) return;
+                var occupiedCells = new HashSet<(int Column, int Row)>();
+                foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
+                {
+                    if (assignedLabelRegions.Contains(regionIndex) || string.IsNullOrWhiteSpace(region.Text)) continue;
+                    var centerX = region.BoundingBox.X + region.BoundingBox.Width / 2;
+                    var centerY = region.BoundingBox.Y + region.BoundingBox.Height / 2;
+                    var column = FindCell(xBoundaries, centerX);
+                    var row = FindCell(yBoundaries, centerY);
+                    if (column >= 0 && row >= 0) occupiedCells.Add((column, row));
+                }
+                var minimumOccupiedCells = hasMarkedTableEvidence ? 2 : 4;
+                if (occupiedCells.Count < minimumOccupiedCells ||
+                    occupiedCells.Select(cell => cell.Column).Distinct().Count() < 2 ||
+                    occupiedCells.Select(cell => cell.Row).Distinct().Count() < 2) continue;
+                gridLines.AddRange(componentGrid);
+            }
+            if (gridLines.Count == 0) return;
+
             bool TouchesSemanticNode(
                 (VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) line)
             {
@@ -1446,11 +1615,6 @@ public static class PdfTextExtractor
                 };
             }
 
-            if (gridLines.Any(TouchesSemanticNode)) return;
-
-            var xBoundaries = activeVertical.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
-            var yBoundaries = activeHorizontal.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
-            if (!TrySpend((long)regions.Count * (xBoundaries.Length + yBoundaries.Length))) return;
             int FindCell(IReadOnlyList<double> boundaries, double coordinate)
             {
                 for (var index = 0; index + 1 < boundaries.Count; index++)
@@ -1464,23 +1628,8 @@ public static class PdfTextExtractor
                 return -1;
             }
 
-            var occupiedCells = new HashSet<(int Column, int Row)>();
-            foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
-            {
-                if (assignedLabelRegions.Contains(regionIndex) || string.IsNullOrWhiteSpace(region.Text)) continue;
-                var centerX = region.BoundingBox.X + region.BoundingBox.Width / 2;
-                var centerY = region.BoundingBox.Y + region.BoundingBox.Height / 2;
-                var column = FindCell(xBoundaries, centerX);
-                var row = FindCell(yBoundaries, centerY);
-                if (column >= 0 && row >= 0) occupiedCells.Add((column, row));
-            }
-            var minimumOccupiedCells = hasMarkedTableEvidence ? 2 : 4;
-            if (occupiedCells.Count < minimumOccupiedCells ||
-                occupiedCells.Select(cell => cell.Column).Distinct().Count() < 2 ||
-                occupiedCells.Select(cell => cell.Row).Distinct().Count() < 2) return;
-
-            if (!TrySpend((long)gridLines.Length * paths.Count +
-                          (long)gridLines.Length * (diagnostics.Count + graphDiagnostics.Count + 1))) return;
+            if (!TrySpend((long)gridLines.Count * paths.Count +
+                          (long)gridLines.Count * (diagnostics.Count + graphDiagnostics.Count + 1))) return;
             cancellationToken.ThrowIfCancellationRequested();
             if (visualInferenceToken.IsCancellationRequested) return;
             var pathIndexById = paths.Select((path, index) => (path.Id, index))
@@ -1691,6 +1840,7 @@ public static class PdfTextExtractor
             }
             nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
                 Geometry: geometry, SourceAnchor: anchor));
+            RecordNodeLabel(labelCandidate[0].index, nodes[^1].Id);
         }
 
         // A text region should only "win" a label slot when it is actually near the shape it
@@ -1838,17 +1988,20 @@ public static class PdfTextExtractor
             if (start < bytes.Length && bytes[start] == '\n') start++;
             var end = IndexOf(bytes, endMarker, start);
             if (end < 0) throw new PdfExtractionException("PDF stream is missing endstream.");
-            var payload = bytes[start..end];
-            while (payload.Length > 0 && (payload[^1] == '\r' || payload[^1] == '\n')) payload = payload[..^1];
             var header = ReadContainingObjectHeader(latin, offset, 2048);
             int? objectId = TryReadContainingObjectId(header, options.EffectiveRegexTimeout, out var parsedObjectId)
                 ? parsedObjectId
                 : null;
+            // Decide before copying: this scan runs once for page content and again for Form
+            // XObjects, and copying every multi-megabyte font and image stream only to discard it
+            // would make the second pass cost as much as the first.
             if (contentObjectIds.Count > 0 && (objectId is null || !contentObjectIds.Contains(objectId.Value)))
             {
                 offset = end + endMarker.Length;
                 continue;
             }
+            var payload = bytes[start..end];
+            while (payload.Length > 0 && (payload[^1] == '\r' || payload[^1] == '\n')) payload = payload[..^1];
             payload = DecodeFilteredStream(payload, header, options.MaxExpandedStreamBytes);
             yield return (objectId, Encoding.Latin1.GetString(payload));
             offset = end + endMarker.Length;
@@ -1860,6 +2013,440 @@ public static class PdfTextExtractor
         objectId = 0;
         var matches = Regex.Matches(header, @"(?<id>\d+)\s+\d+\s+obj\b", RegexOptions.None, timeout);
         return matches.Count > 0 && int.TryParse(matches[^1].Groups["id"].Value, out objectId);
+    }
+
+    /// <summary>What a page resource name resolves to. <see cref="Unknown"/> covers both an
+    /// unresolvable indirect reference and an XObject whose <c>/Subtype</c> is neither Image nor
+    /// Form; the caller decides conservatively what to do with it.</summary>
+    private enum PdfXObjectKind { Image, Form, Unknown }
+
+    /// <summary>One image drawn by a content stream, with the CTM in force at the draw operator.
+    /// The placement rectangle is that matrix applied to the image space unit square;
+    /// <see cref="Name"/> is null for an inline image.</summary>
+    private readonly record struct PdfImageInvocation(string? Name, PdfMatrix Ctm, bool Inline);
+
+    /// <summary>The XObject names one resource dictionary advertises: what each name is, and which
+    /// object a Form name points at so <see cref="CollectEmbeddedImages"/> can descend into it.</summary>
+    private sealed record PdfResourceScope(
+        IReadOnlyDictionary<string, PdfXObjectKind> Kinds,
+        IReadOnlyDictionary<string, int> ObjectIds);
+
+    /// <summary>A Form XObject a page can invoke: its own resource dictionary (null when it
+    /// inherits the caller's), its <c>/Matrix</c>, and its decoded content stream (null when the
+    /// stream could not be read, in which case its images stay invisible).</summary>
+    private sealed record PdfFormXObject(PdfResourceScope? Resources, PdfMatrix Matrix, string? Content);
+
+    /// <summary>Everything a page inherits from its <c>/Pages</c> ancestors plus what it declares
+    /// itself. Null members mean the document declares nothing resolvable for that key.</summary>
+    private sealed record PdfPageAttributes(PdfResourceScope? Resources, Geometry? MediaBox, Geometry? CropBox, int Rotation);
+
+    /// <summary>How many characters of Form XObject content one document may be scanned for
+    /// images. Form recursion follows references the page itself controls, so it needs a ceiling
+    /// that a deeply reused form graph cannot blow past even when depth and cycle checks hold.</summary>
+    private const long MaxFormScanBytes = 8L * 1024 * 1024;
+    private const int MaxFormDepth = 8;
+    private const int MaxPageInheritanceDepth = 32;
+
+    /// <summary>A single shared allowance for a document's Form XObject scan.</summary>
+    private sealed class PdfFormScanBudget(long remaining)
+    {
+        public bool TryConsume(long amount)
+        {
+            if (amount > remaining) return false;
+            remaining -= amount;
+            return true;
+        }
+    }
+
+    /// <summary>Keeps only the draws that really are raster images, descending into Form XObjects
+    /// so an image nested inside one is found at its page-space rectangle. A resolved Form is never
+    /// itself counted; an unresolved name survives only when <paramref name="treatUnresolvedAsImage"/>
+    /// says the document has image objects at all, so an unfollowable resource dictionary degrades
+    /// to over-reporting a placeholder rather than to silently dropping the image.</summary>
+    private static IReadOnlyList<Geometry?> ResolveEmbeddedImages(string content,
+        PdfResourceScope? resources, bool treatUnresolvedAsImage,
+        IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget budget)
+    {
+        var result = new List<Geometry?>();
+        CollectEmbeddedImages(content, resources, PdfMatrix.Identity, treatUnresolvedAsImage, forms, budget,
+            0, [], result);
+        return result;
+    }
+
+    /// <summary>Scans one content stream - a page's, or a Form XObject's - under
+    /// <paramref name="ctm"/>. A Form draw re-enters with the form's own resources (falling back to
+    /// the caller's, per the specification), <c>CTM x /Matrix</c>, and the form marked active so a
+    /// form that reaches itself again stops instead of recursing forever.</summary>
+    private static void CollectEmbeddedImages(string content, PdfResourceScope? resources, PdfMatrix ctm,
+        bool treatUnresolvedAsImage, IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget budget,
+        int depth, HashSet<int> active, List<Geometry?> result)
+    {
+        foreach (var invocation in ScanImageInvocations(content, ctm))
+        {
+            var name = invocation.Name;
+            var kind = invocation.Inline
+                ? PdfXObjectKind.Image
+                : name is { Length: > 0 } && resources is not null && resources.Kinds.TryGetValue(name, out var resolved)
+                    ? resolved
+                    : PdfXObjectKind.Unknown;
+            if (kind == PdfXObjectKind.Form)
+            {
+                if (depth >= MaxFormDepth || name is null || resources is null ||
+                    !resources.ObjectIds.TryGetValue(name, out var objectId) ||
+                    !forms.TryGetValue(objectId, out var form) || form.Content is null ||
+                    !active.Add(objectId))
+                    continue;
+                if (budget.TryConsume(form.Content.Length))
+                    CollectEmbeddedImages(form.Content, form.Resources ?? resources,
+                        invocation.Ctm.Concat(form.Matrix), treatUnresolvedAsImage, forms, budget,
+                        depth + 1, active, result);
+                active.Remove(objectId);
+                continue;
+            }
+            if (kind == PdfXObjectKind.Unknown && !treatUnresolvedAsImage) continue;
+            result.Add(UnitSquareBounds(invocation.Ctm));
+        }
+    }
+
+    /// <summary>Walks a content stream tracking only q/Q/cm so that every <c>Do</c> and every
+    /// inline image can report the CTM in force at the draw. Strings, hex strings, names and
+    /// comments are skipped exactly as <see cref="ContainsOperatorToken"/> skips them, so the word
+    /// "Do" inside a literal string is not an operator. <paramref name="initial"/> is the CTM the
+    /// stream starts under: identity for a page, and the invoking CTM composed with the form's
+    /// <c>/Matrix</c> for a Form XObject, so a nested draw reports page-space coordinates.</summary>
+    private static IReadOnlyList<PdfImageInvocation> ScanImageInvocations(string content, PdfMatrix initial)
+    {
+        var result = new List<PdfImageInvocation>();
+        var stack = new Stack<PdfMatrix>();
+        var ctm = initial;
+        var operands = new List<double>();
+        string? pendingName = null;
+        for (var index = 0; index < content.Length;)
+        {
+            var character = content[index];
+            if (character == '%')
+            {
+                while (index < content.Length && content[index] is not '\r' and not '\n') index++;
+                continue;
+            }
+            if (character == '(')
+            {
+                var depth = 1;
+                index++;
+                while (index < content.Length && depth > 0)
+                {
+                    if (content[index] == '\\') index += Math.Min(2, content.Length - index);
+                    else if (content[index++] == '(') depth++;
+                    else if (content[index - 1] == ')') depth--;
+                }
+                continue;
+            }
+            if (character == '<')
+            {
+                index++;
+                if (index < content.Length && content[index] == '<') { index++; continue; }
+                while (index < content.Length && content[index++] != '>') { }
+                continue;
+            }
+            if (character == '/')
+            {
+                var nameStart = ++index;
+                while (index < content.Length && !char.IsWhiteSpace(content[index]) && !"()<>[]{}/%".Contains(content[index])) index++;
+                pendingName = content[nameStart..index];
+                continue;
+            }
+            if (char.IsWhiteSpace(character) || character is '>' or '[' or ']' or '{' or '}') { index++; continue; }
+            var start = index++;
+            while (index < content.Length && !char.IsWhiteSpace(content[index]) && !"()<>[]{}/%".Contains(content[index])) index++;
+            var token = content[start..index];
+            if (double.TryParse(token, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var number))
+            {
+                operands.Add(number);
+                continue;
+            }
+            var name = pendingName;
+            pendingName = null;
+            switch (token)
+            {
+                case "q": stack.Push(ctm); break;
+                case "Q": if (stack.TryPop(out var restored)) ctm = restored; break;
+                case "cm":
+                    if (operands.Count >= 6)
+                        ctm = ctm.Concat(new PdfMatrix(operands[^6], operands[^5], operands[^4], operands[^3], operands[^2], operands[^1]));
+                    break;
+                case "Do": result.Add(new PdfImageInvocation(name, ctm, false)); break;
+                case "BI":
+                    index = SkipInlineImageData(content, index);
+                    result.Add(new PdfImageInvocation(null, ctm, true));
+                    break;
+            }
+            operands.Clear();
+        }
+        return result;
+    }
+
+    /// <summary>Skips an inline image's dictionary and its raw sample data, which is arbitrary
+    /// binary and must never reach the operator scanner. Returns the index just past the closing
+    /// <c>EI</c> delimiter (or the end of the stream when the image is truncated).</summary>
+    private static int SkipInlineImageData(string content, int index)
+    {
+        var cursor = index;
+        while (cursor < content.Length)
+        {
+            var data = content.IndexOf("ID", cursor, StringComparison.Ordinal);
+            if (data < 0) return content.Length;
+            var openedByDelimiter = data == 0 || char.IsWhiteSpace(content[data - 1]) || content[data - 1] == '>';
+            var next = data + 2;
+            if (openedByDelimiter && (next >= content.Length || char.IsWhiteSpace(content[next])))
+            {
+                cursor = Math.Min(content.Length, next + 1);
+                break;
+            }
+            cursor = data + 2;
+        }
+        while (cursor < content.Length)
+        {
+            var end = content.IndexOf("EI", cursor, StringComparison.Ordinal);
+            if (end < 0) return content.Length;
+            var after = end + 2;
+            if (end > 0 && char.IsWhiteSpace(content[end - 1]) && (after >= content.Length || char.IsWhiteSpace(content[after])))
+                return after;
+            cursor = end + 2;
+        }
+        return content.Length;
+    }
+
+    /// <summary>Maps the image space unit square through the CTM: that rectangle is exactly where
+    /// a <c>Do</c> paints its image. Returns null for a degenerate or non-finite transform.</summary>
+    private static Geometry? UnitSquareBounds(PdfMatrix ctm)
+    {
+        var corners = new[] { ctm.Apply(0, 0), ctm.Apply(1, 0), ctm.Apply(1, 1), ctm.Apply(0, 1) };
+        var minimumX = corners.Min(corner => corner.X);
+        var maximumX = corners.Max(corner => corner.X);
+        var minimumY = corners.Min(corner => corner.Y);
+        var maximumY = corners.Max(corner => corner.Y);
+        if (!double.IsFinite(minimumX) || !double.IsFinite(maximumX) || !double.IsFinite(minimumY) || !double.IsFinite(maximumY))
+            return null;
+        var width = maximumX - minimumX;
+        var height = maximumY - minimumY;
+        return width > 0 && height > 0 ? new Geometry("pdf-user-space", minimumX, minimumY, width, height) : null;
+    }
+
+    /// <summary>Every indirect object's body, in file order. Both the page walk and the Form
+    /// XObject catalog need the same index, and the regular expression that builds it is the
+    /// expensive part, so it is run once.</summary>
+    private static (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById)
+        ReadObjectIndex(string structure, TimeSpan timeout)
+    {
+        var ordered = new List<(int Id, string Body)>();
+        var objects = new Dictionary<int, string>();
+        foreach (Match item in Regex.Matches(structure, @"(?<id>\d+)\s+\d+\s+obj\b(?<body>.*?)(?=\bendobj\b)", RegexOptions.Singleline, timeout))
+        {
+            if (!int.TryParse(item.Groups["id"].Value, out var id)) continue;
+            ordered.Add((id, item.Groups["body"].Value));
+            objects[id] = item.Groups["body"].Value;
+        }
+        return (ordered, objects);
+    }
+
+    /// <summary>Resolves each page's <c>/Resources</c>, <c>/MediaBox</c>, <c>/CropBox</c> and
+    /// <c>/Rotate</c>. All four are inheritable: a page that declares none of them takes what its
+    /// <c>/Pages</c> ancestors declare, which is how most producers write multi-page files - so
+    /// reading them off the page dictionary alone silently loses every image on such a page. Pages
+    /// are numbered exactly as <see cref="ReadContentObjectPages"/> numbers them so the maps agree.</summary>
+    private static IReadOnlyDictionary<int, PdfPageAttributes> ReadPageAttributes(
+        (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById) index, TimeSpan timeout)
+    {
+        var result = new Dictionary<int, PdfPageAttributes>();
+        var pageNumber = 0;
+        foreach (var (_, body) in index.Ordered)
+        {
+            if (!Regex.IsMatch(body, @"/Type\s*/Page\b", RegexOptions.None, timeout)) continue;
+            pageNumber++;
+            var resources = InheritedValue(body, "Resources", index.ById, timeout) is { } declaration
+                ? ReadResourceScope(declaration, index.ById, timeout)
+                : null;
+            result[pageNumber] = new PdfPageAttributes(resources,
+                ReadRectangle(InheritedValue(body, "MediaBox", index.ById, timeout), timeout),
+                ReadRectangle(InheritedValue(body, "CropBox", index.ById, timeout), timeout),
+                ReadRotation(InheritedValue(body, "Rotate", index.ById, timeout)));
+        }
+        return result;
+    }
+
+    /// <summary>The value of an inheritable page key: the page's own when it declares one, else the
+    /// nearest ancestor's along <c>/Parent</c>. Stops at <see cref="MaxPageInheritanceDepth"/> and
+    /// on a repeated ancestor, so a corrupt <c>/Parent</c> loop cannot hang extraction.</summary>
+    private static string? InheritedValue(string body, string key,
+        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
+    {
+        var current = body;
+        var seen = new HashSet<int>();
+        for (var depth = 0; depth < MaxPageInheritanceDepth; depth++)
+        {
+            if (Regex.IsMatch(current, @"/" + key + @"(?![A-Za-z0-9])", RegexOptions.None, timeout))
+                return ResolveKeyValue(current, key, objects, timeout);
+            var parent = Regex.Match(current, @"/Parent\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout);
+            if (!parent.Success || !int.TryParse(parent.Groups["id"].Value, out var parentId) ||
+                !seen.Add(parentId) || !objects.TryGetValue(parentId, out var next))
+                return null;
+            current = next;
+        }
+        return null;
+    }
+
+    /// <summary>Maps one resource dictionary's <c>/XObject</c> names to their kinds and to the
+    /// objects they reference, so a Form name can be followed.</summary>
+    private static PdfResourceScope? ReadResourceScope(string resources,
+        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
+    {
+        if (ResolveDictionaryValue(resources, "XObject", objects, timeout) is not { } xobjects) return null;
+        var kinds = new Dictionary<string, PdfXObjectKind>(StringComparer.Ordinal);
+        var ids = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (Match entry in Regex.Matches(xobjects, @"/(?<name>[^\s/<>\[\]{}()%]+)\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
+        {
+            var name = entry.Groups["name"].Value;
+            var resolved = int.TryParse(entry.Groups["id"].Value, out var id);
+            kinds[name] = resolved && objects.TryGetValue(id, out var target)
+                ? Regex.IsMatch(target, @"/Subtype\s*/Image\b", RegexOptions.None, timeout) ? PdfXObjectKind.Image
+                    : Regex.IsMatch(target, @"/Subtype\s*/Form\b", RegexOptions.None, timeout) ? PdfXObjectKind.Form
+                    : PdfXObjectKind.Unknown
+                : PdfXObjectKind.Unknown;
+            if (resolved) ids[name] = id;
+        }
+        return kinds.Count > 0 ? new PdfResourceScope(kinds, ids) : null;
+    }
+
+    /// <summary>Catalogs every Form XObject with its own resources, <c>/Matrix</c> and decoded
+    /// content stream. The streams are read in one extra pass restricted to the form objects, and
+    /// only when the document has forms at all, so an ordinary file pays nothing for this.</summary>
+    private static IReadOnlyDictionary<int, PdfFormXObject> ReadFormXObjects(
+        (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById) index,
+        byte[] raw, string latin, PdfExtractionOptions options)
+    {
+        var timeout = options.EffectiveRegexTimeout;
+        var bodies = new Dictionary<int, string>();
+        foreach (var (id, body) in index.Ordered)
+            if (Regex.IsMatch(body, @"/Subtype\s*/Form\b", RegexOptions.None, timeout))
+                bodies[id] = body;
+        if (bodies.Count == 0) return new Dictionary<int, PdfFormXObject>();
+        var contents = new Dictionary<int, string>();
+        foreach (var (objectId, payload) in ReadStreams(raw, latin, options, bodies.Keys.ToHashSet()))
+            if (objectId is { } id && !contents.ContainsKey(id)) contents[id] = payload;
+        var result = new Dictionary<int, PdfFormXObject>();
+        foreach (var (id, body) in bodies)
+            result[id] = new PdfFormXObject(
+                ResolveDictionaryValue(body, "Resources", index.ById, timeout) is { } resources
+                    ? ReadResourceScope(resources, index.ById, timeout)
+                    : null,
+                ReadMatrix(body, timeout),
+                contents.GetValueOrDefault(id));
+        return result;
+    }
+
+    /// <summary>A Form XObject's <c>/Matrix</c>, or the identity when it declares none or the
+    /// declaration is not six numbers.</summary>
+    private static PdfMatrix ReadMatrix(string body, TimeSpan timeout)
+    {
+        var match = Regex.Match(body, @"/Matrix\s*\[(?<values>[^\]]*)\]", RegexOptions.None, timeout);
+        if (!match.Success) return PdfMatrix.Identity;
+        var numbers = Regex.Matches(match.Groups["values"].Value, NumberPattern, RegexOptions.None, timeout)
+            .Select(item => double.TryParse(item.Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : double.NaN)
+            .ToArray();
+        return numbers.Length == 6 && numbers.All(double.IsFinite)
+            ? new PdfMatrix(numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5])
+            : PdfMatrix.Identity;
+    }
+
+    /// <summary>A <c>[llx lly urx ury]</c> page box as a normalized rectangle, or null when the
+    /// declaration is missing, malformed or degenerate.</summary>
+    private static Geometry? ReadRectangle(string? declaration, TimeSpan timeout)
+    {
+        if (declaration is null) return null;
+        var numbers = Regex.Matches(declaration, NumberPattern, RegexOptions.None, timeout)
+            .Select(item => double.TryParse(item.Value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : double.NaN)
+            .ToArray();
+        if (numbers.Length < 4 || !numbers.Take(4).All(double.IsFinite)) return null;
+        var left = Math.Min(numbers[0], numbers[2]);
+        var bottom = Math.Min(numbers[1], numbers[3]);
+        var width = Math.Abs(numbers[2] - numbers[0]);
+        var height = Math.Abs(numbers[3] - numbers[1]);
+        return width > 0 && height > 0 ? new Geometry("pdf-user-space", left, bottom, width, height) : null;
+    }
+
+    /// <summary>A <c>/Rotate</c> value normalized to 0, 90, 180 or 270. Anything that is not a
+    /// quarter turn is snapped to the nearest one rather than dropped: a consumer keys "do not map
+    /// rectangles onto the raster" off a non-zero value, and silently reporting 0 would let it map
+    /// them wrongly.</summary>
+    private static int ReadRotation(string? declaration)
+    {
+        if (declaration is null ||
+            !double.TryParse(declaration.Trim(), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var value) || !double.IsFinite(value))
+            return 0;
+        var quarters = (int)Math.Round(value / 90d, MidpointRounding.AwayFromZero);
+        return ((quarters % 4) + 4) % 4 * 90;
+    }
+
+    /// <summary>Returns the text of <paramref name="key"/>'s dictionary value: the balanced
+    /// <c>&lt;&lt; ... &gt;&gt;</c> written inline, or the body of the object an indirect reference
+    /// points at. Null when the key is absent or its target cannot be followed - the caller then
+    /// treats the resource as unresolved rather than as absent.</summary>
+    private static string? ResolveDictionaryValue(string body, string key,
+        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
+    {
+        var match = Regex.Match(body, @"/" + key + @"(?![A-Za-z0-9])\s*", RegexOptions.None, timeout);
+        if (!match.Success) return null;
+        var cursor = match.Index + match.Length;
+        var reference = Regex.Match(body[cursor..], @"^(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout);
+        if (reference.Success)
+            return int.TryParse(reference.Groups["id"].Value, out var id) && objects.TryGetValue(id, out var target) ? target : null;
+        if (cursor + 1 >= body.Length || body[cursor] != '<' || body[cursor + 1] != '<') return null;
+        var depth = 0;
+        for (var index = cursor; index + 1 < body.Length; index++)
+        {
+            if (body[index] == '<' && body[index + 1] == '<') { depth++; index++; continue; }
+            if (body[index] != '>' || body[index + 1] != '>') continue;
+            depth--;
+            index++;
+            if (depth == 0) return body[cursor..(index + 1)];
+        }
+        return null;
+    }
+
+    /// <summary>The text of <paramref name="key"/>'s value whatever shape it has: a dictionary, an
+    /// array, a bare token, or the object an indirect reference points at. <see
+    /// cref="ResolveDictionaryValue"/> only understands dictionaries, which is enough for
+    /// <c>/Resources</c> but not for <c>/MediaBox</c> or <c>/Rotate</c>.</summary>
+    private static string? ResolveKeyValue(string body, string key,
+        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
+    {
+        var match = Regex.Match(body, @"/" + key + @"(?![A-Za-z0-9])\s*", RegexOptions.None, timeout);
+        if (!match.Success) return null;
+        var cursor = match.Index + match.Length;
+        if (cursor >= body.Length) return null;
+        var reference = Regex.Match(body[cursor..], @"^(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout);
+        if (reference.Success)
+        {
+            if (!int.TryParse(reference.Groups["id"].Value, out var id) || !objects.TryGetValue(id, out var target))
+                return null;
+            // The referenced object is the value itself (e.g. "[0 0 612 792]"), so hand back its
+            // whole body rather than looking the key up again inside it.
+            return target;
+        }
+        if (body[cursor] == '[')
+        {
+            var close = body.IndexOf(']', cursor);
+            return close < 0 ? null : body[cursor..(close + 1)];
+        }
+        if (cursor + 1 < body.Length && body[cursor] == '<' && body[cursor + 1] == '<')
+            return ResolveDictionaryValue(body, key, objects, timeout);
+        var end = cursor;
+        while (end < body.Length && !char.IsWhiteSpace(body[end]) && !"()<>[]{}/%".Contains(body[end])) end++;
+        return end > cursor ? body[cursor..end] : null;
     }
 
     private static bool ContainsVectorOperators(string content) =>
@@ -2117,6 +2704,12 @@ public static class PdfTextExtractor
     /// <summary>How a fragment sits relative to a candidate gutter interval [start, end).</summary>
     private enum GutterSide { Left, Right, Straddle }
 
+    /// <summary>How far past a column block's own median line pitch the next baseline may sit
+    /// before it is treated as a new block rather than the block's next line. Ordinary paragraph
+    /// spacing and a heading inside a column stay well under this (roughly one and a half blank
+    /// lines); the drop to a page-bottom footer is far beyond it.</summary>
+    private const double BlockEndPitchFactor = 2.5;
+
     private static GutterSide ClassifyGutterSide(PdfTextRegion fragment, double start, double end)
     {
         var right = fragment.BoundingBox.X + fragment.BoundingBox.Width;
@@ -2138,7 +2731,12 @@ public static class PdfTextExtractor
         public int FirstBaseline;
         public int LastBaseline;
         public int TrueMatchCount;
-        public Dictionary<int, int> SplitByBaseline { get; } = [];
+        /// <summary>Y of the last baseline this run covered, and the vertical gaps between the
+        /// consecutive baselines it has covered so far. A column block is a body of text set at one
+        /// line pitch; a gap far larger than that pitch is the end of the block, not another of its
+        /// lines, which is what keeps a page-bottom footer from being pulled into a column.</summary>
+        public double LastBaselineY;
+        public List<double> Pitches { get; } = [];
     }
 
     /// <summary>Detects a persistent vertical whitespace gutter - a horizontal gap at least
@@ -2148,9 +2746,12 @@ public static class PdfTextExtractor
     /// column precedes the whole right column, each top-to-bottom. A single wide gap on one
     /// baseline (a "Label ... value" row, a title with a trailing page number, or widely spaced
     /// flow-diagram labels sharing one baseline) never accumulates the three confirmations a run
-    /// needs, so it is left exactly as the plain geometric sort produced it. Table-owned fragments
-    /// are excluded from detection entirely and keep the position the geometric sort gave them;
-    /// only the surrounding non-table fragments move.</summary>
+    /// needs, so it is left exactly as the plain geometric sort produced it. A block also ends at a
+    /// vertical step far beyond its own line pitch (see <see cref="BlockEndPitchFactor"/>), which
+    /// is what keeps a page-bottom footer out of the left column, and every baseline after that
+    /// returns to plain top-to-bottom order. Table-owned fragments are excluded from detection
+    /// entirely and keep the position the geometric sort gave them; only the surrounding non-table
+    /// fragments move.</summary>
     private static PdfTextRegion[] ApplyColumnLayout(IReadOnlyList<PdfTextRegion> geometric,
         IReadOnlySet<int>? tableSourceIds, out int columnCount)
     {
@@ -2173,6 +2774,17 @@ public static class PdfTextExtractor
                 baselines[^1].Add(region);
         }
         if (baselines.Count < 3) return [.. geometric];
+        // Within a baseline the geometric sort is Y-major, so when the two columns are set at
+        // different line pitches a right-column fragment sitting a couple of points higher lands
+        // ahead of the left-column fragment it shares a baseline with. Every decision below - which
+        // gap is a gutter, and which side of it a fragment falls on - is horizontal, so order each
+        // baseline left to right first. A baseline's vertical position, used below to measure the
+        // block's line pitch, is its topmost fragment and so is unaffected by that reordering.
+        var baselineTops = baselines.Select(baseline => baseline.Max(region => region.BoundingBox.Y)).ToArray();
+        foreach (var baseline in baselines) baseline.Sort((left, right) =>
+            left.BoundingBox.X != right.BoundingBox.X
+                ? left.BoundingBox.X.CompareTo(right.BoundingBox.X)
+                : left.ReadingOrder.CompareTo(right.ReadingOrder));
 
         var minX = flowRegions.Min(region => region.BoundingBox.X);
         var maxX = flowRegions.Max(region => region.BoundingBox.X + region.BoundingBox.Width);
@@ -2188,6 +2800,21 @@ public static class PdfTextExtractor
             var stillOpen = new List<GutterRun>();
             foreach (var run in openRuns)
             {
+                // A column block runs at one line pitch. A vertical step far beyond that pitch is
+                // the end of the block, not another of its lines: without this test a short
+                // page-bottom footer that happens to fit inside the left column's horizontal
+                // extent ("Page 1", "Confidential") was absorbed as the left column's last line
+                // and therefore emitted ahead of the entire right column. Two observed pitches are
+                // required before the median is trusted as the block's own rhythm.
+                if (run.Pitches.Count >= 2)
+                {
+                    var pitches = run.Pitches.Order().ToArray();
+                    if (baselineTops[baselineIndex] < run.LastBaselineY - pitches[pitches.Length / 2] * BlockEndPitchFactor)
+                    {
+                        if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+                        continue;
+                    }
+                }
                 var sides = baseline.Select(fragment => ClassifyGutterSide(fragment, run.Start, run.End)).ToArray();
                 if (Array.IndexOf(sides, GutterSide.Straddle) >= 0)
                 {
@@ -2199,7 +2826,8 @@ public static class PdfTextExtractor
                 var lastLeftIndex = Array.LastIndexOf(sides, GutterSide.Left);
                 var hasRight = Array.IndexOf(sides, GutterSide.Right) >= 0;
                 run.LastBaseline = baselineIndex;
-                run.SplitByBaseline[baselineIndex] = lastLeftIndex;
+                run.Pitches.Add(run.LastBaselineY - baselineTops[baselineIndex]);
+                run.LastBaselineY = baselineTops[baselineIndex];
                 if (lastLeftIndex >= 0 && hasRight)
                 {
                     var leftFragment = baseline[lastLeftIndex];
@@ -2220,13 +2848,11 @@ public static class PdfTextExtractor
                 var gapEnd = right.BoundingBox.X;
                 if (gapEnd - gapStart < GutterThreshold(left, right)) continue;
                 if (stillOpen.Any(run => run.Start < gapEnd && gapStart < run.End)) continue;
-                var seeded = new GutterRun
+                stillOpen.Add(new GutterRun
                 {
                     Start = gapStart, End = gapEnd, FirstBaseline = baselineIndex, LastBaseline = baselineIndex,
-                    TrueMatchCount = 1
-                };
-                seeded.SplitByBaseline[baselineIndex] = fragmentIndex;
-                stillOpen.Add(seeded);
+                    TrueMatchCount = 1, LastBaselineY = baselineTops[baselineIndex]
+                });
             }
             openRuns = stillOpen;
         }
@@ -2254,20 +2880,15 @@ public static class PdfTextExtractor
             for (var column = 0; column < columns; column++) columnLines[column] = [];
             for (var baselineIndex = cursor; baselineIndex <= blockEnd; baselineIndex++)
             {
-                var baseline = baselines[baselineIndex];
-                var splits = covering.Where(run => run.SplitByBaseline.ContainsKey(baselineIndex))
-                    .Select(run => run.SplitByBaseline[baselineIndex]).OrderBy(splitIndex => splitIndex).ToArray();
-                var segmentStart = 0;
-                for (var segment = 0; segment <= splits.Length; segment++)
-                {
-                    var segmentEndExclusive = segment < splits.Length
-                        ? Math.Clamp(splits[segment] + 1, segmentStart, baseline.Count)
-                        : baseline.Count;
-                    var column = Math.Min(segment, columns - 1);
-                    for (var itemIndex = segmentStart; itemIndex < segmentEndExclusive; itemIndex++)
-                        columnLines[column].Add(baseline[itemIndex]);
-                    segmentStart = segmentEndExclusive;
-                }
+                // Each fragment picks its column from its own geometry rather than from an index
+                // interval recorded during detection: an index split assumed the baseline was
+                // already ordered left to right, so on a baseline whose two columns had drifted
+                // apart vertically it swept a right-column fragment into the left column. A
+                // fragment counts one column to the right for every gutter it clears; one that
+                // straddles a gutter stays in the leftmost column it touches.
+                foreach (var fragment in baselines[baselineIndex])
+                    columnLines[covering.Count(run => ClassifyGutterSide(fragment, run.Start, run.End) == GutterSide.Right)]
+                        .Add(fragment);
             }
             foreach (var column in columnLines) reorderedFlow.AddRange(column);
             cursor = blockEnd + 1;

@@ -880,6 +880,60 @@ public sealed class PptxAdapterTests
         Assert.Equal(-150, rotated.Geometry.RotationDegrees, precision: 4);
     }
 
+    [Fact]
+    public void HiddenGroupExcludesChildShapesWhileSiblingVisibleGroupIsUnaffected()
+    {
+        var entries = Entries(CreatePackage());
+        const string groups =
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"60\" name=\"HiddenGroup\" hidden=\"1\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"61\" name=\"Hidden group child\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"10\" cy=\"10\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Hidden group child</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "</p:grpSp>" +
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"62\" name=\"VisibleGroup\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"63\" name=\"Visible group child\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"10\" cy=\"10\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Visible group child</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "</p:grpSp>";
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]).Replace("</p:spTree>", groups + "</p:spTree>", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var slide = Assert.Single(extraction.Slides);
+
+        var hiddenChild = Assert.Single(slide.Shapes, shape => shape.ShapeId == "61");
+        Assert.True(hiddenChild.IsHidden);
+        Assert.True(hiddenChild.IsHiddenByGroup);
+        var hiddenNode = Assert.Single(extraction.Graph.Nodes, node => node.Source?.Locators.Any(locator => locator.Value == "61") == true);
+        Assert.Equal(ContentLayer.Hidden, hiddenNode.Layer);
+        Assert.True(hiddenNode.Extensions!["hidden_object"].GetBoolean());
+        Assert.True(hiddenNode.Extensions!["hidden_by_group"].GetBoolean());
+
+        var visibleChild = Assert.Single(slide.Shapes, shape => shape.ShapeId == "63");
+        Assert.False(visibleChild.IsHidden);
+        Assert.False(visibleChild.IsHiddenByGroup);
+        var visibleNode = Assert.Single(extraction.Graph.Nodes, node => node.Source?.Locators.Any(locator => locator.Value == "63") == true);
+        Assert.Equal(ContentLayer.Body, visibleNode.Layer);
+        Assert.False(visibleNode.Extensions!.ContainsKey("hidden_by_group"));
+    }
+
+    [Fact]
+    public void HiddenAncestorGroupExcludesDeeplyNestedShape()
+    {
+        var entries = Entries(CreatePackage());
+        const string groups =
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"70\" name=\"Grandparent\" hidden=\"1\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"200\" cy=\"200\" /></a:xfrm></p:grpSpPr>" +
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"71\" name=\"Parent\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"100\" cy=\"100\" /></a:xfrm></p:grpSpPr>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"72\" name=\"Deep child\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"10\" cy=\"10\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Deep child text</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "</p:grpSp></p:grpSp>";
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]).Replace("</p:spTree>", groups + "</p:spTree>", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+
+        var slide = Assert.Single(new PptxAdapter().Extract(new MemoryStream(Repack(entries))).Slides);
+        var deepChild = Assert.Single(slide.Shapes, shape => shape.ShapeId == "72");
+        // The immediate parent group ("Parent") is not itself hidden -- only the grandparent is.
+        // IsHidden must still be true: visibility exclusion has to walk the whole ancestor stack,
+        // not just the nearest enclosing group.
+        Assert.True(deepChild.IsHidden);
+        Assert.True(deepChild.IsHiddenByGroup);
+    }
+
     private static byte[] Repack(Dictionary<string, byte[]> parts)
     {
         using var output = new MemoryStream();
@@ -897,5 +951,161 @@ public sealed class PptxAdapterTests
         var count = 0;
         for (var index = 0; (index = value.IndexOf(needle, index, StringComparison.Ordinal)) >= 0; index += needle.Length) count++;
         return count;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // P17: table cell paragraph/line-break boundaries.
+    // ---------------------------------------------------------------------------------------
+
+    private static byte[] WithTableXml(string tableXml)
+    {
+        var entries = Entries(CreatePackage());
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"])
+            .Replace("<a:tbl><a:tr><a:tc><a:txBody><a:p><a:r><a:t>Cell</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>", tableXml, StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+        return Repack(entries);
+    }
+
+    [Fact]
+    public void TableCellJoinsMultipleParagraphsWithNewlineAndTrimsEdgeBlankParagraphs()
+    {
+        const string table = "<a:tbl><a:tr><a:tc><a:txBody>" +
+            "<a:p/>" + // leading blank paragraph: must be trimmed, not rendered as a leading "\n"
+            "<a:p><a:r><a:t>A</a:t></a:r></a:p><a:p><a:r><a:t>B</a:t></a:r></a:p><a:p><a:r><a:t>C</a:t></a:r></a:p>" +
+            "<a:p/>" + // trailing blank paragraph: must also be trimmed
+            "</a:txBody></a:tc></a:tr></a:tbl>";
+        var shape = Assert.Single(new PptxAdapter().Extract(new MemoryStream(WithTableXml(table))).Slides).Shapes.Single(item => item.ShapeId == "3");
+
+        var cell = Assert.Single(Assert.Single(shape.TableRows!));
+        Assert.Equal("A\nB\nC", cell.Text);
+    }
+
+    [Fact]
+    public void TableCellConvertsLineBreaksAndTabsToTextWithinAParagraph()
+    {
+        const string table = "<a:tbl><a:tr><a:tc><a:txBody><a:p>" +
+            "<a:r><a:t>Line1</a:t></a:r><a:br /><a:r><a:t>Line2</a:t></a:r><a:tab /><a:r><a:t>Tabbed</a:t></a:r>" +
+            "</a:p></a:txBody></a:tc></a:tr></a:tbl>";
+        var shape = Assert.Single(new PptxAdapter().Extract(new MemoryStream(WithTableXml(table))).Slides).Shapes.Single(item => item.ShapeId == "3");
+
+        var cell = Assert.Single(Assert.Single(shape.TableRows!));
+        Assert.Equal("Line1\nLine2\tTabbed", cell.Text);
+    }
+
+    [Fact]
+    public void MergedCellWithGridSpanPreservesMultipleParagraphsAndLeavesColumnCountIntact()
+    {
+        const string table = "<a:tbl><a:tr>" +
+            "<a:tc gridSpan=\"2\"><a:txBody><a:p><a:r><a:t>Merged A</a:t></a:r></a:p><a:p><a:r><a:t>Merged B</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "<a:tc hMerge=\"1\"><a:txBody><a:p /></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p><a:r><a:t>Plain</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "</a:tr></a:tbl>";
+        var shape = Assert.Single(new PptxAdapter().Extract(new MemoryStream(WithTableXml(table))).Slides).Shapes.Single(item => item.ShapeId == "3");
+
+        // The hMerge continuation is correctly dropped from the physical row (its origin's
+        // ColSpan already accounts for it) rather than kept as a placeholder: TableGrid.TryCreate
+        // advances its column cursor by ColSpan alone for an ordinary cell, so re-adding the
+        // continuation here would double-count the column and misalign the grid.
+        var row = Assert.Single(shape.TableRows!);
+        Assert.Equal(2, row.Count);
+        Assert.Equal("Merged A\nMerged B", row[0].Text);
+        Assert.Equal(2, row[0].ColSpan);
+        Assert.Equal("Plain", row[1].Text);
+        Assert.True(TableGrid.TryCreate(new TableNodeContent(shape.TableRows!), out _, out var error), error);
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // P16: slide master/layout visible non-placeholder text inheritance.
+    // ---------------------------------------------------------------------------------------
+
+    private static byte[] CreateMasterLayoutPackage(bool slideShowMasterSp = true, bool layoutShowMasterSp = true, bool includeHiddenMasterShape = false)
+    {
+        var slideAttr = slideShowMasterSp ? "" : " showMasterSp=\"0\"";
+        var layoutAttr = layoutShowMasterSp ? "" : " showMasterSp=\"0\"";
+        var hiddenMasterShape = includeHiddenMasterShape
+            ? "<p:sp><p:nvSpPr><p:cNvPr id=\"30\" name=\"Hidden master text\" hidden=\"1\" /></p:nvSpPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>HIDDEN-MASTER-TEXT</a:t></a:r></a:p></p:txBody></p:sp>"
+            : "";
+        var parts = new Dictionary<string, string>
+        {
+            ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
+            ["ppt/presentation.xml"] = "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\" /></p:sldIdLst></p:presentation>",
+            ["ppt/_rels/presentation.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"slide\" Target=\"slides/slide1.xml\" /></Relationships>",
+            ["ppt/slides/slide1.xml"] =
+                $"<p:sld{slideAttr} xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:cSld><p:spTree>" +
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title\" /><p:nvPr><p:ph type=\"title\" /></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Slide title</a:t></a:r></a:p></p:txBody></p:sp>" +
+                "</p:spTree></p:cSld></p:sld>",
+            ["ppt/slides/_rels/slide1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdLayout\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout\" Target=\"../slideLayouts/slideLayout1.xml\" /></Relationships>",
+            ["ppt/slideLayouts/slideLayout1.xml"] =
+                $"<p:sldLayout{layoutAttr} xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld><p:spTree>" +
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"Title Placeholder\" /><p:nvPr><p:ph type=\"title\" /></p:nvPr></p:nvSpPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Click to edit title</a:t></a:r></a:p></p:txBody></p:sp>" +
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Layout decoration\" /></p:nvSpPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>LAYOUT-TEXT</a:t></a:r></a:p></p:txBody></p:sp>" +
+                "</p:spTree></p:cSld></p:sldLayout>",
+            ["ppt/slideLayouts/_rels/slideLayout1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdMaster\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster\" Target=\"../slideMasters/slideMaster1.xml\" /></Relationships>",
+            ["ppt/slideMasters/slideMaster1.xml"] =
+                "<p:sldMaster xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\"><p:cSld><p:spTree>" +
+                "<p:sp><p:nvSpPr><p:cNvPr id=\"20\" name=\"Master decoration\" /></p:nvSpPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>MASTER-TEXT</a:t></a:r></a:p></p:txBody></p:sp>" +
+                hiddenMasterShape +
+                "</p:spTree></p:cSld></p:sldMaster>",
+        };
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var part in parts)
+            {
+                using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8);
+                writer.Write(part.Value);
+            }
+        return output.ToArray();
+    }
+
+    [Fact]
+    public void InheritsVisibleNonPlaceholderTextFromLayoutAndMasterButNotPlaceholders()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMasterLayoutPackage()));
+        var slide = Assert.Single(extraction.Slides);
+
+        var layoutNode = Assert.Single(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "LAYOUT-TEXT");
+        Assert.Equal("layout", layoutNode.Extensions!["inherited_from"].GetString());
+        Assert.Equal("ppt/slideLayouts/slideLayout1.xml", layoutNode.Extensions!["inherited_part"].GetString());
+        Assert.Equal(ContentLayer.Body, layoutNode.Layer);
+        Assert.Equal(NodeEditability.Protected, layoutNode.Editability);
+
+        var masterNode = Assert.Single(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "MASTER-TEXT");
+        Assert.Equal("master", masterNode.Extensions!["inherited_from"].GetString());
+        Assert.Equal("ppt/slideMasters/slideMaster1.xml", masterNode.Extensions!["inherited_part"].GetString());
+        Assert.Equal(ContentLayer.Body, masterNode.Layer);
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text.Contains("Click to edit title", StringComparison.Ordinal));
+
+        // Inherited shapes are ordered after the slide's own shapes.
+        var order = slide.Shapes.Select((shape, index) => (shape.Text, index)).ToDictionary(item => item.Text, item => item.index);
+        Assert.True(order["LAYOUT-TEXT"] > order["Slide title"]);
+        Assert.True(order["MASTER-TEXT"] > order["Slide title"]);
+    }
+
+    [Fact]
+    public void SlideShowMasterSpFalseHidesBothLayoutAndMasterText()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMasterLayoutPackage(slideShowMasterSp: false)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "LAYOUT-TEXT");
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "MASTER-TEXT");
+    }
+
+    [Fact]
+    public void LayoutShowMasterSpFalseHidesOnlyMasterText()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMasterLayoutPackage(layoutShowMasterSp: false)));
+
+        Assert.Contains(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "LAYOUT-TEXT");
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "MASTER-TEXT");
+    }
+
+    [Fact]
+    public void HiddenShapeOnMasterIsNotInheritedWhileVisibleMasterTextStillIs()
+    {
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateMasterLayoutPackage(includeHiddenMasterShape: true)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "HIDDEN-MASTER-TEXT");
+        Assert.Contains(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "MASTER-TEXT");
     }
 }

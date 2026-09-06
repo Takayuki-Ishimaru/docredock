@@ -2,7 +2,7 @@
 
 日本語 | [English](RELEASE_CHECKLIST.en.md)
 
-この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの実行結果は、リリースワークフローが生成するチェック済みの `RELEASE-EVIDENCE.md`（workflow run URL、commit、成果物ハッシュを含む）を正本とします。Release Owner が証跡と公開判断を所有し、CI/QA Owner が技術ゲートを実行します。必須ゲートが一つでも未完了または失敗している場合は公開しません。
+この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの検証結果は、workflow run URL、commit、成果物ハッシュを含むCIの検証記録として管理します。公開リリースノートと配布物には利用者向けの変更内容・制約・導入手順を記載し、内部評価の点数、開発指標、検証メモは含めません。Release Owner が証跡と公開判断を所有し、CI/QA Owner が技術ゲートを実行します。必須ゲートが一つでも未完了または失敗している場合は公開しません。
 
 デスクトップGUIのPDF入力は既定で利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元は実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
 
@@ -54,7 +54,7 @@
 - [ ] `recognized = semantic projection + visual fallback + explicitly diagnosed omission` のaccountingを形式別・文書全体で照合した
 - [ ] native connection、geometry inference、unresolved connector、edge label、unsupported visual のstable diagnosticを確認した
 - [ ] 既存のparagraph／list／table／image／OCR出力に回帰がなく、出力markerと順序が決定的である
-- [ ] 公開バイナリのsmokeでexit code、marker、diagnostic、各count、fixture SHA-256、output SHA-256を`RELEASE-EVIDENCE.md`へ保存した
+- [ ] 公開バイナリのsmokeでexit code、marker、diagnostic、各count、fixture SHA-256、output SHA-256をCIの検証記録へ保存した
 - [ ] `product_source_commit`と`release_workflow_commit`を分離して記録した
 - [ ] smokeとconversion-QAの双方で、分離したcommit、fixture／出力SHA-256、tier、mode、判定、反復出力の決定性を保存した
 - [ ] `native-only`／`safe`／`balanced` のrelation assertion結果を記録した（positive／negativeを含む）
@@ -110,13 +110,13 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] OCR、Tesseract、Mermaid、PDF rasterizer の同梱有無を明示した
 - [ ] 既知の制約と破壊的変更をリリースノートへ記載した
 - [ ] CONTRIBUTING.md、CODE_OF_CONDUCT.md、SECURITY.md の公開方針を確定した
-- [ ] `RELEASE-EVIDENCE.md` のworkflow生成者、CI/QA Owner、Release Owner、保存場所、commit、成果物hashを記録した
+- [ ] CIの検証記録の生成者、保存場所、commit、成果物hashを記録し、公開資料と分離した
 
 ## リリース承認
 
 - [ ] 公開 commit/tag が保護され、CI が成功している
 - [ ] source archive の全ファイル一覧を PUBLICATION_SCOPE.md と照合した
 - [ ] binary archive の全ファイル一覧を PUBLICATION_SCOPE.md と照合した
-- [ ] SHA256SUMS、SBOM、provenance、attestations、リリースノート、チェック済み RELEASE-EVIDENCE.md を公開ページへ添付した
+- [ ] 公開ページには配布アーカイブ、SHA256SUMS、SBOM、provenance、attestations、利用者向けリリースノートだけを掲載し、内部評価・検証メモがない
 - [ ] 既知の P0/P1 問題がなく、残る制約を利用者向けに文書化した
 - [ ] 公開責任者が最終成果物のハッシュを承認した

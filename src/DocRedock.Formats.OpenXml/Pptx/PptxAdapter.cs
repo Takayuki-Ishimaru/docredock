@@ -31,7 +31,11 @@ public sealed record PptxShapeRecord(
     string? ShapePreset = null,
     string? ConnectorHeadArrow = null,
     string? ConnectorTailArrow = null,
-    IReadOnlyList<VisualPoint>? ConnectorPathPoints = null);
+    IReadOnlyList<VisualPoint>? ConnectorPathPoints = null,
+    bool IsPlaceholder = false,
+    bool IsHiddenByGroup = false,
+    string? InheritedFrom = null,
+    string? InheritedPart = null);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
@@ -79,6 +83,12 @@ public sealed class PptxAdapter
                 var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_id"] = JsonSerializer.SerializeToElement(shape.ShapeId), ["shape_name"] = JsonSerializer.SerializeToElement(shape.Name), ["shape_role"] = JsonSerializer.SerializeToElement(shape.Role) };
                 extension["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden);
                 extension["hidden_object"] = JsonSerializer.SerializeToElement(shape.IsHidden);
+                if (shape.IsHiddenByGroup) extension["hidden_by_group"] = JsonSerializer.SerializeToElement(true);
+                if (shape.InheritedFrom is not null)
+                {
+                    extension["inherited_from"] = JsonSerializer.SerializeToElement(shape.InheritedFrom);
+                    extension["inherited_part"] = JsonSerializer.SerializeToElement(shape.InheritedPart);
+                }
                 if (shape.Paragraphs is not null) extension["paragraphs"] = JsonSerializer.SerializeToElement(shape.Paragraphs);
                 if (shape.ParagraphDetails is not null) extension["paragraph_details"] = JsonSerializer.SerializeToElement(shape.ParagraphDetails);
                 if (shape.IsTable) extension["is_table"] = JsonSerializer.SerializeToElement(true);
@@ -118,7 +128,11 @@ public sealed class PptxAdapter
                     NodeKind.Diagram when diagramTexts is { Count: > 0 } => new TextNodeContent(string.Join("\n", diagramTexts)),
                     _ => CreateShapeTextContent(shape),
                 };
-                var editability = kind == NodeKind.Shape ? NodeEditability.EditableWithConstraints : NodeEditability.Protected;
+                // A layout/master-inherited node has no corresponding shape in this slide's own XML,
+                // so PatchSlide can never resolve an edit back to it (see Shapes()/PatchSlide's
+                // cNvPr id lookup) -- it must never claim to be constrained-editable.
+                var editability = shape.InheritedFrom is not null ? NodeEditability.Protected
+                    : kind == NodeKind.Shape ? NodeEditability.EditableWithConstraints : NodeEditability.Protected;
                 var layer = slide.IsHidden || shape.IsHidden || (kind == NodeKind.Shape && string.IsNullOrWhiteSpace(shape.Text))
                     ? ContentLayer.Hidden
                     : IsFurnitureRole(shape.Role) ? ContentLayer.Furniture : ContentLayer.Body;
@@ -223,6 +237,7 @@ public sealed class PptxAdapter
     {
         var result = new List<PptxSlideRecord>();
         var resolverCache = new Dictionary<string, PlaceholderBulletResolver>(StringComparer.Ordinal);
+        var inheritedCache = new Dictionary<string, InheritedShapeSet>(StringComparer.Ordinal);
         if (!package.TryGetValue("ppt/presentation.xml", out var presentation)) throw new InvalidDataException("Presentation part missing.");
         var presentationRels = ReadRelationships(package, "ppt/_rels/presentation.xml.rels");
         using var reader = XmlReader.Create(new MemoryStream(presentation), SafeXml);
@@ -233,8 +248,9 @@ public sealed class PptxAdapter
             var slideId = "slide" + (result.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var bulletResolver = BuildBulletResolver(package, target.Target, resolverCache);
             var shapes = ReadShapes(slideBytes, slideId, out _, bulletResolver);
+            var inherited = ReadInheritedShapes(package, target.Target, slideBytes, inheritedCache);
             var (notes, notesDetails) = ReadNotesParagraphs(package, target.Target);
-            result.Add(new(slideId, target.Target, shapes, notes, notesDetails, IsSlideHidden(slideBytes)));
+            result.Add(new(slideId, target.Target, inherited.Count == 0 ? shapes : [.. shapes, .. inherited], notes, notesDetails, IsSlideHidden(slideBytes)));
             _ = id;
         }
         if (result.Count == 0)
@@ -242,8 +258,10 @@ public sealed class PptxAdapter
             {
                 var slideId = Path.GetFileNameWithoutExtension(part);
                 var bulletResolver = BuildBulletResolver(package, part, resolverCache);
+                var shapes = ReadShapes(package[part], slideId, out _, bulletResolver);
+                var inherited = ReadInheritedShapes(package, part, package[part], inheritedCache);
                 var (notes, notesDetails) = ReadNotesParagraphs(package, part);
-                result.Add(new(slideId, part, ReadShapes(package[part], slideId, out _, bulletResolver), notes, notesDetails, IsSlideHidden(package[part])));
+                result.Add(new(slideId, part, inherited.Count == 0 ? shapes : [.. shapes, .. inherited], notes, notesDetails, IsSlideHidden(package[part])));
             }
         return result;
     }
@@ -258,6 +276,83 @@ public sealed class PptxAdapter
             return show is "0" || bool.TryParse(show, out var parsed) && !parsed;
         }
         return false;
+    }
+
+    // ------------------------------------------------------- P16: master/layout text inheritance --
+    // ECMA-376: a slide's own placeholders are template-filled content, but any *non*-placeholder
+    // shape drawn directly on its slide layout or slide master (borders, logos, captions, ...) is
+    // genuine visible decoration that PowerPoint renders behind the slide unless suppressed.
+    // showMasterSp (default true) on <p:sld> hides both the layout's and the master's shapes for
+    // that one slide; showMasterSp (default true) on <p:sldLayout> independently hides only the
+    // master's shapes -- the layout's own shapes still show through. Placeholders are never
+    // inherited (they are the editable template surface, already represented via the slide's own
+    // placeholder shape), and neither are hidden shapes/groups (reusing the P15 hidden detection
+    // above, since ReadShapes already folds ancestor-group visibility into shape.IsHidden).
+    private static bool ReadShowMasterSp(byte[] bytes, string rootLocalName)
+    {
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+        {
+            if (reader.NodeType != XmlNodeType.Element || reader.LocalName != rootLocalName) continue;
+            var value = reader.GetAttribute("showMasterSp");
+            return value is null || IsOn(value);
+        }
+        return true;
+    }
+
+    private static (string? Layout, string? Master) ResolveLayoutAndMaster(Dictionary<string, byte[]> package, string slidePart)
+    {
+        var slash = slidePart.LastIndexOf('/');
+        if (slash < 0) return (null, null);
+        var slideRels = ReadRelationships(package, slidePart[..slash] + "/_rels/" + slidePart[(slash + 1)..] + ".rels");
+        var layoutRel = slideRels.Values.FirstOrDefault(x => x.Type.Contains("slideLayout", StringComparison.OrdinalIgnoreCase));
+        if (layoutRel is null || !package.ContainsKey(layoutRel.Target)) return (null, null);
+        var layoutSlash = layoutRel.Target.LastIndexOf('/');
+        if (layoutSlash < 0) return (layoutRel.Target, null);
+        var layoutRels = ReadRelationships(package, layoutRel.Target[..layoutSlash] + "/_rels/" + layoutRel.Target[(layoutSlash + 1)..] + ".rels");
+        var masterRel = layoutRels.Values.FirstOrDefault(x => x.Type.Contains("slideMaster", StringComparison.OrdinalIgnoreCase));
+        var masterTarget = masterRel is not null && package.ContainsKey(masterRel.Target) ? masterRel.Target : null;
+        return (layoutRel.Target, masterTarget);
+    }
+
+    private sealed record InheritedShapeSet(IReadOnlyList<PptxShapeRecord> LayoutShapes, bool LayoutShowsMaster, IReadOnlyList<PptxShapeRecord> MasterShapes);
+
+    // inferTitle:false: the slide-title auto-inference heuristic (ReadShapes, below its main loop)
+    // exists to recover a title among a *slide's own* shapes; run in isolation against a layout's
+    // or master's own decorative shape set it would risk mislabeling one of them "title".
+    private static IReadOnlyList<PptxShapeRecord> NonPlaceholderVisibleShapes(byte[] bytes, string from, string part) =>
+        ReadShapes(bytes, from, out _, PlaceholderBulletResolver.Empty, inferTitle: false)
+            .Where(shape => !shape.IsPlaceholder && !shape.IsHidden && !string.IsNullOrWhiteSpace(shape.Text))
+            // Renumber so a layout/master shape id (independently numbered from the slide's own
+            // cNvPr ids) can never collide with a genuine slide shape's node hash on the same slide.
+            .Select(shape => shape with { ShapeId = from + ":" + shape.ShapeId, InheritedFrom = from, InheritedPart = part })
+            .ToArray();
+
+    private static InheritedShapeSet BuildInheritedShapeSet(Dictionary<string, byte[]> package, string layoutTarget, string? masterTarget, Dictionary<string, InheritedShapeSet> cache)
+    {
+        if (cache.TryGetValue(layoutTarget, out var cached)) return cached;
+        IReadOnlyList<PptxShapeRecord> layoutShapes = [];
+        var layoutShowsMaster = true;
+        if (package.TryGetValue(layoutTarget, out var layoutBytes))
+        {
+            layoutShowsMaster = ReadShowMasterSp(layoutBytes, "sldLayout");
+            layoutShapes = NonPlaceholderVisibleShapes(layoutBytes, "layout", layoutTarget);
+        }
+        IReadOnlyList<PptxShapeRecord> masterShapes = masterTarget is not null && package.TryGetValue(masterTarget, out var masterBytes)
+            ? NonPlaceholderVisibleShapes(masterBytes, "master", masterTarget)
+            : [];
+        var result = new InheritedShapeSet(layoutShapes, layoutShowsMaster, masterShapes);
+        cache[layoutTarget] = result;
+        return result;
+    }
+
+    private static IReadOnlyList<PptxShapeRecord> ReadInheritedShapes(Dictionary<string, byte[]> package, string slidePart, byte[] slideBytes, Dictionary<string, InheritedShapeSet> cache)
+    {
+        if (!ReadShowMasterSp(slideBytes, "sld")) return [];
+        var (layoutTarget, masterTarget) = ResolveLayoutAndMaster(package, slidePart);
+        if (layoutTarget is null) return [];
+        var set = BuildInheritedShapeSet(package, layoutTarget, masterTarget, cache);
+        return set.LayoutShowsMaster && set.MasterShapes.Count > 0 ? [.. set.LayoutShapes, .. set.MasterShapes] : set.LayoutShapes;
     }
 
     private readonly record struct AffineTransform(double M11, double M12, double M21, double M22, double Tx, double Ty)
@@ -288,6 +383,7 @@ public sealed class PptxAdapter
     private sealed class GroupFrame
     {
         public AffineTransform Transform { get; set; } = AffineTransform.Identity;
+        public bool Hidden { get; set; }
     }
 
     private static AffineTransform ParseGroupTransform(XmlReader source)
@@ -380,7 +476,7 @@ public sealed class PptxAdapter
         };
     }
 
-    private static List<PptxShapeRecord> ReadShapes(byte[] bytes, string slideId, out string? notes, PlaceholderBulletResolver bulletResolver)
+    private static List<PptxShapeRecord> ReadShapes(byte[] bytes, string slideId, out string? notes, PlaceholderBulletResolver bulletResolver, bool inferTitle = true)
     {
         notes = null; var result = new List<PptxShapeRecord>(); var groupStack = new Stack<GroupFrame>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read())
@@ -388,15 +484,25 @@ public sealed class PptxAdapter
             if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "grpSp") { groupStack.Push(new GroupFrame()); continue; }
             if (reader.NodeType == XmlNodeType.EndElement && reader.LocalName == "grpSp") { if (groupStack.Count > 0) groupStack.Pop(); continue; }
             if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "grpSpPr" && groupStack.Count > 0) { groupStack.Peek().Transform = ParseGroupTransform(reader); continue; }
+            // A group's own visibility lives on p:grpSp/p:nvGrpSpPr/p:cNvPr, which this loop would
+            // otherwise never inspect: child shapes consume their own cNvPr inside ReadSubtree
+            // below, so only the group's cNvPr ever reaches this outer loop. hidden="1" here must
+            // exclude every shape nested inside, however deeply (P15).
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "cNvPr" && groupStack.Count > 0 && IsOn(reader.GetAttribute("hidden"))) { groupStack.Peek().Hidden = true; continue; }
             if (reader.NodeType != XmlNodeType.Element || reader.LocalName is not ("sp" or "graphicFrame" or "pic" or "cxnSp")) continue;
             var parentTransform = groupStack.Reverse().Aggregate(AffineTransform.Identity, (current, frame) => current * frame.Transform);
+            var groupHidden = groupStack.Any(frame => frame.Hidden);
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
             using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null; string? shapePreset = null;
             string? connectorHeadArrow = null; string? connectorTailArrow = null;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
-            var tableRows = new List<IReadOnlyList<TableCell>>(); List<TableCell>? tableRow = null; StringBuilder? tableCell = null; var tcGridSpan = 1; var tcRowSpan = 1; var tcHMerge = false; var tcVMerge = false;
+            var tableRows = new List<IReadOnlyList<TableCell>>(); List<TableCell>? tableRow = null; var tcGridSpan = 1; var tcRowSpan = 1; var tcHMerge = false; var tcVMerge = false;
+            // Each a:p inside a cell becomes one entry here, joined with '\n' at </a:tc> (P17):
+            // GFM tables have no native multi-paragraph cell, and ReadableMarkdownSerializer's
+            // TableText already turns '\n' into "<br>" for exactly this purpose.
+            var tableCellParagraphs = new List<string>(); StringBuilder? tableCellParagraph = null;
             var autoNumCounters = new Dictionary<int, int>();
             while (subtree.Read())
             {
@@ -410,13 +516,17 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") tableRow = [];
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
-                    tableCell = new StringBuilder(); inTableCell = true;
+                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null;
                     tcGridSpan = ParseIntOr1(subtree.GetAttribute("gridSpan")); tcRowSpan = ParseIntOr1(subtree.GetAttribute("rowSpan"));
                     tcHMerge = IsOn(subtree.GetAttribute("hMerge")); tcVMerge = IsOn(subtree.GetAttribute("vMerge"));
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "p" && !inTableCell)
                 {
                     paragraph = new StringBuilder(); paragraphRuns = []; paragraphLevel = 0; paragraphBullet = false; paragraphBulletCharacter = null; paragraphBulletSpecified = false; paragraphOrdered = false; paragraphListNumber = null;
+                }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "p" && inTableCell)
+                {
+                    tableCellParagraph = new StringBuilder();
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "pPr" && !inTableCell)
                 {
@@ -451,10 +561,23 @@ public sealed class PptxAdapter
                 {
                     paragraph ??= new StringBuilder(); paragraph.Append('\n'); paragraphRuns.Add(new PptxTextRun("\n"));
                 }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "br" && inTableCell)
+                {
+                    tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\n');
+                }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tab" && inTableCell)
+                {
+                    tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\t');
+                }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "t")
                 {
-                    var value = subtree.ReadElementContentAsString(); text.Append(value); tableCell?.Append(value); paragraph?.Append(value);
-                    if (!inTableCell && paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike));
+                    var value = subtree.ReadElementContentAsString(); text.Append(value);
+                    if (inTableCell) tableCellParagraph?.Append(value);
+                    else
+                    {
+                        paragraph?.Append(value);
+                        if (paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike));
+                    }
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tbl") isTable = true;
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "chart")
@@ -478,10 +601,15 @@ public sealed class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tc")
                 {
-                    if (!tcHMerge) tableRow?.Add(new TableCell(tcVMerge ? string.Empty : tableCell?.ToString() ?? string.Empty, tcGridSpan, tcVMerge ? 0 : tcRowSpan));
-                    tableCell = null; inTableCell = false;
+                    if (!tcHMerge) tableRow?.Add(new TableCell(tcVMerge ? string.Empty : JoinCellParagraphs(tableCellParagraphs), tcGridSpan, tcVMerge ? 0 : tcRowSpan));
+                    tableCellParagraph = null; inTableCell = false;
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tr") { if (tableRow is not null) tableRows.Add(tableRow); tableRow = null; }
+                else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && inTableCell)
+                {
+                    tableCellParagraphs.Add(tableCellParagraph?.ToString() ?? string.Empty);
+                    tableCellParagraph = null;
+                }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && !inTableCell && paragraph is not null)
                 {
                     if (!paragraphBulletSpecified && placeholderType is not null &&
@@ -513,10 +641,10 @@ public sealed class PptxAdapter
             var role = InferRole(placeholderType, name);
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
-                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden, shapePreset,
-                connectorHeadArrow, connectorTailArrow, connectorPathPoints));
+                string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden || groupHidden, shapePreset,
+                connectorHeadArrow, connectorTailArrow, connectorPathPoints, placeholderType is not null, groupHidden));
         }
-        if (!result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
+        if (inferTitle && !result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
             var inferredTitle = result
                 .Select((shape, index) => (Shape: shape, Index: index))
@@ -530,6 +658,18 @@ public sealed class PptxAdapter
         }
         ResolveConnectorLabels(result);
         return result;
+    }
+
+    // P17: a table cell's paragraphs are joined with '\n' (ReadableMarkdownSerializer's TableText
+    // turns that into "<br>"), but a leading/trailing empty a:p -- a common authoring artifact --
+    // must not surface as a spurious blank line at either edge. An empty paragraph sandwiched
+    // between real ones is kept: it is a deliberate blank line inside the cell.
+    private static string JoinCellParagraphs(List<string> paragraphs)
+    {
+        var start = 0; var end = paragraphs.Count;
+        while (start < end && paragraphs[start].Length == 0) start++;
+        while (end > start && paragraphs[end - 1].Length == 0) end--;
+        return string.Join('\n', paragraphs.Skip(start).Take(end - start));
     }
 
     private static void ResolveConnectorLabels(List<PptxShapeRecord> shapes)
@@ -602,6 +742,11 @@ public sealed class PptxAdapter
     {
         var labels = new HashSet<string>(StringComparer.Ordinal);
         edgeLabelShapeIds = labels;
+        // Layout/master-inherited shapes are template furniture (logos, section titles, legal
+        // lines). They never take part in the slide's own diagram, so keep them out of every
+        // inference candidate pool instead of letting a nearby decoration become a phantom node.
+        var ownShapes = slide.Shapes.Where(shape => shape.InheritedFrom is null).ToArray();
+        slide = slide with { Shapes = ownShapes };
         var connectors = slide.Shapes.Where(shape =>
             StringComparer.Ordinal.Equals(shape.ShapeType, "connector") && !shape.IsHidden).ToArray();
         var detachedArrowheads = AssociateDetachedArrowheads(connectors, slide.Shapes);

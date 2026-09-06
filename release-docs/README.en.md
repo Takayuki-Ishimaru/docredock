@@ -6,6 +6,14 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.5 Public Beta
+
+- [v0.2.5 release notes](RELEASE_NOTES_v0.2.5.en.md)
+- Protected source documents from overwrite and excluded content hidden through styles or groups
+- Improved Word body text, equations and nested tables, PowerPoint master text and tables, and Excel display formats
+- Preserved PDF body text, mixed-page images and column order, and removed false warnings from multiple tables
+- Escaped literal source symbols and improved text preservation in experimental round-trip editing
+
 ### v0.2.4 Public Beta
 
 - [v0.2.4 release notes](RELEASE_NOTES_v0.2.4.en.md)

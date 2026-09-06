@@ -364,7 +364,8 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Fallback pages: 0", text, StringComparison.Ordinal);
         Assert.DoesNotContain("Unpainted PDF subpath", text, StringComparison.Ordinal);
         var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath);
-        Assert.Contains("NATIVE_TEXT_MUST_SURVIVE", markdown, StringComparison.Ordinal);
+        // F-Issue7: the literal "_" in this plain PDF text is now backslash-escaped.
+        Assert.Contains("NATIVE_TEXT_MUST_SURVIVE", markdown.Replace("\\", string.Empty, StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -463,6 +464,133 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal((int)ExitCode.InvalidInput, refused);
         Assert.Equal((int)ExitCode.Success, forced);
         Assert.Contains("--force", stderr.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Export_readable_refuses_to_write_output_over_the_source_document_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var beforeHash = await Sha256Async(fixture.SourcePath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "readable", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.SourcePath));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "source.assets")));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
+    public async Task Export_roundtrip_refuses_to_write_output_over_the_source_document_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var beforeHash = await Sha256Async(fixture.SourcePath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "roundtrip", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.SourcePath));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "source.drmd")));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
+    public async Task Export_readable_refuses_to_write_output_over_an_xlsx_source_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false));
+        var beforeHash = await Sha256Async(fixture.XlsxPath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.XlsxPath, "--profile", "readable", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.XlsxPath));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
+    public async Task Export_treats_a_case_only_difference_from_the_source_as_the_same_path()
+    {
+        // StagedOutputTransaction/OutputCollisionGuard decide case sensitivity from the running
+        // OS (matching macOS/Windows as case-insensitive, Linux as case-sensitive), not from the
+        // actual volume format. Mirror that same OS gate here rather than probing the disk.
+        if (OperatingSystem.IsLinux()) return;
+
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var beforeHash = await Sha256Async(fixture.SourcePath);
+        var upperCaseOutput = Path.Combine(fixture.Root, Path.GetFileName(fixture.SourcePath).ToUpperInvariant());
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.SourcePath, "--output", upperCaseOutput, "--profile", "readable", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.SourcePath));
+    }
+
+    [Fact]
+    public async Task Render_refuses_to_write_output_over_the_input_markdown_even_with_force()
+    {
+        using var fixture = new Fixture();
+        await File.WriteAllTextAsync(fixture.MarkdownPath, "# Title\n\nBody text.\n");
+        var beforeHash = await Sha256Async(fixture.MarkdownPath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["render", fixture.MarkdownPath, "--format", "html", "--output", fixture.MarkdownPath, "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.MarkdownPath));
+    }
+
+    [Fact]
+    public async Task Unpack_refuses_to_extract_into_the_input_packages_own_directory_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var setup = new CliApplication(new StringWriter(), new StringWriter());
+        Assert.Equal((int)ExitCode.Success,
+            await setup.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+        var package = Path.Combine(fixture.Root, "projection.drmdpkg");
+        Assert.Equal((int)ExitCode.Success, await setup.RunAsync(["pack", fixture.MarkdownPath, "--output", package]));
+        var beforeHash = await Sha256Async(package);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        // fixture.Root is literally the package's own parent directory: unpacking there would back
+        // up and later delete that whole directory during cleanup -- including the package itself.
+        var result = await app.RunAsync(["unpack", package, "--output", fixture.Root, "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal(beforeHash, await Sha256Async(package));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    private static async Task<string> Sha256Async(string path)
+    {
+        await using var stream = File.OpenRead(path);
+        var hash = await System.Security.Cryptography.SHA256.HashDataAsync(stream);
+        return Convert.ToHexString(hash);
     }
 
     [Fact]

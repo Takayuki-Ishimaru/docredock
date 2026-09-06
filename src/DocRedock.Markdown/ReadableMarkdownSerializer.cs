@@ -77,7 +77,7 @@ public sealed partial class ReadableMarkdownSerializer
         var title = options.Title?.Trim() is { Length: > 0 } customTitle
             ? customTitle
             : FindWorkbookTitle(partitions) ?? "ドキュメント";
-        WriteHeading(output, 1, title);
+        WriteHeading(output, 1, EscapeLiteral(title));
 
         foreach (var partition in partitions)
         {
@@ -88,7 +88,7 @@ public sealed partial class ReadableMarkdownSerializer
             var partitionMedia = partition.Nodes.Any(node => node.Kind is NodeKind.Image or NodeKind.ImageText);
             if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0 && !charts && !partitionMedia) continue;
 
-            WriteHeading(output, 2, HumanizePartitionName(partition.Id));
+            WriteHeading(output, 2, EscapeLiteral(HumanizePartitionName(partition.Id)));
             var hasSectionHeading = false;
             var index = 0;
             var insertions = diagrams.Select(diagram => new WorkbookInsertion(diagram.MinRow, diagram.Mermaid, null, diagram))
@@ -173,12 +173,12 @@ public sealed partial class ReadableMarkdownSerializer
             .FirstOrDefault(node => node.Kind == NodeKind.Heading && ExtensionBool(node, "document_title"));
         if (isPptx)
         {
-            WriteHeading(output, 1, options.Title?.Trim() is { Length: > 0 } presentationTitle ? presentationTitle : "プレゼンテーション");
+            WriteHeading(output, 1, options.Title?.Trim() is { Length: > 0 } presentationTitle ? EscapeLiteral(presentationTitle) : "プレゼンテーション");
             wroteTitle = true;
         }
         else if (options.Title?.Trim() is { Length: > 0 } documentTitle)
         {
-            WriteHeading(output, 1, documentTitle);
+            WriteHeading(output, 1, EscapeLiteral(documentTitle));
             wroteTitle = true;
         }
         else if (documentTitleNode is null)
@@ -192,6 +192,7 @@ public sealed partial class ReadableMarkdownSerializer
         // AddEndnotes append after all body content). Each kind is pulled out of the main loop
         // and re-emitted, labeled, in one aggregated section per kind at the document's end.
         var aggregated = ComputeAggregatedSections(partitions);
+        var nestedTableFolds = ComputeNestedTableFolds(partitions);
         for (var partitionIndex = 0; partitionIndex < partitions.Length; partitionIndex++)
         {
             var partition = partitions[partitionIndex];
@@ -203,7 +204,7 @@ public sealed partial class ReadableMarkdownSerializer
                 var slideTitle = partition.Nodes.FirstOrDefault(node =>
                     StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"));
                 var label = $"スライド {partitionIndex + 1}";
-                var titleText = slideTitle is null ? string.Empty : NodeText(slideTitle).Trim();
+                var titleText = slideTitle is null ? string.Empty : DisplayText(slideTitle, NodeText(slideTitle).Trim());
                 WriteHeading(output, 2, titleText.Length == 0 ? label : $"{label} — {titleText}");
                 previousWasListItem = false;
             }
@@ -219,9 +220,12 @@ public sealed partial class ReadableMarkdownSerializer
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
-                if (aggregated.SkipIds.Contains(node.Id)) continue;
+                if (aggregated.SkipIds.Contains(node.Id) || nestedTableFolds.FoldedChildIds.Contains(node.Id)) continue;
                 var text = NodeText(node).Trim();
                 if (string.IsNullOrWhiteSpace(text)) continue;
+                // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
+                // displayText is what every other branch below actually renders.
+                var displayText = DisplayText(node, text);
                 if (isPptx && (IsPresentationFurniture(node) || IsRepeatedPresentationFooter(partitions, node))) continue;
                 if (suppressVisualGraphMembers && (ExtensionBool(node, "visual_graph_member") ||
                     ExtensionBool(node, "visual_edge_label") || ExtensionBool(node, "visual_graph_edge") ||
@@ -236,7 +240,7 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Heading:
                         var sourceLevel = ExtensionInt(node, "heading_level") ?? 1;
                         var headingLevel = ExtensionBool(node, "document_title") ? 1 : wroteTitle ? sourceLevel + 1 : sourceLevel;
-                        WriteHeading(output, headingLevel, text);
+                        WriteHeading(output, headingLevel, displayText);
                         wroteTitle = true;
                         break;
                     case NodeKind.Section when ExtensionString(node, "section_orientation") is { Length: > 0 } orientation:
@@ -247,7 +251,7 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Section:
                     case NodeKind.Slide:
                     case NodeKind.Page:
-                        WriteHeading(output, wroteTitle ? 2 : 1, text);
+                        WriteHeading(output, wroteTitle ? 2 : 1, displayText);
                         wroteTitle = true;
                         break;
                     case NodeKind.Comment:
@@ -255,20 +259,22 @@ public sealed partial class ReadableMarkdownSerializer
                         // reads distinctly from ordinary quoted text and tracked-change markup.
                         var commentAuthor = ExtensionString(node, "comment_author");
                         WriteQuote(output, commentAuthor is { Length: > 0 }
-                            ? $"**コメント** ({commentAuthor}): {text}"
-                            : $"**コメント**: {text}");
+                            ? $"**コメント** ({EscapeLiteral(commentAuthor)}): {displayText}"
+                            : $"**コメント**: {displayText}");
                         break;
                     case NodeKind.Quote:
                     case NodeKind.Annotation:
-                        WriteQuote(output, text);
+                        WriteQuote(output, displayText);
                         break;
                     case NodeKind.CodeBlock:
                         // D11: render literal line breaks, not the styled `<br>` markdown used
-                        // inline elsewhere — a code fence's content must stay verbatim.
+                        // inline elsewhere — a code fence's content must stay verbatim, never
+                        // Markdown-escaped; only the fence length adapts to what it wraps.
                         var codeText = node.Content is RichTextNodeContent codeRich
                             ? string.Concat(codeRich.Runs.Select(run => run.Text)).Trim()
                             : text;
-                        output.AppendLine("```").AppendLine(codeText).AppendLine("```").AppendLine();
+                        var codeFence = CodeFence(codeText);
+                        output.AppendLine(codeFence).AppendLine(codeText).AppendLine(codeFence).AppendLine();
                         break;
                     case NodeKind.List:
                     case NodeKind.ListItem:
@@ -279,7 +285,7 @@ public sealed partial class ReadableMarkdownSerializer
                         var marker = StringComparer.Ordinal.Equals(ExtensionString(node, "list_format"), "ordered") && ExtensionInt(node, "list_number") is { } listNumber
                             ? listNumber.ToString(CultureInfo.InvariantCulture) + ". "
                             : "- ";
-                        var listText = InlineText(text);
+                        var listText = InlineText(displayText);
                         // Some producers include the visible ordinal in w:t as well as w:numPr.
                         // The semantic marker above is authoritative, so suppress that duplicate.
                         if (marker.EndsWith(". ", StringComparison.Ordinal) && listText.StartsWith(marker, StringComparison.Ordinal))
@@ -288,18 +294,18 @@ public sealed partial class ReadableMarkdownSerializer
                             .Append(marker).AppendLine(listText);
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
-                        WriteArbitraryTable(output, table.Rows);
+                        WriteArbitraryTable(output, FoldNestedTableRows(node.Id, table.Rows, nestedTableFolds));
                         break;
                     case NodeKind.Image when node.Content is ReferenceNodeContent:
                         WriteImageNode(output, node, partition, includeOcr: false);
                         break;
                     case NodeKind.ImageText:
-                        WriteOcrDetails(output, text);
+                        WriteOcrDetails(output, displayText);
                         break;
                     case NodeKind.Shape when HasExtension(node, "paragraph_details"):
                         if (StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"))
                         {
-                            WriteHeading(output, wroteTitle ? 2 : 1, text);
+                            WriteHeading(output, wroteTitle ? 2 : 1, displayText);
                             wroteTitle = true;
                         }
                         else
@@ -310,7 +316,7 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Shape:
                         if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"))
                         {
-                            WriteHeading(output, wroteTitle ? 2 : 1, text);
+                            WriteHeading(output, wroteTitle ? 2 : 1, displayText);
                             wroteTitle = true;
                         }
                         else if (isPptx)
@@ -319,7 +325,7 @@ public sealed partial class ReadableMarkdownSerializer
                         }
                         else
                         {
-                            WriteParagraph(output, text);
+                            WriteParagraph(output, displayText);
                         }
                         break;
                     case NodeKind.PageBreak:
@@ -330,12 +336,12 @@ public sealed partial class ReadableMarkdownSerializer
                         output.Append("---").AppendLine().AppendLine();
                         break;
                     case NodeKind.SpeakerNotes:
-                        WriteSpeakerNotesDetails(output, node, text);
+                        WriteSpeakerNotesDetails(output, node, displayText);
                         break;
                     case NodeKind.Connector:
                         // P08: a resolved stCxn/endCxn transition renders as a compact list so a
                         // chain of connectors reads as one flow instead of scattered paragraphs.
-                        output.Append("- ").AppendLine(InlineText(text));
+                        output.Append("- ").AppendLine(InlineText(displayText));
                         break;
                     case NodeKind.Chart when HasExtension(node, "chart_series"):
                         WriteChart(output, node);
@@ -348,10 +354,10 @@ public sealed partial class ReadableMarkdownSerializer
                         break;
                     case NodeKind.Chart:
                     case NodeKind.Diagram:
-                        WriteQuote(output, $"図: {text}");
+                        WriteQuote(output, $"図: {displayText}");
                         break;
                     default:
-                        WriteParagraph(output, text);
+                        WriteParagraph(output, displayText);
                         break;
                 }
                 previousWasListItem = isListItem;
@@ -530,7 +536,9 @@ public sealed partial class ReadableMarkdownSerializer
             {
                 skipIds.Add(candidates[index].Id);
                 if (texts[index].Length == 0 || !keepTexts.Contains(texts[index]) || !rendered.Add(texts[index])) continue;
-                furnitureItems.Add((label, texts[index]));
+                // Dedup/containment above is computed on the raw text; only the text actually
+                // rendered in WriteAggregatedSections needs to be display-safe.
+                furnitureItems.Add((label, DisplayText(candidates[index], texts[index])));
             }
         }
 
@@ -543,7 +551,7 @@ public sealed partial class ReadableMarkdownSerializer
             {
                 skipIds.Add(node.Id);
                 var text = NodeText(node).Trim();
-                if (text.Length > 0) texts.Add(text);
+                if (text.Length > 0) texts.Add(DisplayText(node, text));
             }
             return texts;
         }
@@ -571,12 +579,12 @@ public sealed partial class ReadableMarkdownSerializer
             WriteImageNode(output, imageNode, partition, includeOcr: false);
             foreach (var textNode in imageText.Where(node => StringComparer.Ordinal.Equals(node.ParentId, imageNode.Id)))
             {
-                WriteOcrDetails(output, NodeText(textNode).Trim());
+                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
                 renderedTextIds.Add(textNode.Id);
             }
         }
         foreach (var textNode in imageText.Where(node => !renderedTextIds.Contains(node.Id)))
-            WriteOcrDetails(output, NodeText(textNode).Trim());
+            WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
         if (charts.Length > 0)
         {
             WriteHeading(output, 3, "グラフ");
@@ -586,7 +594,7 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static void WriteImage(StringBuilder output, ReferenceNodeContent image)
     {
-        var alt = (image.AltText ?? "図").Replace("[", "\\[", StringComparison.Ordinal)
+        var alt = EscapeLiteral(image.AltText ?? "図").Replace("[", "\\[", StringComparison.Ordinal)
             .Replace("]", "\\]", StringComparison.Ordinal);
         output.Append("![").Append(alt).Append("](").Append(MarkdownPathEncoder.Encode(image.Reference)).AppendLine(")").AppendLine();
     }
@@ -597,7 +605,7 @@ public sealed partial class ReadableMarkdownSerializer
         var mediaType = ImageMediaType(imageNode, image.Reference);
         if (!ImageDisplayPolicy.IsMarkdownDisplayable(mediaType))
         {
-            var alt = string.IsNullOrWhiteSpace(image.AltText) ? "図" : image.AltText.Trim();
+            var alt = EscapeLiteral(string.IsNullOrWhiteSpace(image.AltText) ? "図" : image.AltText.Trim());
             var extension = Path.GetExtension(image.Reference);
             if (string.IsNullOrWhiteSpace(extension)) extension = "." + (mediaType?.Split('/').LastOrDefault() ?? "unknown");
             WriteQuote(output, $"図: {alt}（{extension} 形式は Markdown で表示できません: {MarkdownPathEncoder.Encode(image.Reference)}）");
@@ -610,7 +618,7 @@ public sealed partial class ReadableMarkdownSerializer
             foreach (var textNode in partition.Nodes.Where(node => node.Kind == NodeKind.ImageText &&
                          StringComparer.Ordinal.Equals(node.ParentId, imageNode.Id))
                          .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
-                WriteOcrDetails(output, NodeText(textNode).Trim());
+                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
     }
 
     private static string VisualDiagnosticBlockId(string fallbackBlockId, VisualDiagnostic diagnostic)
@@ -670,7 +678,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (node.Extensions is null || !node.Extensions.TryGetValue("paragraph_details", out var details) ||
             details.ValueKind != JsonValueKind.Array)
         {
-            WritePptxFallbackParagraphs(output, NodeText(node));
+            WritePptxFallbackParagraphs(output, DisplayText(node, NodeText(node)));
             return;
         }
 
@@ -772,7 +780,10 @@ public sealed partial class ReadableMarkdownSerializer
                 var italic = JsonBool(run, "Italic", "italic");
                 var underline = JsonBool(run, "Underline", "underline");
                 var strike = JsonBool(run, "Strike", "strike", "is_strike");
-                value = InlineText(value);
+                // F-Issue7: escape the literal run text before any decoration is wrapped around
+                // it — escaping the composed "**bold**" afterward would corrupt the markers we
+                // just added.
+                value = InlineText(EscapeLiteral(value));
                 if (strike) value = "~~" + value + "~~";
                 if (underline) value = "<u>" + value + "</u>";
                 if (bold && italic) value = "***" + value + "***";
@@ -782,7 +793,7 @@ public sealed partial class ReadableMarkdownSerializer
             }
             if (output.Length > 0) return output.ToString();
         }
-        return InlineText(JsonString(paragraph, "Text", "text") ?? string.Empty);
+        return InlineText(EscapeLiteral(JsonString(paragraph, "Text", "text") ?? string.Empty));
     }
 
     private static bool HasExtension(DocumentNode node, string key) => node.Extensions?.ContainsKey(key) == true;
@@ -876,7 +887,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (leadingCells.Length == 1 && !leadingCells[0].IsNumeric &&
             TryGetSectionHeading(leadingCells[0].Text, out var leadingHeading, out var leadingLevel))
         {
-            WriteHeading(output, leadingLevel, leadingHeading);
+            WriteHeading(output, leadingLevel, EscapeLiteral(leadingHeading));
             if (rows.Count > 1) RenderRowGroup(output, rows.Skip(1).ToArray());
             return;
         }
@@ -886,7 +897,7 @@ public sealed partial class ReadableMarkdownSerializer
             foreach (var cell in rows[0].Cells)
             {
                 _ = TryGetSectionHeading(cell.Text, out var heading, out var level);
-                WriteHeading(output, level, heading);
+                WriteHeading(output, level, EscapeLiteral(heading));
             }
             return;
         }
@@ -921,8 +932,8 @@ public sealed partial class ReadableMarkdownSerializer
         WriteInference(output, "キー・値の配置を文書情報として分離");
         foreach (var row in rows)
             for (var index = 0; index + 1 < row.Cells.Count; index += 2)
-                output.Append("- **").Append(InlineText(row.Cells[index].Text)).Append("**: ")
-                    .AppendLine(InlineText(row.Cells[index + 1].Text));
+                output.Append("- **").Append(EscapedInlineText(row.Cells[index].Text)).Append("**: ")
+                    .AppendLine(EscapedInlineText(row.Cells[index + 1].Text));
         output.AppendLine();
     }
 
@@ -1024,10 +1035,10 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var cell = meaningfulCells[0];
             var text = cell.Text;
-            if (!cell.IsNumeric && TryGetSectionHeading(text, out var heading, out var level)) WriteHeading(output, level, heading);
-            else if (NoteRegex().IsMatch(text)) WriteQuote(output, text);
+            if (!cell.IsNumeric && TryGetSectionHeading(text, out var heading, out var level)) WriteHeading(output, level, EscapeLiteral(heading));
+            else if (NoteRegex().IsMatch(text)) WriteQuote(output, EscapeLiteral(text));
             else if (LooksLikeCode(text)) WriteCodeBlock(output, text);
-            else WriteParagraph(output, text);
+            else WriteParagraph(output, EscapeLiteral(text));
             return;
         }
 
@@ -1036,22 +1047,22 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var ordinaryCells = meaningfulCells.Except(sectionCells).ToList();
             if (ordinaryCells.Count > 0)
-                output.Append("- ").AppendLine(string.Join(" — ", ordinaryCells.Select(cell => InlineText(cell.Text)))).AppendLine();
+                output.Append("- ").AppendLine(string.Join(" — ", ordinaryCells.Select(cell => EscapedInlineText(cell.Text)))).AppendLine();
             foreach (var cell in sectionCells)
             {
                 _ = TryGetSectionHeading(cell.Text, out var heading, out var level);
-                WriteHeading(output, level, heading);
+                WriteHeading(output, level, EscapeLiteral(heading));
             }
             return;
         }
 
         if (meaningfulCells.All(cell => SelfLabeledRegex().IsMatch(cell.Text)))
         {
-            WriteQuote(output, string.Join(" · ", meaningfulCells.Select(cell => cell.Text)));
+            WriteQuote(output, string.Join(" · ", meaningfulCells.Select(cell => EscapeLiteral(cell.Text))));
             return;
         }
 
-        output.Append("- ").AppendLine(string.Join(" — ", meaningfulCells.Select(cell => InlineText(cell.Text)))).AppendLine();
+        output.Append("- ").AppendLine(string.Join(" — ", meaningfulCells.Select(cell => EscapedInlineText(cell.Text)))).AppendLine();
     }
 
     private static bool LooksLikeKeyValueGroup(IReadOnlyList<SheetRow> rows)
@@ -1123,6 +1134,124 @@ public sealed partial class ReadableMarkdownSerializer
         return null;
     }
 
+    // D08 readability pass: DocxAdapter.AddTable emits a nested w:tbl as an independent sibling
+    // Table node (nested_table_parent/_row/_column extensions record its host cell) so the F1
+    // restore path keeps the outer table's tr/tc shape untouched. Left alone, that sibling prints
+    // as a second, disconnected table with no indication of which cell it came from. This pass
+    // instead folds every Table node whose nested_table_parent resolves — a Table node present in
+    // the SAME partition, with nested_table_row/_column in range of that parent's own
+    // TableNodeContent.Rows — into its host cell's text, and excludes it from top-level rendering
+    // (FoldedChildIds is checked next to the existing AggregatedSections.SkipIds). A node that
+    // cannot be resolved this way — parent missing (a different partition, or dropped by the
+    // content policy), or a row/column out of range — is deliberately left out of FoldedChildIds
+    // so it still renders as an independent table; nothing is ever silently dropped. A chain
+    // deeper than maxDepth (defensive: also covers an accidental reference cycle) stops folding
+    // there and renders that node standalone too, the same as an unresolved reference.
+    private static NestedTableFolds ComputeNestedTableFolds(IReadOnlyList<DocumentPartition> partitions)
+    {
+        const int maxDepth = 8;
+        var foldedChildIds = new HashSet<string>(StringComparer.Ordinal);
+        var childrenByParentId = new Dictionary<string, List<NestedTableSlot>>(StringComparer.Ordinal);
+        foreach (var partition in partitions)
+        {
+            var nodesById = new Dictionary<string, DocumentNode>(StringComparer.Ordinal);
+            foreach (var node in partition.Nodes) nodesById[node.Id] = node;
+            var depthCache = new Dictionary<string, int>(StringComparer.Ordinal);
+
+            // Depth of `candidate` in its nested_table_parent chain (0 = not itself resolved as
+            // nested), or null when it cannot fold: no parent extension, an unresolved/foreign/
+            // out-of-range reference, a reference cycle, or a chain longer than maxDepth. Recurses
+            // into the parent first so a grandchild only resolves once its whole ancestor chain
+            // does, keeping multi-level nesting consistent; memoized per partition since node ids
+            // are unique document-wide (DocumentGraph.NormalizeNodeIds).
+            int? ResolveDepth(DocumentNode candidate, HashSet<string> visiting)
+            {
+                if (depthCache.TryGetValue(candidate.Id, out var cached)) return cached;
+                var parentId = ExtensionString(candidate, "nested_table_parent");
+                if (parentId is null) { depthCache[candidate.Id] = 0; return 0; }
+                if (!visiting.Add(candidate.Id)) return null; // defensive cycle guard
+                try
+                {
+                    if (!nodesById.TryGetValue(parentId, out var parentNode) ||
+                        parentNode.Content is not TableNodeContent parentTable) return null;
+                    var row = ExtensionInt(candidate, "nested_table_row");
+                    var column = ExtensionInt(candidate, "nested_table_column");
+                    if (row is not { } r || r < 0 || r >= parentTable.Rows.Count ||
+                        column is not { } c || c < 0 || c >= parentTable.Rows[r].Count) return null;
+                    if (ResolveDepth(parentNode, visiting) is not { } parentDepth || parentDepth + 1 > maxDepth) return null;
+                    depthCache[candidate.Id] = parentDepth + 1;
+                    return parentDepth + 1;
+                }
+                finally { visiting.Remove(candidate.Id); }
+            }
+
+            foreach (var node in partition.Nodes)
+            {
+                if (node.Kind != NodeKind.Table || node.Content is not TableNodeContent) continue;
+                var parentId = ExtensionString(node, "nested_table_parent");
+                if (parentId is null || ResolveDepth(node, new HashSet<string>(StringComparer.Ordinal)) is null) continue;
+                foldedChildIds.Add(node.Id);
+                // The line offset is authoritative: the host text is split by "\n" below, and a
+                // paragraph holding a line break contributes more than one line. The paragraph
+                // offset only serves graphs written before the line offset existed.
+                var slot = new NestedTableSlot(ExtensionInt(node, "nested_table_row")!.Value, ExtensionInt(node, "nested_table_column")!.Value, node,
+                    ExtensionInt(node, "nested_table_line_offset") ?? ExtensionInt(node, "nested_table_paragraph_offset"));
+                if (!childrenByParentId.TryGetValue(parentId, out var slots)) childrenByParentId[parentId] = slots = new List<NestedTableSlot>();
+                slots.Add(slot);
+            }
+        }
+        return new NestedTableFolds(foldedChildIds, childrenByParentId);
+    }
+
+    // Recursively folds any resolved nested-table children of `nodeId` into their host cell's text
+    // (grandchildren first, so a multi-level nest reads as one flattened block in the outermost
+    // cell) and returns a new grid; `rows` itself is never mutated, and a node with no resolved
+    // children returns it unchanged. Each nested row renders as its cells joined by " / "; nested
+    // rows join with "\n" — TableText (used by WriteTableRow below) turns that into "<br>" exactly
+    // like any other multi-line cell — appended after the host cell's own text with one separating
+    // "\n" only when that text is non-empty. Cell text is left unescaped here: WriteTableRow's
+    // existing TableText call is what escapes the merged text, same as every ordinary cell, so
+    // folded content never bypasses or duplicates that escaping.
+    private static IReadOnlyList<IReadOnlyList<TableCell>> FoldNestedTableRows(
+        string nodeId, IReadOnlyList<IReadOnlyList<TableCell>> rows, NestedTableFolds folds)
+    {
+        if (!folds.ChildrenByParentId.TryGetValue(nodeId, out var slots) || slots.Count == 0) return rows;
+        var grid = rows.Select(row => row.ToArray()).ToArray();
+        // All nested tables of one host cell are placed together, against that cell's ORIGINAL
+        // "\n"-separated lines: nested_table_line_offset counts the lines of the host's own text
+        // that came before the table in the source (a paragraph with a line break spans several),
+        // so "before / nested / after" keeps its order. A child without an offset (older graphs)
+        // still goes after the host's text.
+        foreach (var cellSlots in slots.GroupBy(slot => (slot.Row, slot.Column)))
+        {
+            var (row, column) = cellSlots.Key;
+            if (row < 0 || row >= grid.Length || column < 0 || column >= grid[row].Length) continue;
+            var hostCell = grid[row][column];
+            var paragraphs = string.IsNullOrEmpty(hostCell.Text) ? [] : hostCell.Text.Split('\n').ToList();
+            var placed = cellSlots.Select(slot =>
+            {
+                var childRows = slot.Child.Content is TableNodeContent childTable ? childTable.Rows : Array.Empty<IReadOnlyList<TableCell>>();
+                var foldedChildRows = FoldNestedTableRows(slot.Child.Id, childRows, folds);
+                var nestedText = string.Join("\n", foldedChildRows.Select(nestedRow => string.Join(" / ", nestedRow.Select(cell => cell.Text))));
+                var offset = slot.ParagraphOffset is { } known ? Math.Clamp(known, 0, paragraphs.Count) : paragraphs.Count;
+                return (Offset: offset, Text: nestedText);
+            }).OrderBy(item => item.Offset).ToArray();
+            var lines = new List<string>();
+            var next = 0;
+            for (var index = 0; index <= paragraphs.Count; index++)
+            {
+                while (next < placed.Length && placed[next].Offset == index) lines.Add(placed[next++].Text);
+                if (index < paragraphs.Count) lines.Add(paragraphs[index]);
+            }
+            grid[row][column] = hostCell with { Text = string.Join("\n", lines.Where(line => line.Length > 0)) };
+        }
+        return grid.Select(row => (IReadOnlyList<TableCell>)row).ToArray();
+    }
+
+    private sealed record NestedTableSlot(int Row, int Column, DocumentNode Child, int? ParagraphOffset = null);
+
+    private sealed record NestedTableFolds(HashSet<string> FoldedChildIds, IReadOnlyDictionary<string, List<NestedTableSlot>> ChildrenByParentId);
+
     private static void WriteArbitraryTable(StringBuilder output, IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
         if (rows.Count == 0) return;
@@ -1142,7 +1271,7 @@ public sealed partial class ReadableMarkdownSerializer
         // span (covering only some of the columns) is unaffected and still cell-duplicated by
         // ExpandTableGrid. The table itself is never split mid-way for this — every note row is
         // collected and emitted together, right after the (possibly shortened) table.
-        foreach (var note in noteRows) WriteParagraph(output, note.Text);
+        foreach (var note in noteRows) WriteParagraph(output, EscapeLiteral(note.Text));
     }
 
     private static (List<IReadOnlyList<TableCell>> TableRows, List<TableCell> NoteRows) SplitFullWidthNoteRows(IReadOnlyList<IReadOnlyList<TableCell>> rows)
@@ -1191,12 +1320,10 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static void WriteParagraph(StringBuilder output, string text)
     {
-        var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\r", "\n", StringComparison.Ordinal)
-            .Trim().Replace("\n", "  \n", StringComparison.Ordinal);
-        output.AppendLine(EscapeParagraphStart(normalized)).AppendLine();
+        var normalized = text.Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\r", "\n", StringComparison.Ordinal).Trim();
+        var escaped = EscapeLineStarts(normalized);
+        output.AppendLine(escaped.Replace("\n", "  \n", StringComparison.Ordinal)).AppendLine();
     }
-
-    private static string EscapeParagraphStart(string text) => Regex.Replace(text, @"^(\s*)([#>*+-]|\d+[.)])(?=\s)", "$1\\$2");
 
     private static bool LooksLikeCode(string text)
     {
@@ -1206,8 +1333,12 @@ public sealed partial class ReadableMarkdownSerializer
             normalized.StartsWith('{') || normalized.StartsWith('[') || text.Split('\n').Any(line => line.StartsWith(' ') || line.StartsWith('\t')));
     }
 
-    private static void WriteCodeBlock(StringBuilder output, string text) =>
-        output.AppendLine("```").AppendLine(text.Trim()).AppendLine("```").AppendLine();
+    private static void WriteCodeBlock(StringBuilder output, string text)
+    {
+        var trimmed = text.Trim();
+        var fence = CodeFence(trimmed);
+        output.AppendLine(fence).AppendLine(trimmed).AppendLine(fence).AppendLine();
+    }
 
     private static void WriteInference(StringBuilder output, string message) =>
         output.Append("<!-- inferred: ").Append(message.Replace("--", "—", StringComparison.Ordinal)).AppendLine(" -->");
@@ -1254,7 +1385,7 @@ public sealed partial class ReadableMarkdownSerializer
         var type = ChartTypeLabel(rawType);
         if (!string.IsNullOrWhiteSpace(title))
         {
-            output.Append("**").Append(InlineText(title)).Append("**");
+            output.Append("**").Append(EscapedInlineText(title)).Append("**");
             if (type is { Length: > 0 }) output.Append("（").Append(type).Append("）");
             output.AppendLine().AppendLine();
         }
@@ -1292,11 +1423,11 @@ public sealed partial class ReadableMarkdownSerializer
         var first = numeric[0]; var last = numeric[^1];
         var direction = last.Value > first.Value ? "増加" : last.Value < first.Value ? "減少" : "横ばい";
         var minimum = numeric.MinBy(item => item.Value); var maximum = numeric.MaxBy(item => item.Value);
-        output.Append("- ").Append(InlineText(name)).Append(": ").Append(InlineText(ChartCategory(categories, first.Index))).Append(" の ")
-            .Append(InlineText(first.Display)).Append(" から ").Append(InlineText(ChartCategory(categories, last.Index))).Append(" の ")
-            .Append(InlineText(last.Display)).Append(" へ ").Append(direction)
-            .Append("。最小 ").Append(InlineText(minimum.Display)).Append("、最大 ")
-            .Append(InlineText(maximum.Display)).AppendLine("。");
+        output.Append("- ").Append(EscapedInlineText(name)).Append(": ").Append(EscapedInlineText(ChartCategory(categories, first.Index))).Append(" の ")
+            .Append(EscapedInlineText(first.Display)).Append(" から ").Append(EscapedInlineText(ChartCategory(categories, last.Index))).Append(" の ")
+            .Append(EscapedInlineText(last.Display)).Append(" へ ").Append(direction)
+            .Append("。最小 ").Append(EscapedInlineText(minimum.Display)).Append("、最大 ")
+            .Append(EscapedInlineText(maximum.Display)).AppendLine("。");
     }
 
     private static void WriteCompositionChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories,
@@ -1306,10 +1437,10 @@ public sealed partial class ReadableMarkdownSerializer
         var maximum = numeric.MaxBy(item => item.Value);
         var hasValidTotal = numeric.All(item => item.Value >= 0) && numeric.Sum(item => item.Value) > 0;
         var total = hasValidTotal ? numeric.Sum(item => item.Value) : 0;
-        output.Append("- ").Append(InlineText(name)).Append(": 最大 ")
-            .Append(InlineText(ChartCategory(categories, maximum.Index))).Append(' ').Append(InlineText(maximum.Display));
+        output.Append("- ").Append(EscapedInlineText(name)).Append(": 最大 ")
+            .Append(EscapedInlineText(ChartCategory(categories, maximum.Index))).Append(' ').Append(EscapedInlineText(maximum.Display));
         if (hasValidTotal) output.Append("（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
-        output.Append("、最小 ").Append(InlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(InlineText(minimum.Display));
+        output.Append("、最小 ").Append(EscapedInlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(EscapedInlineText(minimum.Display));
         if (hasValidTotal) output.Append("（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
         output.AppendLine("。");
     }
@@ -1348,7 +1479,7 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var text = item.GetString();
             if (string.IsNullOrWhiteSpace(text)) continue;
-            output.Append("- ").AppendLine(InlineText(text));
+            output.Append("- ").AppendLine(EscapedInlineText(text));
         }
         output.AppendLine();
     }
@@ -1481,8 +1612,8 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var source = labels.TryGetValue(edge.SourceId!, out var sourceLabel) ? sourceLabel : edge.SourceId!;
             var target = labels.TryGetValue(edge.TargetId!, out var targetLabel) ? targetLabel : edge.TargetId!;
-            output.Append("- ").Append(InlineText(source)).Append(edge.IsUndirected ? " — " : " → ").Append(InlineText(target));
-            if (!string.IsNullOrWhiteSpace(edge.Label)) output.Append("（").Append(InlineText(edge.Label!)).Append("）");
+            output.Append("- ").Append(EscapedInlineText(source)).Append(edge.IsUndirected ? " — " : " → ").Append(EscapedInlineText(target));
+            if (!string.IsNullOrWhiteSpace(edge.Label)) output.Append("（").Append(EscapedInlineText(edge.Label!)).Append("）");
             output.AppendLine();
         }
         output.AppendLine();
@@ -1722,7 +1853,9 @@ public sealed partial class ReadableMarkdownSerializer
         {
             output.AppendLine(svg).AppendLine();
         }
-        output.AppendLine("```mermaid").AppendLine(mermaid.Trim()).AppendLine("```").AppendLine();
+        var trimmed = mermaid.Trim();
+        var fence = CodeFence(trimmed);
+        output.Append(fence).AppendLine("mermaid").AppendLine(trimmed).AppendLine(fence).AppendLine();
     }
 
     private static string NodeText(DocumentNode node) => node.Content switch
@@ -1812,10 +1945,120 @@ public sealed partial class ReadableMarkdownSerializer
     private static string InlineText(string value) => Regex.Replace(value, @"</?span\b[^>]*>", string.Empty, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
         .Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal)
         .Replace("#", "\\#", StringComparison.Ordinal).Trim();
-    private static string TableText(string value) => value.Replace("\r", string.Empty, StringComparison.Ordinal)
+    private static string TableText(string value) => EscapeLiteral(value.Replace("\r", string.Empty, StringComparison.Ordinal))
         .Replace("\n", "<br>", StringComparison.Ordinal).Replace("|", "\\|", StringComparison.Ordinal).Trim();
     private static string NormalizeComparison(string value) => Regex.Replace(value, "[\\s_\\-—:：.。/\\\\]", string.Empty);
     private static string Finish(StringBuilder output) => output.ToString().TrimEnd() + "\n";
+
+    // F-Issue7: neutralizes literal Markdown/HTML metacharacters in text that originates from a
+    // PLAIN source (TextNodeContent, ReferenceNodeContent alt text, TableCell text, JSON-extracted
+    // strings from chart/diagram/paragraph_details extensions). RichTextNodeContent is already
+    // escaped by DocRedockInlineMarkdown.Serialize before it ever reaches a writer, so callers must
+    // apply this ONLY to plain-origin strings (see DisplayText/EscapedInlineText below) — applying it
+    // to already-serialized rich text would double-escape real `**bold**`/`_italic_` markup.
+    //
+    // Backslash-escapes the same set DocRedockInlineMarkdown.Escape uses (\ * _ ~ `), so a lone
+    // emphasis/code delimiter never survives as live syntax. `<` becomes `&lt;` only when it could
+    // start a tag/comment/processing-instruction (next char is a letter, `/`, `!`, or `?`); the `>`
+    // that appears to close such a tag is escaped too (`&gt;`) so `<b>text</b>` reads as literal
+    // "<b>text</b>" instead of a dangling `>` next to an escaped `<`. A `>` with no preceding
+    // tag-like `<` is left alone here — it is only dangerous at the start of a line (blockquote),
+    // which WriteParagraph's line-start pass (EscapeLineStarts) handles separately. `&` becomes
+    // `&amp;` only when it could already read as a character reference (`&name;`, `&#123;`,
+    // `&#x1F;`); a bare `a & b` is left untouched.
+    private static string EscapeLiteral(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+        var output = new StringBuilder(value.Length);
+        var pendingTagClose = false;
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            switch (character)
+            {
+                case '\\' or '*' or '_' or '~' or '`':
+                    output.Append('\\').Append(character);
+                    break;
+                case '<':
+                    if (IsHtmlTagStart(value, index + 1))
+                    {
+                        output.Append("&lt;");
+                        pendingTagClose = true;
+                    }
+                    else output.Append('<');
+                    break;
+                case '>' when pendingTagClose:
+                    output.Append("&gt;");
+                    pendingTagClose = false;
+                    break;
+                case '&':
+                    output.Append(IsEntityStart(value, index + 1) ? "&amp;" : "&");
+                    break;
+                case '\n':
+                    pendingTagClose = false;
+                    output.Append(character);
+                    break;
+                default:
+                    output.Append(character);
+                    break;
+            }
+        }
+        return output.ToString();
+    }
+
+    private static bool IsHtmlTagStart(string value, int nextIndex) =>
+        nextIndex < value.Length && (value[nextIndex] is '/' or '!' or '?' || char.IsAsciiLetter(value[nextIndex]));
+
+    private static bool IsEntityStart(string value, int index) =>
+        index < value.Length && EntityReferenceRegex().IsMatch(value.AsSpan(index));
+
+    /// <summary>EscapeLiteral followed by the existing InlineText cleanup (span stripping, newline
+    /// flattening, `#` escaping). Only for GUARANTEED-plain sources (JSON-extracted chart/diagram
+    /// strings, table cell text, comment authors) — never for text that may already be
+    /// rich-serialized, since InlineText alone is what those call sites need instead.</summary>
+    private static string EscapedInlineText(string value) => InlineText(EscapeLiteral(value));
+
+    /// <summary>Returns <paramref name="rawText"/> unchanged when <paramref name="node"/> carries
+    /// RichTextNodeContent (already escaped by DocRedockInlineMarkdown.Serialize when it was turned
+    /// into text), otherwise applies EscapeLiteral. NodeText(node) itself must stay raw for
+    /// comparisons (dedup, footer-repetition, titles), so escaping is layered on at display time via
+    /// this helper instead.</summary>
+    private static string DisplayText(DocumentNode node, string rawText) =>
+        node.Content is RichTextNodeContent ? rawText : EscapeLiteral(rawText);
+
+    // Replaces the narrower EscapeParagraphStart: walks every line (not just the first) of a
+    // paragraph and escapes whatever would otherwise open an ATX heading, blockquote, list item, or
+    // ordered-list marker, plus a line that is nothing but a thematic break / setext underline
+    // (`---`, `===`). Only WriteParagraph needs this — headings flatten to one line before it can
+    // matter, and quotes/list items already start each rendered line with their own "> "/"- " marker.
+    private static string EscapeLineStarts(string text)
+    {
+        var marked = LineStartMarkerRegex().Replace(text, match =>
+        {
+            var indent = match.Groups["indent"].Value;
+            if (match.Groups["olnum"].Success)
+                return indent + match.Groups["olnum"].Value + "\\" + match.Groups["oldelim"].Value;
+            var marker = match.Groups["atx"].Success ? match.Groups["atx"].Value
+                : match.Groups["quote"].Success ? match.Groups["quote"].Value
+                : match.Groups["bullet"].Value;
+            return indent + "\\" + marker;
+        });
+        return ThematicBreakLineRegex().Replace(marked, match => match.Groups["indent"].Value + "\\" + match.Groups["rule"].Value);
+    }
+
+    // Longest run of backticks in the content, plus one (minimum 3): guarantees the fence itself
+    // can never appear, verbatim, inside the content it wraps.
+    private static string CodeFence(string content)
+    {
+        var longest = 0;
+        var current = 0;
+        foreach (var character in content)
+        {
+            if (character == '`') { current++; longest = Math.Max(longest, current); }
+            else current = 0;
+        }
+        return new string('`', Math.Max(3, longest + 1));
+    }
 
     private static int? ExtensionInt(DocumentNode node, string key)
     {
@@ -1934,4 +2177,23 @@ public sealed partial class ReadableMarkdownSerializer
 
     [GeneratedRegex(@"^[A-Z][A-Z0-9_]{2,}$", RegexOptions.CultureInvariant)]
     private static partial Regex UppercaseValueRegex();
+
+    // Group names: indent (leading spaces/tabs, preserved verbatim), then exactly one of
+    // atx (# .. ######), quote (>), bullet (- or +), or olnum+oldelim (ordered marker digits
+    // and its . or ) delimiter, kept apart so only the delimiter needs escaping — "1\." renders
+    // clean, whereas escaping the leading digit ("\1.") would leave a visible backslash.
+    [GeneratedRegex(@"^(?<indent>[ \t]{0,3})(?:(?<atx>#{1,6})(?=[ \t]|$)|(?<quote>>)|(?<bullet>[+\-])(?=[ \t]|$)|(?<olnum>\d{1,9})(?<oldelim>[.)])(?=[ \t]|$))", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex LineStartMarkerRegex();
+
+    // A line consisting solely of '-' or '=' (optionally spaced): a thematic break or a setext
+    // heading underline for the paragraph line above it. Lines already handled by
+    // LineStartMarkerRegex's bullet case (a lone "-" or "- - -") no longer start with the bare
+    // character by the time this runs, so there is no double-escaping.
+    [GeneratedRegex(@"^(?<indent>[ \t]{0,3})(?<rule>(?:-[ \t]*){1,}|(?:=[ \t]*){1,})$", RegexOptions.Multiline | RegexOptions.CultureInvariant)]
+    private static partial Regex ThematicBreakLineRegex();
+
+    // A leading '&' is escaped only when what follows could already read as a real character
+    // reference: &name; / &#123; / &#x1F;.
+    [GeneratedRegex(@"^(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);", RegexOptions.CultureInvariant)]
+    private static partial Regex EntityReferenceRegex();
 }

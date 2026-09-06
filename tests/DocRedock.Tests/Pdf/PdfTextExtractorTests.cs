@@ -295,6 +295,256 @@ public sealed class PdfTextExtractorTests
         Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
     }
 
+    /// <summary>A one-page PDF whose single content stream mixes native text with
+    /// <paramref name="draw"/>, with a resolvable <c>/Resources /XObject</c> dictionary built from
+    /// <paramref name="resources"/> and the XObject objects in <paramref name="xobjects"/>.</summary>
+    private static byte[] MixedContentPdf(string draw, string resources = "", string xobjects = "")
+    {
+        var content = "BT 100 700 Td (Hello) Tj ET\n" + draw;
+        return Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page /Contents 2 0 R" +
+            (resources.Length == 0 ? "" : " /Resources << /XObject << " + resources + " >> >>") + " >> endobj\n" +
+            "2 0 obj << /Length " + content.Length + " >> stream\n" + content + "\nendstream endobj\n" +
+            xobjects + "%%EOF");
+    }
+
+    [Fact]
+    public void Image_xobject_beside_native_text_is_counted_positioned_and_reported()
+    {
+        var pdf = MixedContentPdf("q 200 0 0 100 50 400 cm /Im1 Do Q", "/Im1 5 0 R",
+            "5 0 obj << /Type /XObject /Subtype /Image /Width 900 /Height 300 >> endobj\n");
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var page = result.Pages[0];
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.False(page.IsImageOnly);
+        Assert.Equal(1, page.EmbeddedImageCount);
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(50d, bounds.X, 6);
+        Assert.Equal(400d, bounds.Y, 6);
+        Assert.Equal(200d, bounds.Width, 6);
+        Assert.Equal(100d, bounds.Height, 6);
+        var diagnostic = Assert.Single(result.Diagnostics!,
+            item => item.StartsWith("PdfEmbeddedImageOmitted:", StringComparison.Ordinal));
+        Assert.Contains("PDF page 1: 1 embedded image(s) were not extracted", diagnostic, StringComparison.Ordinal);
+        Assert.Contains("--ocr on", diagnostic, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Form_xobject_beside_native_text_is_not_counted_as_an_embedded_image()
+    {
+        // Object 6 is an unreferenced Image XObject: without resource resolution the conservative
+        // fallback ("the document declares an image somewhere") would count the /Fm1 draw, so this
+        // asserts that /Resources really is followed and /Subtype /Form really is excluded.
+        var pdf = MixedContentPdf("q 1 0 0 1 0 0 cm /Fm1 Do Q", "/Fm1 5 0 R",
+            "5 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 10 10] >> endobj\n" +
+            "6 0 obj << /Type /XObject /Subtype /Image /Width 4 /Height 4 >> endobj\n");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.Equal(0, result.Pages[0].EmbeddedImageCount);
+        Assert.Null(result.Pages[0].EmbeddedImages);
+        Assert.DoesNotContain(result.Diagnostics!,
+            item => item.StartsWith("PdfEmbeddedImageOmitted", StringComparison.Ordinal));
+    }
+
+    private const string ImageObject = "6 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 8 >> endobj\n";
+
+    /// <summary>A Form XObject with its own content stream, so the extractor has a decoded body to
+    /// recurse into rather than an empty shell.</summary>
+    private static string FormObject(int id, string content, string matrix = "", string resources = "") =>
+        id + " 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 1 1]" +
+        (matrix.Length == 0 ? "" : " /Matrix [" + matrix + "]") +
+        (resources.Length == 0 ? "" : " /Resources << /XObject << " + resources + " >> >>") +
+        " /Length " + content.Length + " >> stream\n" + content + "\nendstream endobj\n";
+
+    [Fact]
+    public void Image_inside_a_form_xobject_is_counted_where_the_form_matrix_and_caller_ctm_place_it()
+    {
+        // A Form is not an image, so before the recursion this page reported nothing at all: the
+        // picture inside the form was invisible to the extractor and to OCR.
+        var pdf = MixedContentPdf("q 2 0 0 2 10 20 cm /Fm1 Do Q", "/Fm1 5 0 R",
+            FormObject(5, "/Im1 Do", "100 0 0 50 5 5", "/Im1 6 0 R") + ImageObject);
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var page = result.Pages[0];
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.Equal(1, page.EmbeddedImageCount);
+        // The image space unit square goes through /Matrix [100 0 0 50 5 5] and then through the
+        // caller's CTM [2 0 0 2 10 20]: (0,0) -> (5,5) -> (20,30) and (1,1) -> (105,55) -> (220,130).
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(20d, bounds.X, 6);
+        Assert.Equal(30d, bounds.Y, 6);
+        Assert.Equal(200d, bounds.Width, 6);
+        Assert.Equal(100d, bounds.Height, 6);
+        Assert.Contains(result.Diagnostics!,
+            item => item.StartsWith("PdfEmbeddedImageOmitted:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Image_inside_a_nested_form_xobject_is_found_with_every_matrix_applied()
+    {
+        var pdf = MixedContentPdf("/Fm1 Do", "/Fm1 5 0 R",
+            FormObject(5, "/Fm2 Do", "2 0 0 2 0 0", "/Fm2 7 0 R") +
+            FormObject(7, "/Im1 Do", "10 0 0 10 1 1", "/Im1 6 0 R") + ImageObject);
+
+        var page = PdfTextExtractor.Extract(pdf).Pages[0];
+
+        Assert.Equal(1, page.EmbeddedImageCount);
+        // (0,0) -> [10 0 0 10 1 1] -> (1,1) -> [2 0 0 2 0 0] -> (2,2); (1,1) -> (11,11) -> (22,22).
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(2d, bounds.X, 6);
+        Assert.Equal(2d, bounds.Y, 6);
+        Assert.Equal(20d, bounds.Width, 6);
+        Assert.Equal(20d, bounds.Height, 6);
+    }
+
+    [Fact]
+    public void Form_xobjects_that_reference_each_other_stop_without_losing_the_image_beside_the_cycle()
+    {
+        // /Fm1 draws /Fm2, which draws /Fm1 again. The cycle must terminate, and terminating must
+        // not cost the image the outer form draws after it.
+        var pdf = MixedContentPdf("/Fm1 Do", "/Fm1 5 0 R",
+            FormObject(5, "/Fm2 Do\nq 20 0 0 10 3 4 cm /Im1 Do Q", resources: "/Fm2 7 0 R /Im1 6 0 R") +
+            FormObject(7, "/Fm1 Do", resources: "/Fm1 5 0 R") + ImageObject);
+
+        var page = PdfTextExtractor.Extract(pdf).Pages[0];
+
+        Assert.Equal(1, page.EmbeddedImageCount);
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(3d, bounds.X, 6);
+        Assert.Equal(4d, bounds.Y, 6);
+        Assert.Equal(20d, bounds.Width, 6);
+        Assert.Equal(10d, bounds.Height, 6);
+    }
+
+    /// <summary>A one-page PDF that declares nothing inheritable on the page dictionary itself:
+    /// everything in <paramref name="pagesAttributes"/> lives on the <c>/Pages</c> node the page's
+    /// <c>/Parent</c> points at, which is how most producers write multi-page files.</summary>
+    private static byte[] InheritedAttributePdf(string draw, string pagesAttributes)
+    {
+        var content = "BT 100 700 Td (Hello) Tj ET\n" + draw;
+        return Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page /Parent 3 0 R /Contents 2 0 R >> endobj\n" +
+            "2 0 obj << /Length " + content.Length + " >> stream\n" + content + "\nendstream endobj\n" +
+            "3 0 obj << /Type /Pages /Kids [1 0 R] /Count 1 " + pagesAttributes + " >> endobj\n" +
+            "5 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 8 >> endobj\n" +
+            "7 0 obj << /Type /XObject /Subtype /Form /BBox [0 0 10 10] >> endobj\n%%EOF");
+    }
+
+    [Fact]
+    public void Resources_inherited_from_the_pages_node_separate_the_image_draw_from_the_form_draw()
+    {
+        // The page draws one image and one form. Only a resolved resource dictionary can tell them
+        // apart: with the dictionary unreachable both names are unknown and the conservative
+        // fallback counts two images, so a count of one is what proves /Parent was followed.
+        var pdf = InheritedAttributePdf("q 200 0 0 100 50 400 cm /Im1 Do Q\nq 1 0 0 1 0 0 cm /Fm1 Do Q",
+            "/Resources << /XObject << /Im1 5 0 R /Fm1 7 0 R >> >>");
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var page = result.Pages[0];
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.Equal(1, page.EmbeddedImageCount);
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(50d, bounds.X, 6);
+        Assert.Equal(400d, bounds.Y, 6);
+        Assert.Equal(200d, bounds.Width, 6);
+        Assert.Equal(100d, bounds.Height, 6);
+    }
+
+    [Fact]
+    public void Page_boxes_and_rotation_are_inherited_from_the_pages_node()
+    {
+        var pdf = InheritedAttributePdf(string.Empty,
+            "/MediaBox [0 0 612 792] /CropBox [10 20 602 762] /Rotate 90");
+
+        var page = PdfTextExtractor.Extract(pdf).Pages[0];
+
+        Assert.NotNull(page.MediaBox);
+        Assert.Equal("pdf-user-space", page.MediaBox!.CoordinateSpace);
+        Assert.Equal(0d, page.MediaBox.X, 6);
+        Assert.Equal(0d, page.MediaBox.Y, 6);
+        Assert.Equal(612d, page.MediaBox.Width, 6);
+        Assert.Equal(792d, page.MediaBox.Height, 6);
+        Assert.NotNull(page.CropBox);
+        Assert.Equal(10d, page.CropBox!.X, 6);
+        Assert.Equal(20d, page.CropBox.Y, 6);
+        Assert.Equal(592d, page.CropBox.Width, 6);
+        Assert.Equal(742d, page.CropBox.Height, 6);
+        Assert.Equal(90, page.Rotation);
+    }
+
+    [Fact]
+    public void A_page_that_declares_no_boxes_reports_none()
+    {
+        var page = PdfTextExtractor.Extract(MixedContentPdf(string.Empty)).Pages[0];
+
+        Assert.Null(page.MediaBox);
+        Assert.Null(page.CropBox);
+        Assert.Equal(0, page.Rotation);
+    }
+
+    [Fact]
+    public void Inline_image_beside_native_text_is_counted_and_its_sample_data_is_skipped()
+    {
+        var pdf = MixedContentPdf("q 120 0 0 60 30 500 cm BI /W 4 /H 4 /CS /G /BPC 8 ID 0123456789abcdef EI Q");
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var page = result.Pages[0];
+
+        Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
+        Assert.False(page.IsImageOnly);
+        Assert.Equal(1, page.EmbeddedImageCount);
+        var bounds = Assert.Single(page.EmbeddedImages!);
+        Assert.Equal(30d, bounds.X, 6);
+        Assert.Equal(500d, bounds.Y, 6);
+        Assert.Contains(result.Diagnostics!,
+            item => item.StartsWith("PdfEmbeddedImageOmitted:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Image_only_page_is_not_double_reported_as_an_omitted_embedded_image()
+    {
+        var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 8 >> stream\n/Im1 Do\nendstream\n%%EOF");
+
+        var result = PdfTextExtractor.Extract(pdf);
+
+        Assert.True(result.Pages[0].IsImageOnly);
+        Assert.Contains(result.Diagnostics!, item => item.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics!,
+            item => item.StartsWith("PdfEmbeddedImageOmitted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Embedded_image_placeholder_is_projected_below_the_text_above_it_with_a_warning()
+    {
+        var pdf = MixedContentPdf("q 200 0 0 100 50 400 cm /Im1 Do Q", "/Im1 5 0 R",
+            "5 0 obj << /Type /XObject /Subtype /Image /Width 900 /Height 300 >> endobj\n");
+        var extraction = PdfTextExtractor.Extract(pdf);
+
+        var graph = PdfDocumentGraphProjection.CreateGraph(extraction, new string('a', 64));
+        var partition = Assert.Single(graph.Partitions);
+        var placeholder = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Annotation);
+
+        // "Hello" sits at y=700 and the image at y=400..500, so the placeholder reads after the body.
+        Assert.Equal(2, partition.Nodes.Count);
+        Assert.Equal(1, placeholder.Order);
+        Assert.Equal(ContentLayer.Body, placeholder.Layer);
+        Assert.Contains("PDF page 1: 1 embedded image(s) not extracted",
+            Assert.IsType<TextNodeContent>(placeholder.Content).Text, StringComparison.Ordinal);
+        Assert.True(placeholder.Extensions!["pdf_embedded_image_placeholder"].GetBoolean());
+        Assert.Equal(1, placeholder.Extensions["pdf_embedded_image_count"].GetInt32());
+        Assert.Equal(400d, placeholder.Geometry!.Y, 6);
+        Assert.Equal(100d, placeholder.Geometry.Height, 6);
+        var diagnostic = Assert.Single(PdfDocumentGraphProjection.Diagnostics(extraction),
+            item => item.Code == "PdfEmbeddedImageOmitted");
+        Assert.Equal(DiagnosticSeverity.Warning, diagnostic.Severity);
+    }
+
     [Fact]
     public async Task Image_only_page_keeps_placeholder_and_export_diagnostic()
     {

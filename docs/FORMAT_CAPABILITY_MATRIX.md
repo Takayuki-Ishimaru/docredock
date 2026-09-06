@@ -1,7 +1,7 @@
 # 形式別の技術的な対応範囲
 
 > **この文書は、各形式で利用できる操作と制約を説明する技術リファレンスです。**
-> v0.2.4 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
+> v0.2.5 Public Beta の利用者向けサポート範囲は、[日本語の対応状況](ja/supported-features.md) / [English support status](en/supported-features.md) を正本とします。
 
 記号: ○ = 対応、△ = 条件付き・限定的、× = 非対応。
 
@@ -18,6 +18,13 @@
 | テンプレートを使う新規生成 | ○ | ○ | ○ | × |
 | 埋め込み画像のMarkdown表示 | ○ | ○ 位置・表示寸法を反映 | ○ | △ rasterizer利用時 |
 | 編集済みPDFの代替生成 | × | × | × | △ `--allow-render-fallback`が必要 |
+| 数式（OMML）の本文化 | △ 線形テキスト化・`DocxMathLinearized`警告。前後の本文はF1編集可、数式自体の編集は`DocxMathReplaced`警告付きでテキスト化 | — | × | × |
+| コンテンツコントロール（w:sdt）内の本文 | ○ ブロック型・インライン型ともF1編集可。境界をまたぐ編集は`DocxInlineContainerUnwrapped`警告付きで包みを外す | — | — | — |
+| `mc:AlternateContent` 由来の本文 | ○ 入れ子を含め選択した分岐をF1編集し、同じ文言の他分岐へ反映。反映できない場合は`DocxAlternateContentFallbackStale` | — | — | — |
+| テキストボックス内の本文 | ○ 本文中のDrawingML／VMLテキストボックスをF1編集（ヘッダー・フッター・表セル内は抽出のみ） | — | ○ 図形テキスト | — |
+| スタイル／グループ経由の非表示内容の除外 | ○ 文字・段落スタイル、文書既定値 | ○ 非表示シート | ○ 非表示グループ内の図形 | — |
+| レイアウト／マスター由来の可視文字 | — | — | ○ プレースホルダを除く | — |
+| 入力と同じパスへの出力 | × 常に拒否（`--force`でも不可） | × | × | × |
 
 ## Readable Markdown
 

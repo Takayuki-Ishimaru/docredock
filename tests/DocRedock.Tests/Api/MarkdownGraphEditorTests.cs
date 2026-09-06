@@ -484,6 +484,9 @@ public sealed class MarkdownGraphEditorTests
             [new DocumentPartition("sheet-Summary", 0, [cell])]);
         var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
 
+        // ProjectSpreadsheetCell wraps the raw value/display-value pair in a raw
+        // code span; DecodeSpreadsheetCell tells that fence apart from an escaped
+        // "\`" that would come from a backtick inside the value or display text.
         Assert.Contains("`45292` → 2024-01-01", projection, StringComparison.Ordinal);
         var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
         var displayOnlyEdit = new MarkdownGraphEditor().Apply(
@@ -519,6 +522,266 @@ public sealed class MarkdownGraphEditorTests
         Assert.True(edited.IsValid);
         Assert.Equal("実行計画", Assert.IsType<TextNodeContent>(edited.EditedGraph.FindNode("title")!.Content).Text);
         Assert.Equal("要点1\n要点B", Assert.IsType<TextNodeContent>(edited.EditedGraph.FindNode("body")!.Content).Text);
+    }
+
+    [Fact]
+    public void UnchangedEscapedPlainTextTableAndCodeBlockProjectionsAreProjectionEquivalent()
+    {
+        var orderedExtensions = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["list_format"] = System.Text.Json.JsonSerializer.SerializeToElement("ordered"),
+            ["list_number"] = System.Text.Json.JsonSerializer.SerializeToElement(1),
+        };
+        var graph = new DocumentGraph("1.1", "doc_escape_roundtrip", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-1", 0,
+            [
+                Node("para", "a*b_c~d`e\\f&g<h>i", 0),
+                new DocumentNode("heading", NodeKind.Heading, null, 1, ContentLayer.Body, new TextNodeContent("# not a heading")),
+                new DocumentNode("bullet", NodeKind.ListItem, null, 2, ContentLayer.Body, new TextNodeContent("- not a bullet")),
+                new DocumentNode("ordered", NodeKind.ListItem, null, 3, ContentLayer.Body,
+                    new TextNodeContent("1. not ordered"), Extensions: orderedExtensions),
+                new DocumentNode("quote", NodeKind.Quote, null, 4, ContentLayer.Body,
+                    new TextNodeContent("line1\n- bullet-like\n> nested quote")),
+                new DocumentNode("hr", NodeKind.Paragraph, null, 5, ContentLayer.Body, new TextNodeContent("---")),
+                new DocumentNode("table", NodeKind.Table, null, 6, ContentLayer.Body,
+                    new TableNodeContent([new TableCell[] { "a*b|c\nd&e", "plain" }]),
+                    Editability: NodeEditability.EditableWithConstraints),
+                new DocumentNode("code", NodeKind.CodeBlock, null, 7, ContentLayer.Body,
+                    new TextNodeContent("before\n```\nafter")),
+            ])
+        ]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        var result = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(result.Diff.PatchSet.Operations);
+    }
+
+    [Fact]
+    public void EditingTextWithAnEscapeSequencePreservesTheEscapedCharacter()
+    {
+        var graph = new DocumentGraph("1.1", "doc_escape_edit", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [Node("para", "Use * for emphasis", 0)])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+        Assert.Contains(@"Use \* for emphasis", projection);
+
+        // The Markdown-side edit keeps the existing "\*" escape sequence intact and
+        // only appends a word after it.
+        var edited = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace(@"Use \* for emphasis", @"Use \* for emphasis today", StringComparison.Ordinal));
+
+        Assert.True(edited.IsValid);
+        Assert.Equal("Use * for emphasis today",
+            Assert.IsType<TextNodeContent>(edited.EditedGraph.FindNode("para")!.Content).Text);
+    }
+
+    [Fact]
+    public void NewBlockWithEscapeSequencesDecodesToRawSpecialCharacters()
+    {
+        var graph = new DocumentGraph("1.1", "doc_new_escape", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-a", 0, [Node("n_1", "one", 0)])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+        var addition = projection.Replace("<!--drmd:partition-end id=part-a baseline_nodes=1-->",
+            "<!--drmd:new kind=paragraph-->\n\\*starred\\* and &amp; escaped\n<!--drmd:partition-end id=part-a baseline_nodes=1-->",
+            StringComparison.Ordinal);
+
+        var added = new MarkdownGraphEditor().Apply(graph, addition);
+
+        Assert.True(added.IsValid, string.Join("; ", added.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        var newNode = Assert.Single(added.EditedGraph.Partitions.Single(partition => partition.Id == "part-a").Nodes,
+            node => node.Id != "n_1");
+        Assert.Equal("*starred* and & escaped", Assert.IsType<TextNodeContent>(newNode.Content).Text);
+    }
+
+    [Fact]
+    public void StandaloneXlsxCellBlockPreservesFormulaWithCachedDisplayValue()
+    {
+        var formula = SpreadsheetCell("b3", "B3", "240", 0) with
+        {
+            Extensions = new Dictionary<string, System.Text.Json.JsonElement>
+            {
+                ["formula"] = System.Text.Json.JsonSerializer.SerializeToElement("SUM(B1:B2)")
+            }
+        };
+        // A cell with no parseable A1 address defeats sheet-grid detection for the
+        // whole partition (TryReadSheetCells), so every cell -- including the
+        // formula above -- falls back to the standalone "- **address:**" line
+        // instead of a sheet-table grid.
+        var junk = new DocumentNode("junk", NodeKind.Cell, null, 1, ContentLayer.Body, new TextNodeContent("stray"));
+        var graph = new DocumentGraph("1.1", "doc_formula_fallback", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [formula, junk])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("- **B3:** `=SUM(B1:B2)` → 240", projection, StringComparison.Ordinal);
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+        var formulaEdit = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("SUM(B1:B2)", "SUM(B1:B3)", StringComparison.Ordinal));
+
+        Assert.True(unchanged.IsValid);
+        // Before the DecodeCellText fix this fell through to the "not a formula"
+        // branch of ApplyCell and silently deleted the formula extension.
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.Equal("SUM(B1:B2)", unchanged.EditedGraph.FindNode("b3")!.Extensions!["formula"].GetString());
+        Assert.True(formulaEdit.IsValid);
+        Assert.Equal("SUM(B1:B3)", formulaEdit.EditedGraph.FindNode("b3")!.Extensions!["formula"].GetString());
+        Assert.Equal("240", Assert.IsType<TextNodeContent>(formulaEdit.EditedGraph.FindNode("b3")!.Content).Text);
+    }
+
+    [Theory]
+    [InlineData("`x`")]
+    [InlineData("`x` → y")]
+    public void PreservesPlainSpreadsheetValuesThatLookLikeBacktickWrappedCodeSpans(string value)
+    {
+        // A plain (non-formula, no display_value) cell whose own text happens to
+        // look like a wrapped code span must round-trip as plain content: only a
+        // RAW (unescaped) backtick fence is ever a wrapper ProjectSpreadsheetCell
+        // added, never a backtick that is genuinely part of the value (which goes
+        // out as "\`"). Exercise both projection shapes since they decode through
+        // separate call sites (ParseSheetGrid/ParseMetadataAddressedGrid vs
+        // DecodeCellText) that both feed DecodeSpreadsheetCell.
+        var gridCell = SpreadsheetCell("a1", "A1", value, 0);
+        var gridNeighbor = SpreadsheetCell("b1", "B1", "plain", 1);
+        var gridGraph = new DocumentGraph("1.1", "doc_backtick_grid", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [gridCell, gridNeighbor])]);
+        var gridProjection = new DocRedockMarkdownSerializer().Serialize(gridGraph).Markdown;
+        var gridResult = new MarkdownGraphEditor().Apply(gridGraph, gridProjection);
+
+        Assert.True(gridResult.IsValid, string.Join("; ", gridResult.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(gridResult.Diff.PatchSet.Operations);
+        Assert.Equal(value, Assert.IsType<TextNodeContent>(gridResult.EditedGraph.FindNode("a1")!.Content).Text);
+
+        // A cell with no parseable A1 address forces the standalone
+        // "- **address:**" fallback for the whole partition (see
+        // StandaloneXlsxCellBlockPreservesFormulaWithCachedDisplayValue above).
+        var standaloneCell = SpreadsheetCell("a1", "A1", value, 0);
+        var junk = new DocumentNode("junk", NodeKind.Cell, null, 1, ContentLayer.Body, new TextNodeContent("stray"));
+        var standaloneGraph = new DocumentGraph("1.1", "doc_backtick_standalone", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [standaloneCell, junk])]);
+        var standaloneProjection = new DocRedockMarkdownSerializer().Serialize(standaloneGraph).Markdown;
+        var standaloneResult = new MarkdownGraphEditor().Apply(standaloneGraph, standaloneProjection);
+
+        Assert.True(standaloneResult.IsValid, string.Join("; ", standaloneResult.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(standaloneResult.Diff.PatchSet.Operations);
+        Assert.Equal(value, Assert.IsType<TextNodeContent>(standaloneResult.EditedGraph.FindNode("a1")!.Content).Text);
+    }
+
+    [Fact]
+    public void PreservesSpreadsheetCellValueWithPipeBackslashAmpersandAndNewlineInAGrid()
+    {
+        const string value = "a|b\\c&d\ne";
+        var cell = SpreadsheetCell("a1", "A1", value, 0);
+        var neighbor = SpreadsheetCell("b1", "B1", "plain", 1);
+        var graph = new DocumentGraph("1.1", "doc_special_chars_grid", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [cell, neighbor])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(unchanged.IsValid, string.Join("; ", unchanged.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.Equal(value, Assert.IsType<TextNodeContent>(unchanged.EditedGraph.FindNode("a1")!.Content).Text);
+    }
+
+    [Fact]
+    public void PreservesStandaloneSpreadsheetCellValueWithPipeBackslashAmpersandAndNewline()
+    {
+        const string value = "a|b\\c&d\ne";
+        var cell = SpreadsheetCell("a1", "A1", value, 0);
+        var junk = new DocumentNode("junk", NodeKind.Cell, null, 1, ContentLayer.Body, new TextNodeContent("stray"));
+        var graph = new DocumentGraph("1.1", "doc_special_chars_standalone", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [cell, junk])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        // The embedded newline must come out as "<br>" so the "- **A1:**" line
+        // stays on one physical line (see EscapeSpreadsheetCellLineNewlines).
+        Assert.Contains(@"- **A1:** a|b\\c&amp;d<br>e", projection, StringComparison.Ordinal);
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(unchanged.IsValid, string.Join("; ", unchanged.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.Equal(value, Assert.IsType<TextNodeContent>(unchanged.EditedGraph.FindNode("a1")!.Content).Text);
+    }
+
+    [Fact]
+    public void PreservesBareFormulaCodeSpanWithNoCachedDisplayValue()
+    {
+        var formula = SpreadsheetCell("b3", "B3", string.Empty, 0) with
+        {
+            Extensions = new Dictionary<string, System.Text.Json.JsonElement>
+            {
+                ["formula"] = System.Text.Json.JsonSerializer.SerializeToElement("SUM(A1:A2)")
+            }
+        };
+        var graph = new DocumentGraph("1.1", "doc_bare_formula", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [formula])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        // No cached value or display_value means ProjectSpreadsheetCell emits the
+        // bare "`=expression`" span, with no " -> <value>" suffix.
+        Assert.Contains("| `=SUM(A1:A2)` |", projection, StringComparison.Ordinal);
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+        var formulaEdit = new MarkdownGraphEditor().Apply(graph,
+            projection.Replace("SUM(A1:A2)", "SUM(A1:A3)", StringComparison.Ordinal));
+
+        Assert.True(unchanged.IsValid, string.Join("; ", unchanged.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        Assert.True(formulaEdit.IsValid, string.Join("; ", formulaEdit.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Equal("SUM(A1:A3)", formulaEdit.EditedGraph.FindNode("b3")!.Extensions!["formula"].GetString());
+        Assert.Equal(string.Empty, Assert.IsType<TextNodeContent>(formulaEdit.EditedGraph.FindNode("b3")!.Content).Text);
+    }
+
+    [Fact]
+    public void WrapsPlainStringValueStartingWithEqualsSignInACodeSpan()
+    {
+        var cell = SpreadsheetCell("a1", "A1", "=abc", 0);
+        var graph = new DocumentGraph("1.1", "doc_equals_value", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Summary", 0, [cell])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("| `=abc` |", projection, StringComparison.Ordinal);
+
+        var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(unchanged.IsValid, string.Join("; ", unchanged.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        // ApplyCell treats any decoded cell text starting with '=' as introducing
+        // a formula -- the same way a real spreadsheet would treat typed "=abc"
+        // -- regardless of whether the baseline already had one, so this is not
+        // a byte-for-byte no-op. What this asserts is the part DecodeSpreadsheetCell
+        // is responsible for: the code span decodes back to exactly "=abc", with
+        // no leftover backtick or corruption from the defensive wrapper.
+        Assert.Equal("abc", unchanged.EditedGraph.FindNode("a1")!.Extensions!["formula"].GetString());
+        Assert.Equal("=abc", Assert.IsType<TextNodeContent>(unchanged.EditedGraph.FindNode("a1")!.Content).Text);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("\\")]
+    [InlineData("\\\\")]
+    [InlineData("&lt;")]
+    [InlineData("&amp;lt;")]
+    [InlineData("1.")]
+    [InlineData("plain text, no special characters")]
+    [InlineData("trailing backslash\\")]
+    [InlineData("* * * many * stars * and _underscores_ and ~tildes~ and `code`")]
+    [InlineData("# heading-like\n> quote-like\n- bullet-like\n1. ordered-like\n---\n===\n```fenced```\n~~~fenced~~~")]
+    [InlineData("日本語 *強調* `code` & < > テスト\\")]
+    [InlineData("line one\n\nline three after a blank line")]
+    public void PlainTextEscapeUnescapeRoundTripsForBoundaryAndRandomStrings(string original)
+    {
+        var graph = new DocumentGraph("1.1", "doc_roundtrip", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [Node("para", original, 0)])]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        var result = new MarkdownGraphEditor().Apply(graph, projection);
+
+        Assert.True(result.IsValid, string.Join("; ", result.Diagnostics.Select(d => d.Code + ":" + d.Message)));
+        Assert.Empty(result.Diff.PatchSet.Operations);
+        Assert.Equal(original, Assert.IsType<TextNodeContent>(result.EditedGraph.FindNode("para")!.Content).Text);
     }
 
     private static DocumentNode SpreadsheetCell(string id, string address, string text, int order) => new(
