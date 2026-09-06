@@ -42,6 +42,12 @@ public static class DocRedockMarkdownEditPolicy
         {
             DocumentFormatKind.Docx when node.Kind is NodeKind.Paragraph or NodeKind.Heading or NodeKind.ListItem =>
                 new("text", ["replace-text", "explicit-delete"], ["preserve-kind", "preserve-order"]),
+            // A DOCX text box is editable only once the adapter has bound its w:txbxContent to a
+            // byte slice it can splice; one it could not bind (a box in a header, or one the slice
+            // ledger disagreed about) still projects its text but has no way back, so it keeps
+            // advertising no operation at all.
+            DocumentFormatKind.Docx when node.Kind == NodeKind.TextBox && node.Editability == NodeEditability.EditableInPlace =>
+                new("text", ["replace-text"], ["existing-shape", "no-delete", "preserve-order"]),
             DocumentFormatKind.Docx when node.Kind == NodeKind.Table =>
                 new("table-cells", ["replace-table-cells", "explicit-delete"], ["same-shape", "preserve-order"]),
             DocumentFormatKind.Xlsx when node.Kind == NodeKind.Cell =>

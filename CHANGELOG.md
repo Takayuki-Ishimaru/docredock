@@ -1,6 +1,23 @@
 # Changelog
 
-Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
+Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
+
+## [Unreleased]
+
+## [0.2.5] - 2026-09-07
+
+- Protected source documents from CLI output collisions, including exports with `--force`.
+- Excluded Word text hidden through styles or document defaults and PowerPoint shapes inside hidden groups.
+- Preserved Word content-control text, linearized native equations with a warning, and kept table paragraphs, line breaks, and nested-table order.
+- Preserved visible PowerPoint layout/master text and paragraph boundaries in table and merged cells.
+- Corrected Excel zero padding, thousands/millions scaling, scientific and engineering notation, fractions, and conditional number formats.
+- Escaped literal Markdown/HTML symbols in readable and round-trip output while preserving source text through experimental restoration.
+- Improved experimental Word editing of content controls, equation paragraphs, text boxes, and alternate-content branches, with warnings for unsupported structural changes.
+- Preserved PDF body text that matches diagram labels, corrected column/footer order, and stopped treating separate table grids as connectors.
+- Added positioned placeholders and warnings for mixed-page PDF images, with image crops and OCR when the required providers are available.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.5.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.5.md)
 
 ## [0.2.4] - 2026-09-06
 

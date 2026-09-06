@@ -20,12 +20,29 @@ internal static class PdfDocumentGraphProjection
             if (extraction.VisualProjections?.GetValueOrDefault(page.PageNumber) is { } projection)
                 visualGraph = projection.Graph;
             var hasTopology = visualGraph?.HasTopology == true;
+            // A visual graph is derived from the page's native text/geometry. Membership is
+            // decided by which fragment a node actually consumed as its label - the extractor
+            // records that assignment by stable source text id - never by comparing rendered
+            // strings: a heading or a sentence that merely repeats a node's caption ("START"
+            // above the diagram, "START" in a paragraph) is ordinary body text, and a readable
+            // projection that skips graph members would otherwise delete it with no diagnostic.
+            var graphNodeIds = hasTopology
+                ? visualGraph!.Nodes.Select(visualNode => visualNode.Id).ToHashSet(StringComparer.Ordinal)
+                : null;
+            var labelNodeIds = page.VisualLabelNodeIds;
+            bool IsConsumedNodeLabel(PdfTextRegion region) =>
+                graphNodeIds is not null && labelNodeIds is { Count: > 0 } && region.SourceTextIds.Count > 0 &&
+                // Every fragment of a merged readable line must be label-consumed; a line that
+                // also carries unconsumed text is body text that happens to touch a node.
+                region.SourceTextIds.All(id => labelNodeIds.TryGetValue(id, out var nodeId) && graphNodeIds.Contains(nodeId));
+            // The table path below re-projects the same regions without their source ids, so key
+            // the decision it needs by the (text, bounds) pair those nodes carry verbatim.
+            var consumedLabelBounds = graphNodeIds is null
+                ? null
+                : page.Regions.Where(IsConsumedNodeLabel).Select(region => (region.Text, region.BoundingBox)).ToHashSet();
             var nodes = page.Regions.Where(_ => includeTextlessPlaceholderNodes || !page.IsImageOnly).Select(region =>
             {
-                // A visual graph is derived from the page's native text/geometry. Mark only
-                // source regions that actually label graph nodes, never the Diagram node itself.
-                var isVisualMember = hasTopology && visualGraph!.Nodes.Any(visualNode =>
-                    string.Equals(visualNode.Label, region.Text, StringComparison.Ordinal));
+                var isVisualMember = IsConsumedNodeLabel(region);
                 IReadOnlyDictionary<string, JsonElement>? extensions = isVisualMember
                     ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                     {
@@ -49,11 +66,9 @@ internal static class PdfDocumentGraphProjection
                     var extensions = projected.Extensions is null
                         ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                         : new Dictionary<string, JsonElement>(projected.Extensions, StringComparer.Ordinal);
-                    if (projected.Kind == NodeKind.Paragraph && projected.Content is TextNodeContent text && hasTopology &&
-                        visualGraph!.Nodes.Any(member => member.Label == text.Text && member.Geometry is { } box &&
-                            projected.Geometry is { } region &&
-                            region.X + region.Width / 2 >= box.X && region.X + region.Width / 2 <= box.X + box.Width &&
-                            region.Y + region.Height / 2 >= box.Y && region.Y + region.Height / 2 <= box.Y + box.Height))
+                    if (projected.Kind == NodeKind.Paragraph && projected.Content is TextNodeContent text &&
+                        projected.Geometry is { } projectedBounds &&
+                        consumedLabelBounds?.Contains((text.Text, projectedBounds)) == true)
                         extensions["visual_graph_member"] = JsonSerializer.SerializeToElement(true);
                     return projected with
                     {
@@ -62,6 +77,37 @@ internal static class PdfDocumentGraphProjection
                         Extensions = extensions
                     };
                 }).ToList();
+            }
+            // A page that mixes native text with an embedded image used to drop the image without
+            // leaving anything behind - no link, no asset, no diagnostic - because only textless
+            // pages were ever treated as image-bearing. Record what is missing at the image's own
+            // reading position; the OCR path replaces this node with the rasterized page.
+            if (!page.IsImageOnly && page.EmbeddedImageCount > 0)
+            {
+                var bounds = MergeBounds(page.EmbeddedImages);
+                var placeholder = new DocumentNode(
+                    $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_embedded_images", NodeKind.Annotation, null, nodes.Count,
+                    ContentLayer.Body,
+                    new TextNodeContent($"[PDF page {page.PageNumber}: {page.EmbeddedImageCount} embedded image(s) not extracted; run with --ocr on and a configured rasterizer to recover image text]"),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("embedded_images", page.PageNumber.ToString())]),
+                    Geometry: bounds, Editability: NodeEditability.RenderOnly,
+                    Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
+                    Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        ["pdf_embedded_image_placeholder"] = JsonSerializer.SerializeToElement(true),
+                        ["pdf_embedded_image_count"] = JsonSerializer.SerializeToElement(page.EmbeddedImageCount)
+                    });
+                // PDF user space grows upward and the page's nodes are already in reading order, so
+                // the image belongs after every node whose top edge is at or above the image's top.
+                // Without a resolved rectangle there is nothing to place it by: it goes to the end.
+                var insertAt = bounds is null
+                    ? nodes.Count
+                    : nodes.FindLastIndex(node => node.Geometry is not { } geometry ||
+                        geometry.Y + geometry.Height >= bounds.Y + bounds.Height) + 1;
+                nodes.Insert(insertAt, placeholder);
+                // Order must stay a total order over the page: the inserted node shifts every later
+                // node, and a duplicated Order would make downstream ordering non-deterministic.
+                nodes = nodes.Select((node, order) => node with { Order = order }).ToList();
             }
             if (visualGraph is not null)
             {
@@ -79,6 +125,18 @@ internal static class PdfDocumentGraphProjection
             return new DocumentPartition($"page-{page.PageNumber:D4}", page.PageNumber - 1, nodes, $"pdf:page:{page.PageNumber}");
         }).ToArray();
         return new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_" + hashPrefix, DocumentFormatKind.Pdf, partitions);
+    }
+
+    /// <summary>Union of the placement rectangles the extractor could resolve, or null when it
+    /// resolved none - the page then carries a count but no position.</summary>
+    private static Geometry? MergeBounds(IReadOnlyList<Geometry>? bounds)
+    {
+        if (bounds is not { Count: > 0 }) return null;
+        var left = bounds.Min(item => item.X);
+        var bottom = bounds.Min(item => item.Y);
+        var right = bounds.Max(item => item.X + item.Width);
+        var top = bounds.Max(item => item.Y + item.Height);
+        return new Geometry(bounds[0].CoordinateSpace, left, bottom, right - left, top - bottom);
     }
 
     public static IReadOnlyList<Diagnostic> Diagnostics(PdfExtractionResult extraction) => extraction.Diagnostics?.Select(message =>

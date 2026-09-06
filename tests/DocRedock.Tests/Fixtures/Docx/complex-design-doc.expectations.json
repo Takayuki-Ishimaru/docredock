@@ -146,10 +146,10 @@
     },
     {
       "id": "D08-3",
-      "desc": "ネスト表が独立したMarkdown表として復元される",
+      "desc": "ネスト表が親セル内で前後の本文と順序を保ち、行区切り付きで残る",
       "severity": "guard",
       "type": "contains",
-      "value": "| 税込金額 | 12,800円 |"
+      "value": "| Body | amount | integer | ○ | 円、1〜9,999,999。税込/税抜の内訳は下表のとおり。<br>税込金額 / 12,800円<br>税抜金額(10%) / 11,637円 |"
     },
     {
       "id": "D09-1",
@@ -383,14 +383,14 @@
       "desc": "Q3: TR-09の遷移元/イベント/ガード/遷移先/副作用が一行で残る",
       "severity": "guard",
       "type": "contains",
-      "value": "| TR-09 | PAYMENT_PENDING | 連携失敗 | retry_count >= 5 | ERROR | DLQ登録・運用アラート |"
+      "value": "| TR-09 | PAYMENT\\_PENDING | 連携失敗 | retry\\_count >= 5 | ERROR | DLQ登録・運用アラート |"
     },
     {
       "id": "Q04-1",
       "desc": "Q4: TX-01の書き込み対象(同一トランザクション)が残る",
       "severity": "guard",
       "type": "contains",
-      "value": "TX-01 は expense_claim テーブルへの INSERT と outbox_event テーブルへの INSERT を同一トランザクションで確定する。"
+      "value": "TX-01 は expense\\_claim テーブルへの INSERT と outbox\\_event テーブルへの INSERT を同一トランザクションで確定する。"
     },
     {
       "id": "Q04-2",
@@ -404,7 +404,7 @@
       "desc": "Q5: BR-01の金額閾値と承認経路が表として残る",
       "severity": "guard",
       "type": "contains",
-      "value": "| BR-01 | 10万円以下は課長、超過は部長承認 | 業務主管 | approval_task.route_code |"
+      "value": "| BR-01 | 10万円以下は課長、超過は部長承認 | 業務主管 | approval\\_task.route\\_code |"
     },
     {
       "id": "Q05-2",

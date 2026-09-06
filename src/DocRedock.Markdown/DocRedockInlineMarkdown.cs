@@ -273,7 +273,10 @@ public static class DocRedockInlineMarkdown
         return delimiter + value + delimiter;
     }
 
-    private static string Escape(string value)
+    // Internal (not private) so DocRedockMarkdown.cs can apply the same base
+    // character-set escaping to plain TextNodeContent bodies and table cells;
+    // the reversible round trip depends on both writers using one definition.
+    internal static string Escape(string value)
     {
         var output = new StringBuilder(value.Length);
         foreach (var character in value)
@@ -284,7 +287,7 @@ public static class DocRedockInlineMarkdown
         return output.ToString();
     }
 
-    private static string DecodeEntities(string value) => value.Replace("&lt;", "<", StringComparison.Ordinal)
+    internal static string DecodeEntities(string value) => value.Replace("&lt;", "<", StringComparison.Ordinal)
         .Replace("&gt;", ">", StringComparison.Ordinal).Replace("&amp;", "&", StringComparison.Ordinal);
 
     private static bool StartsWith(string value, int index, string token) =>

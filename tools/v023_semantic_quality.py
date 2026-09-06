@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the PDF semantic portion of v0.2.4 package-smoke evidence."""
+"""Assemble the PDF semantic portion of v0.2.5 package-smoke evidence."""
 from __future__ import annotations
 
 import argparse
@@ -60,7 +60,7 @@ def run_source_suite(cli: Path, output: Path) -> int:
         dense_bytes = dense_markdown.stat().st_size if dense_markdown.is_file() else None
         dense_text = dense_markdown.read_text(encoding="utf-8") if dense_markdown.is_file() else ""
         dense_passed = (dense_result.returncode in (0, 1) and dense_bytes is not None
-                        and dense_bytes <= 128 * 1024 and "DENSE_NATIVE_TEXT" in dense_text)
+                        and dense_bytes <= 128 * 1024 and r"DENSE\_NATIVE\_TEXT" in dense_text)
         dense_passed = dense_passed and dense_duration_ms <= 5000
         if not dense_passed:
             errors.append(f"dense 10k-vector PDF violated bounded/native-text/runtime contract (exit={dense_result.returncode}, markdown_bytes={dense_bytes}, duration_ms={dense_duration_ms})")
@@ -70,8 +70,8 @@ def run_source_suite(cli: Path, output: Path) -> int:
             "no-diagrams", b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length "
             + str(len(text_only)).encode() + b" >> stream\n" + text_only + b"endstream\n%%EOF", "--no-diagrams")
         no_diagram_text = no_diagram_markdown.read_text(encoding="utf-8") if no_diagram_markdown.is_file() else ""
-        no_diagram_passed = (no_diagram_result.returncode in (0, 1) and "NO_DIAGRAM_NATIVE_TEXT" in no_diagram_text
-                             and "NO_DIAGRAM_END" in no_diagram_text and "[PDF visual content:" not in no_diagram_text and "```mermaid" not in no_diagram_text)
+        no_diagram_passed = (no_diagram_result.returncode in (0, 1) and r"NO\_DIAGRAM\_NATIVE\_TEXT" in no_diagram_text
+                             and r"NO\_DIAGRAM\_END" in no_diagram_text and "[PDF visual content:" not in no_diagram_text and "```mermaid" not in no_diagram_text)
         if not no_diagram_passed:
             errors.append(f"no-diagram PDF emitted visual fallback or lost native text (exit={no_diagram_result.returncode}, markdown_bytes={len(no_diagram_text.encode('utf-8'))})")
         def runner(spec, fixture, mode):
@@ -85,7 +85,7 @@ def run_source_suite(cli: Path, output: Path) -> int:
         _, records = run_materialized_corpus(root / "jitter", generate_perturbation_corpus(), runner, parse_markdown)
         cases = list(records)
         errors.extend(f"semantic case failed: {r['case_id']}" for r in records if r["status"] != "passed")
-    document = {"schema_version": 1, "version": "0.2.4", "status": "pass" if not errors else "fail", "errors": errors,
+    document = {"schema_version": 1, "version": "0.2.5", "status": "pass" if not errors else "fail", "errors": errors,
                 "producer_pdf": str(producer), "producer_hashes": hashes, "producer_deterministic": len(set(hashes)) == 1,
                 "producer_duration_median_ms": sorted(durations)[len(durations)//2] if durations else None,
                 "table_fixture": {"rows": 3, "columns": 4, "text_cells": 12, "markdown_bytes": len(table_text.encode("utf-8")), "exit_code": table_result.returncode, "passed": table_passed, "assertions": ["all-12-cell-labels-exactly-once", "markdown-table"]},
@@ -130,7 +130,7 @@ def main() -> int:
             errors.append(f"{path}: invalid or duplicate RID {rid!r}"); continue
         seen.add(rid)
         version, commit = item.get("version"), item.get("product_source_commit")
-        if version != "0.2.4" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
+        if version != "0.2.5" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
             errors.append(f"{rid}: stale or unverifiable version/commit evidence")
         elif provenance is None:
             provenance = (version, commit)
@@ -148,7 +148,7 @@ def main() -> int:
         if missing_kinds: errors.append(f"{rid}: missing semantic evidence: " + ", ".join(sorted(missing_kinds)))
     missing = RIDS - seen
     if missing: errors.append("missing package evidence: " + ", ".join(sorted(missing)))
-    output = {"schema_version": 1, "version": "0.2.4", "cases": records, "source_suite": source_suite,
+    output = {"schema_version": 1, "version": "0.2.5", "cases": records, "source_suite": source_suite,
               "rids": sorted(seen), "status": "pass" if not errors else "fail", "errors": errors}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

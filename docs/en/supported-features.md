@@ -1,10 +1,10 @@
-# v0.2.4 Supported Features
+# v0.2.5 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.2.4 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
+DocRedock v0.2.5 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
 
-| Feature | v0.2.4 status |
+| Feature | v0.2.5 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta; CLI default |
 | `visible`, `complete`, `sanitized` content policies | Supported |
@@ -15,6 +15,8 @@ DocRedock v0.2.4 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion
 | CLI `render --format html` | Experimental; explicit opt-in required |
 
 Readable output supports headings, paragraphs, nested lists, merged tables with blank continuation cells, images/OCR, code, emphasis, hard breaks, spreadsheet formula-cache markers, semantic projection or fallback for supported visuals, and normalized PPTX bullets.
+
+It also keeps paragraph boundaries and in-paragraph line breaks inside table cells (`<br>`), folds Word nested tables into their host cell in source order, extracts body content inside content controls (`w:sdt`), linearizes Word equations (OMML) into text with a `DocxMathLinearized` warning (for example `E=mc^2`; text around an equation, paragraphs inside or containing content controls, blocks under `mc:AlternateContent` (nested forks included), and body text boxes stay F1-editable, and retyping the equation text replaces it with plain text under a `DocxMathReplaced` warning), exports visible non-placeholder text from PowerPoint layouts and masters, and renders Excel display formats (zero padding, thousands/millions scaling, scientific and engineering notation, fractions, conditional sections, negative/zero sections, literal currency symbols). Literal `*`, `_`, `~`, backticks, line-start `#`/`-`/`1.`, and HTML-like text in the source are escaped so they are never interpreted as Markdown syntax. Round-trip output (`--profile roundtrip`) applies the same escaping and the editor decodes it symmetrically on restore (see [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.5/docs/DRMD_MARKDOWN_SPEC.md)).
 
 ## Visual and flow semantics
 
@@ -37,10 +39,10 @@ Connections explicitly stored in the source remain distinguishable from estimate
 
 ## Content policy and other boundaries
 
-The safe default is `visible`. `complete` includes hidden and metadata content with a warning. `sanitized` applies stronger privacy filtering. OCR content follows the same visibility policy as its source image.
+The safe default is `visible`. `complete` includes hidden and metadata content with a warning. `sanitized` applies stronger privacy filtering. OCR content follows the same visibility policy as its source image. Hidden-content detection covers not only direct formatting but also hidden attributes inherited from Word character/paragraph styles or document defaults, and shapes inside hidden PowerPoint groups.
 
-DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It conditionally projects only supported, uniquely resolvable connector/path cases; all other cases retain source text/path fallback and diagnostics. With a rasterizer it prefers a preview for diagram-like PDF pages; an image-only page still leaves a page placeholder and Warning when rasterization/OCR is unavailable. Experimental PDF rendering does not bundle a Japanese font. ASCII uses Base14 Helvetica; non-ASCII requires an embeddable installed or explicitly selected TrueType font with complete glyph coverage.
+DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It conditionally projects only supported, uniquely resolvable connector/path cases; all other cases retain source text/path fallback and diagnostics. With a rasterizer it prefers a preview for diagram-like PDF pages; an image-only page still leaves a page placeholder and Warning when rasterization/OCR is unavailable. An embedded image on a page that also carries text leaves a placeholder at its position with a `PdfEmbeddedImageOmitted` warning; with OCR enabled and a rasterizer available, each image is cut out of the rendered page and recognized on its own (images drawn through Form XObjects and resources or page boxes inherited from `/Pages` are supported; a rotated page or an image that cannot be cut out falls back to whole-page OCR with native-text de-duplication). Experimental PDF rendering does not bundle a Japanese font. ASCII uses Base14 Helvetica; non-ASCII requires an embeddable installed or explicitly selected TrueType font with complete glyph coverage.
 
 Readable Markdown is one-way output. `.drmd` and `.drmdpkg` are experimental and may contain source-derived information. Keep the source document as the authoritative copy.
 
-This document is the canonical public-support statement. See the [v0.2.4 release notes](../../release-docs/RELEASE_NOTES_v0.2.4.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
+This document is the canonical public-support statement. See the [v0.2.5 release notes](../../release-docs/RELEASE_NOTES_v0.2.5.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).

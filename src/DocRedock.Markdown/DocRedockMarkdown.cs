@@ -184,7 +184,8 @@ public sealed class DocRedockMarkdownSerializer
 
     private static void AppendNodeText(StringBuilder output, GraphNodeView node, string kind)
     {
-        var text = node.Text ?? string.Empty;
+        var raw = node.Text ?? string.Empty;
+        var text = kind == "code-block" ? raw : EscapePlainText(raw);
         switch (kind)
         {
             case "heading":
@@ -196,7 +197,10 @@ public sealed class DocRedockMarkdownSerializer
                     output.Append("> ").AppendLine(line);
                 break;
             case "code-block":
-                output.AppendLine("```").AppendLine(text).AppendLine("```");
+                var fence = new string('`', CodeFenceLength(raw));
+                output.AppendLine(fence).Append(raw);
+                if (raw.Length == 0 || raw[^1] != '\n') output.AppendLine();
+                output.AppendLine(fence);
                 break;
             default:
                 output.AppendLine(text);
@@ -213,6 +217,48 @@ public sealed class DocRedockMarkdownSerializer
 
     private static string EscapeFrontMatter(string value) => value.Replace("\r", "", StringComparison.Ordinal)
         .Replace("\n", "", StringComparison.Ordinal);
+
+    // Plain-text (TextNodeContent) bodies get the same base character escaping as
+    // rich-text runs (DocRedockInlineMarkdown.Escape: '\ * _ ~ `' -> backslash,
+    // '& < >' -> entities), plus protection for line-leading Markdown block
+    // markers that would otherwise hijack the line when the file is re-read as
+    // generic Markdown (heading, list bullet, ordered list, thematic break).
+    // Backtick/tilde fences and a leading '>' quote marker are already fully
+    // neutralized by the base escape above (every backtick/tilde/'>' anywhere in
+    // the text is individually backslash- or entity-escaped, so a line can never
+    // start with a raw run of them afterwards) -- only '#', '-'/'+' bullets ('*'
+    // bullets are covered by the base escape too), and bare '---'/'===' lines need
+    // a dedicated rule here.
+    private static readonly Regex HeadingLineStart = new(@"(?m)^([ \t]{0,3})(?=#)", RegexOptions.Compiled);
+    private static readonly Regex UnorderedListLineStart = new(@"(?m)^([ \t]{0,3})(?=[-+](?:[ \t]|\r?$))", RegexOptions.Compiled);
+    private static readonly Regex OrderedListLineStart = new(@"(?m)^(?<indent>[ \t]{0,3})(?<num>\d{1,9})(?<delim>[.)])(?=[ \t]|\r?$)", RegexOptions.Compiled);
+    private static readonly Regex ThematicBreakLineStart = new(@"(?m)^([ \t]{0,3})(?=(?:-{3,}|={3,})[ \t]*\r?$)", RegexOptions.Compiled);
+
+    private static string EscapePlainText(string text)
+    {
+        var escaped = DocRedockInlineMarkdown.Escape(text);
+        escaped = HeadingLineStart.Replace(escaped, "$1\\");
+        escaped = UnorderedListLineStart.Replace(escaped, "$1\\");
+        escaped = OrderedListLineStart.Replace(escaped, match =>
+            match.Groups["indent"].Value + match.Groups["num"].Value + "\\" + match.Groups["delim"].Value);
+        escaped = ThematicBreakLineStart.Replace(escaped, "$1\\");
+        return escaped;
+    }
+
+    // A code fence must be strictly longer than any backtick run already present
+    // in the body; otherwise embedded backticks (e.g. a snippet that itself shows
+    // a fenced block) would prematurely close the outer fence. Minimum length 3.
+    private static int CodeFenceLength(string text)
+    {
+        var longest = 0;
+        var current = 0;
+        foreach (var character in text)
+        {
+            if (character == '`') { current++; if (current > longest) longest = current; }
+            else current = 0;
+        }
+        return Math.Max(longest + 1, 3);
+    }
 
     private static string NormalizeContentPolicy(string value) => value.Trim().ToLowerInvariant() switch
     {
@@ -428,19 +474,25 @@ public sealed class DocRedockMarkdownSerializer
 
     private static void AppendCoreNode(StringBuilder output, DocumentNode node, Func<string, string> resolveImageReference)
     {
+        var isRichText = node.Content is RichTextNodeContent;
         var text = node.Content is RichTextNodeContent rich
             ? DocRedockInlineMarkdown.Serialize(rich.Runs)
             : NodeText(node) ?? string.Empty;
+        // Rich-text bodies are already escaped by DocRedockInlineMarkdown.Serialize
+        // above; plain TextNodeContent bodies get the matching plain-text escape.
+        // Diagram/CodeBlock bodies stay verbatim inside their fence (see below) and
+        // must not go through plainText.
+        var plainText = isRichText ? text : EscapePlainText(text);
         switch (node.Kind)
         {
             case NodeKind.Heading:
-                output.Append(new string('#', HeadingLevel(node.StyleId))).Append(' ').AppendLine(text);
+                output.Append(new string('#', HeadingLevel(node.StyleId))).Append(' ').AppendLine(plainText);
                 break;
             case NodeKind.ListItem:
                 var listMarker = StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "list_format"), "ordered")
                     ? (ExtensionLong(node, "list_number") ?? 1).ToString(CultureInfo.InvariantCulture) + ". "
                     : "- ";
-                output.Append(listMarker).AppendLine(text);
+                output.Append(listMarker).AppendLine(plainText);
                 break;
             case NodeKind.Table when node.Content is TableNodeContent table:
                 AppendTable(output, table.Rows);
@@ -454,26 +506,32 @@ public sealed class DocRedockMarkdownSerializer
             case NodeKind.Cell:
                 var address = node.Source?.Locators.FirstOrDefault(locator => locator.Kind == "cell_address")?.Value ?? node.Id;
                 output.Append("- **").Append(address).Append(":** ");
-                output.Append(ProjectSpreadsheetCell(node));
+                // The standalone "- **A1:**" line has no table-row structure to escape
+                // a '|' for, but it still needs the sheet-grid's own newline handling:
+                // an embedded newline left raw here would split the value across
+                // physical lines and break DecodeCellText's single-line match.
+                output.Append(EscapeSpreadsheetCellLineNewlines(ProjectSpreadsheetCell(node)));
                 output.AppendLine();
                 break;
             case NodeKind.Quote:
-                foreach (var line in text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')) output.Append("> ").AppendLine(line);
+                foreach (var line in plainText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')) output.Append("> ").AppendLine(line);
                 break;
             case NodeKind.CodeBlock:
                 var code = NodeText(node) ?? string.Empty;
-                output.AppendLine(new string((char)96, 3)).Append(code);
+                var codeFence = new string('`', CodeFenceLength(code));
+                output.AppendLine(codeFence).Append(code);
                 if (code.Length == 0 || code[^1] != '\n') output.AppendLine();
-                output.AppendLine(new string((char)96, 3));
+                output.AppendLine(codeFence);
                 break;
             case NodeKind.Diagram when IsMermaidDiagram(node):
-                output.AppendLine("```mermaid").AppendLine(text).AppendLine("```");
+                var diagramFence = new string('`', CodeFenceLength(text));
+                output.Append(diagramFence).AppendLine("mermaid").AppendLine(text).AppendLine(diagramFence);
                 break;
             case NodeKind.Shape:
-                AppendShapeText(output, node, text);
+                AppendShapeText(output, node, plainText);
                 break;
             default:
-                output.AppendLine(text);
+                output.AppendLine(plainText);
                 break;
         }
     }
@@ -597,7 +655,7 @@ public sealed class DocRedockMarkdownSerializer
             foreach (var column in columns)
             {
                 var value = byCoordinate.TryGetValue((column, row), out var cell) ? ProjectSpreadsheetCell(cell.Node) : string.Empty;
-                output.Append(' ').Append(EscapeTableCell(value)).Append(" |");
+                output.Append(' ').Append(EscapeSpreadsheetTableCell(value)).Append(" |");
             }
             output.AppendLine();
         }
@@ -735,10 +793,13 @@ public sealed class DocRedockMarkdownSerializer
         if (node.Extensions is not null && node.Extensions.TryGetValue("formula", out var formula) &&
             formula.ValueKind == System.Text.Json.JsonValueKind.String)
         {
-            var expression = "=" + formula.GetString();
+            // The backtick wrapper and the arrow are projection syntax, never cell content, so
+            // only the expression and the cached value are escaped; the wrapper itself stays
+            // literal for the editor's code-span unwrap.
+            var expression = DocRedockInlineMarkdown.Escape("=" + formula.GetString());
             var calculatedValue = node.Content is TextNodeContent text ? text.Text : string.Empty;
             var calculatedDisplayValue = ExtensionString(node, "display_value");
-            var renderedValue = !string.IsNullOrWhiteSpace(calculatedDisplayValue) ? calculatedDisplayValue : calculatedValue;
+            var renderedValue = DocRedockInlineMarkdown.Escape(!string.IsNullOrWhiteSpace(calculatedDisplayValue) ? calculatedDisplayValue : calculatedValue);
             return renderedValue.Length == 0
                 ? $"`{expression}`"
                 : $"`{expression}` → {renderedValue}";
@@ -748,8 +809,8 @@ public sealed class DocRedockMarkdownSerializer
         var displayValue = ExtensionString(node, "display_value");
         if (!string.IsNullOrWhiteSpace(displayValue) &&
             !string.Equals(displayValue, value, StringComparison.Ordinal))
-            return $"`{value}` → {displayValue}";
-        return value.StartsWith('=') && value.Length > 1 ? $"`{value}`" : value;
+            return $"`{DocRedockInlineMarkdown.Escape(value)}` → {DocRedockInlineMarkdown.Escape(displayValue)}";
+        return value.StartsWith('=') && value.Length > 1 ? $"`{DocRedockInlineMarkdown.Escape(value)}`" : DocRedockInlineMarkdown.Escape(value);
     }
 
     private static int HeadingLevel(string? styleId)
@@ -802,7 +863,23 @@ public sealed class DocRedockMarkdownSerializer
             _ => "application/octet-stream",
         };
     }
-    private static string EscapeTableCell(string value) => value.Replace("|", "\\|", StringComparison.Ordinal).Replace("\r\n", "<br>", StringComparison.Ordinal).Replace("\n", "<br>", StringComparison.Ordinal);
+    // Base escape (backslash + entities) must run before the '|' and newline
+    // handling below: it never touches '|', '\r' or '\n', so applying it first
+    // cannot double-escape the backslashes those two steps introduce.
+    // ProjectSpreadsheetCell has already escaped the cell's own text and wrapped formulas in a
+    // literal code span, so a sheet-grid cell only needs the table-structure escapes here.
+    private static string EscapeSpreadsheetTableCell(string value) => value
+        .Replace("|", "\\|", StringComparison.Ordinal)
+        .Replace("\r\n", "<br>", StringComparison.Ordinal).Replace("\n", "<br>", StringComparison.Ordinal);
+    // Same newline handling as EscapeSpreadsheetTableCell, minus the '|' escape:
+    // the standalone "- **A1:**" line is not a table row, so a literal '|' in
+    // the value needs no escaping there (DecodeCellText never runs it through
+    // ParseTableRow's pipe-delimited split).
+    private static string EscapeSpreadsheetCellLineNewlines(string value) => value
+        .Replace("\r\n", "<br>", StringComparison.Ordinal).Replace("\n", "<br>", StringComparison.Ordinal);
+    private static string EscapeTableCell(string value) => DocRedockInlineMarkdown.Escape(value)
+        .Replace("|", "\\|", StringComparison.Ordinal)
+        .Replace("\r\n", "<br>", StringComparison.Ordinal).Replace("\n", "<br>", StringComparison.Ordinal);
     private static string EscapeLinkText(string value) => value.Replace("]", "\\]", StringComparison.Ordinal);
     private static string EscapeHtmlAttribute(string value) => value
         .Replace("&", "&amp;", StringComparison.Ordinal)
@@ -1071,16 +1148,29 @@ public sealed class DocRedockMarkdownParser
             diagnostics.Add(new("DRMD021", $"Partition '{partitionId}' baseline_nodes is {expected}, but contains {actual} existing block markers.", MarkdownDiagnosticSeverity.Error, partitionId));
     }
 
+    private static readonly Regex FenceLine = new("^[ \\t]{0,3}(?<run>`{3,}|~{3,})", RegexOptions.Compiled);
+
     private static List<MarkerToken> ReadMarkers(string markdown)
     {
         var markers = new List<MarkerToken>();
-        var inFence = false;
+        // Track the exact opening run length/character (not just a boolean) so a
+        // shorter, same- or different-character run embedded inside a longer
+        // adaptive-length fence (see CodeFenceLength) cannot prematurely close it.
+        var fenceLength = 0;
+        var fenceChar = '\0';
         foreach (Match line in Regex.Matches(markdown, ".*?(?:\\r?\\n|$)"))
         {
             if (line.Length == 0) continue;
             var lineText = line.Value;
-            if (Regex.IsMatch(lineText, "^[ \\t]{0,3}(`{3,}|~{3,})")) { inFence = !inFence; continue; }
-            if (inFence) continue;
+            var fence = FenceLine.Match(lineText);
+            if (fence.Success)
+            {
+                var run = fence.Groups["run"].Value;
+                if (fenceLength == 0) { fenceLength = run.Length; fenceChar = run[0]; }
+                else if (run[0] == fenceChar && run.Length >= fenceLength) fenceLength = 0;
+                continue;
+            }
+            if (fenceLength > 0) continue;
             foreach (Match match in Marker.Matches(lineText))
                 markers.Add(new MarkerToken(match.Groups["kind"].Value, match.Groups["attrs"].Value, line.Index + match.Index, match.Length));
         }

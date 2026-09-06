@@ -281,6 +281,13 @@ public sealed class DocRedockMarkdownTests
 
         Assert.Contains("## Summary", sheetMarkdown);
         Assert.Contains("<!--drmd:sheet-table range=B3:B3 source-columns=B source-rows=3 baseline_nodes=1", sheetMarkdown);
+        // The cell's own text ("=SUM(A1:A2)", no formula extension) is wrapped in a
+        // defensive backtick code span because it starts with '='. The wrapper
+        // backticks stay raw -- EscapeSpreadsheetTableCell only escapes '|' and
+        // newlines, never backticks -- while any backtick inside the value or
+        // expression itself would have gone out as "\`" (see ProjectSpreadsheetCell).
+        // MarkdownGraphEditor.DecodeSpreadsheetCell relies on exactly that raw/escaped
+        // distinction to find the real fence.
         Assert.Contains("| " + (char)96 + "=SUM(A1:A2)" + (char)96 + " |", sheetMarkdown);
         Assert.Contains("## Slide 3", slideMarkdown);
     }
@@ -403,6 +410,40 @@ public sealed class DocRedockMarkdownTests
     }
 
     [Fact]
+    public void ParserIgnoresMarkersInsideAnAdaptiveLengthFenceWithAShorterEmbeddedBacktickRun()
+    {
+        // The code body's own "```" lines (run length 3) force the real fence to
+        // 4 backticks (CodeFenceLength). The marker scanner must track the actual
+        // opening run length -- not just an in/out-of-fence flag -- otherwise the
+        // first embedded run would look like a closing fence and "unhide" the
+        // fake marker on the line after it.
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_fence_marker", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("code", NodeKind.CodeBlock, null, 0, ContentLayer.Body,
+                    new TextNodeContent("```\n<!--drmd:delete id=not-a-real-marker-->\n```")),
+            ])
+        ]);
+
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+        Assert.Contains("````\n```\n<!--drmd:delete id=not-a-real-marker-->\n```\n````",
+            markdown.Replace("\r\n", "\n", StringComparison.Ordinal));
+
+        var parsed = new DocRedockMarkdownParser().Parse(markdown);
+
+        Assert.True(parsed.IsComplete);
+        Assert.DoesNotContain(parsed.Blocks, block => block.NodeId == "not-a-real-marker");
+        // The raw block text captured by the parser includes the fence itself
+        // (DecodeBlockText/DecodeCodeBlock strip it separately); what matters here
+        // is that it was captured as ONE block and the embedded marker-like text
+        // was not split out as a second, real marker.
+        var codeBlock = Assert.Single(parsed.Blocks, block => block.NodeId == "code");
+        Assert.Equal("````\n```\n<!--drmd:delete id=not-a-real-marker-->\n```\n````",
+            codeBlock.Text.Replace("\r\n", "\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void ParserRejectsBlocksOutsidePartitionsAndBaselineCountMismatch()
     {
         var parsed = new DocRedockMarkdownParser().Parse("""
@@ -511,6 +552,12 @@ public sealed class DocRedockMarkdownTests
 
         var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
 
+        // ProjectSpreadsheetCell wraps the formula/cached-value pair in a raw code
+        // span; EscapeSpreadsheetTableCell never touches backticks (only '|' and
+        // newlines), so the fence stays raw here (see MarkdownGraphEditorTests.
+        // TreatsProjectedFormulaResultAsReadOnlyAndEditsTheFormula for the read-back
+        // side, which tells this raw fence apart from an escaped "\`" via
+        // MarkdownGraphEditor.DecodeSpreadsheetCell).
         Assert.Contains("| `=SUM(B1:B2)` → 240 |", projection);
     }
 
@@ -579,7 +626,107 @@ public sealed class DocRedockMarkdownTests
 
         var projection = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
 
+        // See ProjectsXlsxFormulaWithItsCachedCalculatedValue above: the
+        // raw-value/display-value code span's wrapper backticks stay raw too.
         Assert.Contains("| `45292` → 2024-01-01 |", projection, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EscapesPlainTextSpecialCharactersAndRiskyLineStartsAcrossBlockKinds()
+    {
+        var orderedExtensions = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["list_format"] = System.Text.Json.JsonSerializer.SerializeToElement("ordered"),
+            ["list_number"] = System.Text.Json.JsonSerializer.SerializeToElement(3),
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_escape", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                // Base character set: '\ * _ ~ `' -> backslash, '& < >' -> entities.
+                new DocumentNode("para", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new TextNodeContent("a*b_c~d`e\\f&g<h>i")),
+                // Line-leading '#' would otherwise read back as a heading.
+                new DocumentNode("heading", NodeKind.Heading, null, 1, ContentLayer.Body,
+                    new TextNodeContent("# not a heading")),
+                // Line-leading '- ' would otherwise read back as a bullet.
+                new DocumentNode("bullet", NodeKind.ListItem, null, 2, ContentLayer.Body,
+                    new TextNodeContent("- not a bullet")),
+                // Line-leading '1. ' would otherwise read back as an ordered item;
+                // only the delimiter is escaped ("1\.").
+                new DocumentNode("ordered", NodeKind.ListItem, null, 3, ContentLayer.Body,
+                    new TextNodeContent("1. not ordered"), Extensions: orderedExtensions),
+                // Quote body lines get the same treatment per-line: '>' is already
+                // neutralized by the base entity escape, '- ' still needs its own rule.
+                new DocumentNode("quote", NodeKind.Quote, null, 4, ContentLayer.Body,
+                    new TextNodeContent("line1\n- bullet-like\n> nested quote")),
+                // A bare '---' line would otherwise read back as a thematic break.
+                new DocumentNode("hr", NodeKind.Paragraph, null, 5, ContentLayer.Body,
+                    new TextNodeContent("---")),
+            ])
+        ]);
+
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        Assert.Contains(@"a\*b\_c\~d\`e\\f&amp;g&lt;h&gt;i", markdown);
+        Assert.Contains(@"## \# not a heading", markdown);
+        Assert.Contains(@"- \- not a bullet", markdown);
+        Assert.Contains(@"3. 1\. not ordered", markdown);
+        Assert.Contains("> line1\n> \\- bullet-like\n> &gt; nested quote", markdown);
+        Assert.Contains(@"\---", markdown);
+    }
+
+    [Fact]
+    public void EscapesTableCellSpecialCharactersIncludingPipeAndEmbeddedNewline()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_table_escape", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("table", NodeKind.Table, null, 0, ContentLayer.Body,
+                    new TableNodeContent([new TableCell[] { "a*b|c\nd&e", "plain" }])),
+            ])
+        ]);
+
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains(@"| a\*b\|c<br>d&amp;e | plain |", markdown);
+    }
+
+    [Fact]
+    public void AdaptsCodeAndMermaidFenceLengthToTheLongestEmbeddedBacktickRun()
+    {
+        var codeGraph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_code_fence", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("code", NodeKind.CodeBlock, null, 0, ContentLayer.Body,
+                    new TextNodeContent("before\n```\nafter")),
+            ])
+        ]);
+        var diagramExtensions = new Dictionary<string, System.Text.Json.JsonElement>
+        {
+            ["diagram_language"] = System.Text.Json.JsonSerializer.SerializeToElement("mermaid"),
+        };
+        var diagramGraph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_diagram_fence", DocumentFormatKind.Pptx,
+        [
+            new DocumentPartition("slide1", 0,
+            [
+                new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Body,
+                    new TextNodeContent("graph TD\n```\n  A-->B"), Extensions: diagramExtensions),
+            ])
+        ]);
+
+        var codeMarkdown = new DocRedockMarkdownSerializer().Serialize(codeGraph).Markdown
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+        var diagramMarkdown = new DocRedockMarkdownSerializer().Serialize(diagramGraph).Markdown
+            .Replace("\r\n", "\n", StringComparison.Ordinal);
+
+        // The body contains a bare ``` (run length 3), so the fence must be at
+        // least 4 backticks long, and the body itself stays verbatim (unescaped).
+        Assert.Contains("````\nbefore\n```\nafter\n````", codeMarkdown);
+        Assert.Contains("````mermaid\ngraph TD\n```\n  A-->B\n````", diagramMarkdown);
     }
 
     private static DocumentNode Cell(string id, string address, string text, int order) => new(

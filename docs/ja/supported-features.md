@@ -1,10 +1,10 @@
-# v0.2.4 の対応機能
+# v0.2.5 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.2.4 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.2.5 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.2.4での扱い |
+| 機能 | v0.2.5での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート。CLI既定 |
 | `visible`／`complete`／`sanitized` | サポート |
@@ -15,6 +15,8 @@ DocRedock v0.2.4 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX�
 | CLI `render --format html` | 実験機能・明示的な有効化が必要 |
 
 閲覧用出力は、見出し、段落、入れ子リスト、空継続セルを使う結合表、画像／OCR、コード、強調、改行、数式キャッシュ警告、対応する視覚要素の意味投影またはfallback、PPTX bulletの正規化に対応します。
+
+さらに、表セル内の段落境界と段落内改行（`<br>`）、Word の入れ子表をセル内の元の順序に沿って折り畳む表示、コンテンツコントロール（`w:sdt`）内の本文、Word 数式（OMML）の線形テキスト化（`DocxMathLinearized` 警告付き。例: `E=mc^2`。数式の前後、sdt 内の段落、インライン sdt を含む段落、`mc:AlternateContent` 由来の段落（入れ子を含む）、本文中のテキストボックスは F1 編集可能で、数式の線形テキストを変更すると `DocxMathReplaced` 警告付きで通常テキストに置き換わる）、PowerPoint のレイアウト／マスター上の可視文字（プレースホルダを除く）、Excel の表示形式（ゼロ埋め、千／百万単位の縮尺、指数・工学表記、分数、条件付きセクション、負数・ゼロのセクション、通貨記号などのリテラル）に対応します。原文に含まれる `*` `_` `~` バッククォート、行頭の `#` `-` `1.`、HTMLタグ風の文字列は Markdown 構文として解釈されないようエスケープします。 往復用出力（`--profile roundtrip`）でも同じ規則でエスケープし、編集後の復元時に対称に戻します（仕様は [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.5/docs/DRMD_MARKDOWN_SPEC.md) を参照）。
 
 ## 図・フローの意味保持
 
@@ -37,10 +39,10 @@ DocRedock v0.2.4 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX�
 
 ## 内容ポリシーとその他の制約
 
-安全な既定値は`visible`です。`complete`は非表示情報とメタデータを警告付きで含め、`sanitized`はさらに強く除外します。OCR内容には元画像と同じ表示ポリシーを適用します。
+安全な既定値は`visible`です。`complete`は非表示情報とメタデータを警告付きで含め、`sanitized`はさらに強く除外します。OCR内容には元画像と同じ表示ポリシーを適用します。 非表示の判定は直接指定だけでなく、Word の文字／段落スタイルや文書既定値から継承した非表示属性、PowerPoint の非表示グループに含まれる図形にも適用します。
 
-DOCX drawingとPDF vector topologyは完全復元しません。対応fragment内で一意に解決できるconnector／pathだけを条件付きで投影し、それ以外はsource text／path fallbackとdiagnosticを保持します。rasterizerがあれば図的PDFページのpreviewを優先し、画像のみページでrasterizer／OCRを利用できない場合もpage placeholderとWarningを残します。実験的PDF生成は日本語フォントを同梱しません。ASCIIはBase14 Helvetica、非ASCIIは全グリフを持つ埋め込み可能なTrueTypeをシステムまたは明示パスから選択する必要があります。
+DOCX drawingとPDF vector topologyは完全復元しません。対応fragment内で一意に解決できるconnector／pathだけを条件付きで投影し、それ以外はsource text／path fallbackとdiagnosticを保持します。rasterizerがあれば図的PDFページのpreviewを優先し、画像のみページでrasterizer／OCRを利用できない場合もpage placeholderとWarningを残します。本文と同居する埋め込み画像は、その位置にプレースホルダを置いて `PdfEmbeddedImageOmitted` 警告を出し、OCRが有効でrasterizerがあれば、各画像をページ画像から切り出して個別にOCRします（Form XObject 内の画像、`/Pages` から継承される Resources やページ寸法にも対応。回転ページなど切り出せない場合はページ全体をOCRし、本文と重複する認識結果を除外します）。実験的PDF生成は日本語フォントを同梱しません。ASCIIはBase14 Helvetica、非ASCIIは全グリフを持つ埋め込み可能なTrueTypeをシステムまたは明示パスから選択する必要があります。
 
 閲覧用Markdownは一方向の出力です。`.drmd`と`.drmdpkg`は実験用で、元文書由来の情報を含む可能性があります。元文書を正本として保持してください。
 
-この文書が利用者向けサポート範囲の正本です。[v0.2.4リリースノート](../../release-docs/RELEASE_NOTES_v0.2.4.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。
+この文書が利用者向けサポート範囲の正本です。[v0.2.5リリースノート](../../release-docs/RELEASE_NOTES_v0.2.5.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。

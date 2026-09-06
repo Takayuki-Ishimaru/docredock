@@ -844,8 +844,11 @@ public sealed class XlsxAdapterTests
         Assert.DoesNotContain(cacheSecret, visible, StringComparison.Ordinal);
         Assert.DoesNotContain(cellSecret, sanitized, StringComparison.Ordinal);
         Assert.DoesNotContain(cacheSecret, sanitized, StringComparison.Ordinal);
-        Assert.Contains(cellSecret, complete, StringComparison.Ordinal);
-        Assert.Contains(cacheSecret, complete, StringComparison.Ordinal);
+        // F-Issue7: readable Markdown now backslash-escapes the literal "_" in this plain cell/cache
+        // text, so compare against a de-escaped copy instead of the raw secret constants.
+        var completeDeEscaped = complete.Replace("\\", string.Empty, StringComparison.Ordinal);
+        Assert.Contains(cellSecret, completeDeEscaped, StringComparison.Ordinal);
+        Assert.Contains(cacheSecret, completeDeEscaped, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -856,8 +859,10 @@ public sealed class XlsxAdapterTests
 
         Assert.Equal(DocRedock.Core.Documents.ContentLayer.Body, node.Layer);
         Assert.Contains(result.Warnings, warning => warning.Contains("cached chart data was retained", StringComparison.Ordinal));
-        Assert.Contains("DOCREDOCK_SECRET_HIDDEN_CHART_CACHE",
-            new DocRedock.Markdown.ReadableMarkdownSerializer().Serialize(result.Graph), StringComparison.Ordinal);
+        // F-Issue7: the literal "_" in this plain cell/cache text is now backslash-escaped.
+        var markdown = new DocRedock.Markdown.ReadableMarkdownSerializer().Serialize(result.Graph)
+            .Replace("\\", string.Empty, StringComparison.Ordinal);
+        Assert.Contains("DOCREDOCK_SECRET_HIDDEN_CHART_CACHE", markdown, StringComparison.Ordinal);
     }
 
     [Fact]

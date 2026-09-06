@@ -60,7 +60,12 @@ public sealed class PdfColumnReadingOrderTests
 
     private static int IndexOfText(string haystack, string needle)
     {
-        var index = haystack.IndexOf(needle, StringComparison.Ordinal);
+        // F-Issue7: readable Markdown now backslash-escapes a literal "_" (e.g. "LEFT_1" ->
+        // "LEFT\_1") so it can never be read as emphasis. Strip escaping backslashes before
+        // searching; only relative ordering between matches is asserted, so the index space
+        // just needs to be consistent, not identical to the original string's offsets.
+        var normalizedHaystack = haystack.Replace("\\", string.Empty, StringComparison.Ordinal);
+        var index = normalizedHaystack.IndexOf(needle, StringComparison.Ordinal);
         Assert.True(index >= 0, $"expected to find \"{needle}\" in: {haystack}");
         return index;
     }
@@ -249,5 +254,65 @@ public sealed class PdfColumnReadingOrderTests
         var lastLeft = left.Max(term => IndexOfText(text, term));
         var firstRight = right.Min(term => IndexOfText(text, term));
         Assert.True(lastLeft < firstRight, $"expected every LEFT_* before every RIGHT_* in: {text}");
+    }
+
+    // --- Columns set at different line pitches, and what closes a column block. ---
+
+    /// <summary>Two columns whose line pitches differ, so their lines drift out of alignment: the
+    /// left column advances 12pt per line, the right 15pt, and the right column's first line sits
+    /// 2pt above the left's. Baselines are grouped with a vertical tolerance, so a left and a right
+    /// line a few points apart still share one - and on such a baseline the right-column fragment
+    /// can be the higher, and therefore the first, of the two in geometric (Y-major) order.</summary>
+    private static IEnumerable<string> MixedPitchColumnLines(IReadOnlyList<string> left, IReadOnlyList<string> right,
+        int leftX = 100, int rightX = 400, int topY = 700, int leftPitch = 12, int rightPitch = 15, int rightTopOffset = 2)
+    {
+        for (var index = 0; index < left.Count; index++) yield return Line(leftX, topY - index * leftPitch, left[index]);
+        for (var index = 0; index < right.Count; index++)
+            yield return Line(rightX, topY + rightTopOffset - index * rightPitch, right[index]);
+    }
+
+    private static readonly string[] MixedPitchLeft = ["LEFT_1", "LEFT_2", "LEFT_3", "LEFT_4", "LEFT_5"];
+    private static readonly string[] MixedPitchRight = ["RIGHT_1", "RIGHT_2", "RIGHT_3", "RIGHT_4"];
+
+    private static string[] ReadingOrderTexts(PdfExtractionResult result)
+    {
+        var regions = result.Pages[0].Regions.OrderBy(region => region.ReadingOrder).ToArray();
+        // ReadingOrder stays a dense 0..n-1 sequence over the final emitted order.
+        Assert.Equal(Enumerable.Range(0, regions.Length), regions.Select(region => region.ReadingOrder));
+        return regions.Select(region => region.Text).ToArray();
+    }
+
+    [Fact]
+    public void Columns_set_at_different_line_pitches_each_keep_their_own_line_order()
+    {
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n", MixedPitchColumnLines(MixedPitchLeft, MixedPitchRight))));
+
+        Assert.Equal(2, result.Pages[0].ColumnCount);
+        Assert.Equal([.. MixedPitchLeft, .. MixedPitchRight], ReadingOrderTexts(result));
+    }
+
+    [Fact]
+    public void A_short_footer_inside_the_left_columns_extent_is_read_after_both_columns()
+    {
+        // "Page 1" sits at the left column's own X, well below the block's 12pt line pitch. It used
+        // to be absorbed as the left column's last line and therefore emitted before RIGHT_1.
+        var content = MixedPitchColumnLines(MixedPitchLeft, MixedPitchRight).Append(Line(100, 560, "Page 1"));
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n", content)));
+
+        Assert.Equal(2, result.Pages[0].ColumnCount);
+        Assert.Equal([.. MixedPitchLeft, .. MixedPitchRight, "Page 1"], ReadingOrderTexts(result));
+    }
+
+    [Fact]
+    public void A_full_width_footer_spanning_the_gutter_reaches_the_same_position()
+    {
+        // The pre-existing guard: a footer wide enough to straddle the gutter ends the block too,
+        // and must land in exactly the same place as the short one above.
+        var content = MixedPitchColumnLines(MixedPitchLeft, MixedPitchRight)
+            .Append(Line(50, 640, "FOOTER_" + new string('X', 60)));
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n", content)));
+
+        Assert.Equal(2, result.Pages[0].ColumnCount);
+        Assert.Equal([.. MixedPitchLeft, .. MixedPitchRight, "FOOTER_" + new string('X', 60)], ReadingOrderTexts(result));
     }
 }

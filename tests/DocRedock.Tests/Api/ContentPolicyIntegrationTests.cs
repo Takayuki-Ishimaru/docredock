@@ -24,6 +24,13 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
 
     private readonly string root = Path.Combine(Path.GetTempPath(), "docredock-content-policy-tests", Guid.NewGuid().ToString("N"));
 
+    // F-Issue7: readable Markdown now backslash-escapes literal Markdown metacharacters (including
+    // "_") found in plain source text, so an underscore-bearing secret token renders escaped
+    // (e.g. "DOCREDOCK_SECRET_HIDDEN_ROW" -> "DOCREDOCK\_SECRET\_HIDDEN\_ROW"). These assertions only
+    // care whether the token made it into the output, not its exact escaping, so compare against a
+    // de-escaped copy of the Markdown.
+    private static string DeEscaped(string markdown) => markdown.Replace("\\", string.Empty, StringComparison.Ordinal);
+
     [Fact]
     public async Task Docx_vanished_text_obeys_readable_content_policy()
     {
@@ -51,7 +58,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         Assert.DoesNotContain(PptxHiddenImageOcr, sanitized.Markdown, StringComparison.Ordinal);
         Assert.False(Directory.Exists(Path.Combine(root, "docx-hidden-image-visible.assets")));
         Assert.False(Directory.Exists(Path.Combine(root, "docx-hidden-image-sanitized.assets")));
-        Assert.Contains(PptxHiddenImageOcr, complete.Markdown, StringComparison.Ordinal);
+        Assert.Contains(PptxHiddenImageOcr, DeEscaped(complete.Markdown), StringComparison.Ordinal);
         var completeAssets = Path.Combine(root, "docx-hidden-image-complete.assets");
         Assert.True(Directory.Exists(completeAssets));
         Assert.Contains(Directory.EnumerateFiles(completeAssets), path =>
@@ -179,19 +186,19 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
             source, firstPath, Sheets: ["sheet-Foo"]));
         var firstMarkdown = await File.ReadAllTextAsync(firstPath);
 
-        Assert.Contains("SELECTED_SHEET_FOO", firstMarkdown, StringComparison.Ordinal);
-        Assert.DoesNotContain("EXCLUDED_FOO", firstMarkdown, StringComparison.Ordinal);
+        Assert.Contains("SELECTED_SHEET_FOO", DeEscaped(firstMarkdown), StringComparison.Ordinal);
+        Assert.DoesNotContain("EXCLUDED_FOO", DeEscaped(firstMarkdown), StringComparison.Ordinal);
         Assert.DoesNotContain(first.Diagnostics, item => item.Code == "XlsxFormulaDangerous");
 
         var secondPath = Path.Combine(root, "partition-prefix-selected.md");
         await service.ExportReadableAsync(new ReadableDocumentExportOptions(
             source, secondPath, Sheets: ["partition-Foo"]));
-        Assert.Contains("SELECTED_PARTITION_FOO", await File.ReadAllTextAsync(secondPath), StringComparison.Ordinal);
+        Assert.Contains("SELECTED_PARTITION_FOO", DeEscaped(await File.ReadAllTextAsync(secondPath)), StringComparison.Ordinal);
 
         var thirdPath = Path.Combine(root, "sheet-space-selected.md");
         await service.ExportReadableAsync(new ReadableDocumentExportOptions(
             source, thirdPath, Sheets: ["Foo Bar"]));
-        var thirdMarkdown = await File.ReadAllTextAsync(thirdPath);
+        var thirdMarkdown = DeEscaped(await File.ReadAllTextAsync(thirdPath));
         Assert.Contains("SELECTED_SPACE_NAME", thirdMarkdown, StringComparison.Ordinal);
         Assert.DoesNotContain("EXCLUDED_UNDERSCORE_NAME", thirdMarkdown, StringComparison.Ordinal);
     }
@@ -224,7 +231,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
             source, markdown, EnableOcr: true, ContentPolicy: "complete", Sheets: ["VeryHidden"]));
 
         Assert.Equal(1, ocr.Calls);
-        Assert.Contains(PptxHiddenImageOcr, await File.ReadAllTextAsync(markdown), StringComparison.Ordinal);
+        Assert.Contains(PptxHiddenImageOcr, DeEscaped(await File.ReadAllTextAsync(markdown)), StringComparison.Ordinal);
         var assets = Path.Combine(root, "selected-image-kept.assets");
         Assert.True(Directory.Exists(assets));
         Assert.Single(Directory.EnumerateFiles(assets));
@@ -275,11 +282,27 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
 
         Assert.DoesNotContain(PptxHiddenImageOcr, visible.Markdown, StringComparison.Ordinal);
         Assert.False(Directory.Exists(Path.Combine(root, "hidden-image-visible.assets")));
-        Assert.Contains(PptxHiddenImageOcr, complete.Markdown, StringComparison.Ordinal);
+        Assert.Contains(PptxHiddenImageOcr, DeEscaped(complete.Markdown), StringComparison.Ordinal);
         var completeAssets = Path.Combine(root, "hidden-image-complete.assets");
         Assert.True(Directory.Exists(completeAssets));
         Assert.Contains(Directory.EnumerateFiles(completeAssets), path =>
             File.ReadAllText(path).Contains(PptxHiddenImagePayload, StringComparison.Ordinal));
+    }
+
+    // P16: a non-placeholder shape drawn directly on the slide master (page decoration, not the
+    // slide's own content) must still reach the readable Markdown DocumentService produces --
+    // this is the end-to-end path a P15/P16-style silent content loss would actually be observed
+    // through, on top of PptxAdapterTests' unit-level coverage of the extraction itself.
+    [Fact]
+    public async Task Pptx_master_text_is_included_in_readable_markdown()
+    {
+        var source = Path.Combine(root, "master-text.pptx");
+        WritePackage(source, PptxPartsWithMasterText());
+        var markdown = Path.Combine(root, "master-text.md");
+
+        await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown));
+
+        Assert.Contains("MASTER-TEXT", DeEscaped(await File.ReadAllTextAsync(markdown)), StringComparison.Ordinal);
     }
 
     private async Task AssertPoliciesAsync(
@@ -298,7 +321,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         {
             Assert.DoesNotContain(secret, visible.Markdown, StringComparison.Ordinal);
             Assert.DoesNotContain(secret, sanitized.Markdown, StringComparison.Ordinal);
-            Assert.Contains(secret, complete.Markdown, StringComparison.Ordinal);
+            Assert.Contains(secret, DeEscaped(complete.Markdown), StringComparison.Ordinal);
         }
 
         foreach (var code in exclusionCodes)
@@ -517,6 +540,69 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
             </p:sld>
             """;
     }
+
+    private static IReadOnlyDictionary<string, string> PptxPartsWithMasterText() => new Dictionary<string, string>
+    {
+        ["[Content_Types].xml"] = """
+            <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+              <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+            </Types>
+            """,
+        ["_rels/.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+            </Relationships>
+            """,
+        ["ppt/presentation.xml"] = """
+            <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst>
+            </p:presentation>
+            """,
+        ["ppt/_rels/presentation.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rId1" Type="slide" Target="slides/slide1.xml"/>
+            </Relationships>
+            """,
+        ["ppt/slides/slide1.xml"] = """
+            <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                   xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                   xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/>
+              <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+              <p:txBody><a:bodyPr/><a:p><a:r><a:t>Slide title</a:t></a:r></a:p></p:txBody>
+              </p:sp></p:spTree></p:cSld>
+            </p:sld>
+            """,
+        ["ppt/slides/_rels/slide1.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rIdLayout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+            </Relationships>
+            """,
+        ["ppt/slideLayouts/slideLayout1.xml"] = """
+            <p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                         xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:cSld><p:spTree>
+              <p:sp><p:nvSpPr><p:cNvPr id="2" name="Title Placeholder"/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+              <p:txBody><a:bodyPr/><a:p><a:r><a:t>Click to edit title</a:t></a:r></a:p></p:txBody></p:sp>
+              </p:spTree></p:cSld>
+            </p:sldLayout>
+            """,
+        ["ppt/slideLayouts/_rels/slideLayout1.xml.rels"] = """
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+              <Relationship Id="rIdMaster" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+            </Relationships>
+            """,
+        ["ppt/slideMasters/slideMaster1.xml"] = """
+            <p:sldMaster xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                         xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <p:cSld><p:spTree>
+              <p:sp><p:nvSpPr><p:cNvPr id="20" name="Master decoration"/></p:nvSpPr>
+              <p:txBody><a:bodyPr/><a:p><a:r><a:t>MASTER-TEXT</a:t></a:r></a:p></p:txBody></p:sp>
+              </p:spTree></p:cSld>
+            </p:sldMaster>
+            """,
+    };
 
     private static void WritePackage(string path, IReadOnlyDictionary<string, string> parts)
     {

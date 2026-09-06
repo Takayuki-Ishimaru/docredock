@@ -51,8 +51,11 @@ public sealed class DocumentServiceTests
         var diagram = Assert.Single(exported.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
         var visual = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
 
-        Assert.Equal(1, readable.Split("CELL_A", StringSplitOptions.None).Length - 1);
-        Assert.DoesNotContain("CELL_A[", readable, StringComparison.Ordinal);
+        // F-Issue7: readable Markdown now backslash-escapes the literal "_" in this plain cell
+        // text ("CELL_A" -> "CELL\_A"); de-escape before counting occurrences.
+        var readableDeEscaped = readable.Replace("\\", string.Empty, StringComparison.Ordinal);
+        Assert.Equal(1, readableDeEscaped.Split("CELL_A", StringSplitOptions.None).Length - 1);
+        Assert.DoesNotContain("CELL_A[", readableDeEscaped, StringComparison.Ordinal);
         Assert.DoesNotContain(visual.Nodes, node => node.Label.StartsWith("CELL_", StringComparison.Ordinal));
         Assert.Contains(visual.Nodes, node => node.Label == "FLOW_START");
     }
@@ -329,6 +332,97 @@ public sealed class DocumentServiceTests
     }
 
     [Fact]
+    public async Task Markdown_edits_reach_docx_content_control_and_equation_paragraphs_at_f1()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "control.docx");
+        await WriteControlAndEquationDocxAsync(source);
+        var markdown = Path.Combine(root, "control.md");
+        var workspace = Path.Combine(root, "control.drmd");
+        var output = Path.Combine(root, "restored.docx");
+        var service = new DocumentService();
+
+        await service.ExportAsync(new DocumentExportOptions(source, workspace, markdown));
+        var projection = await File.ReadAllTextAsync(markdown);
+        // The equation projects as inline code, which parses back into the same Code run.
+        Assert.Contains("Controlled body", projection, StringComparison.Ordinal);
+        Assert.Contains("`x^2`", projection, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(markdown, projection
+            .Replace("Controlled body", "Controlled edit", StringComparison.Ordinal)
+            .Replace("Given ", "Because ", StringComparison.Ordinal));
+
+        var restored = await service.RestoreAsync(new DocumentRestoreOptions(workspace, output, markdown));
+        var patched = ReadDocumentXml(output);
+
+        Assert.Equal(FidelityLevel.F1, restored.Fidelity);
+        Assert.Contains("Controlled edit", patched, StringComparison.Ordinal);
+        // The control's wrapping is outside the patched slice, and the equation stayed OMML rather
+        // than being flattened into the linear text the editor saw.
+        Assert.Contains("<w:sdtPr><w:alias w:val=\"Scope\" /></w:sdtPr>", patched, StringComparison.Ordinal);
+        Assert.Contains("<m:oMath", patched, StringComparison.Ordinal);
+        Assert.DoesNotContain("x^2", patched, StringComparison.Ordinal);
+    }
+
+    // A DOCX text box now advertises a replace-text policy in its DRMD marker, so its sentence is
+    // an ordinary Markdown edit: the round trip carries it back to the w:txbxContent slice and the
+    // shape it hangs off is copied byte for byte.
+    [Fact]
+    public async Task Markdown_edit_reaches_a_docx_text_box_at_f1()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "textbox.docx");
+        await WriteTextBoxDocxAsync(source);
+        var markdown = Path.Combine(root, "textbox.md");
+        var workspace = Path.Combine(root, "textbox.drmd");
+        var output = Path.Combine(root, "restored.docx");
+        var service = new DocumentService();
+
+        await service.ExportAsync(new DocumentExportOptions(source, workspace, markdown));
+        var projection = await File.ReadAllTextAsync(markdown);
+        Assert.Contains("kind=text-box editability=text operations=replace-text", projection, StringComparison.Ordinal);
+        Assert.Contains("Box text", projection, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(markdown, projection.Replace("Box text", "Box edited", StringComparison.Ordinal));
+
+        var restored = await service.RestoreAsync(new DocumentRestoreOptions(workspace, output, markdown));
+        var patched = ReadDocumentXml(output);
+
+        Assert.Equal(FidelityLevel.F1, restored.Fidelity);
+        Assert.Contains("<w:t>Box edited</w:t>", patched, StringComparison.Ordinal);
+        Assert.DoesNotContain("Box text", patched, StringComparison.Ordinal);
+        // The shape, the drawing anchor and the paragraph that holds them sit outside the box's
+        // slice, so they come through untouched.
+        Assert.Contains("<wps:cNvPr id=\"7\" name=\"Box\" />", patched, StringComparison.Ordinal);
+        Assert.Contains("<w:t>Intro</w:t>", patched, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Markdown_edit_around_a_docx_inline_content_control_keeps_the_control_at_f1()
+    {
+        var root = TempDirectory();
+        var source = Path.Combine(root, "inline-control.docx");
+        await WriteInlineControlDocxAsync(source);
+        var markdown = Path.Combine(root, "inline-control.md");
+        var workspace = Path.Combine(root, "inline-control.drmd");
+        var output = Path.Combine(root, "restored.docx");
+        var service = new DocumentService();
+
+        await service.ExportAsync(new DocumentExportOptions(source, workspace, markdown));
+        var projection = await File.ReadAllTextAsync(markdown);
+        // The control's text is projected inline, exactly as if it were an ordinary run.
+        Assert.Contains("Pick Choice here", projection, StringComparison.Ordinal);
+        await File.WriteAllTextAsync(markdown, projection.Replace("Pick Choice here", "Pick Choice now", StringComparison.Ordinal));
+
+        var restored = await service.RestoreAsync(new DocumentRestoreOptions(workspace, output, markdown));
+        var patched = ReadDocumentXml(output);
+
+        Assert.Equal(FidelityLevel.F1, restored.Fidelity);
+        // The edit landed around the control, so the wrapper and the alias only it carries survive.
+        Assert.Contains("<w:sdtPr><w:alias w:val=\"Option\" /></w:sdtPr><w:sdtContent><w:r><w:t>Choice</w:t></w:r></w:sdtContent>", patched, StringComparison.Ordinal);
+        Assert.Contains("<w:t xml:space=\"preserve\"> now</w:t>", patched, StringComparison.Ordinal);
+        Assert.DoesNotContain(restored.Diagnostics, item => item.Code == "DocxInlineContainerUnwrapped");
+    }
+
+    [Fact]
     public async Task Diff_maps_markdown_edit_to_graph_node()
     {
         var root = TempDirectory();
@@ -394,6 +488,274 @@ public sealed class DocumentServiceTests
         var readableText = await File.ReadAllTextAsync(readable.MarkdownPath);
         Assert.Contains("recognized text", readableText);
         Assert.DoesNotContain("rasterizer/OCR unavailable", readableText, StringComparison.Ordinal);
+    }
+
+    /// <summary>A one-page PDF whose content stream draws an Image XObject next to native text -
+    /// the shape that used to lose the image with no link, no asset and no diagnostic.</summary>
+    private static async Task WriteMixedTextAndImagePdfAsync(string path)
+    {
+        const string content = "BT 100 700 Td (Native body line) Tj ET\nq 200 0 0 100 50 400 cm /Im1 Do Q";
+        await File.WriteAllBytesAsync(path, Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page /Contents 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> >> endobj\n" +
+            "2 0 obj << /Length " + content.Length + " >> stream\n" + content + "\nendstream endobj\n" +
+            "5 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 8 >> endobj\n%%EOF"));
+    }
+
+    [Fact]
+    public async Task Pdf_page_mixing_text_and_image_rasterizes_and_keeps_only_non_native_ocr_text()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "mixed.pdf");
+            await WriteMixedTextAndImagePdfAsync(source);
+            // The rasterized page carries the body line too, so OCR reports it alongside the text
+            // that only exists inside the picture.
+            var service = new DocumentService(new FakeOcrEngine("Native body line", "Text inside the picture"), new FakePdfRasterizer());
+
+            var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+                source, Path.Combine(root, "mixed.md"), EnableOcr: true));
+
+            var partition = Assert.Single(result.Graph.Partitions);
+            Assert.Contains(partition.Nodes, node => node.Content is TextNodeContent text &&
+                text.Text.Contains("Native body line", StringComparison.Ordinal));
+            Assert.DoesNotContain(partition.Nodes, node => node.Extensions?.ContainsKey("pdf_embedded_image_placeholder") == true);
+            var image = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Image);
+            var reference = Assert.IsType<ReferenceNodeContent>(image.Content);
+            Assert.Equal("PDF page 1 image", reference.AltText);
+            Assert.True(image.Extensions!["pdf_page_raster"].GetBoolean());
+            Assert.Equal("page-0001", Assert.Single(result.Graph.Assets!).Key);
+            // The readable export materializes the page raster and rewrites the node to point at it.
+            Assert.Contains("page-0001", reference.Reference, StringComparison.Ordinal);
+            Assert.True(File.Exists(Path.Combine(root, reference.Reference)));
+
+            var imageText = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.ImageText);
+            Assert.Equal(image.Id, imageText.ParentId);
+            Assert.Equal("Text inside the picture", Assert.IsType<TextNodeContent>(imageText.Content).Text);
+            Assert.DoesNotContain(result.Diagnostics, item => item.Code == "PdfEmbeddedImageOmitted");
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageRasterized" &&
+                item.Severity == DiagnosticSeverity.Information);
+
+            var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+            Assert.Contains("Native body line", markdown, StringComparison.Ordinal);
+            Assert.Contains("![PDF page 1 image](", markdown, StringComparison.Ordinal);
+            Assert.Contains("page-0001", markdown, StringComparison.Ordinal);
+            Assert.Contains("Text inside the picture", markdown, StringComparison.Ordinal);
+            Assert.DoesNotContain("not extracted", markdown, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Pdf_page_raster_whose_ocr_only_repeats_native_text_gets_no_image_text_node()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "mixed.pdf");
+            await WriteMixedTextAndImagePdfAsync(source);
+            // A decorative image: everything OCR reads back is already native text (whitespace and
+            // line breaks differ, which is why the comparison ignores them).
+            var service = new DocumentService(new FakeOcrEngine("Native  body\nline"), new FakePdfRasterizer());
+
+            var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(
+                source, Path.Combine(root, "mixed.md"), EnableOcr: true));
+
+            var partition = Assert.Single(result.Graph.Partitions);
+            Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Image);
+            Assert.DoesNotContain(partition.Nodes, node => node.Kind == NodeKind.ImageText);
+            Assert.DoesNotContain("ocr-extraction", await File.ReadAllTextAsync(result.MarkdownPath), StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Pdf_page_mixing_text_and_image_keeps_the_placeholder_when_ocr_is_off()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "mixed.pdf");
+            await WriteMixedTextAndImagePdfAsync(source);
+            var rasterizer = new FakePdfRasterizer();
+
+            var result = await new DocumentService(new FakeOcrEngine(), rasterizer).ExportReadableAsync(
+                new ReadableDocumentExportOptions(source, Path.Combine(root, "mixed.md"), EnableOcr: false));
+
+            Assert.Equal(0, rasterizer.Calls);
+            Assert.Empty(result.Graph.Assets!);
+            var partition = Assert.Single(result.Graph.Partitions);
+            Assert.DoesNotContain(partition.Nodes, node => node.Kind is NodeKind.Image or NodeKind.ImageText);
+            var placeholder = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Annotation);
+            Assert.True(placeholder.Extensions!["pdf_embedded_image_placeholder"].GetBoolean());
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageOmitted" &&
+                item.Severity == DiagnosticSeverity.Warning);
+
+            var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+            Assert.Contains("Native body line", markdown, StringComparison.Ordinal);
+            Assert.Contains("> [PDF page 1: 1 embedded image(s) not extracted", markdown, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    /// <summary>A one-page PDF with a /MediaBox, native text, and one Image XObject per rectangle.
+    /// The box is what lets the crop path map user space onto the rendered page, so a PDF without
+    /// one (like <see cref="WriteMixedTextAndImagePdfAsync"/>'s) can only ever fall back.</summary>
+    private static async Task WriteBoxedTextAndImagePdfAsync(string path, int rotation,
+        params (int X, int Y, int Width, int Height)[] images)
+    {
+        var draws = string.Concat(images.Select((rect, index) =>
+            $"\nq {rect.Width} 0 0 {rect.Height} {rect.X} {rect.Y} cm /Im{index + 1} Do Q"));
+        var content = "BT 10 80 Td (Native body line) Tj ET" + draws;
+        await File.WriteAllBytesAsync(path, Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page /Contents 2 0 R /MediaBox [0 0 200 100]" +
+            (rotation == 0 ? string.Empty : " /Rotate " + rotation) +
+            " /Resources << /XObject << " +
+            string.Join(" ", images.Select((_, index) => $"/Im{index + 1} {index + 5} 0 R")) +
+            " >> >> >> endobj\n" +
+            "2 0 obj << /Length " + content.Length + " >> stream\n" + content + "\nendstream endobj\n" +
+            string.Concat(images.Select((_, index) =>
+                $"{index + 5} 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 8 >> endobj\n")) +
+            "%%EOF"));
+    }
+
+    [Fact]
+    public async Task Pdf_embedded_image_is_cut_out_of_the_page_raster_so_ocr_reads_only_the_picture()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "mixed.pdf");
+            await WriteBoxedTextAndImagePdfAsync(source, 0, (20, 30, 60, 40));
+            // The MediaBox is 200x100 and the raster 400x200, so the image at (20,30)-(80,70) in
+            // user space lands at (40,60)-(160,140) in pixels - user space grows upward, the
+            // raster downward.
+            var rasterizer = new PngPdfRasterizer(400, 200, (40, 60, 120, 80));
+            // OCR answers with text the page already carries natively. The whole-page fallback
+            // deletes exactly that as a duplicate, so its survival is what proves the cut-out
+            // picture - not the page - was read.
+            var ocr = new ImageRecordingOcrEngine("Native body line");
+
+            var result = await new DocumentService(ocr, rasterizer).ExportReadableAsync(
+                new ReadableDocumentExportOptions(source, Path.Combine(root, "mixed.md"), EnableOcr: true));
+
+            var seen = Assert.Single(ocr.Seen);
+            Assert.Equal("page-0001-img-01", seen.AssetId);
+            Assert.Equal(120, seen.Width);
+            Assert.Equal(80, seen.Height);
+            Assert.True(seen.AllRed, "OCR was handed pixels from outside the image rectangle");
+
+            // The whole-page raster was only an intermediate: the workspace keeps the crop alone.
+            Assert.Equal("page-0001-img-01", Assert.Single(result.Graph.Assets!).Key);
+            var partition = Assert.Single(result.Graph.Partitions);
+            Assert.Contains(partition.Nodes, node => node.Content is TextNodeContent text &&
+                text.Text.Contains("Native body line", StringComparison.Ordinal));
+            Assert.DoesNotContain(partition.Nodes, node => node.Extensions?.ContainsKey("pdf_embedded_image_placeholder") == true);
+            var image = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Image);
+            Assert.True(image.Extensions!["pdf_embedded_image"].GetBoolean());
+            Assert.Equal(1, image.Extensions["pdf_image_index"].GetInt32());
+            Assert.False(image.Extensions.ContainsKey("pdf_page_raster"));
+            Assert.Equal(20d, image.Geometry!.X, 6);
+            Assert.Equal(30d, image.Geometry.Y, 6);
+            Assert.Equal(60d, image.Geometry.Width, 6);
+            Assert.Equal(40d, image.Geometry.Height, 6);
+            var reference = Assert.IsType<ReferenceNodeContent>(image.Content);
+            Assert.Equal("PDF page 1 image 1", reference.AltText);
+            Assert.True(File.Exists(Path.Combine(root, reference.Reference)));
+
+            var imageText = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.ImageText);
+            Assert.Equal(image.Id, imageText.ParentId);
+            Assert.Equal("Native body line", Assert.IsType<TextNodeContent>(imageText.Content).Text);
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageRasterized" &&
+                item.Severity == DiagnosticSeverity.Information &&
+                item.Message.Contains("PDF page 1: 1 embedded image(s) rasterized for OCR", StringComparison.Ordinal));
+            Assert.DoesNotContain(result.Diagnostics,
+                item => item.Code is "PdfEmbeddedImageOmitted" or "PdfEmbeddedImageCropUnavailable");
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Pdf_page_rotation_sends_the_embedded_image_back_to_whole_page_ocr()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "rotated.pdf");
+            await WriteBoxedTextAndImagePdfAsync(source, 90, (20, 30, 60, 40));
+            var ocr = new ImageRecordingOcrEngine("Native body line");
+
+            var result = await new DocumentService(ocr, new PngPdfRasterizer(400, 200, (40, 60, 120, 80)))
+                .ExportReadableAsync(new ReadableDocumentExportOptions(
+                    source, Path.Combine(root, "rotated.md"), EnableOcr: true));
+
+            // Rotation makes user space and the raster disagree on which axis is which, so the
+            // whole page is read instead of a rectangle that would have been cut from the wrong place.
+            var seen = Assert.Single(ocr.Seen);
+            Assert.Equal("page-0001", seen.AssetId);
+            Assert.Equal(400, seen.Width);
+            Assert.Equal(200, seen.Height);
+            Assert.Equal("page-0001", Assert.Single(result.Graph.Assets!).Key);
+            var partition = Assert.Single(result.Graph.Partitions);
+            var image = Assert.Single(partition.Nodes, node => node.Kind == NodeKind.Image);
+            Assert.True(image.Extensions!["pdf_page_raster"].GetBoolean());
+            // The page raster re-reads the native body line, and de-duplication is back on for it.
+            Assert.DoesNotContain(partition.Nodes, node => node.Kind == NodeKind.ImageText);
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "PdfEmbeddedImageCropUnavailable");
+            Assert.Equal(DiagnosticSeverity.Information, diagnostic.Severity);
+            Assert.Contains("rotated 90", diagnostic.Message, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Two_embedded_images_become_two_assets_ordered_from_the_top_of_the_page()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "two.pdf");
+            // Drawn bottom-first, so content-stream order and reading order disagree.
+            await WriteBoxedTextAndImagePdfAsync(source, 0, (10, 10, 40, 20), (10, 70, 40, 20));
+            // Scale 2 again: the top image lands at (20,20)-(100,60), the bottom at (20,140)-(100,180).
+            var rasterizer = new PngPdfRasterizer(400, 200, (20, 20, 80, 40), (20, 140, 80, 40));
+            var ocr = new ImageRecordingOcrEngine("top picture", "bottom picture");
+
+            var result = await new DocumentService(ocr, rasterizer).ExportReadableAsync(
+                new ReadableDocumentExportOptions(source, Path.Combine(root, "two.md"), EnableOcr: true));
+
+            Assert.Equal(["page-0001-img-01", "page-0001-img-02"], ocr.Seen.Select(item => item.AssetId));
+            Assert.All(ocr.Seen, item =>
+            {
+                Assert.Equal(80, item.Width);
+                Assert.Equal(40, item.Height);
+                Assert.True(item.AllRed, "OCR was handed pixels from outside the image rectangle");
+            });
+            Assert.Equal(["page-0001-img-01", "page-0001-img-02"], result.Graph.Assets!.Keys.Order());
+
+            var partition = Assert.Single(result.Graph.Partitions);
+            var images = partition.Nodes.Where(node => node.Kind == NodeKind.Image).ToArray();
+            Assert.Equal(2, images.Length);
+            Assert.Equal(70d, images[0].Geometry!.Y, 6);
+            Assert.Equal(10d, images[1].Geometry!.Y, 6);
+            Assert.True(images[0].Order < images[1].Order);
+            Assert.Equal("PDF page 1 image 1", Assert.IsType<ReferenceNodeContent>(images[0].Content).AltText);
+            Assert.Equal("PDF page 1 image 2", Assert.IsType<ReferenceNodeContent>(images[1].Content).AltText);
+
+            var texts = partition.Nodes.Where(node => node.Kind == NodeKind.ImageText).ToArray();
+            Assert.Equal(2, texts.Length);
+            Assert.Equal(images[0].Id, texts[0].ParentId);
+            Assert.Equal("top picture", Assert.IsType<TextNodeContent>(texts[0].Content).Text);
+            Assert.Equal(images[1].Id, texts[1].ParentId);
+            Assert.Equal("bottom picture", Assert.IsType<TextNodeContent>(texts[1].Content).Text);
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageRasterized" &&
+                item.Message.Contains("PDF page 1: 2 embedded image(s) rasterized for OCR", StringComparison.Ordinal));
+
+            var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+            Assert.Contains("top picture", markdown, StringComparison.Ordinal);
+            Assert.Contains("bottom picture", markdown, StringComparison.Ordinal);
+        }
+        finally { Directory.Delete(root, recursive: true); }
     }
 
     [Fact]
@@ -577,14 +939,136 @@ public sealed class DocumentServiceTests
     }
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));
 
-    private sealed class FakeOcrEngine : IOcrEngine
+    private static string ReadDocumentXml(string path)
     {
+        using var archive = ZipFile.OpenRead(path);
+        using var reader = new StreamReader(archive.GetEntry("word/document.xml")!.Open(), Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>A DOCX whose body holds a block content control and an inline equation - the two
+    /// shapes that used to project read-only and so never reached the F1 patcher at all.</summary>
+    private static async Task WriteControlAndEquationDocxAsync(string path)
+    {
+        await using var file = File.Create(path);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
+        await WriteEntry(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+        await WriteEntry(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        await WriteEntry(zip, "word/document.xml", """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>
+            <w:sdt><w:sdtPr><w:alias w:val="Scope" /></w:sdtPr><w:sdtContent>
+              <w:p><w:r><w:t>Controlled body</w:t></w:r></w:p>
+            </w:sdtContent></w:sdt>
+            <w:p><w:r><w:t xml:space="preserve">Given </w:t></w:r><m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath><w:r><w:t xml:space="preserve"> holds.</w:t></w:r></w:p>
+            </w:body></w:document>
+            """);
+    }
+
+    /// <summary>A DOCX holding a DrawingML text box, whose w:txbxContent is now a slice of its own
+    /// and so an ordinary Markdown edit target.</summary>
+    private static async Task WriteTextBoxDocxAsync(string path)
+    {
+        await using var file = File.Create(path);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
+        await WriteEntry(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+        await WriteEntry(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        await WriteEntry(zip, "word/document.xml", """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+              xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><w:body>
+            <w:p><w:r><w:t>Intro</w:t></w:r></w:p>
+            <w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData><wps:wsp><wps:cNvPr id="7" name="Box" /><wps:txbx><w:txbxContent><w:p><w:r><w:t>Box text</w:t></w:r></w:p></w:txbxContent></wps:txbx></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+            <w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr />
+            </w:body></w:document>
+            """);
+    }
+
+    /// <summary>A DOCX whose only paragraph wraps part of its text in an inline content control -
+    /// the shape whose whole paragraph used to be refused by the F1 patcher.</summary>
+    private static async Task WriteInlineControlDocxAsync(string path)
+    {
+        await using var file = File.Create(path);
+        using var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false);
+        await WriteEntry(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+        await WriteEntry(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+        await WriteEntry(zip, "word/document.xml", """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+            <w:p><w:r><w:t xml:space="preserve">Pick </w:t></w:r><w:sdt><w:sdtPr><w:alias w:val="Option" /></w:sdtPr><w:sdtContent><w:r><w:t>Choice</w:t></w:r></w:sdtContent></w:sdt><w:r><w:t xml:space="preserve"> here</w:t></w:r></w:p>
+            <w:p><w:r><w:t>Tail</w:t></w:r></w:p><w:sectPr />
+            </w:body></w:document>
+            """);
+    }
+
+    private static async Task WriteEntry(ZipArchive archive, string name, string text)
+    {
+        var entry = archive.CreateEntry(name);
+        await using var stream = new StreamWriter(entry.Open(), new UTF8Encoding(false));
+        await stream.WriteAsync(text);
+    }
+
+    private sealed class FakeOcrEngine(params string[] regionTexts) : IOcrEngine
+    {
+        private readonly string[] regions = regionTexts.Length > 0 ? regionTexts : ["recognized text"];
+
         public ProviderDescriptor Descriptor { get; } = new("test.ocr", new Version(1, 0), 1,
             new HashSet<string> { "ocr.text" }, "MIT", "built-in", true);
 
         public ValueTask<OcrAttemptResult> RecognizeAsync(OcrInput input, OcrOptions options, CancellationToken cancellationToken) =>
             ValueTask.FromResult(new OcrAttemptResult(OcrProcessingStatus.Completed,
-                new OcrResult("recognized text", [new OcrTextRegion("recognized text", new Geometry("image-pixels", 0, 0, 10, 10), 0.92)]), []));
+                new OcrResult(string.Join("\n", regions), regions
+                    .Select((text, index) => new OcrTextRegion(text, new Geometry("image-pixels", 0, index * 10, 10, 10), 0.92))
+                    .ToArray()), []));
+    }
+
+    /// <summary>Answers with a real PNG page - white with one red block per rectangle - so the crop
+    /// path has something to decode and a test can tell exactly which pixels were cut out.</summary>
+    private sealed class PngPdfRasterizer(int width, int height, params (int X, int Y, int Width, int Height)[] redBlocks)
+        : IPdfRasterizer
+    {
+        public ProviderDescriptor Descriptor { get; } = new("test.pdf.rasterizer", new Version(1, 0), 1,
+            new HashSet<string> { "rasterize.pdf" }, "MIT", "built-in", true);
+
+        public ValueTask<IReadOnlyList<RasterizedPdfPage>> RasterizeAsync(string pdfPath, IReadOnlyList<int> pageNumbers,
+            PdfRasterizationOptions options, CancellationToken cancellationToken = default)
+        {
+            var rgb = new byte[width * height * 3];
+            Array.Fill(rgb, (byte)255);
+            foreach (var block in redBlocks)
+                for (var y = block.Y; y < block.Y + block.Height; y++)
+                    for (var x = block.X; x < block.X + block.Width; x++)
+                    {
+                        var at = (y * width + x) * 3;
+                        rgb[at] = 255; rgb[at + 1] = 0; rgb[at + 2] = 0;
+                    }
+            var png = PngRasterImage.Encode(width, height, rgb);
+            return ValueTask.FromResult<IReadOnlyList<RasterizedPdfPage>>(pageNumbers
+                .Select(page => new RasterizedPdfPage(page, "image/png", png, width, height)).ToList());
+        }
+    }
+
+    /// <summary>Records the size and colour of every image handed to OCR, so a test can prove the
+    /// engine saw the cut-out picture rather than the whole page. Answers with one text per call in
+    /// call order, repeating the last.</summary>
+    private sealed class ImageRecordingOcrEngine(params string[] texts) : IOcrEngine
+    {
+        public List<(string AssetId, int Width, int Height, bool AllRed)> Seen { get; } = [];
+
+        public ProviderDescriptor Descriptor { get; } = new("test.ocr", new Version(1, 0), 1,
+            new HashSet<string> { "ocr.text" }, "MIT", "built-in", true);
+
+        public ValueTask<OcrAttemptResult> RecognizeAsync(OcrInput input, OcrOptions options, CancellationToken cancellationToken)
+        {
+            using var buffer = new MemoryStream();
+            input.Image.CopyTo(buffer);
+            var image = PngRasterImage.Decode(buffer.ToArray());
+            var allRed = Enumerable.Range(0, image.Width * image.Height).All(pixel =>
+                image.RgbBytes[pixel * 3] == 255 && image.RgbBytes[pixel * 3 + 1] == 0 && image.RgbBytes[pixel * 3 + 2] == 0);
+            Seen.Add((input.AssetId, image.Width, image.Height, allRed));
+            var text = texts.Length == 0 ? "recognized text" : texts[Math.Min(Seen.Count - 1, texts.Length - 1)];
+            return ValueTask.FromResult(new OcrAttemptResult(OcrProcessingStatus.Completed,
+                new OcrResult(text, [new OcrTextRegion(text, new Geometry("image-pixels", 0, 0, image.Width, image.Height), 0.9)]), []));
+        }
     }
 
     private sealed class FakePdfRasterizer(int? forcedPage = null, bool duplicate = false) : IPdfRasterizer

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed v0.2.4 release quality score aggregation.
+"""Fail-closed v0.2.5 release quality score aggregation.
 
 This is deliberately a gate, rather than a marketing score.  Every input is
 evidence produced by an earlier job.  Missing, skipped, malformed, or failed
@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-VERSION = "0.2.4"
+VERSION = "0.2.5"
 REQUIRED_RIDS = frozenset(("win-x64", "win-arm64", "osx-x64", "osx-arm64", "linux-x64", "linux-arm64"))
 WEIGHTS = {
     "office_readable_semantics": 25,
@@ -207,7 +207,7 @@ def score(conversion_root: Path, smoke_paths: list[Path]) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Aggregate fail-closed v0.2.4 release-quality evidence.")
+    parser = argparse.ArgumentParser(description="Aggregate fail-closed v0.2.5 release-quality evidence.")
     parser.add_argument("--conversion-root", required=True, type=Path)
     parser.add_argument("--smoke-evidence", required=True, action="append", type=Path)
     parser.add_argument("--output", required=True, type=Path)

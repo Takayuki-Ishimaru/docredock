@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.4 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.5 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 

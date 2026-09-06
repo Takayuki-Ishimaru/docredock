@@ -26,6 +26,37 @@ public sealed class ComplexPdfFixtureTests
     }
 
     [Fact]
+    public async Task Complex_fixture_page_two_reports_its_embedded_image_beside_the_native_text()
+    {
+        // The fixture's page 2 places a real 900x300 Image XObject among ordinary paragraphs, and
+        // reaches it through an indirectly referenced /Resources dictionary. Before this was
+        // detected the image vanished with no link, no asset and no diagnostic - the page simply
+        // looked complete because it still had native text.
+        var source = FixturePath();
+        var extraction = PdfTextExtractor.Extract(source);
+
+        Assert.Equal([0, 1, 0], extraction.Pages.Select(page => page.EmbeddedImageCount));
+        Assert.All(extraction.Pages, page => Assert.False(page.IsImageOnly));
+        var bounds = Assert.Single(extraction.Pages[1].EmbeddedImages!);
+        Assert.True(bounds.Width > 100 && bounds.Height > 100, $"expected a page-scale image rectangle, got {bounds}");
+        var diagnostic = Assert.Single(PdfDocumentGraphProjection.Diagnostics(extraction),
+            item => item.Code == "PdfEmbeddedImageOmitted");
+        Assert.Contains("PDF page 2: 1 embedded image(s)", diagnostic.Message, StringComparison.Ordinal);
+
+        var output = Path.Combine(Path.GetTempPath(), "docredock-pdf-embedded-" + Guid.NewGuid().ToString("N") + ".md");
+        try
+        {
+            var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+            Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageOmitted");
+            var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+            Assert.Contains("[PDF page 2: 1 embedded image(s) not extracted", markdown, StringComparison.Ordinal);
+            // The native text around the image must be untouched by the placeholder.
+            Assert.Contains("注記A", markdown, StringComparison.Ordinal);
+        }
+        finally { File.Delete(output); }
+    }
+
+    [Fact]
     public async Task Readable_markdown_export_keeps_pdf_page_partitions_and_content()
     {
         var source = FixturePath();

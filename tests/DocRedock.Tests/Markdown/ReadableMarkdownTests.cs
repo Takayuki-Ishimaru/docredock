@@ -442,6 +442,147 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
+    public void Nested_table_line_offset_wins_over_paragraph_offset_when_a_host_paragraph_has_a_line_break()
+    {
+        var nested = new DocumentNode("nested", NodeKind.Table, null, 1, ContentLayer.Body,
+            new TableNodeContent([[new TableCell("n1"), new TableCell("n2")]]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("outer"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_paragraph_offset"] = JsonSerializer.SerializeToElement(1),
+                ["nested_table_line_offset"] = JsonSerializer.SerializeToElement(2),
+            });
+        var outer = new DocumentNode("outer", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("前段落1行目\n2行目\n後段落"), new TableCell("右")],
+        ]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-nested-line-offset", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [outer, nested])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 前段落1行目<br>2行目<br>n1 / n2<br>後段落 | 右 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nested_tables_fold_at_their_recorded_paragraph_offset_inside_the_host_cell()
+    {
+        static DocumentNode Nested(string id, int order, int offset, string a, string b) => new(id, NodeKind.Table, null, order, ContentLayer.Body,
+            new TableNodeContent([[new TableCell(a), new TableCell(b)]]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("outer"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_paragraph_offset"] = JsonSerializer.SerializeToElement(offset),
+            });
+        var outer = new DocumentNode("outer", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("前の段落\n後の段落"), new TableCell("右")],
+        ]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-nested-offset", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [outer, Nested("mid", 1, 1, "m1", "m2"), Nested("head", 2, 0, "h1", "h2"), Nested("tail", 3, 2, "t1", "t2")])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| h1 / h2<br>前の段落<br>m1 / m2<br>後の段落<br>t1 / t2 | 右 |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| m1 | m2 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Nested_table_content_is_folded_into_its_host_cell_and_not_rendered_as_an_independent_table()
+    {
+        var nested = new DocumentNode("nested", NodeKind.Table, null, 1, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("n1"), new TableCell("n2")],
+            [new TableCell("n3"), new TableCell("n4")],
+        ]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("outer"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(1),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+            });
+        var outer = new DocumentNode("outer", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("列A"), new TableCell("列B")],
+            [new TableCell("ホスト文"), new TableCell("他のセル")],
+        ]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-nested-table", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [outer, nested])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // The nested table's rows collapse into "cell / cell" per row, joined by the same "\n" ->
+        // "<br>" rule every other multi-line cell uses, right after the host cell's own text.
+        Assert.Contains("| ホスト文<br>n1 / n2<br>n3 / n4 | 他のセル |", markdown, StringComparison.Ordinal);
+        // The nested table must not ALSO appear as its own, disconnected table.
+        Assert.DoesNotContain("n1 | n2", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("n3 | n4", markdown, StringComparison.Ordinal);
+        var separatorLines = markdown.Split('\n').Count(line => line.TrimStart().StartsWith('|') && line.Contains("---"));
+        Assert.Equal(1, separatorLines);
+    }
+
+    [Fact]
+    public void Nested_table_with_an_unresolvable_parent_still_renders_as_an_independent_table()
+    {
+        // nested_table_parent points at an id that does not exist in this partition — DocxAdapter
+        // never produces this, but a missing/foreign/out-of-range reference must fail open (render
+        // standalone) rather than silently dropping the table's content.
+        var orphan = new DocumentNode("orphan", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("Orphan A"), new TableCell("Orphan B")],
+        ]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("does-not-exist"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-orphan-nested-table", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [orphan])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| Orphan A | Orphan B |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Triple_nested_tables_fold_recursively_into_the_outermost_host_cell()
+    {
+        var inner = new DocumentNode("inner", NodeKind.Table, null, 2, ContentLayer.Body,
+            new TableNodeContent([[new TableCell("Deep")]]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("mid"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+            });
+        var mid = new DocumentNode("mid", NodeKind.Table, null, 1, ContentLayer.Body,
+            new TableNodeContent([[new TableCell("Mid")]]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["nested_table_parent"] = JsonSerializer.SerializeToElement("outer"),
+                ["nested_table_row"] = JsonSerializer.SerializeToElement(0),
+                ["nested_table_column"] = JsonSerializer.SerializeToElement(0),
+            });
+        var outer = new DocumentNode("outer", NodeKind.Table, null, 0, ContentLayer.Body,
+            new TableNodeContent([[new TableCell("Top")]]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-triple-nested-table", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [outer, mid, inner])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // "mid" folds "inner" into itself first, then "outer" folds the now-augmented "mid" — so
+        // the outermost cell reads top-to-bottom as Top, then Mid, then the deepest Deep.
+        Assert.Contains("| Top<br>Mid<br>Deep |", markdown, StringComparison.Ordinal);
+        var separatorLines = markdown.Split('\n').Count(line => line.TrimStart().StartsWith('|') && line.Contains("---"));
+        Assert.Equal(1, separatorLines);
+    }
+
+    [Fact]
     public void Document_headers_footers_footnotes_and_comments_are_aggregated_into_labeled_sections()
     {
         var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-furniture", DocumentFormatKind.Docx,
@@ -685,6 +826,156 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("<mark> highlighted</mark>", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("display:none", markdown, StringComparison.Ordinal);
         Assert.Contains(" unsafe", markdown, StringComparison.Ordinal);
+    }
+
+    // F-Issue7 regression coverage: plain-origin text (TextNodeContent) previously reached the
+    // writer unescaped, so a literal "*", "_", "~", backtick, or HTML-looking "<b>" from the
+    // source document could be reinterpreted as live Markdown/HTML syntax by a renderer.
+
+    [Fact]
+    public void Plain_paragraph_escapes_literal_markdown_and_html_metacharacters()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-inline", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new TextNodeContent("A *not bold* and _not italic_ and `code` <b>tag</b> a & b &amp; x")),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("A \\*not bold\\*", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\_not italic\\_", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\`code\\`", markdown, StringComparison.Ordinal);
+        // The '<' that could start a tag is escaped, and so is the '>' that closes it, so the
+        // whole span reads as literal text instead of a dangling '>' next to an escaped '<'.
+        Assert.Contains("&lt;b&gt;tag&lt;/b&gt;", markdown, StringComparison.Ordinal);
+        // A bare '&' with no entity-like tail is left alone...
+        Assert.Contains("a & b", markdown, StringComparison.Ordinal);
+        // ...but one that already looks like an entity reference is escaped so it still displays
+        // as the literal text the source document had, instead of decoding one level further.
+        Assert.Contains("&amp;amp;", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("<b>", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Paragraph_text_starting_a_line_with_a_code_fence_is_neutralized_so_later_content_stays_intact()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-fence", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new TextNodeContent("Before the fence\n```\nAfter the fence")),
+                new DocumentNode("p2", NodeKind.Paragraph, null, 1, ContentLayer.Body, new TextNodeContent("Second paragraph")),
+                new DocumentNode("table", NodeKind.Table, null, 2, ContentLayer.Body, new TableNodeContent(
+                [
+                    [new TableCell("A"), new TableCell("B")],
+                    [new TableCell("1"), new TableCell("2")],
+                ])),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // No line is a bare, unescaped fence, so it can never open a code block that swallows
+        // everything after it (the original bug: an un-terminated ``` fence in source text).
+        Assert.DoesNotContain(markdown.Split('\n'), line => line.Trim() is "```" or "~~~");
+        Assert.Contains("Before the fence", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\`\\`\\`", markdown, StringComparison.Ordinal);
+        Assert.Contains("After the fence", markdown, StringComparison.Ordinal);
+        Assert.Contains("Second paragraph", markdown, StringComparison.Ordinal);
+        Assert.Contains("| A | B |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 1 | 2 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_cell_escapes_asterisk_pipe_and_embedded_newline()
+    {
+        var table = new DocumentNode("table", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("Header"), new TableCell("Value")],
+            [new TableCell("A*B"), new TableCell("line one\nline two|end")],
+        ]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-table", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("A\\*B", markdown, StringComparison.Ordinal);
+        Assert.Contains("line one<br>line two\\|end", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Heading_and_list_item_escape_underscore_and_asterisk()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-heading-list", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                Node("h1", NodeKind.Heading, 0, "Section_1 *Draft*", ("heading_level", 1)),
+                Node("li1", NodeKind.ListItem, 1, "Item_A *B*", ("list_level", 0)),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("Section\\_1 \\*Draft\\*", markdown, StringComparison.Ordinal);
+        Assert.Contains("- Item\\_A \\*B\\*", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Paragraph_starting_with_list_or_heading_or_quote_or_rule_syntax_is_escaped()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-line-start", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body, new TextNodeContent("- not a list")),
+                new DocumentNode("p2", NodeKind.Paragraph, null, 1, ContentLayer.Body, new TextNodeContent("1. not ordered")),
+                new DocumentNode("p3", NodeKind.Paragraph, null, 2, ContentLayer.Body, new TextNodeContent("# not a heading")),
+                new DocumentNode("p4", NodeKind.Paragraph, null, 3, ContentLayer.Body, new TextNodeContent("> not a quote")),
+                new DocumentNode("p5", NodeKind.Paragraph, null, 4, ContentLayer.Body, new TextNodeContent("---")),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("\\- not a list", markdown, StringComparison.Ordinal);
+        // The delimiter, not the leading digit, is escaped ("1\." not "\1."): a backslash before a
+        // digit is not a recognized Markdown escape and would otherwise render as a visible "\1.".
+        Assert.Contains("1\\. not ordered", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\# not a heading", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\> not a quote", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\---", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Rich_text_literal_escaping_is_not_doubled()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-rich-no-double-escape", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new RichTextNodeContent([new TextRun("has * one literal asterisk")])),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // DocRedockInlineMarkdown.Serialize already escaped the literal '*' once; DisplayText must
+        // not run EscapeLiteral over already-rich-serialized text a second time.
+        Assert.Contains("has \\* one literal asterisk", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\\\*", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Code_block_containing_a_triple_backtick_run_is_wrapped_in_a_longer_fence()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-escape-codefence", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("code", NodeKind.CodeBlock, null, 0, ContentLayer.Body,
+                    new TextNodeContent("var s = \"```\";")),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("````\nvar s = \"```\";\n````", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("var s = \"```\";\n```\n", markdown, StringComparison.Ordinal);
     }
 
     private static DocumentNode Cell(string address, int row, int column, string value, bool isBold = false) => new(

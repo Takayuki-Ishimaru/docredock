@@ -41,7 +41,8 @@ internal sealed class StagedOutputTransaction : IDisposable
         IEnumerable<string> destinations,
         bool force,
         IEnumerable<string>? optionalDestinations = null,
-        IStagedOutputFileSystem? fileSystem = null)
+        IStagedOutputFileSystem? fileSystem = null,
+        IEnumerable<string>? protectedInputs = null)
     {
         ArgumentNullException.ThrowIfNull(destinations);
         this.fileSystem = fileSystem ?? new PhysicalStagedOutputFileSystem();
@@ -51,6 +52,10 @@ internal sealed class StagedOutputTransaction : IDisposable
             .Concat((optionalDestinations ?? []).Select(Path.GetFullPath))
             .Distinct(PathComparer)
             .ToArray();
+
+        // Runs unconditionally, even under --force: --force means "replace a stale
+        // previous output", never "it is fine to destroy this command's own input".
+        OutputCollisionGuard.EnsureNoCollision(targets, protectedInputs ?? []);
 
         var parentDirectories = targets
             .Select(path => Path.GetDirectoryName(path)
