@@ -94,7 +94,11 @@ public static class VisualGraphValidator
             Warning("VisualConnectorUnresolved", "One or more visual connections remain unresolved and were retained as fallback.");
         if (edges.Any(edge => edge?.Evidence?.ConfidenceBand.Equals("Medium", StringComparison.OrdinalIgnoreCase) == true))
             Warning("VisualInferenceMediumConfidence", "One or more visual connections were inferred with medium confidence.");
-        if (paths.Any(path => path?.IsFallback == true) || graph.SourceItems?.Any(item => item?.Disposition == VisualDisposition.VisualFallback) == true)
+        // FallbackPathCount is the single fallback rule (source-item ledger first, else raw
+        // Paths.IsFallback): a resolved connector's own open stroke stays IsFallback=true even
+        // after its source item's disposition becomes ProjectedEdge, so counting raw paths alone
+        // reported fallback content that was not actually there (F-05).
+        if (graph.FallbackPathCount > 0)
             Warning("VisualFallbackUsed", "One or more visual elements were retained as fallback instead of semantic topology.");
         var inferredQuality = InferQuality(edges);
         if (graph.Quality is { } declaredQuality && declaredQuality != inferredQuality)

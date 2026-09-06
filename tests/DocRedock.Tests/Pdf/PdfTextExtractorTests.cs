@@ -8,6 +8,78 @@ namespace DocRedock.Tests.Pdf;
 
 public sealed class PdfTextExtractorTests
 {
+    private static PdfExtractionResult ExtractReviewContent(string content) => PdfTextExtractor.Extract(
+        Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length " +
+            content.Length + " >> stream\n" + content + "\nendstream\n%%EOF"));
+
+    [Theory]
+    [InlineData("f")]
+    [InlineData("F")]
+    [InlineData("f*")]
+    public void Filled_compound_curves_keep_the_same_fallback_and_diagnostics_as_separate_paths(string paint)
+    {
+        const string curve = "0 0 m 0 50 50 50 50 0 c";
+        const string other = "200 0 m 220 0 l 220 20 l";
+        var separate = ExtractReviewContent($"{curve} {paint} {other} {paint}").VisualGraphs![1];
+        var compound = ExtractReviewContent($"{curve} {other} {paint}").VisualGraphs![1];
+
+        Assert.Equal(separate.Paths!.Select(path => (path.IsFallback, path.Confidence)),
+            compound.Paths!.Select(path => (path.IsFallback, path.Confidence)));
+        Assert.Equal(separate.Diagnostics!.Select(diagnostic => (diagnostic.Code, diagnostic.Message)),
+            compound.Diagnostics!.Select(diagnostic => (diagnostic.Code, diagnostic.Message)));
+        Assert.Contains(compound.Diagnostics!, diagnostic => diagnostic.Code == "VisualPathPartial");
+    }
+
+    [Fact]
+    public void No_paint_with_a_trailing_move_does_not_carry_pending_paths_into_the_next_stroke()
+    {
+        var graph = ExtractReviewContent("0 0 m 100 0 l 200 0 m n 300 0 m 400 0 l S").VisualGraphs![1];
+
+        Assert.Equal(2, graph.Paths!.Count);
+        var edge = Assert.Single(graph.Edges);
+        Assert.Equal(300d, edge.Path![0].X);
+        Assert.Equal(400d, edge.Path[^1].X);
+        Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Message.Contains("Unpainted", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Near_duplicate_pdf_paths_keep_ledger_raw_fallback_and_invariant_consistent()
+    {
+        var graph = ExtractReviewContent("BT 1 0 0 1 10 50 Tm (A) Tj ET 0 0 100 100 re S 1 1 100 100 re S").VisualGraphs![1];
+        var fallbackItem = Assert.Single(graph.SourceItems!, item => item.Disposition == VisualDisposition.VisualFallback);
+
+        Assert.Equal(1, graph.Accounting.FallbackPaths);
+        Assert.True(Assert.Single(graph.Paths!, path => path.Id == fallbackItem.FallbackPathId).IsFallback);
+        var compact = PdfVisualOutputCompactor.Compact(graph);
+        Assert.Equal(1, compact.TotalFallbackPaths);
+        Assert.Equal(fallbackItem.FallbackPathId, Assert.Single(compact.Paths).Id);
+        Assert.Empty(PdfDiagnosticInvariantValidator.Validate(graph, ["VisualFallbackUsed: retained geometry"], compact));
+    }
+
+    [Fact]
+    public void Fallback_compaction_and_invariant_follow_the_ledger_instead_of_raw_flags()
+    {
+        var graph = new VisualGraph("ledger", [], [], Paths:
+        [
+            new VisualPath("kept", IsFallback: false),
+            new VisualPath("decorative", IsFallback: true)
+        ], SourceItems:
+        [
+            new VisualSourceItem("kept", VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback, FallbackPathId: "kept"),
+            new VisualSourceItem("decorative", VisualSourceItemKind.VectorPath, VisualDisposition.IgnoredDecorative, Reason: "decoration")
+        ]);
+
+        var compact = PdfVisualOutputCompactor.Compact(graph);
+        Assert.Equal("kept", Assert.Single(compact.Paths).Id);
+        Assert.Equal(1, compact.TotalFallbackPaths);
+        Assert.Empty(PdfDiagnosticInvariantValidator.Validate(graph, ["VisualFallbackUsed: retained geometry"], compact));
+        var emptyLedgerFallback = graph with { Paths = [new VisualPath("decorative", IsFallback: true)],
+            SourceItems = [graph.SourceItems![1]] };
+        Assert.Empty(PdfVisualOutputCompactor.Compact(emptyLedgerFallback).Paths);
+        Assert.Contains(PdfDiagnosticInvariantValidator.Validate(emptyLedgerFallback, ["VisualFallbackUsed: incorrect"]),
+            issue => issue.StartsWith("INV-01:", StringComparison.Ordinal));
+    }
+
     [Fact]
     public void Extracts_literal_text_and_simple_coordinates_in_reading_order()
     {
@@ -330,6 +402,11 @@ public sealed class PdfTextExtractorTests
         Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
         Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved" &&
             diagnostic.Format == "pdf" && diagnostic.PartUri == "pdf:page:1" && diagnostic.PartitionId == "page-1");
+        // F-05: the message must say what is missing (how many connectors, out of how many
+        // recognized) and where to look in the original, not just "contains partial vector topology".
+        var unavailable = Assert.Single(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
+        Assert.Contains("1 of 1 connector unresolved", unavailable, StringComparison.Ordinal);
+        Assert.Contains("compare with page 1 of the original", unavailable, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -348,6 +425,59 @@ public sealed class PdfTextExtractorTests
         var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
         Assert.Contains(graph.Edges, edge => edge.Resolution == VisualEdgeResolution.GeometryInferred);
         Assert.Contains(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualEdgeDirectionUnknown");
+    }
+
+    [Fact]
+    public void Compound_path_with_two_disjoint_connectors_resolves_both_edges_like_separate_paths()
+    {
+        // Two independent instances of the same minimal shaft-between-two-boxes shape used by
+        // Stroke_before_rectangle_is_resolved_in_second_pass, packed into a SINGLE compound path
+        // (two disjoint m/l subpaths ended by one S) instead of two separate stroked paths.
+        // Before the fix, only the last subpath (the second shaft) became a real, resolvable
+        // edge; the first was finalized early as an unpainted fallback path and never resolved.
+        var separate = PdfTextExtractor.Extract(Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 220 >> stream\n" +
+            "0 0 m 100 0 l S 0 0 20 20 re S 80 -10 20 20 re S\n" +
+            "200 0 m 300 0 l S 200 0 20 20 re S 280 -10 20 20 re S\n" +
+            "endstream\n%%EOF"));
+        var compound = PdfTextExtractor.Extract(Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 220 >> stream\n" +
+            "0 0 m 100 0 l 200 0 m 300 0 l S\n" +
+            "0 0 20 20 re S 80 -10 20 20 re S 200 0 20 20 re S 280 -10 20 20 re S\n" +
+            "endstream\n%%EOF"));
+
+        var separateGraph = separate.VisualGraphs![1];
+        var compoundGraph = compound.VisualGraphs![1];
+
+        // Both connectors became real, resolved edges -- not one edge plus one fallback path.
+        Assert.Equal(2, separateGraph.Edges.Count(edge => edge.Resolution == VisualEdgeResolution.GeometryInferred));
+        Assert.Equal(2, compoundGraph.Edges.Count(edge => edge.Resolution == VisualEdgeResolution.GeometryInferred));
+        Assert.Equal(separateGraph.Edges.Count, compoundGraph.Edges.Count);
+        Assert.Equal(separateGraph.Nodes.Count, compoundGraph.Nodes.Count);
+        Assert.DoesNotContain(compoundGraph.Diagnostics!, diagnostic => diagnostic.Message.Contains("Unpainted PDF subpath", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Compound_path_ended_by_no_paint_creates_no_edges_or_nodes()
+    {
+        // `W n` (clip, no paint): a compound path with several open subpaths must not be painted
+        // -- not partially via the earlier subpaths and not via the last one. This exercises the
+        // `n` branch of the pending-open-subpath deferral, which must reproduce the old
+        // RetainSubpath fallback behaviour exactly for every subpath, just deferred until the
+        // paint operator is known.
+        var pdf = Encoding.Latin1.GetBytes(
+            "%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 70 >> stream\n" +
+            "0 0 m 100 0 l 200 0 m 300 0 l 400 0 m 500 0 l W n\nendstream\n%%EOF");
+
+        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+
+        Assert.Empty(graph.Nodes);
+        Assert.Empty(graph.Edges);
+        Assert.Equal(3, graph.Paths!.Count);
+        Assert.All(graph.Paths!, path => Assert.True(path.IsFallback));
+        Assert.Equal(2, graph.Diagnostics!.Count(diagnostic =>
+            diagnostic.Code == "VisualPathPartial" && diagnostic.Message.Contains("Unpainted PDF subpath", StringComparison.Ordinal)));
+        Assert.DoesNotContain(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
     }
 
     [Fact]
@@ -507,6 +637,37 @@ public sealed class PdfTextExtractorTests
         Assert.Contains(graph.SourceItems!, item => item.Disposition == VisualDisposition.SuppressedDuplicate);
         var validation = VisualGraphValidator.Validate(graph);
         Assert.True(graph.HasTopology, string.Join("; ", validation.Errors.Select(error => error.Code + ": " + error.Message)));
+    }
+
+    [Fact]
+    public void Resolved_single_arrow_page_reports_no_partial_vector_topology_warning()
+    {
+        // F-05: the shaft's own raw open-stroke VisualPath is always recorded IsFallback=true
+        // (BuildVisualGraph), even once it resolves into a semantic edge whose source item is
+        // ProjectedEdge, not VisualFallback. Emitting VisualSemanticProjectionUnavailable from that
+        // raw flag fired the diagnostic on virtually every resolved PDF connector. It must not fire
+        // once every recognized edge resolved, no source item is a genuine fallback, and the graph
+        // carries no diagnostics of its own.
+        var pdf = Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 300 >> stream
+            BT 1 0 0 1 10 20 Tm (PDF_FLOW_START) Tj ET
+            0 0 100 50 re S 0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (PDF_FLOW_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            endstream
+            %%EOF
+            """);
+
+        var result = PdfTextExtractor.Extract(pdf);
+        var graph = result.VisualGraphs![1];
+
+        Assert.False(graph.IsPartialProjection);
+        Assert.Equal(0, graph.FallbackPathCount);
+        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("VisualSemanticProjectionUnavailable", StringComparison.Ordinal));
     }
 
     [Fact]

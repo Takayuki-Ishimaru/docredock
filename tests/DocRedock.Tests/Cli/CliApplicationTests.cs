@@ -13,6 +13,45 @@ public sealed class CliApplicationTests : IDisposable
     public CliApplicationTests() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
 
     public void Dispose() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previousExperimental);
+
+    [Theory]
+    [InlineData("readable")]
+    [InlineData("roundtrip")]
+    [InlineData("audit")]
+    public async Task Export_rejects_removed_strict_option_before_writing_any_output(string profile)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var error = new StringWriter();
+        var result = await new CliApplication(new StringWriter(), error).RunAsync(
+            ["export", fixture.SourcePath, "--profile", profile, "--strict", "--output", fixture.MarkdownPath]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("--strict was removed", error.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.MarkdownPath));
+        Assert.False(Directory.Exists(Path.ChangeExtension(fixture.MarkdownPath, ".assets")));
+        Assert.False(Directory.Exists(Path.ChangeExtension(fixture.MarkdownPath, ".drmd")));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Theory]
+    [InlineData("Overview")]
+    [InlineData("DoesNotExist")]
+    [InlineData("")]
+    public async Task Inspect_rejects_sheet_selection_instead_of_silently_ignoring_it(string selection)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false));
+        var output = new StringWriter();
+        var error = new StringWriter();
+        var result = await new CliApplication(output, error).RunAsync(
+            ["inspect", fixture.XlsxPath, "--sheets", selection]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("inspect does not support --sheets", error.ToString(), StringComparison.Ordinal);
+        Assert.Empty(output.ToString());
+    }
+
     [Fact]
     public async Task Readable_profile_writes_markdown_without_a_sidecar()
     {
@@ -119,7 +158,12 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain("licenses", stdout.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain("--strict", stdout.ToString(), StringComparison.Ordinal);
+        // --strict was removed from export/restore (strict Markdown validation is always enabled),
+        // but doctor legitimately carries its own --strict flag (see CapabilityExitPolicy).
+        var lines = stdout.ToString().Split('\n');
+        Assert.DoesNotContain("--strict", lines.Single(line => line.Contains("docredock export")), StringComparison.Ordinal);
+        Assert.DoesNotContain("--strict", lines.Single(line => line.Contains("docredock restore")), StringComparison.Ordinal);
+        Assert.Contains("docredock doctor [--json] [--strict]", stdout.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -227,6 +271,145 @@ public sealed class CliApplicationTests : IDisposable
         {
             Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", "1");
         }
+    }
+
+    [Fact]
+    public async Task Table_only_pdf_export_reports_consistent_diagram_and_table_counts()
+    {
+        // F-05 case 1: a page whose only vector content is a ruled table used to print
+        // "Visual summary: diagrams=1" (a raw count of pages carrying a visual graph) alongside
+        // "Diagrams reconstructed: 0" (a count of graphs with a resolved semantic edge) -- two
+        // labels for different things, shown as if they were the same figure. Both now render
+        // from the same finalized summary: diagrams=/"Diagrams reconstructed:" agree at 0, and the
+        // renamed vector_pages= carries the old page-count meaning instead.
+        using var fixture = new Fixture();
+        await File.WriteAllBytesAsync(fixture.PdfPath, Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 586 >> stream
+            BT 1 0 0 1 100 760 Tm (TITLE_LINE) Tj ET
+            BT 1 0 0 1 110 615 Tm (R1C1) Tj ET
+            BT 1 0 0 1 210 615 Tm (R1C2) Tj ET
+            BT 1 0 0 1 310 615 Tm (R1C3) Tj ET
+            BT 1 0 0 1 110 655 Tm (R2C1) Tj ET
+            BT 1 0 0 1 210 655 Tm (R2C2) Tj ET
+            BT 1 0 0 1 310 655 Tm (R2C3) Tj ET
+            BT 1 0 0 1 110 695 Tm (R3C1) Tj ET
+            BT 1 0 0 1 210 695 Tm (R3C2) Tj ET
+            BT 1 0 0 1 310 695 Tm (R3C3) Tj ET
+            BT 1 0 0 1 100 530 Tm (NATIVE_TEXT_MUST_SURVIVE) Tj ET
+            100 600 m 400 600 l S
+            100 640 m 400 640 l S
+            100 680 m 400 680 l S
+            100 720 m 400 720 l S
+            100 600 m 100 720 l S
+            200 600 m 200 720 l S
+            300 600 m 300 720 l S
+            400 600 m 400 720 l S
+            endstream
+            %%EOF
+            """));
+        var stdout = new StringWriter();
+
+        var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
+            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+
+        Assert.Equal((int)ExitCode.Success, result);
+        var text = stdout.ToString();
+        Assert.Contains("diagrams=0", text, StringComparison.Ordinal);
+        Assert.Contains("vector_pages=1", text, StringComparison.Ordinal);
+        Assert.Contains("Diagrams reconstructed: 0", text, StringComparison.Ordinal);
+        Assert.Contains("Tables reconstructed: 1", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Compound_path_grid_table_pdf_export_reports_zero_warnings_and_one_table()
+    {
+        // Same grid as Table_only_pdf_export_reports_consistent_diagram_and_table_counts, but the
+        // eight rules are drawn as ONE compound path (eight `m`/`l` subpaths) stroked by a single
+        // trailing `S`, the way reportlab's canvas.grid() emits a ruled table. Per the PDF spec
+        // (32000-1 8.5.3) a painting operator applies to every subpath of the current path, so
+        // this must reconstruct the same table with zero warnings, just like the separate-paths
+        // form above.
+        using var fixture = new Fixture();
+        await File.WriteAllBytesAsync(fixture.PdfPath, Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 586 >> stream
+            BT 1 0 0 1 100 760 Tm (TITLE_LINE) Tj ET
+            BT 1 0 0 1 110 615 Tm (R1C1) Tj ET
+            BT 1 0 0 1 210 615 Tm (R1C2) Tj ET
+            BT 1 0 0 1 310 615 Tm (R1C3) Tj ET
+            BT 1 0 0 1 110 655 Tm (R2C1) Tj ET
+            BT 1 0 0 1 210 655 Tm (R2C2) Tj ET
+            BT 1 0 0 1 310 655 Tm (R2C3) Tj ET
+            BT 1 0 0 1 110 695 Tm (R3C1) Tj ET
+            BT 1 0 0 1 210 695 Tm (R3C2) Tj ET
+            BT 1 0 0 1 310 695 Tm (R3C3) Tj ET
+            BT 1 0 0 1 100 530 Tm (NATIVE_TEXT_MUST_SURVIVE) Tj ET
+            100 600 m 400 600 l 100 640 m 400 640 l 100 680 m 400 680 l 100 720 m 400 720 l
+            100 600 m 100 720 l 200 600 m 200 720 l 300 600 m 300 720 l 400 600 m 400 720 l S
+            endstream
+            %%EOF
+            """));
+        var stdout = new StringWriter();
+
+        var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
+            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+
+        Assert.Equal((int)ExitCode.Success, result);
+        var text = stdout.ToString();
+        Assert.Contains("Warnings: 0", text, StringComparison.Ordinal);
+        Assert.Contains("Tables reconstructed: 1", text, StringComparison.Ordinal);
+        Assert.Contains("Fallback pages: 0", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("Unpainted PDF subpath", text, StringComparison.Ordinal);
+        var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath);
+        Assert.Contains("NATIVE_TEXT_MUST_SURVIVE", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Resolved_connector_pdf_export_reports_consistent_zero_fallback_and_warning_counts()
+    {
+        // F-05 case 2: a page with a single connector that resolves correctly (START -> END) used
+        // to print "unresolved=0; fallback=0" in the Visual summary while separately reporting
+        // "Warnings: 2" and "Fallback pages: 1" -- because the connector's own raw open stroke is
+        // always recorded IsFallback=true even once it is promoted to a resolved semantic edge.
+        // With the fix, every figure derived from the same finalized graph agrees: no fallback and
+        // no warning are reported for a page that fully resolved.
+        using var fixture = new Fixture();
+        await File.WriteAllBytesAsync(fixture.PdfPath, Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 300 >> stream
+            BT 1 0 0 1 10 20 Tm (PDF_FLOW_START) Tj ET
+            0 0 100 50 re S 0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (PDF_FLOW_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            endstream
+            %%EOF
+            """));
+        var stdout = new StringWriter();
+
+        var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
+            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+
+        Assert.Equal((int)ExitCode.Success, result);
+        var text = stdout.ToString();
+        Assert.Contains("diagrams=1", text, StringComparison.Ordinal);
+        Assert.Contains("vector_pages=1", text, StringComparison.Ordinal);
+        Assert.Contains("unresolved=0", text, StringComparison.Ordinal);
+        Assert.Contains("fallback=0", text, StringComparison.Ordinal);
+        Assert.Contains("Warnings: 0", text, StringComparison.Ordinal);
+        Assert.Contains("Fallback pages: 0", text, StringComparison.Ordinal);
+        Assert.Contains("Diagrams reconstructed: 1", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("VisualSemanticProjectionUnavailable", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("VisualFallbackUsed", text, StringComparison.Ordinal);
+        var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath);
+        Assert.Contains("```mermaid", markdown, StringComparison.Ordinal);
+        Assert.Contains("PDF_FLOW_START", markdown, StringComparison.Ordinal);
+        Assert.Contains("PDF_FLOW_DONE", markdown, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -531,6 +714,45 @@ public sealed class CliApplicationTests : IDisposable
         finally { Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", previous); }
     }
 
+    [Fact]
+    public async Task Doctor_text_and_json_agree_on_the_exit_code_in_the_same_environment()
+    {
+        var textCode = await new CliApplication(new StringWriter(), new StringWriter()).RunAsync(["doctor"]);
+        var jsonCode = await new CliApplication(new StringWriter(), new StringWriter()).RunAsync(["doctor", "--json"]);
+
+        Assert.Equal(textCode, jsonCode);
+    }
+
+    [Fact]
+    public async Task Doctor_json_reports_tiers_and_the_same_exit_code_it_returns()
+    {
+        var output = new StringWriter();
+        var code = await new CliApplication(output, new StringWriter()).RunAsync(["doctor", "--json"]);
+
+        using var json = System.Text.Json.JsonDocument.Parse(output.ToString());
+        Assert.Equal("1", json.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal(code, json.RootElement.GetProperty("exit_code").GetInt32());
+        Assert.False(json.RootElement.GetProperty("strict").GetBoolean());
+        Assert.All(json.RootElement.GetProperty("capabilities").EnumerateArray(),
+            item => Assert.True(item.GetProperty("tier").GetString() is "required" or "optional"));
+        var summary = json.RootElement.GetProperty("summary");
+        Assert.True(summary.TryGetProperty("required_ready", out _));
+        Assert.True(summary.TryGetProperty("optional_gaps", out _));
+        Assert.True(summary.TryGetProperty("strict_failures", out _));
+    }
+
+    [Fact]
+    public async Task Doctor_strict_exit_code_is_never_lower_than_the_default_exit_code()
+    {
+        var defaultCode = await new CliApplication(new StringWriter(), new StringWriter()).RunAsync(["doctor"]);
+        var strictOutput = new StringWriter();
+        var strictCode = await new CliApplication(strictOutput, new StringWriter()).RunAsync(["doctor", "--strict"]);
+
+        Assert.InRange(strictCode, 0, 1);
+        Assert.True(strictCode >= defaultCode);
+        Assert.Contains("Exit code: " + strictCode, strictOutput.ToString(), StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("export")]
     [InlineData("render")]
@@ -550,11 +772,94 @@ public sealed class CliApplicationTests : IDisposable
         finally { Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previous); }
     }
 
+    [Fact]
+    public async Task Export_with_an_unknown_sheet_name_fails_with_invalid_input_and_writes_no_output()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false), ("Secret", true));
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "DoesNotExist"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("DoesNotExist", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Overview", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Secret (hidden)", stderr.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.MarkdownPath));
+    }
+
+    [Fact]
+    public async Task Export_with_a_partial_sheet_name_mismatch_fails_with_invalid_input()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false), ("Secret", true));
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview,DoesNotExist"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("DoesNotExist", stderr.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.MarkdownPath));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData(",")]
+    public async Task Export_with_an_empty_sheets_selection_fails_with_invalid_input(string sheetsValue)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false));
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", sheetsValue]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("--sheets", stderr.ToString(), StringComparison.Ordinal);
+        Assert.False(File.Exists(fixture.MarkdownPath));
+    }
+
+    [Fact]
+    public async Task Export_with_a_valid_sheet_name_still_succeeds()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false), ("Secret", true));
+        var app = new CliApplication(new StringWriter(), new StringWriter());
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview"]);
+
+        Assert.InRange(result, (int)ExitCode.Success, (int)ExitCode.SuccessWithWarnings);
+        Assert.True(File.Exists(fixture.MarkdownPath));
+    }
+
+    [Fact]
+    public async Task Export_of_a_hidden_sheet_under_the_default_visible_policy_warns_and_exits_with_warnings()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateXlsx(("Overview", false), ("Secret", true));
+        var stdout = new StringWriter();
+        var app = new CliApplication(stdout, new StringWriter());
+
+        var result = await app.RunAsync(
+            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Secret"]);
+
+        Assert.Equal((int)ExitCode.SuccessWithWarnings, result);
+        Assert.Contains("XlsxSheetExcludedByPolicy", stdout.ToString(), StringComparison.Ordinal);
+        Assert.True(File.Exists(fixture.MarkdownPath));
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "docredock-cli-tests", Guid.NewGuid().ToString("N"));
         public string SourcePath => Path.Combine(Root, "source.docx");
         public string PdfPath => Path.Combine(Root, "source.pdf");
+        public string XlsxPath => Path.Combine(Root, "source.xlsx");
         public string MarkdownPath => Path.Combine(Root, "projection.md");
         public string RestoredPath => Path.Combine(Root, "restored.docx");
 
@@ -573,6 +878,25 @@ public sealed class CliApplicationTests : IDisposable
             Write(archive, "word/document.xml", document);
             if (withImage)
                 Write(archive, "word/_rels/document.xml.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdImage\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/image1.png\"/></Relationships>");
+        }
+
+        /// <param name="sheets">Each sheet's name and whether it is hidden (state="hidden"). Defaults to one visible sheet.</param>
+        public void CreateXlsx(params (string Name, bool Hidden)[] sheets)
+        {
+            if (sheets.Length == 0) sheets = [("Sheet1", false)];
+            using var file = File.Create(XlsxPath);
+            using var archive = new ZipArchive(file, ZipArchiveMode.Create);
+            Write(archive, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"><Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/></Types>");
+            Write(archive, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/></Relationships>");
+            var sheetElements = string.Join(string.Empty, sheets.Select((sheet, index) =>
+                $"<sheet name=\"{sheet.Name}\" sheetId=\"{index + 1}\"{(sheet.Hidden ? " state=\"hidden\"" : string.Empty)} r:id=\"rId{index + 1}\"/>"));
+            Write(archive, "xl/workbook.xml", $"<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets>{sheetElements}</sheets></workbook>");
+            var relationshipElements = string.Join(string.Empty, sheets.Select((_, index) =>
+                $"<Relationship Id=\"rId{index + 1}\" Type=\"worksheet\" Target=\"worksheets/sheet{index + 1}.xml\"/>"));
+            Write(archive, "xl/_rels/workbook.xml.rels", $"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">{relationshipElements}</Relationships>");
+            for (var index = 0; index < sheets.Length; index++)
+                Write(archive, $"xl/worksheets/sheet{index + 1}.xml",
+                    $"<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>{sheets[index].Name} content</t></is></c></row></sheetData></worksheet>");
         }
 
         private static void Write(ZipArchive archive, string path, string content)

@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.3 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.4 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -18,6 +18,8 @@ Download the package for your OS/CPU from GitHub Releases and verify the publish
 6. Choose an output location, convert, then review the Markdown, diagnostics, and assets.
 
 The desktop GUI accepts PDF by default. It extracts native PDF text; textless-page OCR and previews for diagram-like pages may require a configured rasterizer/OCR provider. When unavailable, review the page placeholder and diagnostic.
+
+Two-column pages are read column by column (the whole left column, then the right column) when a vertical gutter is confirmed on three or more consecutive lines. A single wide gap on one line, such as a label and its value or a title and a page number, is not treated as a column boundary. On pages with a reconstructed table, body text outside the table is kept, and any unexplained omission is reported as `PdfNativeTextUnaccounted`.
 
 CLI PDF export, restoration, and rendering remain experimental and require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`, like other experimental CLI workflows. Read-only `docredock inspect <file.pdf>` remains available without the flag.
 
@@ -48,6 +50,8 @@ Mermaid is emitted only when connections are clear and consistent. Recognized vi
 - **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revisions out of the Markdown projection.
 - **complete**: includes hidden/metadata content and emits a warning.
 - **sanitized**: also filters metadata, derived/OCR content, and furniture such as headers and footers.
+
+XLSX exports also accept `--sheets Sheet1,Sheet2` (CLI only) to project only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
 
 OCR text inherits its parent image's visibility. If DocRedock cannot resolve the parent partition, it places the evidence in a dedicated `derived-assets` partition and emits `OcrParentPartitionUnresolved`.
 
@@ -86,9 +90,12 @@ The resolver rejects unsupported CFF/CFF2 outlines, missing glyph coverage, inva
 Check local capabilities with doctor. It is outside the experimental gate and requires no input file.
 
     docredock doctor
+    docredock doctor [--strict]
     docredock doctor --json
 
 ready means the dependency was probed and is available, partial means only some functions (or OCR languages) are available, and unavailable means a dependency is missing or disabled. Native PDF OCR may still be partial when page content is unclear. Image-only PDF OCR needs both an OCR engine and a PDF rasterizer. Discovery checks an explicit path (DOCREDOCK_PDF_RASTERIZER), then pdftoppm, then mutool on PATH. Set DOCREDOCK_DISABLE_PDF_RASTERIZER=1 to disable discovery. If unavailable, install pdftoppm or mutool, or configure the executable path. Processing remains local and does not use the network. Raster fallback is bounded to 100 paths and 32,768 characters per page; native text is retained when fallback is compacted.
+
+Every capability carries a tier, `required` (docx-readable, xlsx-readable, pptx-readable, pdf-text) or `optional` (everything else, including OCR, the PDF rasterizer, and mermaid-render). Plain `docredock doctor` and `docredock doctor --json` always return the same exit code: 0 when every required capability is ready, 1 otherwise; optional gaps are reported but never change this exit code. Add `--strict` to fail (exit 1) on any capability that is not ready, including optional ones — except when an optional gap is already covered by a ready alternative, reported as `satisfied_by`. For example, on a platform with no bundled native OCR helper, `ocr-native` reports `satisfied_by: "tesseract"` once Tesseract is ready, and `--strict` does not fail on that gap; a `partial` alternative never counts as satisfying it. The JSON report adds `tier`, `satisfied_by`, `strict`, `exit_code`, and a `summary` (`required_ready`, `optional_gaps`, `strict_failures`) alongside the existing fields.
 
 PdfTableInferred means a regular ruled grid was reconstructed as a table; PdfTableNative means existing table information was used; PdfTableAmbiguous means evidence was not unique enough to classify as a table. VisualFallbackCompacted means fallback output was reduced to fit the output budget while retaining partial topology. Small gaps and noise in human-drawn diagrams may remain as partial topology and fallback; unresolved connections are reported instead of silently guessed.
 

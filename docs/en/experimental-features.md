@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These command-line workflows are unsupported experiments in the v0.2.3 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
+> These command-line workflows are unsupported experiments in the v0.2.4 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
 
 Set the environment variable before starting the CLI:
 
@@ -28,6 +28,6 @@ DocRedock does not bundle or download a Japanese font. ASCII-only output uses Ba
 
 Font selection and coverage are informational. Omissions and truncation are warnings; CLI render returns 1 when warnings exist. `--quiet` hides information, while `--verbose` includes the selected font path.
 
-Experimental artifacts such as `.drmd` and `.drmdpkg` may contain the original source or restoration data. They require the same confidentiality controls as the source. F0/F1 tests and package smoke checks are engineering evidence, not a promise of layout-preserving user support.
+Experimental artifacts such as `.drmd` and `.drmdpkg` may contain the original source or restoration data. They require the same confidentiality controls as the source.
 
 Use [Supported features](supported-features.md) for the release contract and [Security and privacy](security-and-privacy.md) for handling guidance.

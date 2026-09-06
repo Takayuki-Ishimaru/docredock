@@ -6,6 +6,13 @@
 
 ## 最新版
 
+### v0.2.4 Public Beta
+
+- [v0.2.4 リリースノート](RELEASE_NOTES_v0.2.4.md)
+- PDFの表外本文を保持し、二段組の読み順と複数罫線パスの表再構成を改善
+- XLSXのシート指定を厳密化し、doctorの終了コードとstrict判定を明確化
+- CLIとGUIの図・fallback集計を一致させ、誤警告を削減
+
 ### v0.2.3 Public Beta
 
 - [v0.2.3 リリースノート](RELEASE_NOTES_v0.2.3.md)

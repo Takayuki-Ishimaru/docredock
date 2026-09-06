@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.2.3
+        default: v0.2.4
 
 permissions:
   contents: read
@@ -84,9 +84,9 @@ jobs:
           PRODUCT_SOURCE_COMMIT: ${{ steps.quality-source.outputs.commit }}
           RELEASE_WORKFLOW_COMMIT: ${{ github.workflow_sha }}
         run: python3 tools/conversion-qa/run.py --all
-      - name: Verify v0.2.3 quality-gate contracts
+      - name: Verify quality-gate contracts
         run: python3 -m unittest tools/test_v023_quality_score.py
-      - name: Run v0.2.3 source semantic suite
+      - name: Run source semantic suite
         run: python3 tools/v023_semantic_quality.py --source-cli src/DocRedock.Cli/bin/Release/net10.0/DocRedock.Cli --output artifacts/SOURCE-PDF-SEMANTICS-EVIDENCE.json
       - name: Upload source semantic evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -445,7 +445,7 @@ jobs:
         with:
           name: quality-source-semantic
           path: release-source-semantic
-      - name: Assemble and gate v0.2.3 quality evidence
+      - name: Assemble and gate quality evidence
         shell: bash
         run: |
           set -euo pipefail

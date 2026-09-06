@@ -66,6 +66,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         catch (InvalidOperationException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.RestoreConflict; }
         catch (FileNotFoundException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.InvalidInput; }
         catch (IOException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.InvalidInput; }
+        catch (SheetSelectionException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.InvalidInput; }
         catch (Exception ex)
         {
             // Keep the type for diagnostics, but include the message so a CLI
@@ -81,23 +82,41 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var disabled = string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal);
         var rasterizer = PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"), disabled);
         var capabilities = await new CapabilityReporter().ReportAsync(rasterizer);
-        var report = new CapabilityReport("1", Version, capabilities);
+        var strict = args.HasFlag("strict");
+        // One exit-code decision drives both --json and the text summary below, so changing the
+        // display format never changes the exit code (see CapabilityExitPolicy).
+        var verdict = CapabilityExitPolicy.Evaluate(capabilities, strict);
+        var summary = new CapabilitySummary(verdict.RequiredReady, verdict.OptionalGaps, verdict.StrictFailures);
+        var report = new CapabilityReport("1", Version, capabilities, strict, verdict.ExitCode, summary);
         if (args.HasFlag("json"))
         {
             await output.WriteLineAsync(JsonSerializer.Serialize(report, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
-            return 0;
+            return verdict.ExitCode;
         }
         await output.WriteLineAsync($"DocRedock {Version}"); await output.WriteLineAsync("Readable export");
-        foreach (var item in capabilities.Take(4)) await output.WriteLineAsync($"  {item.Id,-16} {item.Status}");
+        foreach (var item in capabilities.Where(item => item.Tier == "required"))
+            await output.WriteLineAsync($"  {item.Id,-16} {item.Status} (required)");
         await output.WriteLineAsync("OCR");
         foreach (var item in capabilities.Where(item => item.Id.StartsWith("ocr-", StringComparison.Ordinal)))
-            await output.WriteLineAsync($"  {item.Id[4..],-16} {item.Status}{(item.Provider is null ? string.Empty : $" ({item.Provider})")}");
-        await output.WriteLineAsync("PDF rasterizer"); await output.WriteLineAsync($"  {rasterizer.Provider ?? "local"}    {rasterizer.Status}{(rasterizer.Path is null ? string.Empty : $" ({rasterizer.Path})")}");
+            await output.WriteLineAsync($"  {item.Id[4..],-16} {item.Status} (optional){(item.Provider is null ? string.Empty : $" ({item.Provider})")}{(item.SatisfiedBy is null ? string.Empty : $" [provided by {item.SatisfiedBy}]")}");
+        await output.WriteLineAsync("PDF rasterizer"); await output.WriteLineAsync($"  {rasterizer.Provider ?? "local"}    {rasterizer.Status} (optional){(rasterizer.Path is null ? string.Empty : $" ({rasterizer.Path})")}");
         if (rasterizer.Action is not null) await output.WriteLineAsync($"  Action: {rasterizer.Action}");
         var mermaid = capabilities.Single(item => item.Id == "mermaid-render");
-        await output.WriteLineAsync("Mermaid render"); await output.WriteLineAsync($"  {mermaid.Provider ?? "mmdc",-16} {mermaid.Status}");
+        await output.WriteLineAsync("Mermaid render"); await output.WriteLineAsync($"  {mermaid.Provider ?? "mmdc",-16} {mermaid.Status} (optional)");
         if (mermaid.Action is not null) await output.WriteLineAsync($"  Action: {mermaid.Action}");
-        return capabilities.All(item => item.Status == "ready") ? 0 : 1;
+        await output.WriteLineAsync(string.Empty);
+        await output.WriteLineAsync($"Required capabilities: {(verdict.RequiredReady ? "ready" : "NOT ready")}");
+        await output.WriteLineAsync(verdict.OptionalGaps.Count == 0
+            ? "Optional gaps: none"
+            : $"Optional gaps: {string.Join(", ", verdict.OptionalGaps.Select(id => DescribeGap(id, capabilities)))}");
+        await output.WriteLineAsync($"Exit code: {verdict.ExitCode}" + (strict ? string.Empty : " (use --strict to fail on optional gaps)"));
+        return verdict.ExitCode;
+    }
+
+    private static string DescribeGap(string id, IReadOnlyList<CapabilityStatus> capabilities)
+    {
+        var item = capabilities.Single(candidate => candidate.Id == id);
+        return item.SatisfiedBy is null ? id : $"{id} (provided by {item.SatisfiedBy})";
     }
 
     private void WriteCommandHelp(string command)
@@ -107,7 +126,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--allow-render-fallback]",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
-            "doctor" => "doctor [--json]",
+            "doctor" => "doctor [--json] [--strict]",
             "inspect" => "inspect <source-or-file.md>",
             "diff" => "diff <file.md> [--json]",
             "verify" => "verify <file.md|file.drmd|file.drmdpkg>",
@@ -123,6 +142,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private async Task<int> ExportAsync(Arguments args, CancellationToken token)
     {
+        if (args.HasFlag("strict") || args.Option("strict") is not null)
+            return Invalid("--strict was removed because strict Markdown validation is always enabled.");
         var source = RequireExistingFile(args);
         var profile = args.Option("profile") ?? "readable";
         if (profile is not ("roundtrip" or "readable" or "audit")) return Unsupported("Built-in export supports roundtrip, readable, and audit profiles.");
@@ -154,6 +175,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 : new StagedOutputTransaction([markdown], force, [readableAssets]);
             var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var sheets = args.Option("sheets")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // An explicit --sheets that resolves to nothing ("", ",", " , ") is a user
+            // error, not "all sheets": that meaning is reserved for omitting --sheets
+            // entirely (sheets stays null above).
+            if (sheets is { Length: 0 }) return Invalid("--sheets requires at least one sheet name.");
             var readable = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
                 source, stagedMarkdown, ocrMode != "off", languages, contentPolicy,
                 ShowFormulas: args.HasFlag("show-formulas"),
@@ -168,8 +193,12 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
             await output.WriteLineAsync("Mode:     Readable Markdown (one-way; no sidecar)");
             await output.WriteLineAsync($"Visual inference: {visualInference} (ambiguous relations remain unresolved)");
-            await output.WriteLineAsync(VisualInferenceSummary(readable.Graph));
-            await output.WriteLineAsync(ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics).ToString());
+            // Both lines render from the same finalized summary so the figures a user sees
+            // (Visual summary's diagrams=/fallback= and the export block below) can never
+            // disagree with each other (F-05).
+            var visualSummary = ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics);
+            await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
+            await output.WriteLineAsync(visualSummary.ToString());
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
@@ -297,6 +326,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private async Task<int> InspectAsync(Arguments args, CancellationToken token)
     {
+        if (args.HasFlag("sheets") || args.Option("sheets") is not null)
+            return Invalid("inspect does not support --sheets; use export --sheets to select worksheets.");
         var path = RequireExistingFile(args);
         if (Path.GetExtension(path).Equals(".md", StringComparison.OrdinalIgnoreCase))
         {
@@ -319,7 +350,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 try
                 {
                     var visualGraph = DeterministicJson.Deserialize<DocumentGraph>(await File.ReadAllTextAsync(graphPath, token));
-                    if (visualGraph is not null) await output.WriteLineAsync(VisualInferenceSummary(visualGraph));
+                    if (visualGraph is not null) await output.WriteLineAsync(VisualInferenceSummary(ExportSummaryBuilder.Build(visualGraph, [])));
                 }
                 catch (JsonException) { /* integrity verification above remains the source of truth */ }
             }
@@ -575,7 +606,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock unpack <file.drmd> (--in-place | --output directory)
           docredock rules
           docredock migrate <file.md> --to-schema 1.1
-          docredock doctor [--json]
+          docredock doctor [--json] [--strict]
 
         Experimental commands and PDF export require DOCREDOCK_ENABLE_EXPERIMENTAL=1.
         """);
@@ -585,16 +616,14 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         .Select(node => node.Extensions!["visual_graph"].Deserialize<VisualGraph>())
         .OfType<VisualGraph>();
 
-    private static string VisualInferenceSummary(DocumentGraph graph)
-    {
-        var visual = VisualGraphs(graph).ToArray();
-        var edges = visual.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
-        var fallback = visual.Sum(item => item.SourceItems is { Count: > 0 }
-            ? item.SourceItems.Count(source => source?.Disposition == VisualDisposition.VisualFallback)
-            : (item.Paths ?? []).Count(path => path?.IsFallback == true));
-        var rejected = visual.Sum(item => VisualGraphValidator.Validate(item).Errors.Count);
-        return $"Visual summary: diagrams={visual.Length}; native={edges.Count(edge => edge.Resolution == VisualEdgeResolution.NativeConnection)}; high={edges.Count(edge => edge.Evidence?.ConfidenceBand.Equals("High", StringComparison.OrdinalIgnoreCase) == true)}; medium={edges.Count(edge => edge.Evidence?.ConfidenceBand.Equals("Medium", StringComparison.OrdinalIgnoreCase) == true)}; unresolved={edges.Count(edge => edge.SourceId is null || edge.TargetId is null)}; fallback={fallback}; rejected={rejected}";
-    }
+    // Renders from the one finalized ExportSummary so this line's diagrams=/fallback= counters can
+    // never disagree with "Diagrams reconstructed:"/"Fallback pages:" printed alongside it (F-05).
+    // diagrams= is the count of RECONSTRUCTED diagrams (a resolved edge between known nodes);
+    // vector_pages= is how many pages/partitions carried a visual graph at all, resolved or not.
+    private static string VisualInferenceSummary(ExportSummary summary) =>
+        $"Visual summary: diagrams={summary.DiagramsReconstructed}; vector_pages={summary.VectorPages}; " +
+        $"native={summary.NativeEdges}; high={summary.HighConfidenceEdges}; medium={summary.MediumConfidenceEdges}; " +
+        $"unresolved={summary.UnresolvedRelations}; fallback={summary.FallbackPaths}; rejected={summary.Rejected}";
 
     private static string VisualEvidence(VisualEdge edge)
     {
@@ -610,7 +639,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         {
             var result = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
                 sourcePath, Path.Combine(root, "projection.md"), EnableOcr: false, ContentPolicy: "visible"), token);
-            await output.WriteLineAsync(VisualInferenceSummary(result.Graph));
+            await output.WriteLineAsync(VisualInferenceSummary(ExportSummaryBuilder.Build(result.Graph, result.Diagnostics)));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

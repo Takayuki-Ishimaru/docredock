@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.IO.Compression;
+using System.Text;
 using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Docx;
 using DocRedock.Gui;
@@ -281,6 +282,64 @@ public sealed class GuiWorkflowServiceTests : IDisposable
         {
             Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, previous);
         }
+    }
+
+    [Fact]
+    public async Task Readable_export_visual_summary_agrees_with_export_summary_for_a_resolved_connector_pdf()
+    {
+        // Mirrors the CLI's "Resolved_connector_pdf_export_reports_consistent_zero_fallback_and_
+        // warning_counts" (F-05): the GUI used to recount visual-graph nodes ("図: {count}件") and
+        // raw VisualPath.IsFallback separately from ExportSummary, so the two lines shown together
+        // in the GUI could disagree. Both must now render from one ExportSummary instance.
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Root, "diagram.pdf");
+        await File.WriteAllBytesAsync(source, Encoding.Latin1.GetBytes("""
+            %PDF-1.4
+            1 0 obj << /Type /Page >> endobj
+            2 0 obj << /Length 300 >> stream
+            BT 1 0 0 1 10 20 Tm (PDF_FLOW_START) Tj ET
+            0 0 100 50 re S 0 0 100 50 re S
+            BT 1 0 0 1 210 20 Tm (PDF_FLOW_DONE) Tj ET
+            200 0 100 50 re S
+            100 25 m 200 25 l S
+            200 25 m 190 32 l 190 18 l h f
+            endstream
+            %%EOF
+            """));
+        var previous = Environment.GetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable);
+        Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, null);
+        try
+        {
+            var workflow = new GuiWorkflowService();
+
+            var exported = await workflow.ExportAsync(
+                source, Path.Combine(fixture.Root, "export"), enableOcr: false, readable: true);
+
+            Assert.NotNull(exported.VisualSummary);
+            Assert.Contains("図: 1件（vector page 1）", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("unresolved 0", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("fallback 0", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("Diagrams reconstructed: 1", exported.ExportSummary, StringComparison.Ordinal);
+            Assert.Contains("Fallback pages: 0", exported.ExportSummary, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(ExperimentalFeatures.EnvironmentVariable, previous);
+        }
+    }
+
+    [Fact]
+    public async Task Readable_export_visual_summary_is_absent_without_a_visual_graph()
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Root, "proposal.docx");
+        await new MarkdownRenderer().RenderAsync("# Title\n\nPlain text, no diagrams", RenderFormat.Docx, source);
+        var workflow = new GuiWorkflowService();
+
+        var exported = await workflow.ExportAsync(
+            source, Path.Combine(fixture.Root, "export"), enableOcr: false, readable: true);
+
+        Assert.Null(exported.VisualSummary);
     }
 
     private static string Hash(string path) => Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path)));

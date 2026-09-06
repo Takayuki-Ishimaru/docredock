@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and complete release evidence.
 
+## [0.2.4] - 2026-09-06
+
+- Preserved PDF body text outside reconstructed tables and improved two-column reading order.
+- Reconstructed PDF tables whose rules are grouped into a single drawing path.
+- Made XLSX sheet selection fail clearly on unknown names and report hidden sheets excluded by policy.
+- Aligned `docredock doctor` text/JSON exit behavior, added `--strict`, and clarified optional capability handling.
+- Made CLI and GUI visual summaries consistent and removed false fallback warnings for fully resolved PDF connectors.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.4.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.4.md)
+
 ## [0.2.3] - 2026-09-05
 
 - Reconstructed regular PDF grids as Markdown tables while avoiding duplicated cell text.
@@ -129,6 +140,7 @@ Public Beta update focused on more natural readable Markdown output for complex 
 - [English release notes](release-docs/RELEASE_NOTES_v0.1.0.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.1.0.md)
 
+[0.2.4]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.4
 [0.2.3]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.3
 [0.2.2]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.2
 [0.2.1]: https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.2.1

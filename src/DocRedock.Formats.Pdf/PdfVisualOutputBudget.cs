@@ -103,7 +103,12 @@ public static class PdfVisualOutputCompactor
     {
         ArgumentNullException.ThrowIfNull(graph);
         var limits = (budget ?? new PdfVisualOutputBudget()).Normalize();
-        var fallback = (graph.Paths ?? []).Where(path => path is not null && path.IsFallback).ToArray();
+        var fallbackIds = graph.SourceItems is { Count: > 0 } items
+            ? items.Where(item => item?.Disposition == VisualDisposition.VisualFallback)
+                .Select(item => item.FallbackPathId).ToHashSet(StringComparer.Ordinal)
+            : null;
+        var fallback = (graph.Paths ?? []).Where(path => path is not null &&
+            (fallbackIds is null ? path.IsFallback : fallbackIds.Contains(path.Id))).ToArray();
         var emitted = new List<VisualPath>(Math.Min(fallback.Length, limits.MaxFallbackPathsPerPage));
         long characters = 0;
         foreach (var path in fallback)

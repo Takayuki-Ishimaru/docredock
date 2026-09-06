@@ -150,4 +150,34 @@ public sealed record VisualGraph(
                 paths.Count, paths.Count(path => path is not null && !path.IsFallback), paths.Count(path => path is null || path.IsFallback));
         }
     }
+
+    /// <summary>The single rule for "how many vector primitives are genuinely retained as fallback
+    /// (not promoted to a node or edge)". When a source-item ledger is present it is authoritative:
+    /// a connector's own raw open stroke is always recorded <see cref="VisualPath.IsFallback"/> =
+    /// true even after it resolves into a semantic edge (its source item's disposition becomes
+    /// <see cref="VisualDisposition.ProjectedEdge"/>), so the raw path flag alone cannot tell a
+    /// fully resolved diagram from a genuinely partial one. Every caller that needs to know whether
+    /// this graph carries real fallback content (CLI/export summaries, partial-projection
+    /// diagnostics) must use this property instead of inspecting <see cref="Paths"/> directly.</summary>
+    [JsonIgnore]
+    public int FallbackPathCount => SourceItems is { Count: > 0 } items
+        ? items.Count(item => item?.Disposition == VisualDisposition.VisualFallback)
+        : (Paths ?? []).Count(path => path?.IsFallback == true);
+
+    /// <summary>Edges that could not be resolved to two known nodes: a null endpoint, or an
+    /// explicit <see cref="VisualEdgeResolution.Unresolved"/> resolution.</summary>
+    [JsonIgnore]
+    public int UnresolvedRelationCount => (Edges ?? []).Count(edge => edge is not null &&
+        (edge.SourceId is null || edge.TargetId is null || edge.Resolution == VisualEdgeResolution.Unresolved));
+
+    /// <summary>True when this (finalized) graph genuinely lost information during projection:
+    /// real fallback content survived, a source primitive could not be accounted for, an edge
+    /// stayed unresolved, or the graph carries its own diagnostics. Derived from the source-item
+    /// ledger when present so a fully resolved diagram is never reported as partial merely because
+    /// a consumed connector stroke still carries the raw <see cref="VisualPath.IsFallback"/> flag.</summary>
+    [JsonIgnore]
+    public bool IsPartialProjection => SourceItems is not null
+        ? SourceAccounting.VisualFallbacks > 0 || SourceAccounting.Unaccounted > 0 ||
+          Accounting.UnresolvedEdges > 0 || Accounting.Diagnostics > 0
+        : Accounting.UnresolvedEdges > 0 || Accounting.FallbackPaths > 0 || Accounting.Diagnostics > 0;
 }
