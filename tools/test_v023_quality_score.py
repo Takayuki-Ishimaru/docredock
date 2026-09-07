@@ -17,6 +17,39 @@ assert SMOKE_SPEC and SMOKE_SPEC.loader
 SMOKE_SPEC.loader.exec_module(release_smoke)
 
 
+class PackagedMarkdownLinkTests(unittest.TestCase):
+    def test_literal_examples_are_not_checked_as_file_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "guide.md").write_text(
+                "`[a](b)` and `![alt](image.png)`\n"
+                "``a ` character and [x](y)``\n"
+                "```markdown\n[example](missing.md)\n```\n"
+                r"\[escaped\](missing.md)" + "\n[real](target.txt)\n",
+                encoding="utf-8")
+            (root / "target.txt").write_text("target", encoding="utf-8")
+            release_smoke.verify_local_markdown_links(root)
+
+    def test_real_missing_link_after_code_example_is_still_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "guide.md").write_text(
+                "`[example](ignored.md)`\n[real](missing.md)\n",
+                encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "broken packaged Markdown link.*missing.md"):
+                release_smoke.verify_local_markdown_links(root)
+
+    def test_real_links_cannot_escape_the_package(self):
+        for target in ("../outside.txt", "file:///tmp/outside.txt"):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                (root / "guide.md").write_text(
+                    f"`[example](ignored.md)`\n[real]({target})\n",
+                    encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "escapes package root|file URI"):
+                    release_smoke.verify_local_markdown_links(root)
+
+
 class QualityScoreTests(unittest.TestCase):
     def test_doctor_schema_accepts_actual_partial_capability_report_and_rejects_invalid_variants(self):
         required = ["docx-readable", "xlsx-readable", "pptx-readable", "pdf-text", "ocr-engine", "ocr-jpn", "ocr-eng", "ocr-native", "pdf-rasterizer", "mermaid-render"]

@@ -791,7 +791,13 @@ def exercise_capability_ux(cli: Path) -> str:
 
 
 
-MARKDOWN_LINK_PATTERN = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
+# Match escaped characters and backtick code spans before link syntax. This also
+# skips the backtick-fenced examples used in packaged guides; their literal
+# [label](target) text does not refer to a packaged file.
+MARKDOWN_LINK_PATTERN = re.compile(
+    r"\\[^\r\n]|(?<!`)(?P<code>`+)(?!`)[\s\S]*?(?<!`)(?P=code)(?!`)"
+    r"|\[[^\]]*\]\((?P<target>[^)]+)\)"
+)
 
 
 def verify_local_markdown_links(package_root: Path) -> None:
@@ -843,7 +849,9 @@ def verify_local_markdown_links(package_root: Path) -> None:
             ) from exception
 
         for match in MARKDOWN_LINK_PATTERN.finditer(resolved_document.read_text(encoding="utf-8")):
-            target = match.group(1).strip().strip("<>").split("#", 1)[0]
+            if match.group("target") is None:
+                continue
+            target = match.group("target").strip().strip("<>").split("#", 1)[0]
             lowered_target = target.lower()
             if not target or target.startswith("#") or lowered_target.startswith("mailto:"):
                 continue
