@@ -2,7 +2,14 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
-## [Unreleased]
+## [0.2.6] - 2026-09-07
+
+- Kept literal `[text](url)`, `![alt](path)` and reference-link notation in source documents as plain text in readable and round-trip Markdown while preserving real hyperlinks, images, emphasis and generated diagrams.
+- Refused CLI output paths that are hard links to an input document, matching the existing symlink and same-path protection.
+- Made the experimental `render` command honour backslash-escaped Markdown characters so escaped literal text renders as text in HTML and generated documents.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.6.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.6.md)
 
 ## [0.2.5] - 2026-09-07
 

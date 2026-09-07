@@ -978,6 +978,84 @@ public sealed class ReadableMarkdownTests
         Assert.DoesNotContain("var s = \"```\";\n```\n", markdown, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Literal_link_notation_stays_escaped_in_every_plain_text_slot()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-literal-slots", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new TextNodeContent("[LABEL](https://example.com/x)")),
+                Node("h1", NodeKind.Heading, 1, "[LABEL](https://example.com/x)", ("heading_level", 2)),
+                Node("li1", NodeKind.ListItem, 2, "[LABEL](https://example.com/x)", ("list_level", 0)),
+                new DocumentNode("table", NodeKind.Table, null, 3, ContentLayer.Body,
+                    new TableNodeContent([new TableCell[] { "見出し" }, new TableCell[] { "[LABEL](https://example.com/x)" }])),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // Escaping '[' is what stops the link from forming; '(' and ')' stay unescaped on purpose
+        // so the line is still comfortable to read.
+        Assert.Contains("\n\\[LABEL\\](https://example.com/x)\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("## \\[LABEL\\](https://example.com/x)", markdown, StringComparison.Ordinal);
+        Assert.Contains("- \\[LABEL\\](https://example.com/x)", markdown, StringComparison.Ordinal);
+        Assert.Contains("| \\[LABEL\\](https://example.com/x) |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[LABEL](", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Literal_link_notation_stays_escaped_in_workbook_cells()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-literal-cells", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("Sheet1", 0, [Cell("A1", 1, 1, "[x](y)"), Cell("B1", 1, 2, "[id]: https://example.com/ref")])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("\\[x\\](y)", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\[id\\]: https://example.com/ref", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[x](y)", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Image_alt_text_with_brackets_is_escaped_exactly_once()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-image-alt", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("image", NodeKind.Image, null, 0, ContentLayer.Body,
+                    new ReferenceNodeContent("diagram.png", "a[b]c")),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // EscapeLiteral now escapes the brackets itself, so WriteImage must not escape them again.
+        Assert.Contains("![a\\[b\\]c](diagram.png)", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\\\[", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Real_hyperlink_run_still_produces_a_markdown_link()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-real-link", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0,
+            [
+                new DocumentNode("p1", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new RichTextNodeContent(
+                    [
+                        new TextRun("参考: "),
+                        new TextRun("公式サイト", LinkTarget: "https://example.com/real"),
+                        new TextRun(" と [literal](notalink)"),
+                    ])),
+            ])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // A TextRun.LinkTarget is a real hyperlink and keeps its unescaped brackets ...
+        Assert.Contains("[公式サイト](https://example.com/real)", markdown, StringComparison.Ordinal);
+        // ... while bracket characters that are merely part of the run text do not.
+        Assert.Contains("\\[literal\\](notalink)", markdown, StringComparison.Ordinal);
+    }
+
     private static DocumentNode Cell(string address, int row, int column, string value, bool isBold = false) => new(
         "cell-" + address,
         NodeKind.Cell,

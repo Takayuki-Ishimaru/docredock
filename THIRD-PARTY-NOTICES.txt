@@ -22,6 +22,8 @@ the locked dependency graph changes:
 - Microsoft.CodeCoverage, Microsoft.TestPlatform.ObjectModel, and Microsoft.TestPlatform.TestHost — MIT
 - coverlet.collector — MIT
 - Newtonsoft.Json — MIT
+- Markdig — BSD-2-Clause (CommonMark/GFM parser; used only by the tests that assert
+  literal Markdown-looking source text never becomes live Markdown)
 
 Exact versions and the complete resolved graph are pinned in
 `tests/DocRedock.Tests/packages.lock.json` and verified against

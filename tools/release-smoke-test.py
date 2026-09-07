@@ -258,6 +258,177 @@ def exercise_pack_and_tamper(root: Path, cli: Path, projection: Path) -> None:
         raise RuntimeError("tampered sidecar was accepted")
 
 
+def exercise_output_collision_guard(root: Path, cli: Path) -> None:
+    """A hard link to a command's own input is the same file entity as the input, even though it
+    is a distinct path with its own directory entry. --output must refuse it exactly like a
+    literal same-path output or a symlink, never treat it as a safe distinct destination."""
+    source = root / "collision-guard-source.docx"
+    create_docx(source)
+    link = root / "collision-guard-source-link.docx"
+    try:
+        os.link(source, link)
+    except OSError as error:
+        print(f"WARNING: skipping hard-link output-collision check ({error}); this file system does not support hard links.")
+        return
+    before = digest(source)
+    result = invoke(
+        cli,
+        ["export", str(source), "--output", str(link), "--profile", "readable", "--force", "--ocr", "off"],
+        allowed=(2,),
+    )
+    if "Output path must differ from the input path" not in result.stdout:
+        raise RuntimeError("hard-link output-collision guard did not explain the refusal")
+    if digest(source) != before:
+        raise RuntimeError("hard-link output-collision guard modified the source document")
+
+
+LITERAL_MARKDOWN_PROBES = (
+    "[LABEL](https://example.com/x)",
+    "![ALT](image.png)",
+    "[REF][id]",
+    "[id]: https://example.com/ref",
+    "[x](y)",
+)
+
+ESCAPED_MARKDOWN_PROBES = (
+    r"\[LABEL\](https://example.com/x)",
+    r"!\[ALT\](image.png)",
+    r"\[REF\]\[id\]",
+    r"\[id\]: https://example.com/ref",
+    r"\[x\](y)",
+)
+
+# A live reference-definition line ("[id]: url") would start, after any blockquote/list/table-cell
+# prefix, with an unescaped '['. An escaped "\[id]: url" never matches here: the character right
+# after the prefix is '\', not '['.
+LIVE_REFERENCE_DEFINITION = re.compile(r"^[ \t|>-]*\[[^\]\r\n]*\]:")
+FENCE_MARKER = re.compile(r"^\s*```")
+
+def create_docx_with_literal_markdown(path: Path) -> None:
+    paragraphs = "".join(
+        f'<w:p><w:r><w:t xml:space="preserve">{probe}</w:t></w:r></w:p>' for probe in LITERAL_MARKDOWN_PROBES
+    )
+    table = (
+        '<w:tbl><w:tblGrid><w:gridCol w:w="3000"/></w:tblGrid><w:tr><w:tc><w:p><w:r>'
+        f'<w:t xml:space="preserve">{LITERAL_MARKDOWN_PROBES[4]}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+    )
+    write_zip(
+        path,
+        {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            "word/document.xml": (
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                f'<w:body>{paragraphs}{table}</w:body></w:document>'
+            ),
+        },
+    )
+
+def create_xlsx_with_literal_markdown(path: Path) -> None:
+    rows = "".join(
+        f'<row r="{index}"><c r="A{index}" t="inlineStr"><is><t>{probe}</t></is></c></row>'
+        for index, probe in enumerate(LITERAL_MARKDOWN_PROBES, start=1)
+    )
+    write_zip(
+        path,
+        {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            "xl/workbook.xml": '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>',
+            "xl/_rels/workbook.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="worksheet" Target="worksheets/sheet1.xml"/></Relationships>',
+            "xl/styles.xml": '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="1"><font><sz val="11"/></font></fonts><cellXfs count="1"><xf/></cellXfs></styleSheet>',
+            "xl/worksheets/sheet1.xml": f'<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>',
+        },
+    )
+
+def create_pptx_with_literal_markdown(path: Path) -> None:
+    shapes = "".join(
+        f'<p:sp><p:nvSpPr><p:cNvPr id="{index + 2}" name="Shape{index}"/><p:nvPr/></p:nvSpPr><p:spPr/>'
+        f'<p:txBody><a:bodyPr/><a:p><a:r><a:t>{probe}</a:t></a:r></a:p></p:txBody></p:sp>'
+        for index, probe in enumerate(LITERAL_MARKDOWN_PROBES)
+    )
+    write_zip(
+        path,
+        {
+            "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
+            "ppt/presentation.xml": '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst></p:presentation>',
+            "ppt/_rels/presentation.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="slide" Target="slides/slide1.xml"/></Relationships>',
+            "ppt/slides/slide1.xml": (
+                '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+                'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+                f'<p:cSld><p:spTree>{shapes}</p:spTree></p:cSld></p:sld>'
+            ),
+        },
+    )
+
+def _assert_literal_markdown_preserved(markdown: str, context: str) -> None:
+    for probe in LITERAL_MARKDOWN_PROBES:
+        if probe in markdown:
+            raise RuntimeError(f"{context}: raw literal {probe!r} leaked into Markdown output unescaped")
+    for probe in ESCAPED_MARKDOWN_PROBES:
+        if probe not in markdown:
+            raise RuntimeError(f"{context}: expected escaped literal {probe!r} is missing from Markdown output")
+    in_fence = False
+    for line_number, line in enumerate(markdown.splitlines(), start=1):
+        if FENCE_MARKER.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        if LIVE_REFERENCE_DEFINITION.match(line):
+            raise RuntimeError(f"{context}: line {line_number} reads as a live Markdown reference definition: {line!r}")
+
+def _html_render_problems(root: Path, cli: Path, markdown_path: Path, extension: str) -> list[str]:
+    html_path = root / f"literal-markdown-{extension}.html"
+    invoke(
+        cli,
+        ["render", str(markdown_path), "--format", "html", "--output", str(html_path)],
+        allowed=(0, 1),
+        experimental=True,
+    )
+    html = html_path.read_text(encoding="utf-8")
+    problems = []
+    if 'href="https://example.com/x"' in html:
+        problems.append("created a live hyperlink for the [LABEL](...) probe")
+    if 'href="https://example.com/ref"' in html:
+        problems.append("created a live hyperlink for the reference-definition probe")
+    if re.search(r"<img\b[^>]*\bimage\.png", html):
+        problems.append("created a live <img> for the ![ALT](image.png) probe")
+    if "[LABEL](https://example.com/x)" not in html:
+        problems.append("does not display the literal text '[LABEL](https://example.com/x)'")
+    return problems
+
+def exercise_literal_markdown_syntax(root: Path, cli: Path) -> None:
+    """Release gate for the v0.2.5 external review's D07 (literal Markdown syntax leaking into
+    output): source text that only looks like a link, image, reference-style link, or reference
+    definition must stay plain text through the packaged CLI, on every RID. Exercises the escape
+    added to ReadableMarkdownSerializer.EscapeLiteral / DocRedockInlineMarkdown.Escape via a real
+    readable export, then separately gates the CLI's own `render --format html` consumer, which
+    honours the same escapes via MarkdownRenderer.ProtectEscapes."""
+    render_findings: dict[str, list[str]] = {}
+    for extension, creator in (
+        ("docx", create_docx_with_literal_markdown),
+        ("xlsx", create_xlsx_with_literal_markdown),
+        ("pptx", create_pptx_with_literal_markdown),
+    ):
+        source = root / f"literal-markdown.{extension}"
+        markdown_path = root / f"literal-markdown-{extension}.md"
+        creator(source)
+        invoke(
+            cli,
+            ["export", str(source), "--output", str(markdown_path), "--profile", "readable", "--ocr", "off"],
+            allowed=(0, 1),
+        )
+        _assert_literal_markdown_preserved(markdown_path.read_text(encoding="utf-8"), f"{extension} readable export")
+
+        problems = _html_render_problems(root, cli, markdown_path, extension)
+        if problems:
+            render_findings[extension] = problems
+
+    if render_findings:
+        details = "; ".join(f"{extension}: {', '.join(items)}" for extension, items in render_findings.items())
+        raise RuntimeError(
+            "docredock render --format html does not honour the D07 literal-text escape: " + details
+        )
+
 def inspect_gui_binary(gui: Path) -> None:
     if gui.stat().st_size < 1024 * 1024:
         raise RuntimeError("GUI executable is unexpectedly small")
@@ -862,6 +1033,8 @@ def main() -> int:
         visual_evidence = exercise_visual_semantics(root, cli)
         pdf_semantic_cases = exercise_pdf_render(root, cli)
         exercise_pack_and_tamper(root, cli, docx_projection)
+        exercise_output_collision_guard(root, cli)
+        exercise_literal_markdown_syntax(root, cli)
         inspect_gui_binary(gui)
         if args.gui_mode == "startup":
             exercise_gui(gui)
@@ -925,7 +1098,7 @@ def main() -> int:
         raise RuntimeError("visual semantics " + "; ".join(reasons)
                            + f"; failed evidence written to {args.evidence_json}")
     distribution_result = "package checksums/font exclusion" if package_checksum is not None else "direct-publish font exclusion"
-    print(f"Release smoke test passed for v{args.expected_version} versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, structured visual-semantics smoke, F0/F1 restore, Japanese PDF rendering, {distribution_result}, pack/unpack, tamper rejection, and {gui_result}.")
+    print(f"Release smoke test passed for v{args.expected_version} versioning, experimental gating, hidden-content policies, DOCX/XLSX/PPTX readable export, structured visual-semantics smoke, F0/F1 restore, Japanese PDF rendering, {distribution_result}, pack/unpack, tamper rejection, literal Markdown-syntax text integrity, hard-link output-collision rejection, and {gui_result}.")
     if package_checksum is not None:
         print(f"Verified package checksum manifest SHA-256: {package_checksum}")
     else:

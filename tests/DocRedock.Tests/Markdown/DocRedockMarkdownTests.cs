@@ -729,6 +729,77 @@ public sealed class DocRedockMarkdownTests
         Assert.Contains("````mermaid\ngraph TD\n```\n  A-->B\n````", diagramMarkdown);
     }
 
+    [Fact]
+    public void EscapesLiteralLinkNotationInThePlainTextProjection()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_literal_drmd", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("p_link", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+                    new TextNodeContent("[LABEL](https://example.com/x)")),
+                new DocumentNode("p_image", NodeKind.Paragraph, null, 1, ContentLayer.Body,
+                    new TextNodeContent("![ALT](image.png)")),
+                new DocumentNode("p_def", NodeKind.Paragraph, null, 2, ContentLayer.Body,
+                    new TextNodeContent("[id]: https://example.com/ref")),
+            ])
+        ]);
+
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+
+        Assert.Contains("\\[LABEL\\](https://example.com/x)", markdown, StringComparison.Ordinal);
+        Assert.Contains("!\\[ALT\\](image.png)", markdown, StringComparison.Ordinal);
+        Assert.Contains("\\[id\\]: https://example.com/ref", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[LABEL](", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EscapesLiteralLinkNotationInWorkbookCellsAndTableCells()
+    {
+        var workbook = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_literal_cells", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-Sheet1", 0, [Cell("cell_a1", "A1", "[x](y)", 0)])
+        ]);
+        var table = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_literal_table", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part-0001", 0,
+            [
+                new DocumentNode("table_1", NodeKind.Table, null, 0, ContentLayer.Body,
+                    new TableNodeContent([new TableCell[] { "[x](y)", "plain" }])),
+            ])
+        ]);
+
+        var workbookMarkdown = new DocRedockMarkdownSerializer().Serialize(workbook).Markdown;
+        var tableMarkdown = new DocRedockMarkdownSerializer().Serialize(table).Markdown;
+
+        Assert.Contains("\\[x\\](y)", workbookMarkdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("[x](y)", workbookMarkdown, StringComparison.Ordinal);
+        Assert.Contains(@"| \[x\](y) | plain |", tableMarkdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void InlineMarkdownRoundTripsBracketsBackslashesAndRealLinks()
+    {
+        TextRun[] runs =
+        [
+            new("plain a[b]c\\d "),
+            new("lab[e]l", LinkTarget: "https://example.com/x"),
+        ];
+
+        var markdown = DocRedockInlineMarkdown.Serialize(runs);
+
+        // Bracket characters in run TEXT are escaped; the brackets the link syntax itself needs are not.
+        Assert.Equal(@"plain a\[b\]c\\d [lab\[e\]l](https://example.com/x)", markdown);
+
+        var parsed = DocRedockInlineMarkdown.Parse(markdown);
+
+        Assert.Equal("plain a[b]c\\d ",
+            string.Concat(parsed.Runs.Where(run => run.LinkTarget is null).Select(run => run.Text)));
+        var link = Assert.Single(parsed.Runs, run => run.LinkTarget is not null);
+        Assert.Equal("lab[e]l", link.Text);
+        Assert.Equal("https://example.com/x", link.LinkTarget);
+    }
+
     private static DocumentNode Cell(string id, string address, string text, int order) => new(
         id, NodeKind.Cell, null, order, ContentLayer.Body, new TextNodeContent(text),
         new SourceAnchor("xlsx", "/xl/worksheets/sheet1.xml", [new AnchorLocator("cell_address", address)]));

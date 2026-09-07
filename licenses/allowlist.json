@@ -29,6 +29,7 @@
     { "id": "HarfBuzzSharp.NativeAssets.macOS", "version": "8.3.1.3", "license": "MIT" },
     { "id": "HarfBuzzSharp.NativeAssets.WebAssembly", "version": "8.3.1.3", "license": "MIT" },
     { "id": "HarfBuzzSharp.NativeAssets.Win32", "version": "8.3.1.3", "license": "MIT" },
+    { "id": "Markdig", "version": "1.3.2", "license": "BSD-2-Clause" },
     { "id": "Microsoft.ApplicationInsights", "version": "2.23.0", "license": "MIT" },
     { "id": "Microsoft.Bcl.AsyncInterfaces", "version": "6.0.0", "license": "MIT" },
     { "id": "Microsoft.CodeCoverage", "version": "17.14.1", "license": "MIT" },

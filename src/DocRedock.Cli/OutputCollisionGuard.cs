@@ -66,6 +66,21 @@ internal static class OutputCollisionGuard
                     "Output path must differ from the input path; refusing to overwrite the source document even with --force. " +
                     $"Colliding output: {candidate}");
             }
+
+            // A hard link shares its target's (volume/device, file-index/inode) identity but is its
+            // own directory entry: it is neither literally the same path nor a symlink whose target
+            // resolves elsewhere, so PathsEqual above cannot see it. This check is deliberately last
+            // and separate from PathsEqual -- it never changes which candidates collide, only how the
+            // less obvious case is explained once one does.
+            var identityCollides = inputs.Any(input => SameFileIdentity(normalizedCandidate, input)) ||
+                inputParents.Any(parent => SameFileIdentity(normalizedCandidate, parent));
+            if (identityCollides)
+            {
+                throw new OutputCollidesWithInputException(
+                    "Output path must differ from the input path; refusing to overwrite the source document even with --force. " +
+                    "The output refers to the same file as an input, e.g. through a hard link. " +
+                    $"Colliding output: {candidate}");
+            }
         }
     }
 
@@ -74,6 +89,21 @@ internal static class OutputCollisionGuard
         if (PathComparer.Equals(normalizedA, normalizedB)) return true;
         return PathComparer.Equals(ResolveReal(normalizedA), ResolveReal(normalizedB));
     }
+
+    // Best-effort, like ResolveReal below: a failure on either side (missing path, unsupported
+    // platform/CPU architecture, permissions) simply means this extra check contributes nothing --
+    // it can only ever recognize a real collision PathsEqual missed, never manufacture a false one.
+    // Directories are compared too where the platform can identify them (Unix `stat`; Windows
+    // reports no identity for a directory, see FileIdentity): that is what lets the parent-directory
+    // rule above catch an output directory reached through a second path to the same directory
+    // (a macOS firmlink such as /System/Volumes/Data/..., a bind mount) that ResolveReal cannot see.
+    private static bool SameFileIdentity(string normalizedA, string normalizedB) =>
+        Exists(normalizedA) && Exists(normalizedB) &&
+        FileIdentity.TryGet(normalizedA, out var identityA) &&
+        FileIdentity.TryGet(normalizedB, out var identityB) &&
+        identityA == identityB;
+
+    private static bool Exists(string normalizedPath) => File.Exists(normalizedPath) || Directory.Exists(normalizedPath);
 
     private static string Normalize(string path)
     {

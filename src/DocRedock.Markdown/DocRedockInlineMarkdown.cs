@@ -276,12 +276,22 @@ public static class DocRedockInlineMarkdown
     // Internal (not private) so DocRedockMarkdown.cs can apply the same base
     // character-set escaping to plain TextNodeContent bodies and table cells;
     // the reversible round trip depends on both writers using one definition.
+    //
+    // '[' and ']' belong to the set (D07): literal "[text](url)", "![alt](path)",
+    // "[ref][id]" and a "[id]: url" reference definition occurring in the SOURCE
+    // document must stay plain text instead of becoming live Markdown. Escaping
+    // '[' alone is what neutralizes all of those; ']' is escaped too so the pair
+    // stays symmetric. '(' and ')' are intentionally left alone -- they are
+    // harmless once '[' is escaped, and escaping them hurts readability. Real
+    // hyperlinks are unaffected: AppendStyledText wraps the already-escaped label
+    // in its own unescaped brackets. Parse consumes any "\x" as the literal x, so
+    // Parse(Serialize(runs)) still round-trips.
     internal static string Escape(string value)
     {
         var output = new StringBuilder(value.Length);
         foreach (var character in value)
         {
-            if (character is '\\' or '*' or '_' or '~' or '`') output.Append('\\');
+            if (character is '\\' or '*' or '_' or '~' or '`' or '[' or ']') output.Append('\\');
             output.Append(character switch { '&' => "&amp;", '<' => "&lt;", '>' => "&gt;", _ => character.ToString() });
         }
         return output.ToString();

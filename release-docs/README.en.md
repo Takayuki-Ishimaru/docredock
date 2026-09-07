@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.6 Public Beta
+
+- [v0.2.6 release notes](RELEASE_NOTES_v0.2.6.en.md)
+- Preserved source text that resembles links, images, or reference definitions as visible text
+- Kept real links, images, formatting, and generated diagrams, and improved escaping in experimental HTML rendering
+- Rejected CLI output through hard links identified as the same file as an input
+
 ### v0.2.5 Public Beta
 
 - [v0.2.5 release notes](RELEASE_NOTES_v0.2.5.en.md)

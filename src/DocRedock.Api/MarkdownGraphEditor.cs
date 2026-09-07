@@ -343,8 +343,11 @@ public sealed class MarkdownGraphEditor
     }
 
     // Mirrors DocRedockMarkdown.EscapePlainText's escape set: the base rich-text
-    // character set ('\ * _ ~ `') plus the extra line-leading markers it also
-    // backslash-escapes ('# > + - . ) [ ] | ='). '>', '|' and '=' are included so
+    // character set ('\ * _ ~ ` [ ]') plus the extra line-leading markers it also
+    // backslash-escapes ('# > + - . ) | ='). '[' and ']' moved into the base set
+    // with D07 (literal "[text](url)" in a source document must stay plain text);
+    // they were already accepted here, so projections written before that fix keep
+    // decoding unchanged. '>', '|' and '=' are included so
     // a hand-typed "\>", "\|" or "\=" in a plain-text block still decodes even
     // though this writer never emits '>'/'|' that way ('>' goes out as "&gt;",
     // '|' only matters inside table cells, which ParseTableRow leaves escaped
@@ -495,8 +498,38 @@ public sealed class MarkdownGraphEditor
         if (TryReadHtmlImage(text, out var attributes) && attributes.TryGetValue("alt", out var htmlAlt))
             return System.Net.WebUtility.HtmlDecode(htmlAlt);
         var open = text.IndexOf('[');
-        var close = text.IndexOf("](", StringComparison.Ordinal);
-        return open >= 0 && close > open ? text[(open + 1)..close].Replace("\\]", "]", StringComparison.Ordinal) : text;
+        var close = IndexOfLabelEnd(text, open);
+        return open >= 0 && close > open ? UnescapeLinkLabel(text[(open + 1)..close]) : text;
+    }
+
+    // Exact inverse of DocRedockMarkdown.EscapeLinkText, which backslash-escapes '\', '[' and ']'
+    // in an image/link label (D07). Both passes run left to right, so an escaped "\]" inside the
+    // label never terminates it early and a label containing a literal backslash survives intact.
+    private static int IndexOfLabelEnd(string text, int open)
+    {
+        if (open < 0) return -1;
+        for (var index = open + 1; index + 1 < text.Length; index++)
+        {
+            if (text[index] == '\\') { index++; continue; }
+            if (text[index] == ']' && text[index + 1] == '(') return index;
+        }
+        return -1;
+    }
+
+    private static string UnescapeLinkLabel(string value)
+    {
+        var output = new System.Text.StringBuilder(value.Length);
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (value[index] == '\\' && index + 1 < value.Length && value[index + 1] is '\\' or '[' or ']')
+            {
+                output.Append(value[index + 1]);
+                index++;
+                continue;
+            }
+            output.Append(value[index]);
+        }
+        return output.ToString();
     }
 
     private static bool TryReadHtmlImage(string text, out IReadOnlyDictionary<string, string> attributes)

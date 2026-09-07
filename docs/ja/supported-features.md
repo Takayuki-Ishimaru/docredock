@@ -1,10 +1,10 @@
-# v0.2.5 の対応機能
+# v0.2.6 の対応機能
 
 [English](../en/supported-features.md) | 日本語
 
-DocRedock v0.2.5 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
+DocRedock v0.2.6 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX、PDFをローカルの**閲覧用Markdown**へ変換する操作をサポートします。
 
-| 機能 | v0.2.5での扱い |
+| 機能 | v0.2.6での扱い |
 | --- | --- |
 | DOCX／XLSX／PPTX → 閲覧用Markdown | Public Betaとしてサポート。CLI既定 |
 | `visible`／`complete`／`sanitized` | サポート |
@@ -16,7 +16,7 @@ DocRedock v0.2.5 Public Betaでは、デスクトップGUIでDOCX、XLSX、PPTX�
 
 閲覧用出力は、見出し、段落、入れ子リスト、空継続セルを使う結合表、画像／OCR、コード、強調、改行、数式キャッシュ警告、対応する視覚要素の意味投影またはfallback、PPTX bulletの正規化に対応します。
 
-さらに、表セル内の段落境界と段落内改行（`<br>`）、Word の入れ子表をセル内の元の順序に沿って折り畳む表示、コンテンツコントロール（`w:sdt`）内の本文、Word 数式（OMML）の線形テキスト化（`DocxMathLinearized` 警告付き。例: `E=mc^2`。数式の前後、sdt 内の段落、インライン sdt を含む段落、`mc:AlternateContent` 由来の段落（入れ子を含む）、本文中のテキストボックスは F1 編集可能で、数式の線形テキストを変更すると `DocxMathReplaced` 警告付きで通常テキストに置き換わる）、PowerPoint のレイアウト／マスター上の可視文字（プレースホルダを除く）、Excel の表示形式（ゼロ埋め、千／百万単位の縮尺、指数・工学表記、分数、条件付きセクション、負数・ゼロのセクション、通貨記号などのリテラル）に対応します。原文に含まれる `*` `_` `~` バッククォート、行頭の `#` `-` `1.`、HTMLタグ風の文字列は Markdown 構文として解釈されないようエスケープします。 往復用出力（`--profile roundtrip`）でも同じ規則でエスケープし、編集後の復元時に対称に戻します（仕様は [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.5/docs/DRMD_MARKDOWN_SPEC.md) を参照）。
+さらに、表セル内の段落境界と段落内改行（`<br>`）、Word の入れ子表をセル内の元の順序に沿って折り畳む表示、コンテンツコントロール（`w:sdt`）内の本文、Word 数式（OMML）の線形テキスト化（`DocxMathLinearized` 警告付き。例: `E=mc^2`。数式の前後、sdt 内の段落、インライン sdt を含む段落、`mc:AlternateContent` 由来の段落（入れ子を含む）、本文中のテキストボックスは F1 編集可能で、数式の線形テキストを変更すると `DocxMathReplaced` 警告付きで通常テキストに置き換わる）、PowerPoint のレイアウト／マスター上の可視文字（プレースホルダを除く）、Excel の表示形式（ゼロ埋め、千／百万単位の縮尺、指数・工学表記、分数、条件付きセクション、負数・ゼロのセクション、通貨記号などのリテラル）に対応します。原文に含まれる `*` `_` `~` バッククォート、`[` `]`、行頭の `#` `-` `1.`、HTMLタグ風の文字列は Markdown 構文として解釈されないようエスケープします。そのため原文に文字列として書かれた `[text](url)` `![alt](path)` `[ref][id]` `[id]: url` はリンクや画像に変わらず（`[id]: url` の行は参照定義として吸収され消えることもなく）そのまま文字として残り、実際のハイパーリンクや画像は従来どおり出力されます。 往復用出力（`--profile roundtrip`）でも同じ規則でエスケープし、編集後の復元時に対称に戻します（仕様は [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.6/docs/DRMD_MARKDOWN_SPEC.md) を参照）。
 
 ## 図・フローの意味保持
 
@@ -45,4 +45,4 @@ DOCX drawingとPDF vector topologyは完全復元しません。対応fragment�
 
 閲覧用Markdownは一方向の出力です。`.drmd`と`.drmdpkg`は実験用で、元文書由来の情報を含む可能性があります。元文書を正本として保持してください。
 
-この文書が利用者向けサポート範囲の正本です。[v0.2.5リリースノート](../../release-docs/RELEASE_NOTES_v0.2.5.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。
+この文書が利用者向けサポート範囲の正本です。[v0.2.6リリースノート](../../release-docs/RELEASE_NOTES_v0.2.6.md)、[利用ガイド](user-guide.md)、[実験機能](experimental-features.md)、[セキュリティとプライバシー](security-and-privacy.md)も参照してください。

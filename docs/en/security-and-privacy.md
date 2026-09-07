@@ -22,6 +22,10 @@ DocRedock applies limits and checks for XML DTDs, archive traversal/expansion, s
 
 Process untrusted documents with isolated user privileges and apply your organization's malware controls.
 
+## Output path protection
+
+Every CLI command rejects an `--output` (or destination) path that refers to the same file as one of its own inputs -- the identical path, a case-only variant on a case-insensitive volume (macOS, Windows), a symlink to it, or a hard link identified as the same file -- even with `--force`. `--force` only replaces a stale previous output; it never authorizes overwriting the command's own source document. A colliding output fails with exit code 2 and writes nothing.
+
 ## Report a vulnerability
 
 Do not post confidential reports or real documents in a public issue. Follow [SECURITY.md](../../SECURITY.md) and use a minimal synthetic reproducer.

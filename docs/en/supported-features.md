@@ -1,10 +1,10 @@
-# v0.2.5 Supported Features
+# v0.2.6 Supported Features
 
 [日本語](../ja/supported-features.md) | English
 
-DocRedock v0.2.5 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
+DocRedock v0.2.6 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion to **Readable Markdown** in the desktop GUI.
 
-| Feature | v0.2.5 status |
+| Feature | v0.2.6 status |
 | --- | --- |
 | DOCX/XLSX/PPTX → Readable Markdown | Supported as Public Beta; CLI default |
 | `visible`, `complete`, `sanitized` content policies | Supported |
@@ -16,7 +16,7 @@ DocRedock v0.2.5 Public Beta supports local DOCX, XLSX, PPTX, and PDF conversion
 
 Readable output supports headings, paragraphs, nested lists, merged tables with blank continuation cells, images/OCR, code, emphasis, hard breaks, spreadsheet formula-cache markers, semantic projection or fallback for supported visuals, and normalized PPTX bullets.
 
-It also keeps paragraph boundaries and in-paragraph line breaks inside table cells (`<br>`), folds Word nested tables into their host cell in source order, extracts body content inside content controls (`w:sdt`), linearizes Word equations (OMML) into text with a `DocxMathLinearized` warning (for example `E=mc^2`; text around an equation, paragraphs inside or containing content controls, blocks under `mc:AlternateContent` (nested forks included), and body text boxes stay F1-editable, and retyping the equation text replaces it with plain text under a `DocxMathReplaced` warning), exports visible non-placeholder text from PowerPoint layouts and masters, and renders Excel display formats (zero padding, thousands/millions scaling, scientific and engineering notation, fractions, conditional sections, negative/zero sections, literal currency symbols). Literal `*`, `_`, `~`, backticks, line-start `#`/`-`/`1.`, and HTML-like text in the source are escaped so they are never interpreted as Markdown syntax. Round-trip output (`--profile roundtrip`) applies the same escaping and the editor decodes it symmetrically on restore (see [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.5/docs/DRMD_MARKDOWN_SPEC.md)).
+It also keeps paragraph boundaries and in-paragraph line breaks inside table cells (`<br>`), folds Word nested tables into their host cell in source order, extracts body content inside content controls (`w:sdt`), linearizes Word equations (OMML) into text with a `DocxMathLinearized` warning (for example `E=mc^2`; text around an equation, paragraphs inside or containing content controls, blocks under `mc:AlternateContent` (nested forks included), and body text boxes stay F1-editable, and retyping the equation text replaces it with plain text under a `DocxMathReplaced` warning), exports visible non-placeholder text from PowerPoint layouts and masters, and renders Excel display formats (zero padding, thousands/millions scaling, scientific and engineering notation, fractions, conditional sections, negative/zero sections, literal currency symbols). Literal `*`, `_`, `~`, backticks, `[`, `]`, line-start `#`/`-`/`1.`, and HTML-like text in the source are escaped so they are never interpreted as Markdown syntax; source text that merely looks like `[text](url)`, `![alt](path)`, `[ref][id]` or a `[id]: url` reference definition therefore stays plain text instead of becoming a live link, an image request, or (for the definition line) disappearing entirely, while real hyperlinks and images still render. Round-trip output (`--profile roundtrip`) applies the same escaping and the editor decodes it symmetrically on restore (see [DRMD_MARKDOWN_SPEC](https://github.com/Takayuki-Ishimaru/docredock/blob/v0.2.6/docs/DRMD_MARKDOWN_SPEC.md)).
 
 ## Visual and flow semantics
 
@@ -45,4 +45,4 @@ DocRedock does not fully reconstruct DOCX drawing or PDF vector topology. It con
 
 Readable Markdown is one-way output. `.drmd` and `.drmdpkg` are experimental and may contain source-derived information. Keep the source document as the authoritative copy.
 
-This document is the canonical public-support statement. See the [v0.2.5 release notes](../../release-docs/RELEASE_NOTES_v0.2.5.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).
+This document is the canonical public-support statement. See the [v0.2.6 release notes](../../release-docs/RELEASE_NOTES_v0.2.6.en.md), [User guide](user-guide.md), [Experimental features](experimental-features.md), and [Security and privacy](security-and-privacy.md).

@@ -80,15 +80,24 @@ public static class MarkdownAstParser
         if (normalized.EndsWith('|')) normalized = normalized[..^1];
         var cells = new List<string>();
         var current = new System.Text.StringBuilder();
-        var escaped = false;
-        foreach (var character in normalized)
+        for (var index = 0; index < normalized.Length; index++)
         {
-            if (escaped) { current.Append(character); escaped = false; continue; }
-            if (character == '\\') { escaped = true; continue; }
+            var character = normalized[index];
+            // An escaped pipe ('\|') does not end the cell. Both characters are kept verbatim --
+            // rather than resolving the escape here -- so MarkdownRenderer's own backslash-escape
+            // handling (ProtectEscapes) decides the literal character uniformly with every other
+            // CommonMark escape, instead of this block-level splitter silently resolving (and for any
+            // OTHER escaped character, silently discarding the backslash from) cell text before the
+            // inline renderer ever sees it.
+            if (character == '\\' && index + 1 < normalized.Length && normalized[index + 1] == '|')
+            {
+                current.Append('\\').Append('|');
+                index++;
+                continue;
+            }
             if (character == '|') { cells.Add(current.ToString().Trim().Replace("<br>", "\n", StringComparison.Ordinal)); current.Clear(); continue; }
             current.Append(character);
         }
-        if (escaped) current.Append('\\');
         cells.Add(current.ToString().Trim().Replace("<br>", "\n", StringComparison.Ordinal));
         return cells;
     }

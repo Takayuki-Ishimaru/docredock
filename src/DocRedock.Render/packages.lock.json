@@ -8,14 +8,14 @@
       "docredock.markdown": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )"
         }
       },
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )"
         }
       }
     }
