@@ -60,6 +60,17 @@ Desktop GUI PDF input is available by default. CLI PDF export, restoration, and 
 - [ ] From published-binary smoke, persist exit code, markers, diagnostics, counts, fixture SHA-256, and output SHA-256 in CI verification records
 - [x] Describe DOCX connector and PDF vector topology as conditional support only; do not claim complete drawing/SmartArt/arbitrary-vector reconstruction
 
+## P0: Literal-text integrity in Markdown output
+
+All of the following are mandatory gates; none may be skipped. Passing the string-level tests alone is not sufficient evidence -- the parser-based gates and the real-file end-to-end tests must pass as well.
+
+- [ ] String-level escape tests in `ReadableMarkdownTests` / `DocRedockMarkdownTests` pass
+- [ ] The parser-based `MarkdownLiteralSyntaxGateTests.Gate1`-`Gate5` pass (no unintended link, image, or link reference definition; displayed text and order preserved; DRMD round trip unchanged)
+- [ ] Real-file DOCX/XLSX/PPTX end-to-end tests and the GUI/CLI parity test (`MarkdownLiteralSyntaxEndToEndTests`) pass
+- [ ] The generated-syntax regression tests (`MarkdownGeneratedSyntaxRegressionTests`) pass, confirming real hyperlinks, images, bold/italic, lists, Mermaid, and OCR details keep working
+- [ ] `tools/release-smoke-test.py`'s `exercise_literal_markdown_syntax` and `exercise_output_collision_guard` pass against all six RIDs' packaged binaries, with results recorded in release evidence
+- [ ] Record the rule "ordinary text stays text, real features stay features," and that output is identical between GUI and CLI
+
 ## Build and test
 
 Local verification is not a permanent publication condition. Record clean-clone, all-RID, signing/notarization, and structured visual-evidence gates for each target release.
@@ -87,7 +98,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] Publish win-x64, win-arm64, osx-x64, osx-arm64, linux-x64, and linux-arm64
 - [ ] Extract each artifact on its target OS/CPU or a trusted equivalent CI runner, then verify the CLI and GUI binary
 - [ ] On headless CI, construct MainWindow with Avalonia headless before packaging; verify PE/CPU for Windows, Mach-O/CPU/executable permission for macOS, and require the actual packaged GUI child process to stay alive under Xvfb for Linux
-- [ ] Exercise the target-release CLI version, visible/complete/sanitized policies, experimental gate, DOCX/XLSX/PPTX/PDF readable export, F0 SHA comparison, F1 editing, pack/unpack, and tamper rejection
+- [ ] Exercise the target-release CLI version, visible/complete/sanitized policies, experimental gate, DOCX/XLSX/PPTX/PDF readable export, F0 SHA comparison, F1 editing, pack/unpack, tamper rejection, literal-text integrity, and hard-link output-collision rejection
 - [ ] Run DOCX/XLSX/PPTX/PDF visual-semantics smoke against each extracted distribution and record the result in release evidence
 - [ ] Record in the README and release evidence that GUI PDF input is available by default while CLI PDF export/restore/render requires DOCREDOCK_ENABLE_EXPERIMENTAL=1
 - [ ] In an attended graphical environment, verify the GUI content-policy selector, complete warning, DOCREDOCK_DISABLE_UPDATE_CHECK=1, DOCX/XLSX/PPTX/PDF input, and the rendered appearance of Readable Markdown

@@ -546,6 +546,52 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task Export_readable_refuses_to_write_output_over_a_hard_link_to_the_source_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var hardLink = Path.Combine(fixture.Root, "source-hardlink.docx");
+        if (!HardLinkTestHelper.TryCreate(fixture.SourcePath, hardLink)) return; // unsupported file system
+        var beforeHash = await Sha256Async(fixture.SourcePath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.SourcePath, "--output", hardLink, "--profile", "readable", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Contains("hard link", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.SourcePath));
+        Assert.Equal(beforeHash, await Sha256Async(hardLink));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "source-hardlink.assets")));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
+    public async Task Export_roundtrip_refuses_to_write_output_over_a_hard_link_to_the_source_even_with_force()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var hardLink = Path.Combine(fixture.Root, "source-hardlink.docx");
+        if (!HardLinkTestHelper.TryCreate(fixture.SourcePath, hardLink)) return; // unsupported file system
+        var beforeHash = await Sha256Async(fixture.SourcePath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(
+            ["export", fixture.SourcePath, "--output", hardLink, "--profile", "roundtrip", "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Contains("hard link", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.SourcePath));
+        Assert.Equal(beforeHash, await Sha256Async(hardLink));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, "source-hardlink.drmd")));
+        Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
     public async Task Render_refuses_to_write_output_over_the_input_markdown_even_with_force()
     {
         using var fixture = new Fixture();
@@ -584,6 +630,32 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
         Assert.Equal(beforeHash, await Sha256Async(package));
         Assert.Empty(Directory.GetDirectories(fixture.Root, ".docredock-stage-*"));
+    }
+
+    [Fact]
+    public async Task Pack_sidecar_refuses_to_write_output_over_a_hard_link_to_the_markdown_even_with_force()
+    {
+        // pack --sidecar writes its zip output directly (SidecarContainer.PackToAsync), with no
+        // StagedOutputTransaction/staging-directory safety net -- OutputCollisionGuard is the only
+        // thing standing between this call and overwriting its own markdown input in place.
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var setup = new CliApplication(new StringWriter(), new StringWriter());
+        Assert.Equal((int)ExitCode.Success,
+            await setup.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+        var hardLink = Path.Combine(fixture.Root, "markdown-hardlink.md");
+        if (!HardLinkTestHelper.TryCreate(fixture.MarkdownPath, hardLink)) return; // unsupported file system
+        var beforeHash = await Sha256Async(fixture.MarkdownPath);
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var result = await app.RunAsync(["pack", fixture.MarkdownPath, "--sidecar", "--output", hardLink, "--force"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, result);
+        Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Contains("hard link", stderr.ToString(), StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(beforeHash, await Sha256Async(fixture.MarkdownPath));
+        Assert.Equal(beforeHash, await Sha256Async(hardLink));
     }
 
     private static async Task<string> Sha256Async(string path)

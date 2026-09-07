@@ -8,6 +8,12 @@
         "resolved": "6.0.4",
         "contentHash": "lkhqpF8Pu2Y7IiN7OntbsTtdbpR1syMsm2F3IgX6ootA4ffRqWL5jF7XipHuZQTdVuWG/gVAAcf8mjk8Tz0xPg=="
       },
+      "Markdig": {
+        "type": "Direct",
+        "requested": "[1.3.2, )",
+        "resolved": "1.3.2",
+        "contentHash": "fZgOC/3CswUrndjDTac70aQpYdtxbW5+5bRumR7vzvI2HJbkmgKisB1c9oT+GA6v0jB/JDR9BLa9FiPzQmaK6A=="
+      },
       "Microsoft.NET.Test.Sdk": {
         "type": "Direct",
         "requested": "[17.14.1, )",
@@ -289,37 +295,37 @@
           "Avalonia": "[12.1.1, )",
           "Avalonia.Desktop": "[12.1.1, )",
           "Avalonia.Themes.Fluent": "[12.1.1, )",
-          "DocRedock.Api": "[0.2.2, )",
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Formats.Pdf": "[0.2.2, )",
-          "DocRedock.Ocr.Tesseract": "[0.2.2, )",
-          "DocRedock.RoundTrip": "[0.2.2, )",
-          "DocRedock.VisualInference": "[0.2.2, )"
+          "DocRedock.Api": "[0.2.6, )",
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Formats.Pdf": "[0.2.6, )",
+          "DocRedock.Ocr.Tesseract": "[0.2.6, )",
+          "DocRedock.RoundTrip": "[0.2.6, )",
+          "DocRedock.VisualInference": "[0.2.6, )"
         }
       },
       "docredock.api": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Formats.OpenXml": "[0.2.2, )",
-          "DocRedock.Formats.Pdf": "[0.2.2, )",
-          "DocRedock.Markdown": "[0.2.2, )",
-          "DocRedock.Ocr.Tesseract": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )",
-          "DocRedock.Render": "[0.2.2, )",
-          "DocRedock.RoundTrip": "[0.2.2, )",
-          "DocRedock.VisualInference": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Formats.OpenXml": "[0.2.6, )",
+          "DocRedock.Formats.Pdf": "[0.2.6, )",
+          "DocRedock.Markdown": "[0.2.6, )",
+          "DocRedock.Ocr.Tesseract": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )",
+          "DocRedock.Render": "[0.2.6, )",
+          "DocRedock.RoundTrip": "[0.2.6, )",
+          "DocRedock.VisualInference": "[0.2.6, )"
         }
       },
       "docredock.cli": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Api": "[0.2.2, )",
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Markdown": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )",
-          "DocRedock.RoundTrip": "[0.2.2, )",
-          "DocRedock.VisualInference": "[0.2.2, )"
+          "DocRedock.Api": "[0.2.6, )",
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Markdown": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )",
+          "DocRedock.RoundTrip": "[0.2.6, )",
+          "DocRedock.VisualInference": "[0.2.6, )"
         }
       },
       "docredock.core": {
@@ -328,66 +334,66 @@
       "docredock.formats.openxml": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )",
-          "DocRedock.VisualInference": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )",
+          "DocRedock.VisualInference": "[0.2.6, )"
         }
       },
       "docredock.formats.pdf": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )",
-          "DocRedock.VisualInference": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )",
+          "DocRedock.VisualInference": "[0.2.6, )"
         }
       },
       "docredock.markdown": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )"
         }
       },
       "docredock.ocr.tesseract": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )"
         }
       },
       "docredock.providers.abstractions": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )"
         }
       },
       "docredock.render": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Markdown": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Markdown": "[0.2.6, )"
         }
       },
       "docredock.roundtrip": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )"
         }
       },
       "docredock.visualinference": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )"
         }
       },
       "docredock.worker": {
         "type": "Project",
         "dependencies": {
-          "DocRedock.Core": "[0.2.2, )",
-          "DocRedock.Formats.OpenXml": "[0.2.2, )",
-          "DocRedock.Formats.Pdf": "[0.2.2, )",
-          "DocRedock.Ocr.Tesseract": "[0.2.2, )",
-          "DocRedock.Providers.Abstractions": "[0.2.2, )"
+          "DocRedock.Core": "[0.2.6, )",
+          "DocRedock.Formats.OpenXml": "[0.2.6, )",
+          "DocRedock.Formats.Pdf": "[0.2.6, )",
+          "DocRedock.Ocr.Tesseract": "[0.2.6, )",
+          "DocRedock.Providers.Abstractions": "[0.2.6, )"
         }
       }
     }

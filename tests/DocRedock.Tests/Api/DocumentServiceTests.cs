@@ -593,7 +593,9 @@ public sealed class DocumentServiceTests
 
             var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
             Assert.Contains("Native body line", markdown, StringComparison.Ordinal);
-            Assert.Contains("> [PDF page 1: 1 embedded image(s) not extracted", markdown, StringComparison.Ordinal);
+            // The placeholder is projected as ordinary node text, so its leading bracket is
+            // backslash-escaped like any other literal '[' (D07); it still reads as "[PDF page 1: ...".
+            Assert.Contains("> \\[PDF page 1: 1 embedded image(s) not extracted", markdown, StringComparison.Ordinal);
         }
         finally { Directory.Delete(root, recursive: true); }
     }

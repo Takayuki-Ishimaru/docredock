@@ -600,6 +600,208 @@ public sealed class MarkdownRendererTests
                 Path.Combine(fixture.Root, "rendered.docx"), new RenderOptions(TemplatePath: template)));
     }
 
+    [Fact]
+    public async Task Html_render_treats_escaped_link_and_image_syntax_as_literal_text()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-links.html");
+        const string markdown = """
+            \[LABEL\](https://example.com/x)
+
+            !\[ALT\](image.png)
+
+            \[REF\]\[id\]
+
+            \[id\]: https://example.com/ref
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.DoesNotContain("href=\"https://example.com/x\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<img", html, StringComparison.Ordinal);
+        Assert.Contains("[LABEL](https://example.com/x)", html, StringComparison.Ordinal);
+        Assert.Contains("![ALT](image.png)", html, StringComparison.Ordinal);
+        Assert.Contains("[REF][id]", html, StringComparison.Ordinal);
+        Assert.Contains("[id]: https://example.com/ref", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_treats_escaped_emphasis_markers_as_literal_text()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-emphasis.html");
+        const string markdown = """
+            \*not emphasis\*
+
+            \_not italic\_
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.DoesNotContain("<em>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<strong>", html, StringComparison.Ordinal);
+        Assert.Contains("*not emphasis*", html, StringComparison.Ordinal);
+        Assert.Contains("_not italic_", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_keeps_private_use_characters_from_the_source_text_intact()
+    {
+        // Symbol fonts map glyphs into the Private Use Area, so such characters can legitimately
+        // occur in converted text. The escape placeholders the renderer uses internally must never
+        // be confused with them: the private-use character has to survive unchanged while the
+        // escaped bracket next to it still renders as a literal bracket.
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "private-use.html");
+        const string markdown = "\uE041 marker \\[x\\](y) \uE05B";
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("\uE041 marker [x](y) \uE05B", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<a ", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_keeps_a_backslash_literal_inside_a_code_span()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-code.html");
+        const string markdown = "`a\\[b`";
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<code>a\\[b</code>", html, StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_creates_a_real_link_when_only_the_label_has_escaped_brackets()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "real-link.html");
+        const string markdown = "[see \\[spec\\]](https://example.com/real)";
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<a href=\"https://example.com/real\">see [spec]</a>", html, StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_treats_an_escaped_bracket_in_a_table_cell_as_literal_text()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-table.html");
+        const string markdown = """
+            | Column |
+            | --- |
+            | \[x\](y) |
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.DoesNotContain("href=\"y\"", html, StringComparison.Ordinal);
+        Assert.Contains("[x](y)", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_treats_escaped_line_start_markers_as_a_literal_paragraph()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-blocks.html");
+        const string markdown = """
+            \# Not a heading
+
+            \- Not a list item
+
+            1\. Not a numbered item
+
+            \> Not a quote
+
+            \---
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.DoesNotContain("<h1", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<h2", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<ul>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<ol>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("<hr>", html, StringComparison.Ordinal);
+        Assert.Contains("<p># Not a heading</p>", html, StringComparison.Ordinal);
+        Assert.Contains("<p>- Not a list item</p>", html, StringComparison.Ordinal);
+        Assert.Contains("<p>1. Not a numbered item</p>", html, StringComparison.Ordinal);
+        Assert.Contains("<p>&gt; Not a quote</p>", html, StringComparison.Ordinal);
+        Assert.Contains("<p>---</p>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public void Parser_does_not_recognize_escaped_line_start_markers_as_block_syntax()
+    {
+        var document = MarkdownAstParser.Parse("""
+            \# Not a heading
+
+            \- Not a list item
+
+            1\. Not a numbered item
+            """);
+
+        Assert.Equal(3, document.Blocks.Count);
+        Assert.All(document.Blocks, block => Assert.IsType<MarkdownParagraph>(block));
+    }
+
+    [Fact]
+    public void Parser_preserves_backslash_escapes_in_table_cells_for_the_inline_renderer_to_resolve()
+    {
+        var document = MarkdownAstParser.Parse("""
+            | Column |
+            | --- |
+            | \[x\](y) |
+            """);
+
+        var table = Assert.IsType<MarkdownTable>(Assert.Single(document.Blocks));
+        Assert.Equal(@"\[x\](y)", Assert.Single(table.Rows)[0]);
+    }
+
+    [Fact]
+    public async Task Docx_render_treats_escaped_markdown_as_literal_text_in_paragraph_and_table_runs()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-link.docx");
+        const string markdown = """
+            \[LABEL\](https://example.com/x)
+
+            | Column |
+            | --- |
+            | \[x\](y) |
+            """;
+
+        await new MarkdownRenderer().RenderAsync(markdown, RenderFormat.Docx, output);
+
+        using var archive = ZipFile.OpenRead(output);
+        var xml = await ReadEntryAsync(archive, "word/document.xml");
+        Assert.Contains("[LABEL](https://example.com/x)", xml, StringComparison.Ordinal);
+        Assert.Contains("[x](y)", xml, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", xml, StringComparison.Ordinal);
+    }
+
     private sealed class Fixture : IDisposable
     {
         public string Root { get; } = Path.Combine(Path.GetTempPath(), "docredock-render-tests", Guid.NewGuid().ToString("N"));
@@ -612,6 +814,17 @@ public sealed class MarkdownRendererTests
         using var reader = new StreamReader(archive.GetEntry(name)!.Open());
         return await reader.ReadToEndAsync();
     }
+
+    private static string ExtractMain(string html)
+    {
+        var start = html.IndexOf("<main>", StringComparison.Ordinal) + "<main>".Length;
+        var end = html.IndexOf("</main>", StringComparison.Ordinal);
+        return html[start..end];
+    }
+
+    private static void AssertNoEscapePlaceholderLeak(string text) =>
+        Assert.False(text.Any(character => character is >= '\uFDD0' and <= '\uFDEF'),
+            "rendered output must not leak an internal escape placeholder character");
 
     private sealed class StubMermaidRenderer : IMermaidRenderer
     {

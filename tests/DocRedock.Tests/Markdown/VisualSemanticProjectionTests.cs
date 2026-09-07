@@ -237,6 +237,8 @@ public sealed class VisualSemanticProjectionTests
         var markdown = serializer.Serialize(graph);
 
         Assert.DoesNotContain("```mermaid", markdown, StringComparison.Ordinal);
-        Assert.Contains("START → [unlabeled shape: missing]", markdown, StringComparison.Ordinal);
+        // The fallback node's own text is plain-origin, so EscapeLiteral backslash-escapes its
+        // brackets (D07) -- a renderer still shows "START → [unlabeled shape: missing]".
+        Assert.Contains("START → \\[unlabeled shape: missing\\]", markdown, StringComparison.Ordinal);
     }
 }

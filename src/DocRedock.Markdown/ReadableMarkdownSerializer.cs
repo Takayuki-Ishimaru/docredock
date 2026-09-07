@@ -594,8 +594,9 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static void WriteImage(StringBuilder output, ReferenceNodeContent image)
     {
-        var alt = EscapeLiteral(image.AltText ?? "図").Replace("[", "\\[", StringComparison.Ordinal)
-            .Replace("]", "\\]", StringComparison.Ordinal);
+        // EscapeLiteral escapes '[' and ']' itself (D07); bracket-escaping the alt text a second
+        // time here would double the backslash and render a stray '\' inside the image label.
+        var alt = EscapeLiteral(image.AltText ?? "図");
         output.Append("![").Append(alt).Append("](").Append(MarkdownPathEncoder.Encode(image.Reference)).AppendLine(")").AppendLine();
     }
 
@@ -1957,8 +1958,16 @@ public sealed partial class ReadableMarkdownSerializer
     // apply this ONLY to plain-origin strings (see DisplayText/EscapedInlineText below) — applying it
     // to already-serialized rich text would double-escape real `**bold**`/`_italic_` markup.
     //
-    // Backslash-escapes the same set DocRedockInlineMarkdown.Escape uses (\ * _ ~ `), so a lone
-    // emphasis/code delimiter never survives as live syntax. `<` becomes `&lt;` only when it could
+    // Backslash-escapes the same set DocRedockInlineMarkdown.Escape uses (\ * _ ~ ` [ ]), so a lone
+    // emphasis/code delimiter never survives as live syntax. `[` and `]` are in that set (D07) so
+    // source text that merely LOOKS like Markdown -- `[text](url)`, `![alt](path)`, `[ref][id]`, and a
+    // `[id]: url` reference definition, which a renderer would otherwise consume and hide entirely --
+    // stays visible literal text. `(`, `)`, `!` and `:` are deliberately NOT escaped: escaping `[`
+    // alone already neutralizes every one of those forms, and escaping the rest only makes the
+    // readable output noisier. Real links/images are built by writers that add their own unescaped
+    // brackets around an EscapeLiteral'd label (WriteImage, SerializeReadableRuns), so they still work.
+    //
+    // `<` becomes `&lt;` only when it could
     // start a tag/comment/processing-instruction (next char is a letter, `/`, `!`, or `?`); the `>`
     // that appears to close such a tag is escaped too (`&gt;`) so `<b>text</b>` reads as literal
     // "<b>text</b>" instead of a dangling `>` next to an escaped `<`. A `>` with no preceding
@@ -1976,7 +1985,7 @@ public sealed partial class ReadableMarkdownSerializer
             var character = value[index];
             switch (character)
             {
-                case '\\' or '*' or '_' or '~' or '`':
+                case '\\' or '*' or '_' or '~' or '`' or '[' or ']':
                     output.Append('\\').Append(character);
                     break;
                 case '<':

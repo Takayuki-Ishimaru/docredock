@@ -219,7 +219,7 @@ public sealed class DocRedockMarkdownSerializer
         .Replace("\n", "", StringComparison.Ordinal);
 
     // Plain-text (TextNodeContent) bodies get the same base character escaping as
-    // rich-text runs (DocRedockInlineMarkdown.Escape: '\ * _ ~ `' -> backslash,
+    // rich-text runs (DocRedockInlineMarkdown.Escape: '\ * _ ~ ` [ ]' -> backslash,
     // '& < >' -> entities), plus protection for line-leading Markdown block
     // markers that would otherwise hijack the line when the file is re-read as
     // generic Markdown (heading, list bullet, ordered list, thematic break).
@@ -228,7 +228,8 @@ public sealed class DocRedockMarkdownSerializer
     // the text is individually backslash- or entity-escaped, so a line can never
     // start with a raw run of them afterwards) -- only '#', '-'/'+' bullets ('*'
     // bullets are covered by the base escape too), and bare '---'/'===' lines need
-    // a dedicated rule here.
+    // a dedicated rule here. A line-leading '[' -- the start of a link reference
+    // definition -- is covered by the base escape as well (D07).
     private static readonly Regex HeadingLineStart = new(@"(?m)^([ \t]{0,3})(?=#)", RegexOptions.Compiled);
     private static readonly Regex UnorderedListLineStart = new(@"(?m)^([ \t]{0,3})(?=[-+](?:[ \t]|\r?$))", RegexOptions.Compiled);
     private static readonly Regex OrderedListLineStart = new(@"(?m)^(?<indent>[ \t]{0,3})(?<num>\d{1,9})(?<delim>[.)])(?=[ \t]|\r?$)", RegexOptions.Compiled);
@@ -880,7 +881,14 @@ public sealed class DocRedockMarkdownSerializer
     private static string EscapeTableCell(string value) => DocRedockInlineMarkdown.Escape(value)
         .Replace("|", "\\|", StringComparison.Ordinal)
         .Replace("\r\n", "<br>", StringComparison.Ordinal).Replace("\n", "<br>", StringComparison.Ordinal);
-    private static string EscapeLinkText(string value) => value.Replace("]", "\\]", StringComparison.Ordinal);
+    // Image/link LABEL text only: the surrounding "![" / "](" is projection syntax, so the label
+    // needs its own escape for the characters that would end it early or be lost on the way back.
+    // '\' is escaped first, then '[' and ']' (D07), which keeps MarkdownGraphEditor.DecodeLinkLabel
+    // an exact left-to-right inverse even for a label that contains a backslash or a bracket.
+    private static string EscapeLinkText(string value) => value
+        .Replace("\\", "\\\\", StringComparison.Ordinal)
+        .Replace("[", "\\[", StringComparison.Ordinal)
+        .Replace("]", "\\]", StringComparison.Ordinal);
     private static string EscapeHtmlAttribute(string value) => value
         .Replace("&", "&amp;", StringComparison.Ordinal)
         .Replace("\"", "&quot;", StringComparison.Ordinal)

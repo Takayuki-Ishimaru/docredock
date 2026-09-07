@@ -60,6 +60,17 @@
 - [ ] `native-only`／`safe`／`balanced` のrelation assertion結果を記録した（positive／negativeを含む）
 - [x] DOCX connectorとPDF vector topologyは条件付き対応としてのみ記載し、完全drawing／SmartArt／任意vector graph再構成を対応済みと記載していない
 
+## P0: Markdown リテラル文字列の保全
+
+以下はすべて必須ゲートであり、一つも省略できない。文字列レベルのテストが成功しているだけでは十分性の証拠にならず、構文解析ベースのゲートと実ファイルによるend-to-endテストの成功も必要とする。
+
+- [ ] `ReadableMarkdownTests` / `DocRedockMarkdownTests` の文字列レベルのエスケープテストが成功する
+- [ ] 構文解析ベースの `MarkdownLiteralSyntaxGateTests.Gate1`〜`Gate5` が成功する（意図しないリンク・画像・リンク参照定義を生成しないこと、表示テキストと順序が保たれること、DRMD往復編集で差分が出ないことを検証する）
+- [ ] 実ファイル（DOCX／XLSX／PPTX）のend-to-endテストとGUI/CLI一致テスト（`MarkdownLiteralSyntaxEndToEndTests`）が成功する
+- [ ] 生成構文の回帰テスト（`MarkdownGeneratedSyntaxRegressionTests`）が成功し、実際のハイパーリンク・画像・太字／斜体・リスト・Mermaid・OCR詳細が引き続き機能することを確認した
+- [ ] `tools/release-smoke-test.py` の `exercise_literal_markdown_syntax` と `exercise_output_collision_guard` が対象6 RIDすべての配布バイナリで成功し、結果をリリース証跡に記録した
+- [ ] 「通常の文字列は文字列のまま、実際の機能は機能のまま」という原則と、GUIとCLIで出力が一致することを明記した
+
 ## ビルドとテスト
 
 ローカル検証結果は恒久的な公開条件ではありません。clean clone、全RID、署名／notarization、構造化visual evidenceの各ゲートを、対象releaseごとに記録してください。
@@ -87,7 +98,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] win-x64、win-arm64、osx-x64、osx-arm64、linux-x64、linux-arm64 を publish した
 - [ ] 各成果物を対象 OS/CPU の実機または信頼できる CI runner で展開し、CLI と GUI バイナリを検証した
 - [ ] headless CI ではパッケージ前にAvalonia headlessでMainWindowを構築し、Windows GUIのPE形式・CPU、macOS GUIのMach-O形式・CPU・実行権限を検証し、LinuxではXvfb上で実配布GUI子プロセスの生存を確認した
-- [ ] 対象releaseのCLIバージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否を確認した
+- [ ] 対象releaseのCLIバージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否、Markdownリテラル文字列の保全、ハードリンク出力の衝突拒否を確認した
 - [ ] 展開後の実バイナリでDOCX／XLSX／PPTX／PDF visual-semantics smokeを実行し、結果をリリース証跡に記録した
 - [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換／復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
 - [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX／PDF入力と閲覧用Markdownの見た目を確認した

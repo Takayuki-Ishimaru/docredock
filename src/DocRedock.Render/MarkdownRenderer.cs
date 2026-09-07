@@ -46,6 +46,14 @@ public sealed record RenderReport(string Operation, RenderFormat Format, string 
 public sealed class MarkdownRenderer
 {
     private const int MaxMermaidDiagrams = 32;
+    // The 32 ASCII punctuation characters CommonMark allows a backslash to escape, in code-point
+    // order. While inline text is tokenized, an escaped one is stood in for by the Unicode
+    // noncharacter U+FDD0 + its index here: the U+FDD0..U+FDEF block is reserved by Unicode for
+    // exactly this kind of internal, never-interchanged use, so unlike a private-use character it
+    // can never collide with a symbol-font glyph that a source document legitimately contains.
+    private const string AsciiPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+    private const char PlaceholderBase = '\uFDD0';
+    private const char PlaceholderLast = '\uFDEF';
     private static readonly Regex HtmlInlineToken = new(
         @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*|_(?<emUnderscore>[^_\r\n]+)_",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -328,17 +336,20 @@ public sealed class MarkdownRenderer
 
     private static string HtmlInline(string value, string? sourceDirectory = null, string? outputPath = null)
     {
-        var output = new StringBuilder(value.Length + 32);
+        var protectedValue = ProtectEscapes(value);
+        var output = new StringBuilder(protectedValue.Length + 32);
         var cursor = 0;
-        foreach (Match match in HtmlInlineToken.Matches(value))
+        foreach (Match match in HtmlInlineToken.Matches(protectedValue))
         {
-            output.Append(HtmlText(value[cursor..match.Index]));
+            output.Append(HtmlText(protectedValue[cursor..match.Index]));
+            var imageUrl = DecodePlaceholdersVerbatim(match.Groups["imageUrl"].Value);
+            var linkUrl = DecodePlaceholdersVerbatim(match.Groups["linkUrl"].Value);
             if (match.Groups["safeTag"].Success) output.Append(match.Value);
-            else if (match.Groups["imageUrl"].Success && IsSafeHtmlUrl(match.Groups["imageUrl"].Value, image: true))
-                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(ResolveHtmlImageUrl(match.Groups["imageUrl"].Value, sourceDirectory, outputPath)))
+            else if (match.Groups["imageUrl"].Success && IsSafeHtmlUrl(imageUrl, image: true))
+                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(ResolveHtmlImageUrl(imageUrl, sourceDirectory, outputPath)))
                     .Append("\" alt=\"").Append(Html(match.Groups["imageAlt"].Value)).Append("\">");
-            else if (match.Groups["linkUrl"].Success && IsSafeHtmlUrl(match.Groups["linkUrl"].Value, image: false))
-                output.Append("<a href=\"").Append(Html(match.Groups["linkUrl"].Value)).Append("\">").Append(Html(match.Groups["linkText"].Value)).Append("</a>");
+            else if (match.Groups["linkUrl"].Success && IsSafeHtmlUrl(linkUrl, image: false))
+                output.Append("<a href=\"").Append(Html(linkUrl)).Append("\">").Append(Html(match.Groups["linkText"].Value)).Append("</a>");
             else if (match.Groups["code"].Success) output.Append("<code>").Append(Html(match.Groups["code"].Value)).Append("</code>");
             else if (match.Groups["strike"].Success) output.Append("<del>").Append(Html(match.Groups["strike"].Value)).Append("</del>");
             else if (match.Groups["strong"].Success) output.Append("<strong>").Append(Html(match.Groups["strong"].Value)).Append("</strong>");
@@ -347,7 +358,94 @@ public sealed class MarkdownRenderer
             else output.Append(Html(match.Value));
             cursor = match.Index + match.Length;
         }
-        output.Append(HtmlText(value[cursor..]));
+        output.Append(HtmlText(protectedValue[cursor..]));
+        return output.ToString();
+    }
+
+    // CommonMark backslash escapes (https://spec.commonmark.org/current/#backslash-escapes): a
+    // backslash followed by an ASCII punctuation character is that literal character and must not
+    // start or end emphasis, code spans, links, or images; escapes are not processed inside code
+    // spans or link/image destinations. ReadableMarkdownSerializer.EscapeLiteral and
+    // DocRedockInlineMarkdown.Escape (D07) rely on the reader honouring this -- without it this
+    // renderer's own regex tokenizer (HtmlInlineToken above) has no notion of escaping and turns an
+    // escaped literal such as "\[LABEL\](url)" back into a live link with a stray backslash left
+    // over, and in a table cell the backslash was silently dropped upstream while the link stayed
+    // live (see MarkdownAstParser.SplitTableRow).
+    //
+    // Rather than teach the tokenizer's regex about escaping directly, every backslash-escaped
+    // punctuation character is replaced with an opaque placeholder in the Unicode Private Use Area
+    // (U+FDD0 plus the punctuation's index in AsciiPunctuation) before the regex ever runs. None of the regex's
+    // character classes (`[^\]]`, `[^`\r\n]`, a bare `*`, `_`, ...) can match a placeholder, so an
+    // escaped delimiter can no longer start or end syntax -- and an escaped closing bracket inside a
+    // link/image label (`[see \[spec\]](url)`) is simply skipped over by `[^\]]+` the same way,
+    // letting the existing regex find the real, unescaped delimiters with no extra bracket-matching
+    // logic. Html/HtmlText decode the placeholder back to the literal character wherever they emit
+    // text; link/image URLs instead go through DecodePlaceholdersVerbatim, which restores the
+    // original two-character "\X" sequence, since escapes are not processed inside a destination.
+    private static string ProtectEscapes(string value)
+    {
+        if (value.IndexOf('\\') < 0) return value;
+        var output = new StringBuilder(value.Length);
+        var index = 0;
+        while (index < value.Length)
+        {
+            var character = value[index];
+            if (character == '`')
+            {
+                // Mirrors HtmlInlineToken's own code-span rule exactly (a single backtick, one or
+                // more characters that are not a backtick/CR/LF, then a single backtick) so a span
+                // recognized here is always the span the tokenizer recognizes later. Escapes are not
+                // processed inside code spans, so the whole span is copied through untouched.
+                var close = -1;
+                for (var probe = index + 1; probe < value.Length; probe++)
+                {
+                    if (value[probe] == '`') { close = probe; break; }
+                    if (value[probe] is '\r' or '\n') break;
+                }
+                if (close > index + 1)
+                {
+                    output.Append(value, index, close - index + 1);
+                    index = close + 1;
+                    continue;
+                }
+                output.Append('`');
+                index++;
+                continue;
+            }
+            if (character == '\\' && index + 1 < value.Length && IsAsciiPunctuation(value[index + 1]))
+            {
+                output.Append((char)(PlaceholderBase + AsciiPunctuation.IndexOf(value[index + 1])));
+                index += 2;
+                continue;
+            }
+            output.Append(character);
+            index++;
+        }
+        return output.ToString();
+    }
+
+    private static bool IsAsciiPunctuation(char character) => AsciiPunctuation.IndexOf(character) >= 0;
+
+    private static bool IsPlaceholder(char character) => character is >= PlaceholderBase and <= PlaceholderLast;
+
+    private static string DecodePlaceholders(string value)
+    {
+        if (value.Length == 0) return value;
+        var output = new StringBuilder(value.Length);
+        foreach (var character in value)
+            output.Append(IsPlaceholder(character) ? AsciiPunctuation[character - PlaceholderBase] : character);
+        return output.ToString();
+    }
+
+    private static string DecodePlaceholdersVerbatim(string value)
+    {
+        if (value.Length == 0) return value;
+        var output = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (IsPlaceholder(character)) output.Append('\\').Append(AsciiPunctuation[character - PlaceholderBase]);
+            else output.Append(character);
+        }
         return output.ToString();
     }
 
@@ -384,7 +482,7 @@ public sealed class MarkdownRenderer
                !image && uri.Scheme.Equals(Uri.UriSchemeMailto, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string Html(string value) => System.Net.WebUtility.HtmlEncode(value);
+    private static string Html(string value) => System.Net.WebUtility.HtmlEncode(DecodePlaceholders(value));
 
     private static string ValidateTemplate(string path, RenderFormat format)
     {
