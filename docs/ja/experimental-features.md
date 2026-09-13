@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/experimental-features.md)
 
-> v0.2.6 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
+> v0.2.7 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
 
 CLIを起動する前に環境変数を設定します。
 
@@ -21,6 +21,10 @@ $env:DOCREDOCK_ENABLE_EXPERIMENTAL = "1"
 ## PDF入力とOCR
 
 PDF抽出はネイティブテキストをページ単位で保持します。文字のないページのOCRには、利用可能なPDF rasterizerとOCR providerが必要です。`DOCREDOCK_PDF_RASTERIZER`による明示設定、PATH上のpdftoppm／mutoolの順で探索しますが、これらのツールは同梱しません。利用可否は`docredock doctor`で確認でき、`DOCREDOCK_DISABLE_PDF_RASTERIZER=1`で探索を無効にできます。利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
+
+## Markdown生成（render）
+
+`render`はインラインMarkdownを一度だけ解釈し、そのひとつの解釈からすべての出力形式を書き出すため、HTML・DOCX・PPTX・XLSX・PDFのテキストは一致します。文字参照は共通のポリシーに従い、WHATWG HTML5 のセミコロン付き名前 2,125 件すべてに対応します。名前は大文字・小文字を区別し、`&NotEqualTilde;` などの 2 コードポイント展開にも対応します。`&amp;`や`&copy;`などの名前付き参照、10進の`&#65;`、16進の`&#x41;`はそれぞれが示す文字に解決し、未知の名前やセミコロンのない記述はリテラルのテキストのまま残ります。コードスパンとフェンスコードブロックの中の参照は記述どおりに保持します。HTML出力は解決後のテキストを一度だけエスケープするため、`&lt;u&gt;`のようにタグを綴ったテキストはテキストとして表示され、マークアップになることはありません。
 
 ## PDF生成とフォント
 

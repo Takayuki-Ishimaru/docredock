@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.2.6 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
+このガイドは、v0.2.7 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -94,6 +94,8 @@ CFF／CFF2、グリフ不足、不正なcollection、埋め込み禁止フォン
     docredock doctor --json
 
 ready は依存関係を実測して利用可能、partial は一部の機能または OCR 言語だけ利用可能、unavailable は不足または無効化された状態です。ネイティブPDF OCRも内容によってpartialになる場合があります。画像PDFの OCR には OCR engine と PDF rasterizer の両方が必要です。rasterizer は明示パス（DOCREDOCK_PDF_RASTERIZER）、次に PATH 上の pdftoppm、mutool の順で探索します。探索を無効化する場合は DOCREDOCK_DISABLE_PDF_RASTERIZER=1 を設定します。未検出時は pdftoppm または mutool をインストールするか、実行ファイルのパスを設定してください。fallbackはページあたり最大100 path・32,768文字で、圧縮時もネイティブテキストを保持します。
+
+**Windows で OCR を有効にする。** Windows Media OCR（ネイティブ provider。`ocr-native`／`windows-media`として報告されます）を使うには、言語ごとの OCR 言語機能が必要です。これは表示言語とは別の、任意インストールの Windows コンポーネントです。日本語を表示言語として追加しただけでは、日本語 OCR は有効になりません。実際に何がインストールされているかは `docredock doctor`（または `docredock doctor --json`）で確認できます。利用可能な言語パックが見つかると `ocr-native` は `ready` になり、`action` に不足している言語と追加方法が具体的に示されます。言語パックを追加するには、設定 > 時刻と言語 > 言語と地域 > 言語を追加 > (言語) > オプション > 「光学式文字認識 (OCR)」を使うか、管理者権限の PowerShell で `Add-WindowsCapability -Online -Name Language.OCR~~~ja-JP~0.0.1.0`（日本語）／`Language.OCR~~~en-US~0.0.1.0`（英語）を実行します。PDF rasterizer（pdftoppm／mutool）はこれとは無関係です。rasterizer が必要になるのは画像のみの PDF ページを OCR する場合だけで、DOCX/XLSX/PPTX に埋め込まれた画像の OCR や、すでにネイティブテキストを持つ PDF ページには影響しません。そのため rasterizer が未検出でも OCR トグルは無効化されなくなりました。Windows Media OCR が利用できない場合は、可搬な代替として Tesseract を導入してください（[対応状況](supported-features.md)を参照）。
 
 各 capability には tier（`required`: docx-readable、xlsx-readable、pptx-readable、pdf-text／それ以外はすべて `optional`。OCR、PDF rasterizer、mermaid-render を含む）が付きます。素の `docredock doctor` と `docredock doctor --json` は常に同じ終了コードを返します。必須 capability がすべて ready なら 0、そうでなければ 1 です。optional な不足は出力に表示されますが終了コードには影響しません。`--strict` を付けると、optional を含めどれか1つでも ready でない capability があれば終了コード1になります。ただし、その optional な不足がすでに ready な代替手段で満たされている場合（`satisfied_by` で表示）は例外です。たとえばネイティブ OCR ヘルパーが同梱されないプラットフォームでは、Tesseract が ready になると `ocr-native` は `satisfied_by: "tesseract"` を報告し、`--strict` でもこの不足では失敗しません。`partial` な代替手段は満たしたことにはなりません。JSON レポートには既存フィールドに加えて `tier`・`satisfied_by`・`strict`・`exit_code`・`summary`（`required_ready`・`optional_gaps`・`strict_failures`）が追加されます。
 

@@ -183,6 +183,88 @@ public sealed class CapabilityReporterTests
     }
 
     [Fact]
+    public void Windows_ocr_language_probe_listing_japanese_and_english_is_ready()
+    {
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(true, "[\"ja-JP\",\"en-US\"]"),
+            "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+
+        Assert.Equal("ready", status.Status);
+        Assert.Equal("windows-media", status.Provider);
+        Assert.Contains("Japanese", status.Action!, StringComparison.Ordinal);
+        Assert.Contains("English", status.Action!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_ocr_language_probe_listing_only_english_names_the_missing_japanese_install_action()
+    {
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(true, "[\"en-US\"]"), "powershell.exe");
+
+        // English still works, so overall the function is ready; the gap is named so the user
+        // knows exactly which language feature to add rather than guessing.
+        Assert.Equal("ready", status.Status);
+        Assert.Contains("Japanese", status.Action!, StringComparison.Ordinal);
+        Assert.Contains("Language.OCR~~~ja-JP", status.Action!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_ocr_language_probe_listing_only_japanese_names_the_missing_english_install_action()
+    {
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(true, "[\"ja-JP\"]"), "powershell.exe");
+
+        Assert.Equal("ready", status.Status);
+        Assert.Contains("English", status.Action!, StringComparison.Ordinal);
+        Assert.Contains("Language.OCR~~~en-US", status.Action!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_ocr_language_probe_listing_no_usable_language_is_unavailable_with_install_action()
+    {
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(true, "[\"fr-FR\"]"), "powershell.exe");
+
+        Assert.Equal("unavailable", status.Status);
+        Assert.Contains("Add-WindowsCapability", status.Action!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_ocr_language_probe_failure_with_a_stderr_reason_is_unavailable_with_that_reason()
+    {
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(false, string.Empty, "DRMD_OCR_FAILED: script execution is disabled by policy."),
+            "powershell.exe");
+
+        Assert.Equal("unavailable", status.Status);
+        Assert.Contains("script execution is disabled by policy", status.Action!, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Windows_ocr_language_probe_that_produced_no_stderr_is_partial_not_unavailable()
+    {
+        // RunBoundedAsync reports an empty StandardError both when the probe times out and when it
+        // cannot be distinguished from that; treat this ambiguous case as "partial" rather than
+        // claiming with no evidence that no language pack is installed.
+        var status = CapabilityReporter.DescribeWindowsOcrLanguages(
+            new CapabilityProbeResult(false, string.Empty), "powershell.exe");
+
+        Assert.Equal("partial", status.Status);
+    }
+
+    [Theory]
+    [InlineData("[\"ja-JP\",\"en-US\"]", 2)]
+    [InlineData("not json", 0)]
+    [InlineData("", 0)]
+    [InlineData("\"ja-JP\"", 1)]
+    public void Windows_ocr_language_tag_parsing_tolerates_malformed_or_bare_output(string standardOutput, int expectedCount)
+    {
+        var tags = CapabilityReporter.ParseWindowsOcrLanguageTags(standardOutput);
+
+        Assert.Equal(expectedCount, tags.Count);
+    }
+
+    [Fact]
     public async Task Bounded_probe_rejects_oversized_output_without_retaining_it()
     {
         if (OperatingSystem.IsWindows()) return;
@@ -192,6 +274,20 @@ public sealed class CapabilityReporterTests
 
         Assert.False(result.Succeeded);
         Assert.Empty(result.StandardOutput);
+    }
+
+    [Fact]
+    public async Task Bounded_probe_reports_the_process_stderr_text()
+    {
+        // CapabilityReporter.DescribeWindowsOcrLanguages relies on this to tell a genuine script
+        // failure (stderr present) apart from a probe that could not run at all (stderr empty).
+        if (OperatingSystem.IsWindows()) return;
+        using var script = new ScriptFixture("echo failure-detail 1>&2; exit 1");
+
+        var result = await CapabilityReporter.RunBoundedAsync(script.Path, [], CancellationToken.None);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("failure-detail", result.StandardError, StringComparison.Ordinal);
     }
 
     [Fact]

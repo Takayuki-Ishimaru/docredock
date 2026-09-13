@@ -207,6 +207,40 @@ internal static class XmlSliceScanner
         }
     }
 
+    // Index every element in an already semantically validated XML fragment. These offsets
+    // let table edits splice cell paragraphs without reserializing their enclosing tables.
+    internal static IReadOnlyList<(string LocalName, int Start, int End)> FindElementRanges(byte[] xml)
+    {
+        var stack = new Stack<(string Name, int Start)>();
+        var ranges = new List<(string LocalName, int Start, int End)>();
+        for (var cursor = 0; cursor < xml.Length;)
+        {
+            if (xml[cursor] != (byte)'<') { cursor++; continue; }
+            if (Starts(xml, cursor, "<!--"u8)) { cursor = FindTerminator(xml, cursor + 4, "-->"u8); continue; }
+            if (Starts(xml, cursor, "<![CDATA["u8)) { cursor = FindTerminator(xml, cursor + 9, "]]>"u8); continue; }
+            if (Starts(xml, cursor, "<?"u8)) { cursor = FindTerminator(xml, cursor + 2, "?>"u8); continue; }
+            if (Starts(xml, cursor, "<!"u8)) throw new InvalidDataException("Declarations are not allowed in an XML element slice.");
+            var closing = cursor + 1 < xml.Length && xml[cursor + 1] == (byte)'/';
+            var nameStart = cursor + (closing ? 2 : 1);
+            var nameEnd = nameStart;
+            while (nameEnd < xml.Length && IsNameByte(xml[nameEnd])) nameEnd++;
+            if (nameEnd == nameStart) throw new InvalidDataException("Malformed XML element slice.");
+            var name = LocalName(xml, nameStart, nameEnd);
+            var end = FindTagEnd(xml, nameEnd);
+            if (closing)
+            {
+                if (!stack.TryPop(out var opened) || opened.Name != name)
+                    throw new InvalidDataException("Unbalanced XML element slice.");
+                ranges.Add((name, opened.Start, end + 1));
+            }
+            else if (IsSelfClosing(xml, nameEnd, end)) ranges.Add((name, cursor, end + 1));
+            else stack.Push((name, cursor));
+            cursor = end + 1;
+        }
+        if (stack.Count != 0) throw new InvalidDataException("Unbalanced XML element slice.");
+        return ranges.OrderBy(item => item.Start).ToArray();
+    }
+
     private static bool IsNameByte(byte value) => value is >= (byte)'A' and <= (byte)'Z' or >= (byte)'a' and <= (byte)'z' or >= (byte)'0' and <= (byte)'9' or (byte)':' or (byte)'_' or (byte)'-' or (byte)'.';
     private static string LocalName(byte[] xml, int start, int end)
     {

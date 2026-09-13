@@ -178,8 +178,35 @@ public sealed class DocRedockMarkdownSerializer
         output.Append("<!--drmd:document-end id=").Append(EscapeAttribute(documentId))
             .Append(" partitions=").Append(partitions.Count.ToString(CultureInfo.InvariantCulture)).AppendLine("-->");
 
-        return new MarkdownProjection(options.ProjectionId, output.ToString(), contributions,
+        return FinishProjection(options.ProjectionId, output, contributions,
             Array.Empty<MarkdownDiagnostic>());
+    }
+
+    // Markdown uses LF on every OS. Remap ranges as CRLF pairs shrink so
+    // contribution offsets still address the returned text, including embedded newlines.
+    private static MarkdownProjection FinishProjection(string projectionId, StringBuilder output,
+        IReadOnlyList<ProjectionContribution> contributions, IReadOnlyList<MarkdownDiagnostic> diagnostics)
+    {
+        var markdown = output.ToString();
+        var removed = new List<int>();
+        for (var index = 0; index + 1 < markdown.Length; index++)
+            if (markdown[index] == '\r' && markdown[index + 1] == '\n') removed.Add(index);
+        if (removed.Count == 0) return new MarkdownProjection(projectionId, markdown, contributions, diagnostics);
+
+        int MapOffset(int offset)
+        {
+            var index = removed.BinarySearch(offset);
+            return offset - (index < 0 ? ~index : index);
+        }
+
+        var mapped = contributions.Select(contribution =>
+        {
+            var range = contribution.MarkdownRange;
+            var start = MapOffset(range.Start);
+            return contribution with { MarkdownRange = new TextRange(start, MapOffset(range.End) - start) };
+        }).ToArray();
+        return new MarkdownProjection(projectionId,
+            markdown.Replace("\r\n", "\n", StringComparison.Ordinal), mapped, diagnostics);
     }
 
     private static void AppendNodeText(StringBuilder output, GraphNodeView node, string kind)
@@ -371,7 +398,12 @@ public sealed class DocRedockMarkdownSerializer
 
         foreach (var partition in partitions)
         {
-            var nodes = partition.Nodes.Where(node => IncludeCorePolicy(node, policy)).OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
+            // P-ShapeGrid: a synthesized shape-grid table (PptxAdapter.DetectShapeGridTables) is a
+            // readable-only projection convenience -- it has no corresponding real shape/table in
+            // the slide XML, so DRMD/roundtrip must never emit a protected table block for it. Its
+            // member shapes remain ordinary, independently editable nodes exactly as before.
+            var nodes = partition.Nodes.Where(node => IncludeCorePolicy(node, policy) && !IsShapeGridSynthesizedTable(node))
+                .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
             output.Append("<!--drmd:partition-begin id=").Append(EscapeAttribute(partition.Id)).Append(" baseline_nodes=")
                 .Append(nodes.Length.ToString(CultureInfo.InvariantCulture)).AppendLine("-->");
             AppendPartitionLabel(output, graph.Format, partition.Id);
@@ -455,7 +487,7 @@ public sealed class DocRedockMarkdownSerializer
         }
         output.Append("<!--drmd:document-end id=").Append(EscapeAttribute(graph.DocumentId)).Append(" partitions=")
             .Append(partitions.Length.ToString(CultureInfo.InvariantCulture)).AppendLine("-->");
-        return new MarkdownProjection(options.ProjectionId, output.ToString(), contributions, diagnostics);
+        return FinishProjection(options.ProjectionId, output, contributions, diagnostics);
     }
 
     private static bool IncludeCorePolicy(DocumentNode node, string policy) =>
@@ -610,6 +642,15 @@ public sealed class DocRedockMarkdownSerializer
 
     private static bool IsMermaidDiagram(DocumentNode node) => node.Kind == NodeKind.Diagram &&
         StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "diagram_language"), "mermaid");
+
+    // P-ShapeGrid (shape-grid-table-spec.md "出力側"): a Table node PptxAdapter synthesized from a
+    // grid of adjacent rectangle shapes, not from any real a:tbl -- see BuildShapeGridTableNode.
+    private static bool IsShapeGridSynthesizedTable(DocumentNode node) =>
+        node.Kind == NodeKind.Table && ExtensionBool(node, "shape_grid_table");
+
+    private static bool ExtensionBool(DocumentNode node, string name) =>
+        node.Extensions is not null && node.Extensions.TryGetValue(name, out var value) &&
+        value.ValueKind is System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False && value.GetBoolean();
 
     private static bool IsInlineLinkProjection(DocumentNode node, IReadOnlyDictionary<string, DocumentNode> nodesById)
     {

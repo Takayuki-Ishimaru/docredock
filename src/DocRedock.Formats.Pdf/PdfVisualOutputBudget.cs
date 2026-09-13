@@ -55,6 +55,19 @@ public static class PdfVisualOutputCompactor
             .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
         var edgeIds = source.Where(item => pathIds.Contains(item.Id)).Select(item => item.ProjectedEdgeId)
             .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
+        // P-Overlay: a ruling-line path whose SourceItem disposition is VisualFallback rather than
+        // ProjectedEdge -- SuppressTableGridEdges declined to suppress it as an edge (e.g. a wide
+        // schedule-overlay shape happened to touch that same ruling line, tripping its
+        // network-diagram guard) -- is still one of this table's own boundaries, and must not
+        // linger as a dangling, unresolved connector just because the ledger never called it a
+        // "projected edge". Matched by Points *reference*, the same technique BuildSourceItems uses.
+        var pathsByPoints = new Dictionary<IReadOnlyList<VisualPathPoint>, VisualPath>(ReferenceEqualityComparer.Instance);
+        foreach (var path in graph.Paths ?? [])
+            if (path.Points is { } points) pathsByPoints.TryAdd(points, path);
+        var strandedEdgeIds = (graph.Edges ?? []).Where(edge => edge.Path is { } points &&
+                pathsByPoints.TryGetValue(points, out var path) && pathIds.Contains(path.Id))
+            .Select(edge => edge.Id).ToArray();
+        edgeIds.UnionWith(strandedEdgeIds);
         var nodes = (graph.Nodes ?? []).Where(node => !nodeIds.Contains(node.Id)).ToArray();
         var edges = (graph.Edges ?? []).Where(edge => !edgeIds.Contains(edge.Id) &&
             !nodeIds.Contains(edge.SourceId ?? string.Empty) && !nodeIds.Contains(edge.TargetId ?? string.Empty)).ToArray();
@@ -63,7 +76,110 @@ public static class PdfVisualOutputCompactor
             ? item with { Disposition = VisualDisposition.IgnoredDecorative, ProjectedNodeId = null, ProjectedEdgeId = null,
                 FallbackPathId = null, Reason = "reconstructed table grid consumed by table projection" }
             : item).ToArray();
-        var projection = new VisualGraph(graph.Id, nodes, edges, graph.Diagnostics, graph.Direction, graph.Groups, paths, items);
+        var diagnostics = TrimUnresolvedConnectorDiagnostics(graph.Diagnostics,
+            (graph.Edges ?? []).Where(edge => strandedEdgeIds.Contains(edge.Id) && (edge.SourceId is null || edge.TargetId is null)).Count());
+        var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
+        return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
+    }
+
+    // A removed edge that never resolved to two nodes still owns one "VisualConnectorUnresolved"
+    // VisualDiagnostic recorded back when BuildVisualGraph first created it.
+    // PdfDiagnosticInvariantValidator's INV-03 requires that diagnostic count to never exceed the
+    // graph's own live UnresolvedEdges count, so removing an unresolved edge without also dropping
+    // one matching diagnostic would desynchronize the two -- mirroring the same reconciliation
+    // BuildVisualGraph itself performs when SuppressTableGridEdges suppresses a ruling line. No
+    // diagnostic entry carries a reliable SourceObjectId back to its edge (BuildVisualGraph's own
+    // Diag(...) helper never sets one for this code), so this trims by COUNT, exactly as that
+    // existing reconciliation already does.
+    private static IReadOnlyList<VisualDiagnostic>? TrimUnresolvedConnectorDiagnostics(
+        IReadOnlyList<VisualDiagnostic>? diagnostics, int removedUnresolvedEdgeCount)
+    {
+        if (removedUnresolvedEdgeCount <= 0 || diagnostics is not { Count: > 0 }) return diagnostics;
+        var trimmed = new List<VisualDiagnostic>(diagnostics);
+        var remaining = removedUnresolvedEdgeCount;
+        for (var index = trimmed.Count - 1; index >= 0 && remaining > 0; index--)
+        {
+            if (trimmed[index].Code != "VisualConnectorUnresolved") continue;
+            trimmed.RemoveAt(index);
+            remaining--;
+        }
+        return trimmed;
+    }
+
+    /// <summary>P-Overlay: removes a schedule-arrow/bar/marker/line shape already folded into a
+    /// table's own cells (see PdfTableOverlayDetector.Detect / ReadableMarkdownSerializer's
+    /// format-neutral ApplyTableOverlays) from the readable visual projection, the same way
+    /// <see cref="RemoveConsumedTableVisuals"/> removes a table's own ruling-line paths. The
+    /// caller retains the original graph for evidence/accounting. <paramref name="overlayShapeIds"/>
+    /// is whatever PdfTableOverlayDetector used as an overlay's own ShapeId -- a promoted
+    /// VisualNode's or VisualEdge's own id, or (for a shape that never resolved into either, e.g.
+    /// a filled bar with no matching label) a raw VisualPath id directly.</summary>
+    public static VisualGraph RemoveConsumedOverlayVisuals(VisualGraph graph, IReadOnlyList<string> overlayShapeIds)
+    {
+        ArgumentNullException.ThrowIfNull(graph); ArgumentNullException.ThrowIfNull(overlayShapeIds);
+        if (overlayShapeIds.Count == 0) return graph;
+        var overlaySet = overlayShapeIds.ToHashSet(StringComparer.Ordinal);
+        var nodesToRemove = (graph.Nodes ?? []).Where(node => overlaySet.Contains(node.Id)).ToArray();
+        var edgesToRemove = (graph.Edges ?? []).Where(edge => overlaySet.Contains(edge.Id)).ToArray();
+        var nodeIds = nodesToRemove.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+        var edgeIds = edgesToRemove.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+
+        // P1 fix: derive the raw path ids to re-disposition from the source-item LEDGER itself
+        // (mirroring RemoveConsumedTableVisuals), never from a Geometry/Points reverse lookup. That
+        // reverse lookup's `TryAdd` kept only the FIRST raw path for a given Geometry/Points, so a
+        // rectangle drawn twice at identical coordinates (e.g. `re f` immediately followed by
+        // `re S` -- a common "filled + outlined" bar) could point the ledger update at the wrong
+        // path id, leaving the *actual* backing path's ledger entry still claiming
+        // ProjectedNodeId/ProjectedEdgeId of a node/edge that this method just removed --
+        // VisualSourceItemReferenceInvalid, IsConsistent=false, PdfExtractionException.
+        var source = graph.SourceItems ?? [];
+        var consumedPathIds = source.Where(item => overlaySet.Contains(item.Id) ||
+                (item.ProjectedNodeId is not null && overlaySet.Contains(item.ProjectedNodeId)) ||
+                (item.ProjectedEdgeId is not null && overlaySet.Contains(item.ProjectedEdgeId)))
+            .Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+        // An overlay ShapeId naming an EDGE that never resolved into two nodes (the common case for
+        // a schedule "today line") never earns a ProjectedEdge ledger entry at all -- BuildSourceItems
+        // sets that disposition only once BOTH endpoints resolve. Its raw path is ledgered as
+        // VisualFallback instead (referenced only by FallbackPathId), invisible to the ledger scan
+        // above via overlaySet membership. Recover it by matching the edge's own Path *reference*
+        // to its backing VisualPath's Points -- reference equality, never value-equal Geometry, so
+        // this can never reintroduce the P1 bug (two distinct VisualPath objects, even with
+        // identical coordinates, never share one Points list instance).
+        var pathsByPoints = new Dictionary<IReadOnlyList<VisualPathPoint>, VisualPath>(ReferenceEqualityComparer.Instance);
+        foreach (var path in graph.Paths ?? [])
+            if (path.Points is { } points) pathsByPoints.TryAdd(points, path);
+        foreach (var edge in edgesToRemove)
+            if (edge.Path is { } points && pathsByPoints.TryGetValue(points, out var path)) consumedPathIds.Add(path.Id);
+        // An arrow overlay's small triangular arrowhead (e.g. the filled marker at the bottom of a
+        // schedule "today line") is a separate VisualPath from its shaft, matched to it only by
+        // proximity (see PdfTableInference.FindArrowShaftMatches / PdfTableOverlayDetector.Detect,
+        // which folds it into the shaft's own arrow classification rather than treating it as an
+        // independent overlay). It must disappear from the readable graph together with its shaft,
+        // or it survives as its own orphaned "vector fallback" entry.
+        foreach (var match in PdfTableInference.FindArrowShaftMatches(graph.Paths ?? []))
+            if (consumedPathIds.Contains(match.ShaftPathId)) consumedPathIds.Add(match.MarkerPathId);
+
+        var nodes = (graph.Nodes ?? []).Where(node => !nodeIds.Contains(node.Id)).ToArray();
+        var edges = (graph.Edges ?? []).Where(edge => !edgeIds.Contains(edge.Id) &&
+            !nodeIds.Contains(edge.SourceId ?? string.Empty) && !nodeIds.Contains(edge.TargetId ?? string.Empty)).ToArray();
+        var paths = (graph.Paths ?? []).Where(path => !consumedPathIds.Contains(path.Id)).ToArray();
+        var items = source.Select(item => consumedPathIds.Contains(item.Id)
+            ? item with { Disposition = VisualDisposition.IgnoredDecorative, ProjectedNodeId = null, ProjectedEdgeId = null,
+                FallbackPathId = null, Reason = "table overlay consumed by table projection" }
+            : item).ToArray();
+        // P2 fix: count unresolved-edge removals from the actual, final removed-edge set (every
+        // graph.Edges member not present in the surviving `edges` array above), not merely
+        // `edgesToRemove` (edges whose own Id was named directly by overlayShapeIds). An edge whose
+        // SourceId is null but whose TargetId names a REMOVED NODE also disappears above (via the
+        // `!nodeIds.Contains(edge.TargetId...)` filter) without ever being a member of
+        // `edgesToRemove`, so counting only `edgesToRemove` under-counted -- leaving one stale
+        // "VisualConnectorUnresolved" VisualDiagnostic behind whenever that happened, desynchronized
+        // from the graph's own (now smaller) live unresolved-edge count: INV-03, IsConsistent=false.
+        var survivingEdgeIds = edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        var removedUnresolvedEdgeCount = (graph.Edges ?? [])
+            .Count(edge => !survivingEdgeIds.Contains(edge.Id) && (edge.SourceId is null || edge.TargetId is null));
+        var diagnostics = TrimUnresolvedConnectorDiagnostics(graph.Diagnostics, removedUnresolvedEdgeCount);
+        var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
     }
 

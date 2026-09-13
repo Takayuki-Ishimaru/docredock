@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.7 Public Beta
+
+- [v0.2.7 release notes](RELEASE_NOTES_v0.2.7.en.md)
+- Improved readable Markdown tables for schedule arrows and duration bars
+- Improved character references and text preservation in experimental round-trip editing
+- Improved PDF table recognition, OCR text layout, and environment guidance
+
 ### v0.2.6 Public Beta
 
 - [v0.2.6 release notes](RELEASE_NOTES_v0.2.6.en.md)

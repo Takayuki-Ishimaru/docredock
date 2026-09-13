@@ -6,6 +6,13 @@
 
 ## 最新版
 
+### v0.2.7 Public Beta
+
+- [v0.2.7 リリースノート](RELEASE_NOTES_v0.2.7.md)
+- 工程表の矢印や期間バーを、閲覧用Markdownの表で読み取りやすく改善
+- Markdownの文字参照と、実験的な往復編集での本文保持を改善
+- PDFの表認識とOCRの文字配置・利用環境の案内を改善
+
 ### v0.2.6 Public Beta
 
 - [v0.2.6 リリースノート](RELEASE_NOTES_v0.2.6.md)

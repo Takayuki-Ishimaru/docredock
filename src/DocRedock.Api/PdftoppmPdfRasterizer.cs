@@ -87,6 +87,8 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
                 result.Add(new RasterizedPdfPage(page, "image/png", bytes, width, height));
                 totalPixels += pixels;
                 totalBytes += bytes.Length;
+                // Windows forbids deleting a file while our read handle is open.
+                await input.DisposeAsync().ConfigureAwait(false);
                 File.Delete(path);
             }
             return result;

@@ -58,6 +58,11 @@ public static class PdfPageProjection
                 ["pdf_table_confidence"] = JsonSerializer.SerializeToElement(table.Confidence.ToString()),
                 ["pdf_source_path_ids"] = JsonSerializer.SerializeToElement(table.SourcePathIds)
             };
+            // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already format-neutral --
+            // any NodeKind.Table node with a non-empty "table_overlays" extension gets its cell
+            // text folded with glyphs, no PDF-specific serializer change needed.
+            if (table.Overlays is { Count: > 0 } overlays)
+                extensions["table_overlays"] = JsonSerializer.SerializeToElement(overlays);
             nodes.Add(new DocumentNode(table.Id, NodeKind.Table, null, order, ContentLayer.Body,
                 new TableNodeContent(rows), Geometry: table.Bounds, Editability: NodeEditability.Protected,
                 Provenance: [new ProvenanceItem(EvidenceKind.TableInferred, Engine: "pdf vector grid")], Extensions: extensions));

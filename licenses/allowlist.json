@@ -6,6 +6,9 @@
     "MIT",
     "OFL-1.1"
   ],
+  "sourceData": [
+    { "id": "WHATWG-HTML-entities", "version": "2026-09-13", "license": "BSD-3-Clause", "source": "https://html.spec.whatwg.org/entities.json", "note": "2,125 semicolon-terminated names incorporated into generated C# source; no NuGet dependency." }
+  ],
   "packages": [
     { "id": "Avalonia", "version": "12.1.1", "license": "MIT" },
     { "id": "Avalonia.Angle.Windows.Natives", "version": "2.1.27548.20260419", "license": "BSD-3-Clause", "note": "The NuGet package embeds the ANGLE three-clause BSD license in LICENSE." },

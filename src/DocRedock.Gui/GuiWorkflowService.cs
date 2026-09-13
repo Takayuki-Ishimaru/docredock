@@ -238,6 +238,57 @@ public sealed class GuiWorkflowService
         }
     }
 
+    /// <summary>Whether the OCR toggle should be enabled and what to tell the user, given the
+    /// current engine/native/rasterizer capability probe. Extracted as a pure function so the
+    /// decision can be unit-tested without an Avalonia window (see
+    /// tests/DocRedock.Tests/Gui/GuiWorkflowServiceOcrCapabilityTests.cs).</summary>
+    public readonly record struct OcrCapabilityDecision(bool Enabled, string StatusText);
+
+    /// <summary>
+    /// A working OCR *function* (the Tesseract engine, or a native OS provider such as Windows
+    /// Media OCR / Apple Vision) is what gates the toggle. The PDF rasterizer (pdftoppm/mutool) is
+    /// only needed to OCR image-only PDF pages — never for OCR of images embedded directly in
+    /// DOCX/XLSX/PPTX — so an unavailable rasterizer must not disable OCR outright; it is reported
+    /// as a separate note instead. This is what was wrong before: on a machine with no rasterizer
+    /// installed (the common case on Windows, where pdftoppm/mutool are rarely present) the toggle
+    /// was force-disabled even when Windows Media OCR or Tesseract were perfectly usable.
+    /// </summary>
+    public static OcrCapabilityDecision DescribeOcrCapability(
+        CapabilityStatus rasterizer, CapabilityStatus engine, CapabilityStatus native, CapabilityStatus jpn, CapabilityStatus eng)
+    {
+        var enabled = engine.Status == "ready" || native.Status is "ready" or "partial";
+        if (!enabled)
+        {
+            var actions = new[] { engine.Action, native.Action }
+                .Where(action => !string.IsNullOrWhiteSpace(action))
+                .Distinct()
+                .ToArray();
+            var reason = actions.Length > 0
+                ? string.Join(" ", actions)
+                : "Tesseract と対応言語データを構成するか、OS 標準の OCR 機能を有効にしてください。";
+            return new OcrCapabilityDecision(false,
+                $"画像/PDFのOCRは現在利用できません（engine: {engine.Status}, native: {native.Status}, rasterizer: {rasterizer.Status}）。{reason}");
+        }
+
+        var rasterizerNote = rasterizer.Status == "ready"
+            ? string.Empty
+            : $"\n注意: 画像のみのPDFページをOCRするにはpdftoppmまたはmutoolが必要です（rasterizer: {rasterizer.Status}）。"
+              + (string.IsNullOrWhiteSpace(rasterizer.Action) ? string.Empty : rasterizer.Action + " ")
+              + "DOCX/XLSX/PPTXに埋め込まれた画像のOCRには影響しません。";
+
+        if (native.Status == "partial" && engine.Status != "ready")
+            return new OcrCapabilityDecision(true,
+                $"PDF OCR: Verification pending ({native.Provider})\n画像の最初のOCR時にネイティブプロバイダーを確認します。失敗時は警告を表示します。{rasterizerNote}");
+
+        var providerLabel = engine.Status == "ready" ? engine.Provider : native.Provider;
+        // ocr-jpn/ocr-eng describe Tesseract data, not the native provider's languages.
+        var languageNote = engine.Status == "ready"
+            ? $"言語: 日本語 {jpn.Status}, English {eng.Status}"
+            : "言語: OS 標準 OCR の導入済み言語を使用します。";
+        return new OcrCapabilityDecision(true,
+            $"PDF OCR: Ready ({providerLabel})\n{languageNote}{rasterizerNote}");
+    }
+
     private static IReadOnlyList<Diagnostic> AddProjectionDiagnostics(
         DocumentGraph graph,
         IReadOnlyList<Diagnostic> diagnostics)

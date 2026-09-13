@@ -218,6 +218,14 @@ public static class PdfTextExtractor
                     PdfTableInference.HasNativeTableMarkedContent(stream));
                 if (inferredTables.Count > 0)
                 {
+                    // P-Overlay: detect schedule-arrow/bar/marker/line overlays against the full,
+                    // pre-compaction graph (the same graph Infer itself used) so the detector can
+                    // still see every ruling-line path it needs to exclude via table.SourcePathIds.
+                    // P8: called once for the whole page (DetectForPage, not per table) so a shape
+                    // scoring highly against more than one table is credited to only the one it
+                    // intersects most; this also folds each table's own P6 cell-fill furniture into
+                    // its SourcePathIds before RemoveConsumedTableVisuals runs below.
+                    inferredTables = PdfTableOverlayDetector.DetectForPage(inferredTables, visualGraph);
                     tables[pageNumber] = inferredTables;
                     pageTables = inferredTables;
                     foreach (var table in inferredTables)
@@ -226,6 +234,13 @@ public static class PdfTextExtractor
                 var readableGraph = inferredTables.Count > 0
                     ? PdfVisualOutputCompactor.RemoveConsumedTableVisuals(visualGraph, inferredTables)
                     : visualGraph;
+                // P-Overlay: an overlay shape is already folded into the table's own cell text
+                // (ReadableMarkdownSerializer.ApplyTableOverlays, format-neutral); it must not also
+                // survive as a disconnected member of this page's "Visual flow" graph.
+                var overlayShapeIds = inferredTables.SelectMany(table => table.Overlays ?? [])
+                    .Select(overlay => overlay.ShapeId).ToArray();
+                if (overlayShapeIds.Length > 0)
+                    readableGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(readableGraph, overlayShapeIds);
                 var outputGraph = PdfVisualOutputCompactor.ProjectGraph(readableGraph, options.OutputBudget);
                 visualProjections[pageNumber] = outputGraph;
                 var fallback = PdfVisualOutputCompactor.Compact(outputGraph.Graph, options.OutputBudget);
@@ -1327,7 +1342,26 @@ public static class PdfTextExtractor
             for (var v = 0; v < verticalLines.Length; v++)
                 if (verticalCrossings[v] >= 3) GridFor(FindComponent(horizontalLines.Length + v)).Vertical.Add(v);
 
-            var semanticNodes = nodes.Where(node => node.Geometry is not null).ToArray();
+            // P-Overlay: a "Vector node N" that is still only PROVISIONAL (an unlabelled closed
+            // shape that has not yet been confirmed as part of a resolved diagram relation -- see
+            // the connectivity cleanup after arrowhead/soft-connection inference below) must not
+            // ALWAYS count as a "semantic node" for this guard, or a schedule overlay bar/rect
+            // dropped on top of an otherwise clean table (see PdfTableOverlayDetector) can sit near
+            // one of the table's own ruling lines by coincidence and falsely veto suppressing that
+            // *entire* grid as "touching a real diagram", leaving every ruling line as a dangling
+            // unresolved connector instead of quietly becoming table structure.
+            //
+            // P5 fix: unconditionally excluding EVERY provisional node from this guard was too
+            // broad -- it also silenced an ordinary, non-overlay architecture/flow diagram made of
+            // unlabelled boxes (nothing unusual: many diagrams simply have no text inside a box),
+            // wrongly letting its own connecting lines be suppressed as "table grid" (an output
+            // CHANGE for a PDF with no overlay at all). A provisional node is excluded from this
+            // guard only when it looks like small furniture sitting ON an already-qualified grid --
+            // its own bbox falls completely inside the CANDIDATE grid's bbox, and its short side is
+            // no larger than that grid's own (smallest) cell short side -- never merely because it
+            // is unlabelled. This is evaluated per candidate grid below (`IsSmallFurnitureOnGrid`),
+            // since "the grid" is scoped per crossing-connected component, not globally.
+            var nodesWithGeometry = nodes.Where(node => node.Geometry is not null).ToArray();
             var hasMarkedTableEvidence = false;
             var markedTableEvidenceResolved = false;
             var gridLines = new List<(VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum)>();
@@ -1353,11 +1387,31 @@ public static class PdfTextExtractor
                      !HasRegularSpacing(activeVertical.Select(line => line.Fixed)))) continue;
 
                 var componentGrid = activeHorizontal.Concat(activeVertical).ToArray();
-                if (!TrySpend((long)componentGrid.Length * semanticNodes.Length)) return;
-                if (componentGrid.Any(TouchesSemanticNode)) continue;
+                if (!TrySpend((long)componentGrid.Length * nodesWithGeometry.Length)) return;
 
+                // P5 fix: compute this CANDIDATE grid's own bbox and smallest cell short side
+                // before deciding which provisional nodes are exempt from the "touches a semantic
+                // node" veto for it specifically (a different candidate grid elsewhere on the page
+                // has its own, unrelated bbox/cell size).
                 var xBoundaries = activeVertical.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
                 var yBoundaries = activeHorizontal.Select(line => line.Fixed).Distinct().OrderBy(value => value).ToArray();
+                var gridLeft = xBoundaries[0]; var gridRight = xBoundaries[^1];
+                var gridBottom = yBoundaries[0]; var gridTop = yBoundaries[^1];
+                var minCellWidth = xBoundaries.Zip(xBoundaries.Skip(1), (a, b) => b - a).DefaultIfEmpty(double.PositiveInfinity).Min();
+                var minCellHeight = yBoundaries.Zip(yBoundaries.Skip(1), (a, b) => b - a).DefaultIfEmpty(double.PositiveInfinity).Min();
+                var cellShortSide = Math.Min(minCellWidth, minCellHeight);
+
+                bool IsSmallFurnitureOnGrid(VisualNode node)
+                {
+                    var geometry = node.Geometry!;
+                    if (geometry.X < gridLeft - 1.5 || geometry.X + geometry.Width > gridRight + 1.5 ||
+                        geometry.Y < gridBottom - 1.5 || geometry.Y + geometry.Height > gridTop + 1.5) return false;
+                    return Math.Min(Math.Abs(geometry.Width), Math.Abs(geometry.Height)) <= cellShortSide + 1.5;
+                }
+
+                var semanticNodes = nodesWithGeometry.Where(node =>
+                    !(provisionalUnlabelledNodeIds.Contains(node.Id) && IsSmallFurnitureOnGrid(node))).ToArray();
+                if (componentGrid.Any(line => TouchesSemanticNode(line, semanticNodes))) continue;
                 if (!TrySpend((long)regions.Count * (xBoundaries.Length + yBoundaries.Length))) return;
                 var occupiedCells = new HashSet<(int Column, int Row)>();
                 foreach (var (region, regionIndex) in regions.Select((region, index) => (region, index)))
@@ -1378,9 +1432,10 @@ public static class PdfTextExtractor
             if (gridLines.Count == 0) return;
 
             bool TouchesSemanticNode(
-                (VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) line)
+                (VisualEdge Edge, VisualPath Path, bool Horizontal, double Fixed, double Minimum, double Maximum) line,
+                IReadOnlyList<VisualNode> candidateSemanticNodes)
             {
-                foreach (var node in semanticNodes)
+                foreach (var node in candidateSemanticNodes)
                 {
                     var geometry = node.Geometry!;
                     var tolerance = Math.Max(1, Math.Min(Math.Abs(geometry.Width), Math.Abs(geometry.Height)) * .1);

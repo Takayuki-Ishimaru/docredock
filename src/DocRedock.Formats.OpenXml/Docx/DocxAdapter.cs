@@ -177,6 +177,15 @@ public sealed class DocxAdapter : IFormatProbe
         }
         var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
         var landscapeSectionStarts = FindLandscapeSectionStarts(doc, bodyElements);
+        // P-Overlay: every shape any table's DetectDocxTableOverlays folded into a cell -- (A)
+        // cell-anchored, or (B) preceding-paragraph-anchored -- collected across the whole document
+        // so AddDocumentVisualGraph (below, after this loop) can exclude all of them from its one
+        // shared whole-document visual canvas in a single pass.
+        var overlayExcludedShapes = new HashSet<XElement>();
+        // D5: the most recently processed paragraph's own `order` value (the `ordinal` counter's
+        // value at the moment it was assigned) -- kept so a table immediately following one can
+        // recompute that exact paragraph's node id below (see TagPrecedingParagraphOverlayTextBoxes).
+        int? lastParagraphOrder = null;
         for (var elementIndex = 0; elementIndex < bodyElements.Length; elementIndex++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -190,13 +199,47 @@ public sealed class DocxAdapter : IFormatProbe
             if (element.Name == W + "p")
             {
                 var paragraphOrder = ordinal++;
+                lastParagraphOrder = paragraphOrder;
                 var textBoxes = BindHostTextBoxes(entry.Original, entry.Slice, textBoxLedger, alternateMirrors, hiddenStyles);
                 AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes);
             }
             else if (element.Name == W + "tbl")
             {
                 var tableOrder = ordinal++;
-                AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal, hiddenStyles, entry.Control);
+                // P-Overlay: run detection BEFORE AddTable so its result can (1) be handed straight
+                // to AddTable as the table_overlays extension and (2) tag the TextBox node(s) the
+                // paragraph immediately before this table -- processed on an EARLIER loop iteration,
+                // before this table's own id was known -- already added to `nodes`.
+                var precedingParagraph = elementIndex > 0 && bodyElements[elementIndex - 1].Name == W + "p" ? bodyElements[elementIndex - 1] : null;
+                var overlayDetection = DetectDocxTableOverlays(doc, element, precedingParagraph, bodyElements, elementIndex, hiddenStyles);
+                if (overlayDetection is { } detection)
+                {
+                    overlayExcludedShapes.UnionWith(detection.ExcludedVisualElements);
+                    if (detection.PrecedingParagraphOverlayOwnerIds.Count > 0 && precedingParagraph is not null && lastParagraphOrder is not null)
+                    {
+                        // The table's id is a deterministic function of (partUri, tableOrder) alone --
+                        // the exact formula AddTable uses internally -- so it is safe to compute here,
+                        // before AddTable itself runs.
+                        var tableAnchor = new SourceAnchor("docx", "/word/document.xml", [new("body_child_ordinal", tableOrder.ToString(System.Globalization.CultureInfo.InvariantCulture))], tableOrder);
+                        var tableId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, tableAnchor);
+                        // D5: recompute the preceding paragraph's OWN node id -- the exact
+                        // (paraId-aware) anchor formula AddParagraph uses internally -- so
+                        // TagPrecedingParagraphOverlayTextBoxes can require node.ParentId to match
+                        // it. shape_id alone is just a small integer a producer can (and real
+                        // documents do) reuse for unrelated shapes elsewhere in the document;
+                        // without this, such a collision could tag the wrong TextBox node.
+                        var precedingParagraphParaId = (string?)precedingParagraph.Attribute(W14 + "paraId");
+                        var precedingParagraphAnchor = new SourceAnchor("docx", "/word/document.xml",
+                            precedingParagraphParaId is null
+                                ? [new("body_child_ordinal", lastParagraphOrder.Value.ToString(System.Globalization.CultureInfo.InvariantCulture))]
+                                : [new("w14_para_id", precedingParagraphParaId)],
+                            lastParagraphOrder.Value);
+                        var precedingParagraphNodeId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, precedingParagraphAnchor);
+                        TagPrecedingParagraphOverlayTextBoxes(nodes, detection.PrecedingParagraphOverlayOwnerIds, tableId, precedingParagraphNodeId);
+                    }
+                }
+                AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal, hiddenStyles, entry.Control,
+                    tableOverlays: overlayDetection?.Overlays, documentBytes: documentBytes, originalTable: entry.Original);
             }
             else if (IsMathRoot(element))
             {
@@ -209,7 +252,7 @@ public sealed class DocxAdapter : IFormatProbe
         // Build one document-level visual canvas so a flow is reconstructed across paragraph
         // boundaries; unresolved primitives remain represented by the visual fallback/diagnostic
         // data carried by the derived Diagram node.
-        AddDocumentVisualGraph(bodyElements, nodes, ref ordinal, hiddenStyles, VisualInferenceTimeout, cancellationToken);
+        AddDocumentVisualGraph(bodyElements, nodes, ref ordinal, hiddenStyles, VisualInferenceTimeout, cancellationToken, overlayExcludedShapes);
         if (options.IncludeFurniture)
             ordinal = await AddRelatedTextPartsAsync(archive, relationships, "header", NodeKind.Header, ContentLayer.Furniture, nodes, ordinal, hiddenStyles, cancellationToken).ConfigureAwait(false);
         if (options.IncludeFurniture)
@@ -288,7 +331,7 @@ public sealed class DocxAdapter : IFormatProbe
         var additions = new List<byte[]>();
         // A text box's slice sits *inside* its host block's slice, so the two can only be spliced
         // one at a time. Every slice an operation claims is kept here to catch that up front.
-        var claimed = new List<(RawSliceRef Slice, string NodeId)>();
+        var claimed = new List<(RawSliceRef Slice, string NodeId, bool TableTextEdit)>();
         foreach (var operation in diff.PatchSet.Operations.Where(operation => operation.MutatesOriginal))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -304,10 +347,11 @@ public sealed class DocxAdapter : IFormatProbe
             var slice = operation.Before.RawSlice;
             if (!StringComparer.Ordinal.Equals(slice.PartUri, "/word/document.xml"))
                 return Failure("ProtectedBoundary", "Edit crosses a non-body DOCX part boundary.", operation.NodeId);
-            if (claimed.FirstOrDefault(item => Overlaps(item.Slice, slice)) is { NodeId: not null } clash)
+            var tableTextEdit = operation.Before.Kind == NodeKind.Table && operation.Kind != PatchOperationKind.ExplicitDelete;
+            if (claimed.FirstOrDefault(item => Overlaps(item.Slice, slice) && !(tableTextEdit && item.TableTextEdit)) is { NodeId: not null } clash)
                 return Failure("OverlappingEdits", "Edit the text box and its host paragraph in separate restores.",
                     slice.EndOffset - slice.StartOffset <= clash.Slice.EndOffset - clash.Slice.StartOffset ? operation.NodeId : clash.NodeId);
-            claimed.Add((slice, operation.NodeId));
+            claimed.Add((slice, operation.NodeId, tableTextEdit));
             var original = await ReadDocumentSliceAsync(sourcePath, slice, cancellationToken).ConfigureAwait(false);
             if (!StringComparer.Ordinal.Equals(SafeXml.Sha256(original), slice.Sha256))
                 return Failure("SliceHashMismatch", "Original XML slice no longer matches baseline hash.", operation.NodeId);
@@ -324,12 +368,12 @@ public sealed class DocxAdapter : IFormatProbe
             else if (operation.After is not null)
             {
                 var edits = default(DocxParagraphEditResult);
-                changes[operation.NodeId] = operation.Before.Kind switch
-                {
-                    NodeKind.Table => ReplaceTableCells(original, operation.After.Content, out edits),
-                    NodeKind.TextBox => ReplaceTextBoxContent(original, operation.After.Content, out edits),
-                    _ => ReplaceParagraphContent(original, operation.After.Content, out edits),
-                };
+                if (operation.Before.Kind == NodeKind.Table)
+                    mirrored.AddRange(ReplaceTableCellSlices(original, slice, operation.Before.Content, operation.After.Content, out edits));
+                else
+                    changes[operation.NodeId] = operation.Before.Kind == NodeKind.TextBox
+                        ? ReplaceTextBoxContent(original, operation.After.Content, out edits)
+                        : ReplaceParagraphContent(original, operation.After.Content, out edits);
                 // OMML is structured markup that only projects as one linear string. An edit that
                 // no longer contains that string has retyped the equation, so the original markup
                 // is dropped rather than left stranded beside the new text - and said so here.
@@ -349,12 +393,12 @@ public sealed class DocxAdapter : IFormatProbe
                     {
                         var companionOriginal = await ReadDocumentSliceAsync(sourcePath, companion, cancellationToken).ConfigureAwait(false);
                         if (!StringComparer.Ordinal.Equals(SafeXml.Sha256(companionOriginal), companion.Sha256)) continue;
-                        mirrored.Add((companion, operation.Before.Kind switch
-                        {
-                            NodeKind.Table => ReplaceTableCells(companionOriginal, operation.After.Content, out _),
-                            NodeKind.TextBox => ReplaceTextBoxContent(companionOriginal, operation.After.Content, out _),
-                            _ => ReplaceParagraphContent(companionOriginal, operation.After.Content, out _),
-                        }));
+                        if (operation.Before.Kind == NodeKind.Table)
+                            mirrored.AddRange(ReplaceTableCellSlices(companionOriginal, companion, operation.Before.Content, operation.After.Content, out _));
+                        else
+                            mirrored.Add((companion, operation.Before.Kind == NodeKind.TextBox
+                                ? ReplaceTextBoxContent(companionOriginal, operation.After.Content, out _)
+                                : ReplaceParagraphContent(companionOriginal, operation.After.Content, out _)));
                     }
             }
             // Nothing in the other branches said the same thing, so the edit reaches only the
@@ -854,9 +898,15 @@ public sealed class DocxAdapter : IFormatProbe
     }
 
     private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, ICollection<DocumentNode> nodes, ref int ordinal,
-        DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+        DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken,
+        IReadOnlySet<XElement>? overlayExcludedShapes = null)
     {
-        var visualRoot = new XElement(W + "p", bodyElements.Select(element => new XElement(element)));
+        // P-Overlay: a shape DetectDocxTableOverlays folded into a table's cells (or tagged as a
+        // preceding-paragraph overlay) must not ALSO become a phantom node/edge in this
+        // whole-document visual canvas -- mirrors PptxAdapter.Extract handing BuildVisualGraphs a
+        // shape list with overlay shapes already removed.
+        var visualRoot = new XElement(W + "p", bodyElements.Select(element =>
+            overlayExcludedShapes is { Count: > 0 } ? CloneExcludingOverlayShapes(element, overlayExcludedShapes) : new XElement(element)));
         var anchor = new SourceAnchor("docx", "/word/document.xml", [new AnchorLocator("visual_graph", "document")], ordinal);
         if (BuildDocxVisualGraph(visualRoot, anchor, "doc_document", hiddenStyles, inferenceTimeout, cancellationToken) is not { } visualGraph) return;
 
@@ -1622,8 +1672,17 @@ public sealed class DocxAdapter : IFormatProbe
     // can put it back inside its host cell instead of guessing from document order alone.
     private static void AddTable(XElement table, string partUri, RawSliceRef? slice, int order,
         ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, ref int ordinal,
-        DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, DocxNestedTable? nested = null)
+        DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, DocxNestedTable? nested = null,
+        IReadOnlyList<DocxTableOverlay>? tableOverlays = null,
+        byte[]? documentBytes = null, IReadOnlyDictionary<XElement, RawSliceRef>? tableSlices = null, XElement? originalTable = null)
     {
+        // Resolution of an inline AlternateContent can change the element walk. Keep its
+        // nested tables protected unless the byte and semantic trees are identical in shape.
+        if (slice is not null && documentBytes is not null && originalTable is not null && !originalTable.Descendants(MC + "AlternateContent").Any())
+        {
+            var bytes = documentBytes.AsSpan(checked((int)slice.StartOffset), checked((int)(slice.EndOffset - slice.StartOffset))).ToArray();
+            tableSlices = IndexSliceElements(bytes, table, slice);
+        }
         var anchor = new SourceAnchor("docx", partUri, [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
         var grid = new List<List<TableCell>>();
@@ -1633,7 +1692,13 @@ public sealed class DocxAdapter : IFormatProbe
         foreach (var row in table.Elements(W + "tr"))
         {
             var rowCells = new List<TableCell>();
-            var gridColumn = 0;
+            // D2: pad this row with empty placeholder cells for any leading grid columns it skips
+            // via gridBefore, so its TableCell count still lines up 1:1 with w:tblGrid's column
+            // count the same way vMerge/gridSpan already keep every other row aligned -- otherwise
+            // a gridBefore row silently shifted every one of its own cells left by however many
+            // columns it skipped.
+            var gridColumn = ParseDocxGridBefore(row.Element(W + "trPr"));
+            for (var placeholder = 0; placeholder < gridColumn; placeholder++) rowCells.Add(new TableCell(""));
             foreach (var tc in row.Elements(W + "tc"))
             {
                 var tcPr = tc.Element(W + "tcPr");
@@ -1673,13 +1738,19 @@ public sealed class DocxAdapter : IFormatProbe
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
+        // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already shared with PPTX/XLSX
+        // and reads this same "table_overlays" extension key off any NodeKind.Table node -- see
+        // DetectDocxTableOverlays below for how the DOCX port populates it.
+        if (tableOverlays is { Count: > 0 }) extensions["table_overlays"] = JsonSerializer.SerializeToElement(tableOverlays);
         // Same rule as AddParagraph: an equation directly under a cell paragraph is preserved as an
         // anchor by the cell rewrite, so the table stays editable; one nested deeper cannot be
         // addressed, and the table is read-only rather than losing it on the next edit.
         var restorable = RelevantDescendants(table).Where(IsMathRoot).All(element => element.Parent?.Name == W + "p");
         var effectiveSlice = restorable ? slice : null;
+        // Only a table bound to verified original bytes can be edited. Nested table
+        // text edits become disjoint paragraph splices during restoration.
         nodes.Add(new(id, NodeKind.Table, null, order, ContentLayer.Body, new TableNodeContent(grid), anchor, effectiveSlice,
-            Editability: restorable ? NodeEditability.EditableWithConstraints : NodeEditability.Protected,
+            Editability: restorable && effectiveSlice is not null ? NodeEditability.EditableWithConstraints : NodeEditability.Protected,
             Provenance: [new(EvidenceKind.Native)], Extensions: extensions.Count == 0 ? null : extensions));
         if (effectiveSlice is not null) sliceMap[id] = effectiveSlice;
 
@@ -1714,8 +1785,10 @@ public sealed class DocxAdapter : IFormatProbe
                         lineOffset += 1 + ParagraphText(cellBlocks[preceding], hiddenStyles).Count(character => character == '\n');
                     }
                     var nestedOrder = ordinal++;
-                    AddTable(cellBlocks[blockIndex], partUri, null, nestedOrder, nodes, sliceMap, ref ordinal, hiddenStyles,
-                        contentControl, new DocxNestedTable(id, rowIndex, cellIndex, paragraphOffset, lineOffset));
+                    var nestedSlice = tableSlices is not null && tableSlices.TryGetValue(cellBlocks[blockIndex], out var indexed) ? indexed : null;
+                    AddTable(cellBlocks[blockIndex], partUri, nestedSlice, nestedOrder, nodes, sliceMap, ref ordinal, hiddenStyles,
+                        contentControl, new DocxNestedTable(id, rowIndex, cellIndex, paragraphOffset, lineOffset),
+                        tableSlices: tableSlices);
                 }
                 cellIndex++;
             }
@@ -1726,6 +1799,661 @@ public sealed class DocxAdapter : IFormatProbe
     /// <summary>Where a nested table sat inside its host table's cell grid, and after how many of
     /// the host cell's own kept paragraphs (see <see cref="CellText"/>) it appeared.</summary>
     private sealed record DocxNestedTable(string ParentNodeId, int Row, int Column, int ParagraphOffset, int LineOffset);
+
+    // =============================================================================================
+    // P-Overlay (DOCX port of PptxAdapter.DetectTableOverlays / the XLSX port's DetectSheetOverlays
+    // -- see table-overlay-spec.md and table-overlay-spec-xlsx-docx-pdf.md "2. DOCX"). Japanese
+    // schedule tables draw arrow/bar/marker/line/label shapes directly on top of a native w:tbl
+    // whose columns are dates. This maps each such shape onto the table row/column range it visually
+    // covers so ReadableMarkdownSerializer.ApplyTableOverlays -- already shared with PPTX/XLSX, no
+    // change needed there beyond the suppression-set widening near TryPrepareNode -- can fold it into
+    // the cell text instead of it being dropped (a textless cell drawing: CellText/RelevantDescendants
+    // treats w:txbxContent as opaque, so this was already the case before this feature and stays that
+    // way for any drawing that does NOT resolve into an overlay -- see the note on CollectCellOverlayCandidates
+    // below) or printed as an unrelated paragraph (a cell drawing WITH text: also already impossible,
+    // for the same CellText/w:txbxContent reason -- confirmed by reading the method, not assumed).
+    //
+    // Two anchoring shapes are in scope (spec "対応範囲"):
+    //   (A) a shape anchored inside a table cell's own paragraph: wp:inline, wp:anchor with a
+    //       supported relativeFrom, or (cell-only) a VML v:shape/v:rect/v:line inside a w:pict.
+    //   (B) a wp:anchor shape in the paragraph *immediately before* the table whose
+    //       positionV@relativeFrom is exactly "paragraph" (the table's own top edge stands in for
+    //       that paragraph's own bottom edge). Any other relativeFrom on that paragraph's shapes --
+    //       page, margin, line, column, ... -- is explicitly NOT an overlay: this is what keeps the
+    //       fixture's page-anchored 本日線 (today-line; relativeFrom="page" on both axes) rendering
+    //       exactly as it does today -- an ordinary floating shape that AddDocumentVisualGraph may
+    //       still fold into its whole-document visual canvas, never a table cell marker. The same
+    //       fixture's page-anchored note box ("実績更新注記") sits nowhere near a table's immediately
+    //       preceding paragraph at all, so it never reaches candidacy either way; both keep rendering
+    //       as their own standalone paragraph text, unchanged.
+    //
+    // A floating table (w:tblPr/w:tblpPr) is skipped entirely -- spec "非対応".
+    // =============================================================================================
+
+    private const double DocxOverlayEmuPerTwip = 635.0; // 1 twip = 635 EMU (20 twips = 1pt = 12700 EMU).
+
+    /// <summary>One detected overlay, in the same JSON contract PptxTableOverlay/XlsxSheetOverlay use
+    /// (PascalCase, StartRow/StartColumn 0-based and end-inclusive).</summary>
+    private sealed record DocxTableOverlay(
+        string ShapeId, string Text, string Kind, string Direction, string Axis,
+        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
+
+    private sealed record DocxTableOverlayDetection(
+        IReadOnlyList<DocxTableOverlay> Overlays,
+        IReadOnlySet<string> PrecedingParagraphOverlayOwnerIds,
+        IReadOnlySet<XElement> ExcludedVisualElements);
+
+    // The small preset/rotation/axis-range helpers below intentionally duplicate PptxAdapter's
+    // private ones (OverlayArrowPresets, IsOverlayMarkerPreset, RotateAndFlipOverlayDirection,
+    // ComputeOverlayAxisRange, ...) instead of factoring a shared Common/ helper -- same rationale as
+    // the XLSX port's own "P-Overlay" region: this task's constraints forbid editing PptxAdapter.cs,
+    // and extracting a shared type would require doing exactly that (removing the methods it owns).
+    private static readonly (string Preset, string Direction, string Axis)[] DocxOverlayArrowPresets =
+    [
+        ("rightarrow", "right", "horizontal"), ("notchedrightarrow", "right", "horizontal"),
+        ("stripedrightarrow", "right", "horizontal"), ("homeplate", "right", "horizontal"), ("chevron", "right", "horizontal"),
+        ("leftarrow", "left", "horizontal"),
+        ("uparrow", "up", "vertical"),
+        ("downarrow", "down", "vertical"),
+        ("leftrightarrow", "both", "horizontal"),
+        ("updownarrow", "both", "vertical"),
+    ];
+    private static readonly string[] DocxOverlayMarkerPresets =
+        ["diamond", "flowchartdecision", "ellipse", "flowchartconnector", "triangle", "flowchartoffpageconnector"];
+    private static readonly string[] DocxOverlayDirectionCycle = ["right", "down", "left", "up"];
+
+    private static bool IsDocxOverlayMarkerPreset(string preset) =>
+        DocxOverlayMarkerPresets.Contains(preset) ||
+        (preset.StartsWith("star", StringComparison.Ordinal) && preset.Length > 4 && preset[4..].All(char.IsAsciiDigit));
+
+    // Spec: "コネクタ（prst="line"/straightConnector1/bentConnector*）は a:ln/headEnd|tailEnd で矢尻".
+    private static bool IsDocxOverlayConnectorPreset(string? preset) => preset is not null &&
+        (preset == "line" || preset.StartsWith("straightconnector", StringComparison.Ordinal) ||
+         preset.StartsWith("bentconnector", StringComparison.Ordinal) || preset.StartsWith("curvedconnector", StringComparison.Ordinal));
+
+    private static double? ParseTwipsNullable(string? value) =>
+        double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsed) ? parsed : null;
+
+    private static double EmuToTwips(double emu) => emu / DocxOverlayEmuPerTwip;
+
+    private static IReadOnlyList<double> DocxOverlayBoundaries(double origin, IReadOnlyList<double> sizes)
+    {
+        var boundaries = new double[sizes.Count + 1];
+        boundaries[0] = origin;
+        for (var i = 0; i < sizes.Count; i++) boundaries[i + 1] = boundaries[i] + sizes[i];
+        return boundaries;
+    }
+
+    // Shared row/column resolution (spec "行・列範囲", mirrors PptxAdapter.ComputeOverlayAxisRange):
+    // a band is "covered" when the shape's span on that axis overlaps it by at least half the
+    // band's own width; a degenerate (zero-length) span falls through to the center-point fallback
+    // -- this is also what a connector/line segment resolves through.
+    private static (int Start, int End) ComputeDocxOverlayAxisRange(double min, double max, IReadOnlyList<double> boundaries)
+    {
+        var covered = new List<int>();
+        for (var i = 0; i < boundaries.Count - 1; i++)
+        {
+            var bandStart = boundaries[i]; var bandEnd = boundaries[i + 1];
+            var bandWidth = bandEnd - bandStart;
+            if (bandWidth <= 0) continue;
+            var overlap = Math.Max(0, Math.Min(max, bandEnd) - Math.Max(min, bandStart));
+            if (overlap >= bandWidth * 0.5) covered.Add(i);
+        }
+        if (covered.Count > 0) return (covered[0], covered[^1]);
+        var clamped = Math.Clamp((min + max) / 2, boundaries[0], boundaries[^1]);
+        for (var i = 0; i < boundaries.Count - 1; i++)
+            if (clamped >= boundaries[i] && clamped <= boundaries[i + 1]) return (i, i);
+        return (0, 0);
+    }
+
+    private sealed record DocxTableGeometry(IReadOnlyList<double> ColumnBoundaries, IReadOnlyList<double> RowBoundaries);
+
+    // Spec "表の幾何": column boundaries come straight from w:tblGrid/gridCol@w -- unlike PPTX/XLSX
+    // there is no independent "frame size" to reconcile them against; w:tblGrid *is* the
+    // authoritative column layout. Row boundaries are table-relative (top = 0): every cell's own row
+    // index and the "直前段落 (B)" case (spec: "表上端=0として") share this same relative frame, so
+    // nothing here ever needs the table's page-absolute vertical position.
+    private static DocxTableGeometry? BuildDocxTableGeometry(XElement table)
+    {
+        var gridCols = table.Element(W + "tblGrid")?.Elements(W + "gridCol")
+            .Select(column => ParseTwipsNullable((string?)column.Attribute(W + "w")) ?? 0).ToArray() ?? [];
+        var rows = table.Elements(W + "tr").ToArray();
+        // Mirrors PptxAdapter.DetectTableOverlays' own host gate (TableRows/TableColumnWidths both
+        // >= 2): a 1xN or Nx1 grid is never a genuine schedule table worth overlaying.
+        if (gridCols.Length < 2 || rows.Length < 2) return null;
+        var rawHeights = rows.Select(row => ParseTwipsNullable((string?)row.Element(W + "trPr")?.Element(W + "trHeight")?.Attribute(W + "val"))).ToArray();
+        var known = rawHeights.Where(height => height is > 0).Select(height => height!.Value).ToArray();
+        // Spec: "行高不明の行は既知行の平均（既知が無ければ1行=480twips）で補う".
+        var fallback = known.Length > 0 ? known.Average() : 480.0;
+        var heights = rawHeights.Select(height => height is > 0 ? height!.Value : fallback).ToArray();
+        return new DocxTableGeometry(DocxOverlayBoundaries(0, gridCols), DocxOverlayBoundaries(0, heights));
+    }
+
+    // Spec: "表左端X = pgMar@left + w:tblInd@w（両方twips）。sectPrは表の後ろで最初に現れる段落
+    // sectPr、無ければbody末尾のsectPr". Scanning forward from the table (rather than backward) means
+    // a table that starts a fresh section (e.g. a landscape section) picks up THAT section's own
+    // margins, mirroring how FindLandscapeSectionStarts reads "the next paragraph's own sectPr ends
+    // the section the table is actually in". Returns pgMar@left separately from the combined
+    // table-left value: spec (B)'s "column" bucket resolves against pgMar@left ALONE (there is no
+    // cell, hence no tblInd-shifted "cell left", outside the table) -- so tblInd must not leak into
+    // that specific computation the way it correctly does into every column boundary and (A) cell
+    // position below.
+    private static (double PageLeftMarginTwips, double TableLeftTwips) ResolveDocxTableLeftTwips(XDocument doc, XElement table, XElement[] bodyElements, int tableIndex)
+    {
+        XElement? sectPr = null;
+        for (var index = tableIndex + 1; index < bodyElements.Length; index++)
+        {
+            if (bodyElements[index].Name != W + "p") continue;
+            if (bodyElements[index].Element(W + "pPr")?.Element(W + "sectPr") is { } candidate) { sectPr = candidate; break; }
+        }
+        sectPr ??= doc.Root?.Element(W + "body")?.Element(W + "sectPr");
+        var pgMarLeft = ParseTwipsNullable((string?)sectPr?.Element(W + "pgMar")?.Attribute(W + "left")) ?? 1440; // 1in default.
+        var tblIndElement = table.Element(W + "tblPr")?.Element(W + "tblInd");
+        var tblIndType = (string?)tblIndElement?.Attribute(W + "type");
+        // D3: w:tblInd@w is only a twips length when w:type is absent or "dxa" -- "pct" (a
+        // percentage of some other measure), "nil", and "auto" are not twips at all, and reading
+        // their raw numeric value as twips silently shifted the whole table (and every overlay in
+        // it) left or right by an unrelated amount.
+        var tblInd = tblIndType is null or "dxa" ? ParseTwipsNullable((string?)tblIndElement?.Attribute(W + "w")) ?? 0 : 0;
+        return (pgMarLeft, pgMarLeft + tblInd);
+    }
+
+    /// <summary>A candidate shape/connector plus every field its classification and position
+    /// resolution need, read once whether it ends up cell-anchored (A) or preceding-paragraph
+    /// anchored (B) -- only the position-resolution call site differs between the two.</summary>
+    private sealed record DocxOverlayCandidate(
+        XElement Owner, string ContractShapeId, string Text, string? Preset, bool IsConnector,
+        bool IsTextBox, double RotationDegrees, bool FlipH, bool FlipV,
+        double WidthTwips, double HeightTwips, string? HeadArrowType, string? TailArrowType,
+        bool IsInline, string? HorizontalRelativeFrom, double HorizontalOffsetTwips,
+        string? VerticalRelativeFrom, double VerticalOffsetTwips);
+
+    // Spec: "ShapeId = wp:docPr@id or VML o:spid/id".
+    private static string ResolveDocxOverlayContractShapeId(XElement owner, XElement? anchorOrInline)
+    {
+        var docPrId = anchorOrInline?.Element(WP + "docPr")?.Attribute("id")?.Value;
+        if (!string.IsNullOrEmpty(docPrId)) return docPrId;
+        var spid = owner.Attributes().FirstOrDefault(attribute => attribute.Name.LocalName == "spid")?.Value;
+        if (!string.IsNullOrEmpty(spid)) return spid;
+        return (string?)owner.Attribute("id") ??
+            (string?)owner.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ?? string.Empty;
+    }
+
+    // The same shape-owner id BuildDocxVisualGraph/TextBoxShapeId resolve (own "id" attribute, else
+    // an owned cNvPr descendant) -- used only to find the already-created TextBox node a (B) overlay
+    // shape's w:txbxContent produced, so it can be tagged after the fact (see
+    // TagPrecedingParagraphOverlayTextBoxes). Deliberately NOT the contract ShapeId above: those two
+    // ids are conventionally the same numeric value in real Word output, but are not the same field.
+    private static string? ResolveDocxOverlayOwnerVisualId(XElement owner) =>
+        (string?)owner.Attribute("id") ?? (string?)owner.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
+
+    private static bool IsDocxOverlayOwnerElement(XElement element) =>
+        element.Name == A + "sp" || element.Name == WPS + "wsp" ||
+        element.Name == V + "shape" || element.Name == V + "rect" || element.Name == V + "line";
+
+    // D1: parses a VML length/coordinate token (e.g. "198pt", "2.5cm", "144" -- no unit means pt
+    // per the VML spec) into twips. Shared by StyleValue and the v:line Coordinate helper inside
+    // ReadDocxOverlayCandidate below, so both style-based (width/height/margin-*) and
+    // point-pair-based (from/to) VML values get the same unit-aware conversion.
+    private static double ParseVmlLengthTwips(string? token)
+    {
+        var trimmed = (token ?? string.Empty).Trim();
+        var numberLength = trimmed.Length;
+        while (numberLength > 0 && char.IsLetter(trimmed[numberLength - 1])) numberLength--;
+        var unit = trimmed[numberLength..].ToLowerInvariant();
+        if (!double.TryParse(trimmed[..numberLength], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var value)) return 0;
+        return unit switch
+        {
+            "in" => value * 1440,
+            "cm" => value * 566.93,
+            "mm" => value * 56.693,
+            "px" => value * 15,
+            _ => value * 20, // "pt", no unit, or anything unrecognized: VML defaults to points.
+        };
+    }
+
+    /// <summary>Reads one candidate shape's classification/geometry fields. VML (v:shape/v:rect/
+    /// v:line) is only ever read here for a (A) cell shape -- spec "VMLはセル内のみ対応" -- so it has
+    /// no relativeFrom concept of its own: it is always positioned relative to its own paragraph, the
+    /// same as the DrawingML (A) "column"/"paragraph" default bucket (see ResolveDocxOverlayX /
+    /// ResolveCellOverlayRowRange).</summary>
+    private static DocxOverlayCandidate? ReadDocxOverlayCandidate(XElement owner, DocxHiddenStyles hiddenStyles)
+    {
+        var isVml = owner.Name == V + "shape" || owner.Name == V + "rect" || owner.Name == V + "line";
+        if (isVml)
+        {
+            // v:line has no fill/prstGeom of its own -- it IS the connector. v:rect is always a bar
+            // (deliverable: "VML v:rect bar in a cell"); an unrecognized generic v:shape falls back to
+            // "bar" too, same default bucket ClassifyDocxOverlay uses for any unrecognized preset.
+            var preset = owner.Name == V + "line" ? "line" : owner.Name == V + "rect" ? "rect" : null;
+            var isConnector = owner.Name == V + "line";
+            var style = (string?)owner.Attribute("style") ?? string.Empty;
+            // D1: VML expresses lengths (style width/height/margin-*) and v:line from/to
+            // coordinates in CSS-style units -- pt (the default for a bare number with no unit
+            // suffix), in, cm, mm, or px -- never bare twips. Treating the raw number as
+            // already-twips silently under-scaled every value by ~20x (pt) or worse, so an
+            // ordinary `width:198pt` bar rendered as a tiny sliver of its real width.
+            double StyleValue(string key)
+            {
+                foreach (var token in style.Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var pair = token.Split(':', 2);
+                    if (pair.Length == 2 && pair[0].Trim().Equals(key, StringComparison.OrdinalIgnoreCase))
+                        return ParseVmlLengthTwips(pair[1]);
+                }
+                return 0;
+            }
+            double widthTwips; double heightTwips; double xOffsetTwips; double yOffsetTwips;
+            if (isConnector)
+            {
+                // v:line positions itself with from="x,y" / to="x,y" point pairs, not style width/height.
+                double Coordinate(string text, int index)
+                {
+                    var parts = text.Split(',');
+                    return index < parts.Length ? ParseVmlLengthTwips(parts[index]) : 0;
+                }
+                var from = (string?)owner.Attribute("from") ?? "0,0";
+                var to = (string?)owner.Attribute("to") ?? "0,0";
+                var (x1, y1) = (Coordinate(from, 0), Coordinate(from, 1));
+                var (x2, y2) = (Coordinate(to, 0), Coordinate(to, 1));
+                xOffsetTwips = Math.Min(x1, x2); yOffsetTwips = Math.Min(y1, y2);
+                widthTwips = Math.Abs(x2 - x1); heightTwips = Math.Abs(y2 - y1);
+            }
+            else
+            {
+                widthTwips = StyleValue("width"); heightTwips = StyleValue("height");
+                xOffsetTwips = StyleValue("margin-left"); yOffsetTwips = StyleValue("margin-top");
+            }
+            var stroke = owner.Descendants(V + "stroke").FirstOrDefault();
+            var hasStartArrow = !string.IsNullOrWhiteSpace((string?)stroke?.Attribute("startarrow"));
+            var hasEndArrow = !string.IsNullOrWhiteSpace((string?)stroke?.Attribute("endarrow"));
+            return new DocxOverlayCandidate(owner, ResolveDocxOverlayContractShapeId(owner, null),
+                TextBoxText(owner, hiddenStyles).Trim(), preset, isConnector, false,
+                0, false, false, widthTwips, heightTwips,
+                hasStartArrow ? "triangle" : null, hasEndArrow ? "triangle" : null,
+                IsInline: false, HorizontalRelativeFrom: "column", HorizontalOffsetTwips: xOffsetTwips,
+                VerticalRelativeFrom: "paragraph", VerticalOffsetTwips: yOffsetTwips);
+        }
+
+        var anchorOrInline = (XElement?)owner.Ancestors(WP + "anchor").FirstOrDefault() ?? owner.Ancestors(WP + "inline").FirstOrDefault();
+        if (anchorOrInline is null) return null;
+        var isAnchor = anchorOrInline.Name == WP + "anchor";
+        if (isAnchor && (string?)anchorOrInline.Attribute("hidden") is "1" or "true") return null;
+        var presetKey = owner.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst")?.Value?.ToLowerInvariant();
+        var isConnectorPreset = IsDocxOverlayConnectorPreset(presetKey);
+        var isTextBox = (string?)owner.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvSpPr")?.Attribute("txBox") is "1" or "true";
+        var xfrm = owner.Descendants(A + "xfrm").FirstOrDefault();
+        var rotation = (ParseTwipsNullable((string?)xfrm?.Attribute("rot")) ?? 0) / 60000.0;
+        var flipH = (string?)xfrm?.Attribute("flipH") is "1" or "true";
+        var flipV = (string?)xfrm?.Attribute("flipV") is "1" or "true";
+        var extent = anchorOrInline.Element(WP + "extent");
+        var ext = xfrm?.Element(A + "ext");
+        var widthEmu = ParseTwipsNullable((string?)extent?.Attribute("cx")) ?? ParseTwipsNullable((string?)ext?.Attribute("cx")) ?? 0;
+        var heightEmu = ParseTwipsNullable((string?)extent?.Attribute("cy")) ?? ParseTwipsNullable((string?)ext?.Attribute("cy")) ?? 0;
+        var line = owner.Descendants(A + "ln").FirstOrDefault();
+        var headArrow = (string?)line?.Element(A + "headEnd")?.Attribute("type");
+        var tailArrow = (string?)line?.Element(A + "tailEnd")?.Attribute("type");
+        var positionH = anchorOrInline.Element(WP + "positionH");
+        var positionV = anchorOrInline.Element(WP + "positionV");
+        var horizontalOffsetEmu = ParseTwipsNullable((string?)positionH?.Element(WP + "posOffset")) ?? 0;
+        var verticalOffsetEmu = ParseTwipsNullable((string?)positionV?.Element(WP + "posOffset")) ?? 0;
+        return new DocxOverlayCandidate(owner, ResolveDocxOverlayContractShapeId(owner, anchorOrInline),
+            TextBoxText(owner, hiddenStyles).Trim(), presetKey, isConnectorPreset, isTextBox,
+            rotation, flipH, flipV, EmuToTwips(widthEmu), EmuToTwips(heightEmu), headArrow, tailArrow,
+            IsInline: !isAnchor,
+            HorizontalRelativeFrom: isAnchor ? ((string?)positionH?.Attribute("relativeFrom"))?.ToLowerInvariant() : null,
+            HorizontalOffsetTwips: EmuToTwips(horizontalOffsetEmu),
+            VerticalRelativeFrom: isAnchor ? ((string?)positionV?.Attribute("relativeFrom"))?.ToLowerInvariant() : null,
+            VerticalOffsetTwips: EmuToTwips(verticalOffsetEmu));
+    }
+
+    // (A): every candidate shape/connector anchored directly inside this cell's own paragraphs. A
+    // nested table's own cell shapes are never picked up here: CellBlocks/RelevantDescendants (and
+    // therefore CellText) already treat w:tbl as opaque, and a drawing element cannot legally live
+    // outside its own w:tc anyway, so `cell.Descendants()` never crosses into a different cell.
+    //
+    // Non-overlay drawings' text in cells (both A candidates that fail candidacy below, and any
+    // drawing this method does not even consider a candidate owner element): CellText/ParagraphText
+    // route through RelevantDescendants, which treats w:txbxContent as opaque (OpaqueParagraphContainers)
+    // and never descends into it -- confirmed by reading, not assumed. A cell drawing's text was
+    // already invisible to CellText before this feature and stays exactly that way for one that does
+    // NOT become an overlay; only ApplyTableOverlays (ReadableMarkdownSerializer, unchanged by this
+    // port) ever prints an overlay's own Text, and only for the ones this method's caller keeps.
+    private static IEnumerable<DocxOverlayCandidate> CollectCellOverlayCandidates(XElement cell, DocxHiddenStyles hiddenStyles)
+    {
+        foreach (var owner in cell.Descendants().Where(IsDocxOverlayOwnerElement))
+            if (ReadDocxOverlayCandidate(owner, hiddenStyles) is { } candidate) yield return candidate;
+    }
+
+    // (B): only a DrawingML wp:anchor shape directly in the table's immediately preceding paragraph
+    // qualifies at all -- spec "VMLはセル内のみ対応" excludes VML from ever being a (B) candidate, and
+    // wp:inline has no relativeFrom to test at all.
+    private static IEnumerable<DocxOverlayCandidate> CollectPrecedingParagraphOverlayCandidates(XElement paragraph, DocxHiddenStyles hiddenStyles)
+    {
+        foreach (var owner in paragraph.Descendants().Where(item => item.Name == A + "sp" || item.Name == WPS + "wsp"))
+        {
+            if (ReadDocxOverlayCandidate(owner, hiddenStyles) is not { } candidate) continue;
+            if (candidate.IsInline) continue;
+            if (!StringComparer.Ordinal.Equals(candidate.VerticalRelativeFrom, "paragraph")) continue;
+            yield return candidate;
+        }
+    }
+
+    // Spec: A's "column/character/leftMargin/other" bucket resolves against the shape's own cell's
+    // left edge; B's only listed bucket ("column") resolves against the page's own left margin
+    // instead, since there is no cell outside the table. Both are simply "the natural text-flow left
+    // edge for this context" -- the two call sites below pass in whichever one applies.
+    private static double ResolveDocxOverlayX(DocxOverlayCandidate candidate, double defaultLeftTwips, double pageLeftMarginTwips)
+    {
+        if (candidate.IsInline) return defaultLeftTwips;
+        return candidate.HorizontalRelativeFrom switch
+        {
+            "page" => candidate.HorizontalOffsetTwips,
+            "margin" => pageLeftMarginTwips + candidate.HorizontalOffsetTwips,
+            _ => defaultLeftTwips + candidate.HorizontalOffsetTwips,
+        };
+    }
+
+    // Spec (A) Y-bucket split: paragraph/line/character (and inline) resolve a real absolute Y and
+    // use the shared coverage rule, possibly spanning several rows; margin/page/column cannot (the
+    // shape's own absolute-page position says nothing about which row of the table its owning CELL
+    // happens to be), so they pin to the cell's own row and only extend downward while `cy` overflows
+    // it (spec: "cyが起点行の高さを超えるなら行高で下方向に伸ばす").
+    private static (int StartRow, int EndRow) ResolveCellOverlayRowRange(
+        DocxOverlayCandidate candidate, int cellRowIndex, double cellTopTwips, double cellBottomTwips, IReadOnlyList<double> rowBoundaries)
+    {
+        if (candidate.VerticalRelativeFrom is "margin" or "page")
+        {
+            var endRow = cellRowIndex;
+            var remaining = candidate.HeightTwips - (cellBottomTwips - cellTopTwips);
+            while (remaining > 0 && endRow + 2 < rowBoundaries.Count)
+            {
+                endRow++;
+                remaining -= rowBoundaries[endRow + 1] - rowBoundaries[endRow];
+            }
+            return (cellRowIndex, endRow);
+        }
+        var y = candidate.IsInline ? cellTopTwips : cellTopTwips + candidate.VerticalOffsetTwips;
+        return ComputeDocxOverlayAxisRange(y, y + candidate.HeightTwips, rowBoundaries);
+    }
+
+    // Spec (B): "段落高はその段落に文字が無ければ240twips、あれば240×行数の概算". A hard line break
+    // (w:br/w:cr -- already what ParagraphText turns into '\n') is the only signal available here for
+    // "another line" without a layout engine; 240 twips = 12pt is this fixture's own documented
+    // per-line height (generate_schedule_docx.py's PRECEDING_PARA_TWIPS).
+    private static double EstimateDocxParagraphHeightTwips(XElement paragraph, DocxHiddenStyles hiddenStyles)
+    {
+        var text = ParagraphText(paragraph, hiddenStyles);
+        var lineCount = text.Length == 0 ? 1 : text.Count(character => character == '\n') + 1;
+        return 240.0 * lineCount;
+    }
+
+    // Candidacy gate (spec): "図形面積の50%以上が表内（テキストボックス=labelは90%）" operationalized,
+    // for DOCX, as the column/X-axis containment ratio alone (spec: "列方向で表内に50%以上入って
+    // いない図形はオーバーレイにしない") -- a cell shape's Y position is already pinned to its own
+    // cell/row by construction (ResolveCellOverlayRowRange), and a (B) shape's Y is a deliberately
+    // approximate estimate, so X is the one axis worth gating on here. A zero-width shape (a vertical
+    // line/connector) has no ratio to compute; whether its single X coordinate falls inside the
+    // table stands in for it instead.
+    private static bool IsDocxOverlayLabelCandidate(DocxOverlayCandidate candidate)
+    {
+        if (candidate.IsConnector || !candidate.IsTextBox) return false;
+        var presetKey = candidate.Preset;
+        if (presetKey is not null && Array.Exists(DocxOverlayArrowPresets, p => p.Preset == presetKey)) return false;
+        if (presetKey == "line") return false;
+        if (presetKey is not null && IsDocxOverlayMarkerPreset(presetKey)) return false;
+        return true;
+    }
+
+    private static bool TryGetDocxOverlayColumnContainment(DocxOverlayCandidate candidate, double x, double width, IReadOnlyList<double> columnBoundaries, out double containment)
+    {
+        var tableLeft = columnBoundaries[0]; var tableRight = columnBoundaries[^1];
+        if (width > 0)
+        {
+            var overlap = Math.Max(0, Math.Min(x + width, tableRight) - Math.Max(x, tableLeft));
+            containment = overlap / width;
+        }
+        else containment = x >= tableLeft && x <= tableRight ? 1.0 : 0.0;
+        return containment >= (IsDocxOverlayLabelCandidate(candidate) ? 0.9 : 0.5);
+    }
+
+    private static DocxTableOverlay ClassifyDocxOverlay(DocxOverlayCandidate candidate, int startRow, int endRow, int startColumn, int endColumn)
+    {
+        string kind; string direction; string? axis;
+        if (candidate.IsConnector)
+        {
+            var head = !string.IsNullOrWhiteSpace(candidate.HeadArrowType) && !StringComparer.OrdinalIgnoreCase.Equals(candidate.HeadArrowType, "none");
+            var tail = !string.IsNullOrWhiteSpace(candidate.TailArrowType) && !StringComparer.OrdinalIgnoreCase.Equals(candidate.TailArrowType, "none");
+            // DOCX shapes carry no parsed connector path-point list (unlike PptxShapeRecord's
+            // ConnectorPathPoints); the shape's own bounding box, flip-adjusted the same way
+            // BuildDocxVisualGraph's PointAt derives a connector's endpoints from geometry, gives the
+            // forward (start -> end) vector instead.
+            var dx = candidate.FlipH ? -candidate.WidthTwips : candidate.WidthTwips;
+            var dy = candidate.FlipV ? -candidate.HeightTwips : candidate.HeightTwips;
+            var connectorAxis = Math.Abs(dx) >= Math.Abs(dy) ? "horizontal" : "vertical";
+            var forward = connectorAxis == "horizontal" ? (dx >= 0 ? "right" : "left") : (dy >= 0 ? "down" : "up");
+            if (!head && !tail) { kind = "line"; direction = "none"; axis = null; }
+            else if (head && tail) { kind = "arrow"; direction = "both"; axis = connectorAxis; }
+            else { kind = "arrow"; direction = tail ? forward : OppositeDocxOverlayDirection(forward); axis = connectorAxis; }
+        }
+        else
+        {
+            var presetKey = candidate.Preset;
+            var arrowPresetMatch = presetKey is null ? default : Array.Find(DocxOverlayArrowPresets, p => p.Preset == presetKey);
+            (string Preset, string Direction, string Axis)? arrowPreset = arrowPresetMatch.Preset is null ? null : arrowPresetMatch;
+            if (arrowPreset is { } preset)
+            {
+                kind = "arrow";
+                (direction, axis) = RotateAndFlipDocxOverlayDirection(preset.Direction, preset.Axis, candidate.RotationDegrees, candidate.FlipH, candidate.FlipV);
+            }
+            else if (presetKey == "line") { kind = "line"; direction = "none"; axis = null; }
+            else if (presetKey is not null && IsDocxOverlayMarkerPreset(presetKey)) { kind = "marker"; direction = "none"; axis = null; }
+            else if (candidate.IsTextBox) { kind = "label"; direction = "none"; axis = null; }
+            else { kind = "bar"; direction = "none"; axis = null; }
+        }
+        // Coverage-based axis (spec): "被覆列数 > 1 または(被覆行数 == 1)" -> horizontal; only a
+        // multi-row, single-column span reads as vertical.
+        axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
+        return new DocxTableOverlay(candidate.ContractShapeId, candidate.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, candidate.Preset);
+    }
+
+    private static string OppositeDocxOverlayDirection(string direction) => direction switch
+    {
+        "right" => "left", "left" => "right", "up" => "down", "down" => "up", _ => direction,
+    };
+
+    // Task note: unlike PptxAdapter.RotateAndFlipOverlayDirection, NO flipH-induced +180 artifact
+    // correction is needed here. That correction undoes an artifact of how PptxAdapter's
+    // TransformGeometry *derives* RotationDegrees from a transformed reference vector (which folds
+    // flipH into the measured angle); DocxOverlayCandidate.RotationDegrees instead comes straight off
+    // this shape's own raw a:xfrm@rot attribute (see ReadDocxOverlayCandidate), which OOXML defines
+    // independently of flipH/flipV, so there is no such artifact here to undo.
+    private static (string Direction, string Axis) RotateAndFlipDocxOverlayDirection(string baseDirection, string baseAxis, double rotationDegrees, bool flipH, bool flipV)
+    {
+        var steps = (int)Math.Round(rotationDegrees / 90.0, MidpointRounding.AwayFromZero);
+        steps = ((steps % 4) + 4) % 4;
+        var mirroredDirection = baseDirection switch
+        {
+            "left" when flipH => "right",
+            "right" when flipH => "left",
+            "up" when flipV => "down",
+            "down" when flipV => "up",
+            _ => baseDirection,
+        };
+        string direction; string axis;
+        if (mirroredDirection == "both")
+        {
+            direction = "both";
+            axis = steps % 2 == 1 ? (baseAxis == "horizontal" ? "vertical" : "horizontal") : baseAxis;
+        }
+        else
+        {
+            var index = Array.IndexOf(DocxOverlayDirectionCycle, mirroredDirection);
+            direction = DocxOverlayDirectionCycle[(index + steps) % 4];
+            axis = direction is "right" or "left" ? "horizontal" : "vertical";
+        }
+        return (direction, axis);
+    }
+
+    // Spec ordering rule (shared with PptxAdapter/XlsxAdapter): "(StartRow, StartColumn, ShapeId を
+    // 数値として...非数値は後ろ、序数比較)".
+    // D4 (nit): a VML v:shape/@id (e.g. "_x0000_s1026") is not purely numeric, so long.TryParse
+    // below fails for it and it falls through to the ordinal string branch -- sorting VML shapes
+    // by their literal id text rather than by the numeric suffix's magnitude. That is fine as-is:
+    // Office assigns these ids sequentially with a shared "_x0000_s" prefix and equal digit
+    // counts within one document, so ordinal-by-full-string already recovers the same relative
+    // order in practice. Left unchanged; this comment is the review's fix.
+    private sealed class DocxOverlayShapeIdComparer : IComparer<string>
+    {
+        public static readonly DocxOverlayShapeIdComparer Instance = new();
+        public int Compare(string? x, string? y)
+        {
+            var xIsNumeric = long.TryParse(x, out var xValue);
+            var yIsNumeric = long.TryParse(y, out var yValue);
+            if (xIsNumeric && yIsNumeric) return xValue.CompareTo(yValue);
+            if (xIsNumeric) return -1;
+            if (yIsNumeric) return 1;
+            return string.CompareOrdinal(x, y);
+        }
+    }
+
+    private static DocxTableOverlayDetection? DetectDocxTableOverlays(
+        XDocument doc, XElement table, XElement? precedingParagraph, XElement[] bodyElements, int tableIndex, DocxHiddenStyles hiddenStyles)
+    {
+        // Spec "非対応": a floating table's column mapping is out of scope.
+        if (table.Element(W + "tblPr")?.Element(W + "tblpPr") is not null) return null;
+        // D6: a right-to-left table (w:tblPr/w:bidiVisual) lays its grid out with logical column 0
+        // on the RIGHT -- every column-boundary computation below assumes left-to-right, so
+        // detecting overlays on a bidi table would silently place them in mirrored (wrong)
+        // columns. Skip overlay detection for these tables entirely rather than emit a
+        // confidently wrong column.
+        if (IsDocxOoxmlFlagSet(table.Element(W + "tblPr")?.Element(W + "bidiVisual"))) return null;
+        var geometry = BuildDocxTableGeometry(table);
+        if (geometry is null) return null;
+        var (pageLeftMarginTwips, tableLeftTwips) = ResolveDocxTableLeftTwips(doc, table, bodyElements, tableIndex);
+
+        var overlays = new List<DocxTableOverlay>();
+        var excludedElements = new HashSet<XElement>();
+        var precedingOwnerIds = new HashSet<string>(StringComparer.Ordinal);
+
+        var rows = table.Elements(W + "tr").ToArray();
+        for (var rowIndex = 0; rowIndex < rows.Length; rowIndex++)
+        {
+            // D2: see ParseDocxGridBefore -- a row's <w:tc> children start at this grid column,
+            // not at 0, so a shape covering a cell in a gridBefore row resolves against the
+            // correct entry in geometry.ColumnBoundaries.
+            var gridColumn = ParseDocxGridBefore(rows[rowIndex].Element(W + "trPr"));
+            foreach (var tc in rows[rowIndex].Elements(W + "tc"))
+            {
+                var gridSpan = ParsePositiveInt((string?)tc.Element(W + "tcPr")?.Element(W + "gridSpan")?.Attribute(W + "val")) ?? 1;
+                var boundedColumn = Math.Min(gridColumn, geometry.ColumnBoundaries.Count - 2);
+                var cellLeftTwips = geometry.ColumnBoundaries[boundedColumn];
+                var boundedRow = Math.Min(rowIndex, geometry.RowBoundaries.Count - 2);
+                var cellTopTwips = geometry.RowBoundaries[boundedRow];
+                var cellBottomTwips = geometry.RowBoundaries[boundedRow + 1];
+                foreach (var candidate in CollectCellOverlayCandidates(tc, hiddenStyles))
+                {
+                    if (candidate.WidthTwips <= 0 && candidate.HeightTwips <= 0) continue; // a true point: nothing to place.
+                    // (A) X is measured from the CELL's own left edge for the "column"/default bucket
+                    // (tableLeftTwips, including tblInd, cancels out of the column-boundary comparison
+                    // below for that common case); the "margin" bucket resolves against pgMar@left
+                    // ALONE (spec: "margin → 表左端…正確にはpgMar@left + posOffset") -- tblInd must
+                    // NOT leak into it, hence pageLeftMarginTwips rather than tableLeftTwips here.
+                    var x = ResolveDocxOverlayX(candidate, tableLeftTwips + cellLeftTwips, pageLeftMarginTwips);
+                    var width = Math.Max(candidate.WidthTwips, 0);
+                    var shiftedColumnBoundaries = geometry.ColumnBoundaries.Select(boundary => boundary + tableLeftTwips).ToArray();
+                    if (!TryGetDocxOverlayColumnContainment(candidate, x, width, shiftedColumnBoundaries, out _)) continue;
+
+                    var (startRow, endRow) = ResolveCellOverlayRowRange(candidate, boundedRow, cellTopTwips, cellBottomTwips, geometry.RowBoundaries);
+                    var (startColumn, endColumn) = ComputeDocxOverlayAxisRange(x, x + width, shiftedColumnBoundaries);
+                    overlays.Add(ClassifyDocxOverlay(candidate, startRow, endRow, startColumn, endColumn));
+                    excludedElements.Add(candidate.Owner);
+                }
+                gridColumn += gridSpan;
+            }
+        }
+
+        if (precedingParagraph is not null)
+        {
+            var paragraphHeightTwips = EstimateDocxParagraphHeightTwips(precedingParagraph, hiddenStyles);
+            var shiftedColumnBoundaries = geometry.ColumnBoundaries.Select(boundary => boundary + tableLeftTwips).ToArray();
+            foreach (var candidate in CollectPrecedingParagraphOverlayCandidates(precedingParagraph, hiddenStyles))
+            {
+                if (candidate.WidthTwips <= 0 && candidate.HeightTwips <= 0) continue;
+                // (B) "column" (the only bucket the spec lists a distinct rule for) resolves against
+                // pgMar@left alone, same reasoning as (A)'s "margin" bucket above.
+                var x = ResolveDocxOverlayX(candidate, pageLeftMarginTwips, pageLeftMarginTwips);
+                var width = Math.Max(candidate.WidthTwips, 0);
+                if (!TryGetDocxOverlayColumnContainment(candidate, x, width, shiftedColumnBoundaries, out _)) continue;
+
+                var y = Math.Max(0, candidate.VerticalOffsetTwips - paragraphHeightTwips);
+                var height = Math.Max(candidate.HeightTwips, 0);
+                var (startRow, endRow) = ComputeDocxOverlayAxisRange(y, y + height, geometry.RowBoundaries);
+                var (startColumn, endColumn) = ComputeDocxOverlayAxisRange(x, x + width, shiftedColumnBoundaries);
+                overlays.Add(ClassifyDocxOverlay(candidate, startRow, endRow, startColumn, endColumn));
+                excludedElements.Add(candidate.Owner);
+                if (ResolveDocxOverlayOwnerVisualId(candidate.Owner) is { Length: > 0 } ownerVisualId) precedingOwnerIds.Add(ownerVisualId);
+            }
+        }
+
+        if (overlays.Count == 0) return null;
+        var ordered = overlays
+            .OrderBy(overlay => overlay.StartRow).ThenBy(overlay => overlay.StartColumn)
+            .ThenBy(overlay => overlay.ShapeId, DocxOverlayShapeIdComparer.Instance)
+            .ToArray();
+        return new DocxTableOverlayDetection(ordered, precedingOwnerIds, excludedElements);
+    }
+
+    // Mirrors AddDocumentVisualGraph's own in-place "visual_graph_member" patch a few dozen lines
+    // below it: `nodes` is concretely a List<DocumentNode>, so an already-appended TextBox node (the
+    // preceding paragraph was processed by AddParagraph on an EARLIER main-loop iteration, before
+    // this table -- and therefore this table's own id -- were known) can still be tagged after the
+    // fact once this table's overlay detection completes.
+    private static void TagPrecedingParagraphOverlayTextBoxes(ICollection<DocumentNode> nodes, IReadOnlySet<string> ownerIds, string hostTableId, string precedingParagraphNodeId)
+    {
+        if (ownerIds.Count == 0 || nodes is not List<DocumentNode> nodeList) return;
+        for (var index = 0; index < nodeList.Count; index++)
+        {
+            var node = nodeList[index];
+            // D5: shape_id alone is just the raw v:shape/@id or DrawingML cNvPr/@id -- a small
+            // integer a producer can (and real documents do) reuse across unrelated shapes
+            // elsewhere in the same document. Require ParentId to match the specific preceding
+            // paragraph this detection came from, so only a TextBox node AddParagraph actually
+            // created FROM THAT paragraph can be tagged.
+            if (node.Kind != NodeKind.TextBox || node.ParentId != precedingParagraphNodeId || node.Extensions is null ||
+                !node.Extensions.TryGetValue("shape_id", out var shapeIdElement) || shapeIdElement.ValueKind != JsonValueKind.String ||
+                !ownerIds.Contains(shapeIdElement.GetString()!)) continue;
+            var extensions = new Dictionary<string, JsonElement>(node.Extensions, StringComparer.Ordinal)
+            {
+                ["table_overlay_host"] = JsonSerializer.SerializeToElement(hostTableId),
+                ["table_overlay"] = JsonSerializer.SerializeToElement(true),
+            };
+            nodeList[index] = node with { Extensions = extensions };
+        }
+    }
+
+    // A deep clone that drops specific descendant subtrees by reference identity against the
+    // ORIGINAL (un-cloned) tree -- used to keep a detected overlay shape (both (A) cell-anchored and
+    // (B) preceding-paragraph-anchored) out of the whole-document visual canvas
+    // AddDocumentVisualGraph builds, the DOCX counterpart of PptxAdapter.Extract building its
+    // visualGraphs from `slide with { Shapes = ... }` with overlay shapes already filtered out.
+    // XElement/XObject uses reference equality by default (LINQ to XML never overrides
+    // Equals/GetHashCode), and XContainer.Add auto-clones any node that already has a parent, so this
+    // is a plain structural copy everywhere except at an excluded node.
+    private static XElement CloneExcludingOverlayShapes(XElement source, IReadOnlySet<XElement> excluded)
+    {
+        var clone = new XElement(source.Name, source.Attributes());
+        foreach (var node in source.Nodes())
+        {
+            if (node is XElement child)
+            {
+                if (excluded.Contains(child)) continue;
+                clone.Add(CloneExcludingOverlayShapes(child, excluded));
+            }
+            else clone.Add(node);
+        }
+        return clone;
+    }
 
     /// <summary>Marks, per cell block, whether a paragraph survives <see cref="CellText"/>'s trimming
     /// of leading and trailing empty paragraphs (tables are never "kept" paragraphs).</summary>
@@ -1809,6 +2537,19 @@ public sealed class DocxAdapter : IFormatProbe
 
     private static int? ParsePositiveInt(string? value) =>
         int.TryParse(value, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed > 0 ? parsed : null;
+
+    // D2: w:trPr/w:gridBefore@val (defaults to 0) is how many leading grid columns a row's
+    // <w:tc> elements skip -- Word omits <w:tc> entirely for those columns rather than emitting
+    // empty ones, so any code walking <w:tc> children in document order must count from this
+    // offset, not from 0, to line up with w:tblGrid's column indices.
+    private static int ParseDocxGridBefore(XElement? trPr) =>
+        int.TryParse((string?)trPr?.Element(W + "gridBefore")?.Attribute(W + "val"),
+            System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0 ? value : 0;
+
+    // D6: standard OOXML ST_OnOff semantics for a bare boolean element -- present with no w:val
+    // (or any w:val other than "0"/"false"/"off") means true.
+    private static bool IsDocxOoxmlFlagSet(XElement? element) =>
+        element is not null && (string?)element.Attribute(W + "val") is not ("0" or "false" or "off");
 
     private static async Task<int> AddRelatedTextPartsAsync(ZipArchive archive, IReadOnlyDictionary<string, string> relationships, string relationshipFragment,
         NodeKind kind, ContentLayer layer, ICollection<DocumentNode> nodes, int ordinal, DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
@@ -2970,22 +3711,58 @@ public sealed class DocxAdapter : IFormatProbe
         return (true, next);
     }
 
-    private static byte[] ReplaceTableCells(byte[] originalSlice, NodeContent content, out DocxParagraphEditResult edits)
+    private static IReadOnlyDictionary<XElement, RawSliceRef> IndexSliceElements(byte[] bytes, XElement root, RawSliceRef host)
     {
-        if (content is not TableNodeContent edited) throw new InvalidDataException("An edited DOCX table must retain table cell content.");
+        var ranges = XmlSliceScanner.FindElementRanges(bytes);
+        var elements = root.DescendantsAndSelf().ToArray();
+        if (ranges.Count != elements.Length || ranges.Where((range, index) => range.LocalName != elements[index].Name.LocalName).Any())
+            throw new InvalidDataException("DOCX element slices do not match the parsed table.");
+        return elements.Select((element, index) => (element, range: ranges[index]))
+            .ToDictionary(item => item.element, item => new RawSliceRef(host.PartUri,
+                host.StartOffset + item.range.Start, host.StartOffset + item.range.End,
+                SafeXml.Sha256(bytes.AsSpan(item.range.Start, item.range.End - item.range.Start)), RawSliceKind.XmlElement));
+    }
+
+    private static IReadOnlyList<(RawSliceRef Slice, byte[] Data)> ReplaceTableCellSlices(
+        byte[] originalSlice, RawSliceRef host, NodeContent before, NodeContent content, out DocxParagraphEditResult edits)
+    {
+        if (before is not TableNodeContent baseline || content is not TableNodeContent edited)
+            throw new InvalidDataException("An edited DOCX table must retain table cell content.");
         var table = LoadSliceElement(originalSlice);
         if (table.Descendants(W + "fldChar").Any()) throw new InvalidDataException("A field boundary cannot be edited in a table.");
+        var indexed = IndexSliceElements(originalSlice, table, host);
+        var replacements = new List<(RawSliceRef Slice, byte[] Data)>();
         var rows = table.Elements(W + "tr").ToArray();
-        if (rows.Length != edited.Rows.Count) throw new InvalidDataException("DOCX table row count changed; F1 table structure edits are not supported.");
+        if (rows.Length != edited.Rows.Count || rows.Length != baseline.Rows.Count)
+            throw new InvalidDataException("DOCX table row count changed; F1 table structure edits are not supported.");
         edits = default;
         for (var rowIndex = 0; rowIndex < rows.Length; rowIndex++)
         {
             var cells = rows[rowIndex].Elements(W + "tc").ToArray();
-            if (cells.Length != edited.Rows[rowIndex].Count) throw new InvalidDataException("DOCX table cell count changed; F1 table structure edits are not supported.");
+            var leading = ParseDocxGridBefore(rows[rowIndex].Element(W + "trPr"));
+            if (cells.Length + leading != edited.Rows[rowIndex].Count || baseline.Rows[rowIndex].Count != edited.Rows[rowIndex].Count)
+                throw new InvalidDataException("DOCX table cell count changed; F1 table structure edits are not supported.");
+            for (var placeholder = 0; placeholder < leading; placeholder++)
+                if (edited.Rows[rowIndex][placeholder].Text != baseline.Rows[rowIndex][placeholder].Text)
+                    throw new InvalidDataException("A skipped DOCX grid column cannot be edited.");
             for (var cellIndex = 0; cellIndex < cells.Length; cellIndex++)
-                edits += ReplaceCellText(cells[cellIndex], edited.Rows[rowIndex][cellIndex].Text);
+            {
+                var text = edited.Rows[rowIndex][cellIndex + leading].Text;
+                if (text == baseline.Rows[rowIndex][cellIndex + leading].Text) continue;
+                var cell = cells[cellIndex];
+                var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").ToArray();
+                var originals = paragraphs.Select(paragraph => new XElement(paragraph)).ToArray();
+                if (paragraphs.Length == 0 && cell.Descendants(W + "tbl").Any())
+                    throw new InvalidDataException("A nested DOCX table cell must retain an addressable paragraph.");
+                edits += ReplaceCellText(cell, text);
+                if (paragraphs.Length == 0) replacements.Add((indexed[cell], Serialize(cell)));
+                else
+                    for (var index = 0; index < paragraphs.Length; index++)
+                        if (!XNode.DeepEquals(originals[index], paragraphs[index]))
+                            replacements.Add((indexed[paragraphs[index]], Serialize(paragraphs[index])));
+            }
         }
-        return Serialize(table);
+        return replacements;
     }
 
     // Writes a cell's text back paragraph by paragraph. Two things matter here: the cell's own

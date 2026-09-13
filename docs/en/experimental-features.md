@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These command-line workflows are unsupported experiments in the v0.2.6 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
+> These command-line workflows are unsupported experiments in the v0.2.7 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
 
 Set the environment variable before starting the CLI:
 
@@ -21,6 +21,10 @@ The environment gate applies to experimental CLI workflows, including CLI PDF ex
 ## PDF input and OCR
 
 PDF extraction preserves native text page partitions. Textless-page OCR requires a usable PDF rasterizer and OCR provider. DocRedock checks an explicit `DOCREDOCK_PDF_RASTERIZER` path, then pdftoppm / mutool on PATH; it does not bundle either tool. Use `docredock doctor` to inspect availability and `DOCREDOCK_DISABLE_PDF_RASTERIZER=1` to disable discovery. If rasterization is unavailable, DocRedock emits `PdfRasterizerUnavailable` instead of implying that OCR ran.
+
+## Markdown rendering
+
+`render` reads inline Markdown once and writes every output format from that single reading, so HTML, DOCX, PPTX, XLSX, and PDF carry identical text. Character references follow one shared policy covering all 2,125 semicolon-terminated WHATWG HTML5 names, with case-sensitive lookup and two-code-point expansions such as `&NotEqualTilde;`: named references such as `&amp;` and `&copy;`, decimal `&#65;`, and hexadecimal `&#x41;` resolve to the characters they denote, while an unknown name or a missing semicolon stays literal text. References inside a code span or a fenced code block are left exactly as written. HTML output escapes the decoded text once, so text that spells a tag, such as `&lt;u&gt;`, is displayed as text and never becomes markup.
 
 ## PDF rendering and fonts
 

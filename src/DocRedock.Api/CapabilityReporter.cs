@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 
 namespace DocRedock.Api;
 
@@ -52,7 +53,7 @@ public sealed class CapabilityReporter
                 capabilities.Add(Language("eng", languages, tesseract));
             }
         }
-        var native = nativeOcr?.Invoke() ?? NativeOcr();
+        var native = nativeOcr?.Invoke() ?? await NativeOcrAsync(cancellationToken).ConfigureAwait(false);
         (engine, native) = ReconcileOcrFunction(engine, native);
         capabilities.Add(engine);
         capabilities.Add(native);
@@ -99,7 +100,7 @@ public sealed class CapabilityReporter
         ? new("ocr-" + language, "ready", "tesseract", path, Tier: "optional")
         : new("ocr-" + language, "unavailable", "tesseract", path, $"Install the {language} traineddata package.", Tier: "optional");
 
-    private CapabilityStatus NativeOcr()
+    private async Task<CapabilityStatus> NativeOcrAsync(CancellationToken cancellationToken)
     {
         if (OperatingSystem.IsMacOS())
         {
@@ -113,12 +114,102 @@ public sealed class CapabilityReporter
         {
             var helper = Path.Combine(AppContext.BaseDirectory, "windows-ocr.ps1");
             var shell = resolveExecutable(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
-            return File.Exists(helper) && shell is not null
-                ? new("ocr-native", "partial", "windows-media", shell, "Windows Media OCR is configured but its installed language packs are not probed.", Tier: "optional")
-                : new("ocr-native", "unavailable", "windows-media", Action: "Keep windows-ocr.ps1 beside the application and enable Windows PowerShell.", Tier: "optional");
+            if (!File.Exists(helper) || shell is null)
+                return new("ocr-native", "unavailable", "windows-media", Action: "Keep windows-ocr.ps1 beside the application and enable Windows PowerShell.", Tier: "optional");
+            return await ProbeWindowsOcrLanguagesAsync(shell, helper, cancellationToken).ConfigureAwait(false);
         }
         return new("ocr-native", "unavailable", "system", Action: "No native OCR provider is bundled for this platform; install Tesseract.", Tier: "optional");
     }
+
+    /// <summary>
+    /// Finding windows-ocr.ps1 and powershell.exe beside the application only proves Windows Media
+    /// OCR is *wired up*, not that it can OCR anything: the OCR language feature (e.g. Japanese) is
+    /// a separate optional Windows component that may not be installed, which is the actual cause
+    /// behind reports of "OCR could not be enabled" on Windows. Invoking the helper's
+    /// -ListLanguages probe (via the same injected `run` used for tesseract/mmdc) tells the user
+    /// precisely which language to add instead of leaving native OCR permanently "partial".
+    /// </summary>
+    private async Task<CapabilityStatus> ProbeWindowsOcrLanguagesAsync(string shell, string helper, CancellationToken cancellationToken)
+    {
+        var probe = await run(shell,
+            ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper, "-ListLanguages"],
+            cancellationToken).ConfigureAwait(false);
+        return DescribeWindowsOcrLanguages(probe, shell);
+    }
+
+    /// <summary>
+    /// Pure decision over an already-completed -ListLanguages probe, kept separate from the process
+    /// invocation above so it is unit-testable on any OS without an injectable "isWindows" flag.
+    /// </summary>
+    internal static CapabilityStatus DescribeWindowsOcrLanguages(CapabilityProbeResult probe, string shell)
+    {
+        if (!probe.Succeeded)
+        {
+            // The probe ran and reported an error on stderr: treat that as a genuine failure (e.g.
+            // Constrained Language Mode or AppLocker blocking the script) and surface the reason.
+            // No stderr at all is what a timed-out/killed probe looks like (RunBoundedAsync returns
+            // an empty string in that case) — that ambiguity is reported as "partial", not
+            // "unavailable", since native OCR may still work once the probe itself is fixed.
+            return string.IsNullOrWhiteSpace(probe.StandardError)
+                ? new("ocr-native", "partial", "windows-media", shell,
+                    "Windows Media OCR is configured but the installed-language probe did not complete (it may have timed out); run 'docredock doctor' again.",
+                    Tier: "optional")
+                : new("ocr-native", "unavailable", "windows-media", shell,
+                    $"The Windows OCR language probe failed: {probe.StandardError.Trim()} Check that Windows PowerShell script execution is not blocked (Constrained Language Mode / AppLocker).",
+                    Tier: "optional");
+        }
+
+        var tags = ParseWindowsOcrLanguageTags(probe.StandardOutput);
+        var hasJapanese = tags.Any(tag => MatchesWindowsOcrLanguage(tag, "ja"));
+        var hasEnglish = tags.Any(tag => MatchesWindowsOcrLanguage(tag, "en"));
+        if (!hasJapanese && !hasEnglish)
+            return new("ocr-native", "unavailable", "windows-media", shell,
+                "No Windows OCR language pack is installed. Add one from Settings > Time & Language > Language & region > "
+                + "Add a language > (language) > Options > \"Optical character recognition\" (Japanese: \"光学式文字認識 (OCR)\"), "
+                + "or run: Add-WindowsCapability -Online -Name Language.OCR~~~ja-JP~0.0.1.0 (Japanese) / "
+                + "Add-WindowsCapability -Online -Name Language.OCR~~~en-US~0.0.1.0 (English).",
+                Tier: "optional");
+
+        var languageNote = hasJapanese && hasEnglish
+            ? "Installed Windows OCR language packs: Japanese, English."
+            : hasJapanese
+                ? "Installed Windows OCR language pack: Japanese only. For English, add it via Settings > Time & Language > "
+                  + "Language & region > Add a language > English > Options > \"Optical character recognition\", or run: "
+                  + "Add-WindowsCapability -Online -Name Language.OCR~~~en-US~0.0.1.0."
+                : "Installed Windows OCR language pack: English only. For Japanese, add it via Settings > Time & Language > "
+                  + "Language & region > Add a language > Japanese > Options > \"光学式文字認識 (OCR)\", or run: "
+                  + "Add-WindowsCapability -Online -Name Language.OCR~~~ja-JP~0.0.1.0.";
+        return new("ocr-native", "ready", "windows-media", shell, languageNote, Tier: "optional");
+    }
+
+    /// <summary>Accepts the JSON array windows-ocr.ps1 -ListLanguages prints, and tolerates a bare
+    /// string or malformed output (probed rather than trusted, like every other capability here).</summary>
+    internal static IReadOnlyList<string> ParseWindowsOcrLanguageTags(string standardOutput)
+    {
+        if (string.IsNullOrWhiteSpace(standardOutput)) return [];
+        try
+        {
+            using var document = JsonDocument.Parse(standardOutput);
+            return document.RootElement.ValueKind switch
+            {
+                JsonValueKind.Array => document.RootElement.EnumerateArray()
+                    .Where(element => element.ValueKind == JsonValueKind.String)
+                    .Select(element => element.GetString() ?? string.Empty)
+                    .Where(tag => tag.Length > 0)
+                    .ToArray(),
+                JsonValueKind.String => (document.RootElement.GetString() is { Length: > 0 } tag ? [tag] : Array.Empty<string>()),
+                _ => [],
+            };
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
+
+    private static bool MatchesWindowsOcrLanguage(string tag, string baseTag) =>
+        tag.Equals(baseTag, StringComparison.OrdinalIgnoreCase) ||
+        tag.StartsWith(baseTag + "-", StringComparison.OrdinalIgnoreCase);
 
     private async Task<CapabilityStatus> MermaidAsync(CancellationToken cancellationToken)
     {
@@ -169,7 +260,8 @@ public sealed class CapabilityReporter
             var stdout = await output.ConfigureAwait(false);
             var stderr = await error.ConfigureAwait(false);
             return new(process.ExitCode == 0 && !stdout.Truncated && !stderr.Truncated,
-                stdout.Truncated || stderr.Truncated ? string.Empty : stdout.Text);
+                stdout.Truncated || stderr.Truncated ? string.Empty : stdout.Text,
+                stderr.Truncated ? string.Empty : stderr.Text);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -228,4 +320,4 @@ public sealed class CapabilityReporter
     }
 }
 
-public sealed record CapabilityProbeResult(bool Succeeded, string StandardOutput);
+public sealed record CapabilityProbeResult(bool Succeeded, string StandardOutput, string StandardError = "");

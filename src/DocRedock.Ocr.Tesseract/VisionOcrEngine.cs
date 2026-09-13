@@ -263,8 +263,37 @@ public sealed class FallbackOcrEngine : IOcrEngine
             };
         }
 
-        return fallbackResult with { Diagnostics = [.. result.Diagnostics, .. fallbackResult.Diagnostics] };
+        // Both providers failed. AdapterWarningDiagnostics.SummarizeForDisplay (used by the CLI and
+        // GUI to build the one-line-per-code diagnostic view) groups diagnostics by Code and shows
+        // only one representative message per code. Both engines can report the same generic code
+        // for an unrelated reason (e.g. "ExecutableUnavailable" for a missing Tesseract binary vs.
+        // a missing PowerShell executable), which would silently hide one provider's reason from
+        // the user unless they pass --verbose. Relabeling both sides keeps them distinct so a user
+        // always sees why *each* provider is unavailable, e.g. "Windows OCR: ...; Tesseract: ...".
+        return fallbackResult with
+        {
+            Diagnostics =
+            [
+                .. Relabel(result.Diagnostics, primary.Descriptor.ProviderId, "Primary"),
+                .. Relabel(fallbackResult.Diagnostics, fallback.Descriptor.ProviderId, "Fallback"),
+            ],
+        };
     }
+
+    private static IEnumerable<OcrDiagnostic> Relabel(IReadOnlyList<OcrDiagnostic> diagnostics, string providerId, string codePrefix) =>
+        diagnostics.Select(diagnostic => diagnostic with
+        {
+            Code = codePrefix + diagnostic.Code,
+            Message = $"{ProviderLabel(providerId)}: {diagnostic.Message}",
+        });
+
+    private static string ProviderLabel(string providerId) => providerId switch
+    {
+        "docredock.ocr.windows-media" => "Windows OCR",
+        "docredock.ocr.vision" => "Apple Vision OCR",
+        "docredock.ocr.tesseract" => "Tesseract",
+        _ => providerId,
+    };
 }
 
 public static class OcrEngineFactory

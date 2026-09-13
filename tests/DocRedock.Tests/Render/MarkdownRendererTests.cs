@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using DocRedock.Render;
 
@@ -801,6 +802,200 @@ public sealed class MarkdownRendererTests
         Assert.Contains("[x](y)", xml, StringComparison.Ordinal);
         Assert.DoesNotContain("\\", xml, StringComparison.Ordinal);
     }
+
+    // One document exercising every place inline text is read, written once and rendered to every
+    // format: the "semantic text" a reader sees must be identical everywhere, and a code span or a
+    // fenced block must stay exactly as authored everywhere.
+    private const string CharacterReferenceMarkdown = """
+        # Title &amp; &#65;
+
+        Body A &amp; B &lt;tag&gt; &#x42;
+
+        - Item &amp; &#67;
+
+        | Head &amp; 1 | Head &#68; |
+        | --- | --- |
+        | Cell &amp; 2 | Cell &#x45; |
+
+        [Label &amp; link](https://example.com/?a=1&amp;b=2)
+
+        `code &amp; span`
+
+        ```text
+        fenced &amp; block
+        ```
+        """;
+
+    private static readonly string[] CharacterReferenceTexts =
+    [
+        "Title & A", "Body A & B <tag> B", "Item & C",
+        "Head & 1", "Head D", "Cell & 2", "Cell E", "Label & link",
+    ];
+
+    private const string CharacterReferenceCodeSpan = "code &amp; span";
+    private const string CharacterReferenceCodeBlock = "fenced &amp; block";
+
+    [Fact]
+    public async Task Html_render_decodes_character_references_into_text_and_encodes_them_once()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "references.html");
+
+        await new MarkdownRenderer().RenderAsync(CharacterReferenceMarkdown, RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        var text = SemanticText(html);
+        Assert.All(CharacterReferenceTexts, expected => Assert.Contains(expected, text, StringComparison.Ordinal));
+        // Decoded once on the way in, encoded once on the way out: never "&amp;amp;" in ordinary text.
+        Assert.Contains("<h1>Title &amp; A</h1>", html, StringComparison.Ordinal);
+        Assert.Contains("<p>Body A &amp; B &lt;tag&gt; B</p>", html, StringComparison.Ordinal);
+        Assert.Contains("<li>Item &amp; C</li>", html, StringComparison.Ordinal);
+        Assert.Contains("<td>Cell &amp; 2</td>", html, StringComparison.Ordinal);
+        Assert.Contains("<a href=\"https://example.com/?a=1&amp;b=2\">Label &amp; link</a>", html, StringComparison.Ordinal);
+        // A code span and a fenced block are literal: CommonMark resolves no reference inside them,
+        // so the "&amp;" they contain IS ordinary text and is the only thing encoded twice.
+        Assert.Contains("<code>code &amp;amp; span</code>", html, StringComparison.Ordinal);
+        Assert.Contains("<pre><code data-language=\"text\">fenced &amp;amp; block</code></pre>", html, StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Docx_render_decodes_the_same_character_references_as_html()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "references.docx");
+
+        await new MarkdownRenderer().RenderAsync(CharacterReferenceMarkdown, RenderFormat.Docx, output);
+
+        using var archive = ZipFile.OpenRead(output);
+        XNamespace w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        var text = string.Join("\n", XDocument.Parse(await ReadEntryAsync(archive, "word/document.xml"))
+            .Descendants(w + "t").Select(element => element.Value));
+        Assert.All(CharacterReferenceTexts, expected => Assert.Contains(expected, text, StringComparison.Ordinal));
+        Assert.Contains(CharacterReferenceCodeSpan, text, StringComparison.Ordinal);
+        Assert.Contains(CharacterReferenceCodeBlock, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Pptx_render_decodes_the_same_character_references_as_html()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "references.pptx");
+
+        await new MarkdownRenderer().RenderAsync(CharacterReferenceMarkdown, RenderFormat.Pptx, output);
+
+        using var archive = ZipFile.OpenRead(output);
+        XNamespace a = "http://schemas.openxmlformats.org/drawingml/2006/main";
+        var text = string.Join("\n", XDocument.Parse(await ReadEntryAsync(archive, "ppt/slides/slide1.xml"))
+            .Descendants(a + "t").Select(element => element.Value));
+        Assert.All(CharacterReferenceTexts, expected => Assert.Contains(expected, text, StringComparison.Ordinal));
+        Assert.Contains(CharacterReferenceCodeSpan, text, StringComparison.Ordinal);
+        Assert.Contains(CharacterReferenceCodeBlock, text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Xlsx_render_decodes_the_same_character_references_as_html()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "references.xlsx");
+
+        await new MarkdownRenderer().RenderAsync(CharacterReferenceMarkdown, RenderFormat.Xlsx, output);
+
+        using var archive = ZipFile.OpenRead(output);
+        XNamespace x = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        var cells = XDocument.Parse(await ReadEntryAsync(archive, "xl/worksheets/sheet1.xml"))
+            .Descendants(x + "is").Select(element => element.Value).ToArray();
+        // A document with a table places only its table cells on the sheet.
+        Assert.Equal(["Head & 1", "Head D", "Cell & 2", "Cell E"], cells);
+    }
+
+    [Fact]
+    public async Task Pdf_render_decodes_the_same_character_references_as_html()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "references.pdf");
+
+        await new MarkdownRenderer().RenderAsync(CharacterReferenceMarkdown, RenderFormat.Pdf, output);
+
+        var pdf = System.Text.Encoding.Latin1.GetString(await File.ReadAllBytesAsync(output));
+        Assert.All(CharacterReferenceTexts, expected => Assert.Contains(expected, pdf, StringComparison.Ordinal));
+        Assert.Contains(CharacterReferenceCodeSpan, pdf, StringComparison.Ordinal);
+        Assert.Contains(CharacterReferenceCodeBlock, pdf, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Html_render_escapes_a_tag_that_came_from_a_character_reference()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "encoded-tag.html");
+
+        await new MarkdownRenderer().RenderAsync("&lt;u&gt;x&lt;/u&gt; and <u>y</u>", RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        var main = ExtractMain(html);
+        // "&lt;u&gt;" is TEXT that happens to spell a tag, so it is escaped back on the way out;
+        // only the tag the author actually wrote stays live markup.
+        Assert.Contains("&lt;u&gt;x&lt;/u&gt;", main, StringComparison.Ordinal);
+        Assert.Contains("<u>y</u>", main, StringComparison.Ordinal);
+        Assert.Equal(1, main.Split("<u>", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public async Task Html_render_decodes_a_link_destination_once_and_attribute_encodes_it_once()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "link-destination.html");
+
+        await new MarkdownRenderer().RenderAsync("[x](http://h/?a=1&amp;b=2)", RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<a href=\"http://h/?a=1&amp;b=2\">x</a>", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("&amp;amp;", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Html_render_keeps_a_backslash_escaped_ampersand_from_starting_a_reference()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "escaped-ampersand.html");
+
+        await new MarkdownRenderer().RenderAsync(@"\&amp; and \&#65;", RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("&amp;amp; and &amp;#65;", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\", ExtractMain(html), StringComparison.Ordinal);
+        AssertNoEscapePlaceholderLeak(html);
+    }
+
+    [Fact]
+    public async Task Html_render_rejects_a_scheme_hidden_behind_a_character_reference()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "hidden-scheme.html");
+
+        await new MarkdownRenderer().RenderAsync("[x](javascript&#58;alert(1))", RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.DoesNotContain("<a ", html, StringComparison.Ordinal);
+        Assert.Contains("[x](javascript:alert(1))", ExtractMain(html), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Html_render_builds_the_title_from_decoded_heading_text()
+    {
+        using var fixture = new Fixture();
+        var output = Path.Combine(fixture.Root, "title.html");
+
+        await new MarkdownRenderer().RenderAsync("# **A &amp; B** &lt;tag&gt;", RenderFormat.Html, output);
+
+        var html = await File.ReadAllTextAsync(output);
+        Assert.Contains("<title>A &amp; B &lt;tag&gt;</title>", html, StringComparison.Ordinal);
+    }
+
+    // The text a reader sees: strip the markup, then resolve the escaping the HTML writer applied.
+    // Doing it in that order proves an escaped "&lt;tag&gt;" was never live markup to begin with.
+    private static string SemanticText(string html) =>
+        System.Net.WebUtility.HtmlDecode(Regex.Replace(ExtractMain(html), "<[^>]+>", string.Empty));
 
     private sealed class Fixture : IDisposable
     {

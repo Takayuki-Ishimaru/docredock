@@ -88,6 +88,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] restore が lock file を変更せず成功した
 - [ ] Release build が警告 0、エラー 0 で成功した
 - [ ] 全テストが成功し、skip の理由をレビューした
+- [ ] CI は Linux に加えて Windows・macOS でも本体テストと GUI ヘッドレステストを実行し、原本保護（大文字小文字のみの違い、Windows junction、8.3 短縮名、macOS firmlink、ハードリンク、シンボリックリンクの連鎖、Unicode NFC/NFD 正規化）の行列がそこで検証されている（`OutputCollisionGuardPlatformTests`）
 - [ ] 公開 CI に conversion-qa を残す場合、合成 fixture だけで成功した
 - [ ] LicenseAudit が成功し、SBOM を生成した
 - [ ] 同一入力・同一設定で再実行し、期待する出力と診断が決定的である

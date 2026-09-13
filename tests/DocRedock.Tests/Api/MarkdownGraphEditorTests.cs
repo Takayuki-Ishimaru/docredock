@@ -125,6 +125,22 @@ public sealed class MarkdownGraphEditorTests
     }
 
     [Fact]
+    public void Protected_crlf_text_accepts_canonical_lf_but_rejects_content_changes()
+    {
+        var node = new DocumentNode("protected", NodeKind.Paragraph, null, 0, ContentLayer.Body,
+            new TextNodeContent("first\r\nsecond"), Editability: NodeEditability.Protected);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_crlf", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [node])]);
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph).Markdown;
+        var unchanged = new MarkdownGraphEditor().Apply(graph, markdown);
+        Assert.True(unchanged.IsValid);
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        var edited = new MarkdownGraphEditor().Apply(graph, markdown.Replace("second", "changed", StringComparison.Ordinal));
+        Assert.False(edited.IsValid);
+        Assert.Contains(edited.Diagnostics, item => item.Code == "ProtectedNodeEdit");
+    }
+
+    [Fact]
     public void Inline_link_projection_is_f0_equivalent_and_protected_content_stays_rejected()
     {
         const string target = "https://example.test/docs";
@@ -141,8 +157,8 @@ public sealed class MarkdownGraphEditorTests
         var protectedMarker = "<!--drmd:block id=link kind=link editability=protected operations=none constraints=preserve-marker,preserve-content-->";
         var unchanged = new MarkdownGraphEditor().Apply(graph, projection);
         var tampered = new MarkdownGraphEditor().Apply(graph,
-            projection.Replace(protectedMarker + Environment.NewLine + Environment.NewLine,
-                protectedMarker + Environment.NewLine + "changed" + Environment.NewLine + Environment.NewLine,
+            projection.Replace(protectedMarker + "\n\n",
+                protectedMarker + "\nchanged\n\n",
                 StringComparison.Ordinal));
 
         Assert.Contains("[<u>Reference</u>](https://example.test/docs)", projection, StringComparison.Ordinal);

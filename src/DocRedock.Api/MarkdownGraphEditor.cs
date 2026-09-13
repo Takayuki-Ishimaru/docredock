@@ -242,7 +242,9 @@ public sealed class MarkdownGraphEditor
         TypedMarkdownBlock block)
     {
         if (node.Content is RichTextNodeContent rich)
-            return StringComparer.Ordinal.Equals(DocRedockInlineMarkdown.Serialize(rich.Runs), DecodeInlineBlockMarkdown(block));
+            return StringComparer.Ordinal.Equals(
+                DocRedockInlineMarkdown.Serialize(rich.Runs).Replace("\r\n", "\n", StringComparison.Ordinal),
+                DecodeInlineBlockMarkdown(block).Replace("\r\n", "\n", StringComparison.Ordinal));
         if (node.Kind == NodeKind.Link && string.IsNullOrWhiteSpace(block.Text) &&
             node.Content is ReferenceNodeContent link && node.ParentId is { } parentId &&
             baseline.FindNode(parentId)?.Content is RichTextNodeContent parentRich &&
@@ -274,7 +276,9 @@ public sealed class MarkdownGraphEditor
                 pair.First.Count == pair.Second.Count && pair.First.Zip(pair.Second).All(cell =>
                     StringComparer.Ordinal.Equals(cell.First.Text, cell.Second.Text)));
         }
-        return StringComparer.Ordinal.Equals(ProjectNodeText(node).TrimEnd(), decoded.TrimEnd());
+        return StringComparer.Ordinal.Equals(
+            ProjectNodeText(node).Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd(),
+            decoded.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd());
     }
 
     private static DocumentNode ApplyCell(DocumentNode node, string text)
@@ -381,8 +385,11 @@ public sealed class MarkdownGraphEditor
         return DecodeEntities(output.ToString());
     }
 
-    private static string DecodeEntities(string value) => value.Replace("&lt;", "<", StringComparison.Ordinal)
-        .Replace("&gt;", ">", StringComparison.Ordinal).Replace("&amp;", "&", StringComparison.Ordinal);
+    // The product's one character-reference policy (DocRedockInlineMarkdown.DecodeEntities and
+    // MarkdownRenderer resolve references through the same class), so a projection decodes to the
+    // same text no matter which reader opens it. EscapePlainText/Escape always write a literal '&'
+    // as "&amp;", so a generated projection round-trips unchanged.
+    private static string DecodeEntities(string value) => MarkdownCharacterReferences.Decode(value);
 
     // Inverse of DocRedockMarkdown.EscapeTableCell for one raw cell produced by
     // ParseTableRow. A literal "<br>" substring can only be the newline marker

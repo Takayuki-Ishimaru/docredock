@@ -1,11 +1,20 @@
-# Invoked only by WindowsOcrEngine. It uses the inbox Windows.Media.Ocr WinRT
-# API and writes a JSON array of line text and image-pixel bounding boxes.
-[CmdletBinding()]
+# Invoked by WindowsOcrEngine and by CapabilityReporter. In the default
+# (Recognize) mode it uses the inbox Windows.Media.Ocr WinRT API to OCR one
+# image and writes a JSON array of line text and image-pixel bounding boxes.
+# With -ListLanguages it instead reports which OCR language packs Windows has
+# actually installed, as a JSON array of BCP-47 tags (e.g. ["ja-JP","en-US"]),
+# so CapabilityReporter can tell a user precisely which language feature is
+# missing instead of a permanently vague "OCR unavailable" (see the OS
+# Settings > Time & Language > Language & region > Add a language > Options >
+# "Optical character recognition" feature, or Add-WindowsCapability).
+[CmdletBinding(DefaultParameterSetName = 'Recognize')]
 param(
-    [Parameter(Mandatory = $true, Position = 0)]
+    [Parameter(ParameterSetName = 'Recognize', Mandatory = $true, Position = 0)]
     [string]$ImagePath,
-    [Parameter(ValueFromRemainingArguments = $true, Position = 1)]
-    [string[]]$Languages
+    [Parameter(ParameterSetName = 'Recognize', ValueFromRemainingArguments = $true, Position = 1)]
+    [string[]]$Languages,
+    [Parameter(ParameterSetName = 'ListLanguages', Mandatory = $true)]
+    [switch]$ListLanguages
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,17 +44,31 @@ try {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
         Exit-Unavailable 'Windows.Media.Ocr is available only on Windows.'
     }
+
+    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
+    $ocrEngineType = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
+
+    if ($ListLanguages) {
+        # Reports installed language packs only; a caller (WindowsOcrEngine) still falls back to
+        # TryCreateFromUserProfileLanguages(), so this list is a diagnostic hint, not the full
+        # story, but it is enough to tell a user which OCR language feature to add.
+        $tags = [System.Collections.Generic.List[string]]::new()
+        foreach ($language in $ocrEngineType::AvailableRecognizerLanguages) {
+            $tags.Add([string]$language.LanguageTag)
+        }
+        [Console]::Out.Write((ConvertTo-Json -InputObject ([string[]]$tags.ToArray()) -Compress))
+        exit 0
+    }
+
     if (-not (Test-Path -LiteralPath $ImagePath -PathType Leaf)) {
         throw "OCR image was not found at '$ImagePath'."
     }
 
-    [void][System.Reflection.Assembly]::LoadWithPartialName('System.Runtime.WindowsRuntime')
     $storageFileType = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
     $fileAccessModeType = [Windows.Storage.FileAccessMode, Windows.Storage, ContentType = WindowsRuntime]
     $randomAccessStreamType = [Windows.Storage.Streams.IRandomAccessStream, Windows.Storage, ContentType = WindowsRuntime]
     $bitmapDecoderType = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
     $softwareBitmapType = [Windows.Graphics.Imaging.SoftwareBitmap, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
-    $ocrEngineType = [Windows.Media.Ocr.OcrEngine, Windows.Foundation, ContentType = WindowsRuntime]
     $ocrResultType = [Windows.Media.Ocr.OcrResult, Windows.Foundation, ContentType = WindowsRuntime]
 
     $requestedTags = foreach ($language in $Languages) {

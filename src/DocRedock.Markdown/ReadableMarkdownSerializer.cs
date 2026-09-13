@@ -48,9 +48,11 @@ public sealed partial class ReadableMarkdownSerializer
         var selectedGraph = graph.Format == DocumentFormatKind.Xlsx && options.IncludedSheets is { Count: > 0 }
             ? graph with { Partitions = graph.Partitions.Where(partition => IsIncludedPartition(partition.Id)).ToArray() }
             : graph;
-        var excludedCount = selectedGraph.Nodes.Count(node => !DocumentContentPolicyRules.Includes(node, policy));
-        var sensitiveCount = selectedGraph.Nodes.Count(node => node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
-            node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes);
+        // P-Overlay (XLSX): a "sheet_overlay" Shape node is neither excluded from the counts below
+        // nor from projectedGraph -- see IsAlwaysReadableSheetOverlay for why.
+        var excludedCount = selectedGraph.Nodes.Count(node => !DocumentContentPolicyRules.Includes(node, policy) && !IsAlwaysReadableSheetOverlay(node));
+        var sensitiveCount = selectedGraph.Nodes.Count(node => (node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
+            node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes) && !IsAlwaysReadableSheetOverlay(node));
         Diagnostics = policy == DocumentContentPolicy.Complete && sensitiveCount > 0
             ? [new MarkdownDiagnostic("HiddenContentIncluded", $"Complete content policy included {sensitiveCount} hidden or metadata node(s).", MarkdownDiagnosticSeverity.Warning)]
             : excludedCount > 0
@@ -60,7 +62,7 @@ public sealed partial class ReadableMarkdownSerializer
         {
             Partitions = selectedGraph.Partitions.Select(partition => partition with
             {
-                Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy)).ToArray()
+                Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node)).ToArray()
             }).ToArray()
         };
         return projectedGraph.Format == DocumentFormatKind.Xlsx
@@ -216,23 +218,60 @@ public sealed partial class ReadableMarkdownSerializer
                 options.IncludeDiagrams ? TryGetRenderableVisualGraph(node) : TryGetRelationVisualGraph(node));
             var consumedVisualShapeIds = visualGraphNodes
                 .SelectMany(VisualGraphMemberShapeIds).ToHashSet(StringComparer.Ordinal);
+            // F-Issue7 (extended for P-Overlay): the pre-switch filtering chain is factored into a
+            // local predicate so the same rules decide, up front, which table_overlays hosts in this
+            // partition actually reach the switch -- that set is what silences their absorbed shapes.
+            bool TryPrepareNode(DocumentNode candidate, out string rawText, out string display)
+            {
+                rawText = string.Empty;
+                display = string.Empty;
+                if (aggregated.SkipIds.Contains(candidate.Id) || nestedTableFolds.FoldedChildIds.Contains(candidate.Id)) return false;
+                var candidateText = NodeText(candidate).Trim();
+                if (string.IsNullOrWhiteSpace(candidateText)) return false;
+                // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
+                // displayText is what every other branch below actually renders.
+                var candidateDisplay = DisplayText(candidate, candidateText);
+                if (isPptx && (IsPresentationFurniture(candidate) || IsRepeatedPresentationFooter(partitions, candidate))) return false;
+                if (suppressVisualGraphMembers && (ExtensionBool(candidate, "visual_graph_member") ||
+                    ExtensionBool(candidate, "visual_edge_label") || ExtensionBool(candidate, "visual_graph_edge") ||
+                    (ExtensionBool(candidate, "visual_graph_node") &&
+                        ExtensionString(candidate, "shape_id") is { Length: > 0 } memberShapeId && consumedVisualShapeIds.Contains(memberShapeId)))) return false;
+                if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(candidate, "shape_role"), "title")) return false;
+                if (candidate.Kind == NodeKind.Link) return false; // D12: already inlined as [text](url) by the owning paragraph's rich text.
+                rawText = candidateText;
+                display = candidateDisplay;
+                return true;
+            }
+            // P-Overlay: a table's own overlay markers/labels already carry what an absorbed shape
+            // would otherwise print as a stray paragraph, so its host id is only suppressed once the
+            // table itself is confirmed to actually reach the switch under this partition's filtering.
+            // PPTX/XLSX host tables carry their own "shape_id" extension (the underlying shape's own
+            // id); DOCX has no such extension on a w:tbl-derived Table node, so its own node Id -- the
+            // value DocxAdapter stamps as table_overlay_host on the (B) TextBox node it tags -- is
+            // included here too, matching whichever identifier space the host format actually used.
+            var renderedOverlayTableIds = partition.Nodes
+                .Where(candidate => candidate.Kind == NodeKind.Table && HasExtension(candidate, "table_overlays") &&
+                    TryPrepareNode(candidate, out _, out _))
+                .SelectMany(candidate => new[] { ExtensionString(candidate, "shape_id"), candidate.Id })
+                .OfType<string>()
+                .ToHashSet(StringComparer.Ordinal);
             foreach (var node in isPptx
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
-                if (aggregated.SkipIds.Contains(node.Id) || nestedTableFolds.FoldedChildIds.Contains(node.Id)) continue;
-                var text = NodeText(node).Trim();
-                if (string.IsNullOrWhiteSpace(text)) continue;
-                // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
-                // displayText is what every other branch below actually renders.
-                var displayText = DisplayText(node, text);
-                if (isPptx && (IsPresentationFurniture(node) || IsRepeatedPresentationFooter(partitions, node))) continue;
-                if (suppressVisualGraphMembers && (ExtensionBool(node, "visual_graph_member") ||
-                    ExtensionBool(node, "visual_edge_label") || ExtensionBool(node, "visual_graph_edge") ||
-                    (ExtensionBool(node, "visual_graph_node") &&
-                        ExtensionString(node, "shape_id") is { Length: > 0 } shapeId && consumedVisualShapeIds.Contains(shapeId)))) continue;
-                if (isPptx && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title")) continue;
-                if (node.Kind == NodeKind.Link) continue; // D12: already inlined as [text](url) by the owning paragraph's rich text.
+                if (!TryPrepareNode(node, out var text, out var displayText)) continue;
+                // P-Overlay suppression: no heading, no paragraph, and no rotation annotation -- the
+                // host table already rendered this shape's text/marker in its own cells. DOCX tags a
+                // (B) preceding-paragraph overlay shape's NodeKind.TextBox node (it has no
+                // NodeKind.Shape node at all); PPTX/XLSX tag a NodeKind.Shape node.
+                // P-ShapeGrid: a header/label/body-cell member of a synthesized grid table
+                // (table_grid_member_host) is suppressed the same way, against the SAME
+                // renderedOverlayTableIds set -- a grid table's own "shape_id" extension is
+                // "grid:<headerFirstShapeId>", the identifier both extensions point at.
+                if (node.Kind is NodeKind.Shape or NodeKind.TextBox &&
+                    (ExtensionString(node, "table_overlay_host") is { Length: > 0 } overlayHostId && renderedOverlayTableIds.Contains(overlayHostId) ||
+                     ExtensionString(node, "table_grid_member_host") is { Length: > 0 } gridHostId && renderedOverlayTableIds.Contains(gridHostId)))
+                    continue;
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
                 if (previousWasListItem && !isListItem) output.AppendLine();
                 switch (node.Kind)
@@ -294,7 +333,7 @@ public sealed partial class ReadableMarkdownSerializer
                             .Append(marker).AppendLine(listText);
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
-                        WriteArbitraryTable(output, FoldNestedTableRows(node.Id, table.Rows, nestedTableFolds));
+                        WriteArbitraryTable(output, ApplyTableOverlays(node, FoldNestedTableRows(node.Id, table.Rows, nestedTableFolds)));
                         break;
                     case NodeKind.Image when node.Content is ReferenceNodeContent:
                         WriteImageNode(output, node, partition, includeOcr: false);
@@ -799,6 +838,21 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static bool HasExtension(DocumentNode node, string key) => node.Extensions?.ContainsKey(key) == true;
 
+    // P-Overlay (XLSX): XlsxAdapter stamps a "sheet_overlay" Shape node ContentLayer.Hidden purely
+    // so the *generic* DRMD/roundtrip projection (DocRedockMarkdown.cs -- untouched by this
+    // feature, and which applies this exact same DocumentContentPolicyRules.Includes gate) keeps
+    // excluding it exactly as it always has: Xlsx drawings never became graph nodes before this
+    // feature, so DRMD must not start rendering a new, disconnected shape block for one. This is
+    // the one, narrow place that reaches back around that Hidden-layer exclusion so ReadRows (see
+    // ApplySheetOverlays) can still see the node and fold its marker into the covered cell -- and
+    // only for a node that (a) really is a table overlay and (b) is not *also* hidden for a
+    // genuine reason. A hidden sheet stamps every one of its nodes' "sheet_state" extension to
+    // something other than "visible" (see XlsxAdapter.Extract's "if (sheet.IsHidden)" remap); that
+    // case keeps the ordinary hidden-content behavior instead of leaking through this bypass.
+    private static bool IsAlwaysReadableSheetOverlay(DocumentNode node) =>
+        node.Kind == NodeKind.Shape && HasExtension(node, "sheet_overlay") &&
+        ExtensionString(node, "sheet_state") is null or "visible";
+
     private static bool TryProperty(JsonElement element, out JsonElement value, params string[] names)
     {
         foreach (var name in names)
@@ -818,11 +872,19 @@ public sealed partial class ReadableMarkdownSerializer
 
     private List<SheetRow> ReadRows(DocumentPartition partition)
     {
-        var cells = partition.Nodes
-            .Where(node => node.Kind == NodeKind.Cell)
-            .Select(ToCell)
-            .Where(cell => cell is not null && !string.IsNullOrWhiteSpace(cell.Text))
-            .Cast<ReadableCell>()
+        var cellsByPosition = new Dictionary<(int Row, int Column), ReadableCell>();
+        foreach (var node in partition.Nodes.Where(node => node.Kind == NodeKind.Cell))
+        {
+            var cell = ToCell(node);
+            if (cell is not null) cellsByPosition[(cell.Row, cell.Column)] = cell;
+        }
+        // P-Overlay (XLSX): fold sheet_overlay markers in after ToCell, before the blank-text
+        // filter below -- a covered position with no existing Cell node still needs a synthesized
+        // cell so its marker survives that filter and joins the header/label region.
+        ApplySheetOverlays(partition, cellsByPosition);
+
+        var cells = cellsByPosition.Values
+            .Where(cell => !string.IsNullOrWhiteSpace(cell.Text))
             .OrderBy(cell => cell.Row)
             .ThenBy(cell => cell.Column)
             .ToList();
@@ -831,6 +893,54 @@ public sealed partial class ReadableMarkdownSerializer
             .Select(group => new SheetRow(group.Key, group.ToList()))
             .OrderBy(row => row.Number)
             .ToList();
+    }
+
+    /// <summary>
+    /// XLSX port of PptxAdapter/ApplyTableOverlays' cell folding: each "sheet_overlay" Shape node
+    /// (one per detected overlay -- see XlsxAdapter.DetectSheetOverlays) writes its marker into
+    /// every cell its StartRow..EndRow/StartColumn..EndColumn range covers. Unlike the PPTX table
+    /// path there is no TableGrid/merged-slot dedup to do here: XlsxAdapter already resolves a
+    /// covered cell inside a merged range to that range's origin before the overlay node is ever
+    /// created, so every (row, column) this loop visits is already a distinct origin cell.
+    /// Overlay nodes are visited in partition order, which XlsxAdapter.Extract populates in the
+    /// same (StartRow, StartColumn, ShapeId) order DetectSheetOverlays returns -- so two overlays
+    /// landing on the same cell still append in that deterministic order (spec: "同一セルへの複数
+    /// 書き込み").
+    /// </summary>
+    private static void ApplySheetOverlays(DocumentPartition partition, Dictionary<(int Row, int Column), ReadableCell> cellsByPosition)
+    {
+        foreach (var node in partition.Nodes.Where(node => node.Kind == NodeKind.Shape && HasExtension(node, "sheet_overlay")))
+        {
+            var overlay = ReadSheetOverlay(node);
+            if (overlay is null || overlay.EndRow < overlay.StartRow || overlay.EndColumn < overlay.StartColumn) continue;
+            for (var row = overlay.StartRow; row <= overlay.EndRow; row++)
+            for (var column = overlay.StartColumn; column <= overlay.EndColumn; column++)
+            {
+                var isLabelSlot = row == overlay.StartRow && column == overlay.StartColumn;
+                var fragment = OverlayFragment(overlay, OverlayGlyph(overlay, row, column), isLabelSlot);
+                if (fragment.Length == 0) continue;
+                cellsByPosition[(row, column)] = cellsByPosition.TryGetValue((row, column), out var existing)
+                    ? existing with { Text = existing.Text.Length == 0 ? fragment : existing.Text + "\n" + fragment, IsOverlay = true }
+                    : new ReadableCell(row, column, fragment, false, false, false, false, false, false, null, column, IsOverlay: true);
+            }
+        }
+    }
+
+    private static TableOverlay? ReadSheetOverlay(DocumentNode node)
+    {
+        if (node.Extensions is null || !node.Extensions.TryGetValue("sheet_overlay", out var raw) ||
+            raw.ValueKind != JsonValueKind.Object) return null;
+        var startRow = JsonInt(raw, "StartRow", "startRow") ?? 0;
+        var startColumn = JsonInt(raw, "StartColumn", "startColumn") ?? 0;
+        return new TableOverlay(
+            JsonString(raw, "ShapeId", "shapeId") ?? string.Empty,
+            JsonString(raw, "Text", "text") ?? string.Empty,
+            JsonString(raw, "Kind", "kind") ?? string.Empty,
+            JsonString(raw, "Direction", "direction") ?? "none",
+            JsonString(raw, "Axis", "axis") ?? "horizontal",
+            startRow, JsonInt(raw, "EndRow", "endRow") ?? startRow,
+            startColumn, JsonInt(raw, "EndColumn", "endColumn") ?? startColumn,
+            JsonString(raw, "ShapePreset", "shapePreset"));
     }
 
     private static List<ReadableDiagram> ReadDiagrams(DocumentPartition partition) => partition.Nodes
@@ -1001,7 +1111,9 @@ public sealed partial class ReadableMarkdownSerializer
         // Preserve compact rows as one logical table row. This keeps a four-column
         // header aligned with its following data row even when the source uses wide
         // visual spacing between cells (a common revision-history layout).
-        if (row.Cells.Count <= 4)
+        // P-Overlay (XLSX): see the ReadableCell.IsOverlay comment -- a row an overlay touched
+        // must never split into an orphaned label fragment and an orphaned marker fragment.
+        if (row.Cells.Count <= 4 || row.Cells.Any(cell => cell.IsOverlay))
         {
             yield return new(row, row.Cells);
             yield break;
@@ -1273,6 +1385,152 @@ public sealed partial class ReadableMarkdownSerializer
         // ExpandTableGrid. The table itself is never split mid-way for this — every note row is
         // collected and emitted together, right after the (possibly shortened) table.
         foreach (var note in noteRows) WriteParagraph(output, EscapeLiteral(note.Text));
+    }
+
+    // P-Overlay: schedule-arrow/bar/marker/line/label shapes that PptxAdapter has already resolved
+    // onto a table's grid cells (table_overlays extension) get folded into the cell text here, so
+    // the reader sees "設計 ━━" beside the right column instead of a disconnected paragraph after
+    // the table. This runs on the original a:tr row/column indices -- the same indices the
+    // extension uses -- before SplitFullWidthNoteRows (inside WriteArbitraryTable) can drop or
+    // renumber rows.
+    private static IReadOnlyList<IReadOnlyList<TableCell>> ApplyTableOverlays(DocumentNode node, IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    {
+        if (!HasExtension(node, "table_overlays")) return rows;
+        var overlays = ReadTableOverlays(node);
+        if (overlays.Count == 0) return rows;
+        if (!TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _)) return rows;
+
+        var mutableRows = rows.Select(row => row.ToArray()).ToArray();
+        foreach (var overlay in overlays)
+        {
+            if (overlay.EndRow < overlay.StartRow || overlay.EndColumn < overlay.StartColumn) continue;
+            var rowFrom = Math.Max(0, overlay.StartRow);
+            var rowTo = Math.Min(grid.RowCount - 1, overlay.EndRow);
+            var columnFrom = Math.Max(0, overlay.StartColumn);
+            var columnTo = Math.Min(grid.ColumnCount - 1, overlay.EndColumn);
+            if (rowFrom > rowTo || columnFrom > columnTo) continue; // wholly out of the grid: ignored, not an error
+
+            // F5: glyph selection (head/tail vs. body) must key off the range actually rendered,
+            // not the extension's raw indices -- otherwise an arrow clamped at the grid edge loses
+            // its arrowhead (isLastColumn/isLastRow compares against an EndColumn/EndRow that was
+            // never actually reached) instead of ending in it one column/row earlier.
+            var clampedOverlay = overlay with { StartRow = rowFrom, EndRow = rowTo, StartColumn = columnFrom, EndColumn = columnTo };
+
+            // One overlay can cover several grid slots that all resolve to the same merged origin
+            // cell (rowspan/colspan); it writes that cell once, using its first slot's marker.
+            var perOrigin = new Dictionary<(int Row, int Column), string>();
+            for (var row = rowFrom; row <= rowTo; row++)
+            for (var column = columnFrom; column <= columnTo; column++)
+            {
+                var slot = grid.Rows[row][column];
+                var originKey = (slot.OriginRow, slot.OriginCellIndex);
+                if (perOrigin.ContainsKey(originKey)) continue;
+                var isLabelSlot = row == clampedOverlay.StartRow && column == clampedOverlay.StartColumn;
+                var fragment = OverlayFragment(clampedOverlay, OverlayGlyph(clampedOverlay, row, column), isLabelSlot);
+                if (fragment.Length == 0) continue;
+                perOrigin[originKey] = fragment;
+            }
+            foreach (var (origin, fragment) in perOrigin)
+            {
+                var cell = mutableRows[origin.Row][origin.Column];
+                mutableRows[origin.Row][origin.Column] = cell with { Text = cell.Text.Length == 0 ? fragment : cell.Text + "\n" + fragment };
+            }
+        }
+        return mutableRows.Select(row => (IReadOnlyList<TableCell>)row).ToArray();
+    }
+
+    /// <summary>The glyph for one grid slot of an overlay, ignoring any label text (see
+    /// OverlayFragment). Horizontal axis varies the glyph by column position (c1/c2 ends);
+    /// vertical axis varies it by row position (r1/r2 ends) and repeats per column for the unusual
+    /// case of a vertical overlay spanning more than one column.</summary>
+    private static string OverlayGlyph(TableOverlay overlay, int row, int column)
+    {
+        if (StringComparer.Ordinal.Equals(overlay.Kind, "label")) return string.Empty;
+        if (StringComparer.Ordinal.Equals(overlay.Axis, "vertical"))
+        {
+            var single = overlay.StartRow == overlay.EndRow;
+            var isFirst = row == overlay.StartRow;
+            var isLast = row == overlay.EndRow;
+            return overlay.Kind switch
+            {
+                "arrow" => overlay.Direction switch
+                {
+                    "down" => single ? "▼" : isLast ? "▼" : "│",
+                    "up" => single ? "▲" : isFirst ? "▲" : "│",
+                    "both" => single ? "▲▼" : isFirst ? "▲" : isLast ? "▼" : "│",
+                    _ => "│",
+                },
+                "marker" => OverlayMarkerGlyph(overlay.ShapePreset),
+                _ => "│", // bar / line
+            };
+        }
+        var singleColumn = overlay.StartColumn == overlay.EndColumn;
+        var isFirstColumn = column == overlay.StartColumn;
+        var isLastColumn = column == overlay.EndColumn;
+        return overlay.Kind switch
+        {
+            "arrow" => overlay.Direction switch
+            {
+                "right" => singleColumn ? "━▶" : isLastColumn ? "━━▶" : "━━",
+                "left" => singleColumn ? "◀━" : isFirstColumn ? "◀━━" : "━━",
+                "both" => singleColumn ? "◀━▶" : isFirstColumn ? "◀━━" : isLastColumn ? "━━▶" : "━━",
+                _ => singleColumn ? "━" : "━━",
+            },
+            "bar" => singleColumn ? "━" : "━━",
+            "line" => singleColumn ? "─" : "──",
+            "marker" => OverlayMarkerGlyph(overlay.ShapePreset),
+            _ => singleColumn ? "━" : "━━",
+        };
+    }
+
+    // F6: the adapter classifies ShapePreset case-insensitively (ToLowerInvariant, see
+    // IsOverlayMarkerPreset/ClassifyTableOverlay) but stores the shape's original-case preset text
+    // in the overlay -- lower-case here too so e.g. "Ellipse" still resolves to its glyph.
+    private static string OverlayMarkerGlyph(string? shapePreset) => shapePreset?.ToLowerInvariant() switch
+    {
+        "ellipse" => "●",
+        "triangle" => "▲",
+        _ => "◆",
+    };
+
+    /// <summary>Prefixes the overlay's label text (only at its first covered slot) onto the glyph,
+    /// separated by one space; a bare label (Kind "label", no glyph) is just the text. Both flow
+    /// through the same TableText/EscapeLiteral path as ordinary cell text afterwards -- no extra
+    /// escaping is applied here.</summary>
+    private static string OverlayFragment(TableOverlay overlay, string glyph, bool isLabelSlot)
+    {
+        var label = isLabelSlot ? overlay.Text : string.Empty;
+        if (label.Length == 0) return glyph;
+        return glyph.Length == 0 ? label : label + " " + glyph;
+    }
+
+    private sealed record TableOverlay(
+        string ShapeId, string Text, string Kind, string Direction, string Axis,
+        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
+
+    private static List<TableOverlay> ReadTableOverlays(DocumentNode node)
+    {
+        if (node.Extensions is null || !node.Extensions.TryGetValue("table_overlays", out var raw) ||
+            raw.ValueKind != JsonValueKind.Array) return [];
+        var overlays = new List<TableOverlay>();
+        foreach (var item in raw.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object) continue;
+            // F7: every other JSON reader in this file accepts both PascalCase (the default
+            // JsonSerializer.SerializeToElement casing PptxAdapter writes) and camelCase.
+            var startRow = JsonInt(item, "StartRow", "startRow") ?? 0;
+            var startColumn = JsonInt(item, "StartColumn", "startColumn") ?? 0;
+            overlays.Add(new TableOverlay(
+                JsonString(item, "ShapeId", "shapeId") ?? string.Empty,
+                JsonString(item, "Text", "text") ?? string.Empty,
+                JsonString(item, "Kind", "kind") ?? string.Empty,
+                JsonString(item, "Direction", "direction") ?? "none",
+                JsonString(item, "Axis", "axis") ?? "horizontal",
+                startRow, JsonInt(item, "EndRow", "endRow") ?? startRow,
+                startColumn, JsonInt(item, "EndColumn", "endColumn") ?? startColumn,
+                JsonString(item, "ShapePreset", "shapePreset")));
+        }
+        return overlays;
     }
 
     private static (List<IReadOnlyList<TableCell>> TableRows, List<TableCell> NoteRows) SplitFullWidthNoteRows(IReadOnlyList<IReadOnlyList<TableCell>> rows)
@@ -1949,7 +2207,8 @@ public sealed partial class ReadableMarkdownSerializer
     private static string TableText(string value) => EscapeLiteral(value.Replace("\r", string.Empty, StringComparison.Ordinal))
         .Replace("\n", "<br>", StringComparison.Ordinal).Replace("|", "\\|", StringComparison.Ordinal).Trim();
     private static string NormalizeComparison(string value) => Regex.Replace(value, "[\\s_\\-—:：.。/\\\\]", string.Empty);
-    private static string Finish(StringBuilder output) => output.ToString().TrimEnd() + "\n";
+    private static string Finish(StringBuilder output) =>
+        output.ToString().Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd() + "\n";
 
     // F-Issue7: neutralizes literal Markdown/HTML metacharacters in text that originates from a
     // PLAIN source (TextNodeContent, ReferenceNodeContent alt text, TableCell text, JSON-extracted
@@ -2104,7 +2363,17 @@ public sealed partial class ReadableMarkdownSerializer
         return column > 0;
     }
 
-    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn)
+    // P-Overlay (XLSX): IsOverlay marks a cell ApplySheetOverlays touched (synthesized, or an
+    // existing cell it appended a marker to) -- see SplitRow, which never splits a row containing
+    // one. A schedule row's non-overlay columns are commonly blank (only the label/owner columns
+    // ever had real data), so folding in an arrow/bar spanning a handful of *other* columns opens a
+    // wide gap in that row's now-non-blank column positions -- exactly what SplitRow's general
+    // side-by-side-tables heuristic (row.Cells.Count > 4 and a gap >= 2 columns) exists to detect,
+    // splitting one schedule row into a same-row label fragment and a same-row overlay fragment
+    // that a region can then never join back together (BuildRegions accepts at most one fragment
+    // per row per region). A row genuinely made of two independent tables never carries an overlay
+    // marker, so this stays narrowly scoped to the case this feature introduces.
+    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false)
     {
         public bool IsHeaderStyled => IsBold || HasFill || HasBorder || IsCentered || FontSize is >= 12;
     }

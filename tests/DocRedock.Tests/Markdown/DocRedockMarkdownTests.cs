@@ -30,6 +30,26 @@ public sealed class DocRedockMarkdownTests
     }
 
     [Fact]
+    public void Canonical_lf_output_keeps_contribution_ranges_aligned_after_crlf_text()
+    {
+        var graph = new FakeGraph("doc_1", "docx", [
+            new FakePartition("part-0001", [
+                new FakeNode("n_first", "Paragraph", "first\r\nsecond", 0),
+                new FakeNode("n_last", "Paragraph", "last", 1)
+            ])
+        ]);
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph);
+        Assert.DoesNotContain("\r\n", projection.Markdown, StringComparison.Ordinal);
+        foreach (var (nodeId, expected) in new[] { ("n_first", "first\nsecond"), ("n_last", "last") })
+        {
+            var contribution = Assert.Single(projection.Contributions, item => item.NodeId == nodeId);
+            var range = contribution.MarkdownRange;
+            Assert.Equal(expected, projection.Markdown.Substring(range.Start, range.Length).TrimEnd('\n'));
+        }
+        Assert.True(new DocRedockMarkdownParser().Parse(projection.Markdown).IsComplete);
+    }
+
+    [Fact]
     public void ParserMapsEditedTextToTheSameNodeAndSupportsNewAndExplicitDelete()
     {
         const string markdown = """
@@ -210,6 +230,45 @@ public sealed class DocRedockMarkdownTests
         Assert.Contains("| --- | --- |", projection.Markdown);
         Assert.Contains("![Architecture](日本語%20proposal%20%28v1%29.drmd/assets/diagram.png)", projection.Markdown);
         Assert.Contains("[Reference](https://example.test)", projection.Markdown);
+    }
+
+    // P-ShapeGrid (shape-grid-table-spec.md "出力側"): PptxAdapter synthesizes a NodeKind.Table
+    // node (shape_grid_table=true) from a grid of adjacent rectangle shapes -- it has no
+    // corresponding real shape/table in the slide XML, so DRMD/roundtrip must never emit a
+    // protected table block for it (IsShapeGridSynthesizedTable). Its member shapes remain
+    // ordinary, independently editable nodes exactly as before.
+    [Fact]
+    public void ShapeGridSynthesizedTableIsSkippedFromDrmdWhileMemberShapeTextRemains()
+    {
+        var syntheticTable = new DocumentNode("grid-table", NodeKind.Table, null, 0, ContentLayer.Derived,
+            new TableNodeContent([new TableCell[] { "工程", "9/1" }, new TableCell[] { "要件定義", "" }]),
+            Editability: NodeEditability.Protected,
+            Extensions: new Dictionary<string, System.Text.Json.JsonElement>(StringComparer.Ordinal)
+            {
+                ["shape_id"] = System.Text.Json.JsonSerializer.SerializeToElement("grid:2"),
+                ["shape_grid_table"] = System.Text.Json.JsonSerializer.SerializeToElement(true),
+                ["synthesized_from_shapes"] = System.Text.Json.JsonSerializer.SerializeToElement(new[] { "2", "3" }),
+            });
+        var headerMember = new DocumentNode("header-member", NodeKind.Shape, null, 1, ContentLayer.Body, new TextNodeContent("工程"));
+        var labelMember = new DocumentNode("label-member", NodeKind.Shape, null, 2, ContentLayer.Body, new TextNodeContent("要件定義"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_shape_grid", DocumentFormatKind.Pptx,
+        [
+            new DocumentPartition("slide1", 0, [syntheticTable, headerMember, labelMember]),
+        ]);
+
+        var projection = new DocRedockMarkdownSerializer().Serialize(graph);
+
+        // No protected table block for the synthesized grid: neither its own block marker...
+        Assert.DoesNotContain("id=grid-table", projection.Markdown);
+        Assert.DoesNotContain("kind=table", projection.Markdown);
+        // ...nor the GFM table syntax it would have produced.
+        Assert.DoesNotContain("| 工程 | 9/1 |", projection.Markdown);
+        Assert.DoesNotContain("| --- | --- |", projection.Markdown);
+        // Its member shapes remain ordinary, independently editable Shape blocks.
+        Assert.Contains("<!--drmd:block id=header-member kind=shape", projection.Markdown);
+        Assert.Contains("<!--drmd:block id=label-member kind=shape", projection.Markdown);
+        Assert.Contains("工程", projection.Markdown);
+        Assert.Contains("要件定義", projection.Markdown);
     }
 
     [Fact]
