@@ -95,7 +95,22 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            // On Windows, terminated processes can briefly retain their working-directory
+            // handles after the parent signals exit. Allow those handles to close before
+            // removing the private input; do not cancel cleanup with the caller's token.
+            for (var attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    Directory.Delete(root, recursive: true);
+                    break;
+                }
+                catch (IOException exception) when (OperatingSystem.IsWindows() && attempt < 39 &&
+                    ((exception.HResult & 0xffff) is 32 or 33 or 145))
+                {
+                    await Task.Delay(50).ConfigureAwait(false);
+                }
+            }
         }
     }
 

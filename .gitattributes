@@ -1,0 +1,2 @@
+# Legacy sidecars contain hashes of their exact bytes. Never convert their line endings.
+tests/DocRedock.Tests/Fixtures/Legacy/** -text
