@@ -1,2 +1,12 @@
 schema_version: "1.0"
-techniques: []
+techniques:
+  - id: whatwg-html-entities
+    source: "https://html.spec.whatwg.org/entities.json"
+    retrieved: "2026-09-13"
+    license: "BSD-3-Clause"
+    license_source: "https://github.com/whatwg/html/blob/main/LICENSE"
+    copyright: "WHATWG (Apple, Google, Mozilla, Microsoft)"
+    usage: "2,125 semicolon-terminated names from 2,231 records; codepoint sequences incorporated into C# source."
+    implementation: "src/DocRedock.Markdown/HtmlEntityTable*.g.cs"
+    generator: "tools/generate-html-entities.py"
+    notice: "THIRD-PARTY-NOTICES.txt"

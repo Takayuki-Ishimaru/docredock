@@ -88,6 +88,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] Restore succeeds without changing a lock file
 - [ ] Release build succeeds with zero warnings and zero errors
 - [ ] Every test succeeds and every skip reason has been reviewed
+- [ ] CI runs the unit and headless GUI suites on Windows and macOS in addition to Linux, and the original-file protection matrix (case-only difference, Windows junction, 8.3 short name, macOS firmlink, hard link, symlink chain, Unicode NFC/NFD normalization) is verified there (`OutputCollisionGuardPlatformTests`)
 - [ ] If conversion-qa remains in public CI, it succeeds using only synthetic fixtures
 - [ ] LicenseAudit succeeds and emits the SBOM
 - [ ] A repeated run with identical inputs and configuration produces deterministic expected output and diagnostics

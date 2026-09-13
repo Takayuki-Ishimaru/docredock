@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -35,7 +36,29 @@ public sealed record PptxShapeRecord(
     bool IsPlaceholder = false,
     bool IsHiddenByGroup = false,
     string? InheritedFrom = null,
-    string? InheritedPart = null);
+    string? InheritedPart = null,
+    // --- P-Overlay: table-overlay detection inputs (see table-overlay-spec.md). All optional /
+    // default-safe so the single positional constructor call in ReadShapes keeps compiling.
+    IReadOnlyList<double>? TableColumnWidths = null,
+    IReadOnlyList<double>? TableRowHeights = null,
+    bool IsTextBox = false,
+    bool FlipH = false,
+    bool FlipV = false);
+
+/// <summary>
+/// A shape (arrow/bar/marker/line/label) detected as visually overlaying a table's row/column
+/// range -- see table-overlay-spec.md "抽出側の契約". Row/Column indices are 0-based and
+/// End-inclusive. Serialized with default <see cref="JsonSerializer"/> options (PascalCase).
+/// </summary>
+public sealed record PptxTableOverlay(
+    string ShapeId,
+    string Text,
+    string Kind,
+    string Direction,
+    string Axis,
+    int StartRow, int EndRow,
+    int StartColumn, int EndColumn,
+    string? ShapePreset);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
@@ -68,7 +91,43 @@ public sealed class PptxAdapter
         {
             cancellationToken.ThrowIfCancellationRequested();
             var nodes = new List<DocumentNode>(); var order = 0;
-            var visualGraphs = BuildVisualGraphs(slide, out var visualLabelShapeIds, VisualInferenceTimeout, cancellationToken);
+            // G11: both DetectTableOverlays and DetectShapeGridTables need this slide's native
+            // a:tbl hosts and connector-wired shape ids; computing each once here instead of once
+            // per call (DetectTableOverlays, then again inside DetectShapeGridTables' own guard
+            // rail (c) and box-candidate gate, then again on every ClassifyOverlayCandidates call)
+            // avoids repeating the same LINQ pass 3-4 times per slide for the same answer.
+            var nativeHostTables = GetNativeHostTables(slide.Shapes);
+            var wiredShapeIds = GetWiredShapeIds(slide.Shapes);
+            // P-Overlay: strip schedule-arrow/bar/marker/line overlay shapes out of the pool that
+            // feeds visual-flow inference (they overlay a table, they are not a diagram edge) before
+            // building this slide's visual graphs -- see DetectTableOverlays for the full contract.
+            var (tableOverlaysByTable, tableOverlayShapeIds) = DetectTableOverlays(slide.Shapes, nativeHostTables, wiredShapeIds);
+            var tableOverlayHostByShapeId = tableOverlaysByTable
+                .SelectMany(entry => entry.Value.Select(overlay => (OverlayId: overlay.ShapeId, HostId: entry.Key)))
+                .ToDictionary(pair => pair.OverlayId, pair => pair.HostId, StringComparer.Ordinal);
+            // P-ShapeGrid: detect grids of adjacent rectangle shapes standing in for a native table
+            // (shape-grid-table-spec.md) -- must run after DetectTableOverlays (so a grid never
+            // claims a shape a native table already absorbed) and before BuildVisualGraphs (so
+            // grid members/overlays never leak into visual-flow inference either, same contract as
+            // tableOverlayShapeIds just above).
+            var shapeGridTables = DetectShapeGridTables(slide.Shapes, tableOverlayShapeIds, nativeHostTables, wiredShapeIds);
+            var gridMemberHostByShapeId = shapeGridTables
+                .SelectMany(grid => grid.MemberShapeIds.Select(id => (MemberId: id, HostId: grid.GridShapeId)))
+                .ToDictionary(pair => pair.MemberId, pair => pair.HostId, StringComparer.Ordinal);
+            var gridInsertBeforeShapeId = shapeGridTables.ToDictionary(grid => grid.InsertBeforeShapeId, StringComparer.Ordinal);
+            // Grid overlays reuse the exact same table_overlay_host/table_overlay extension wiring
+            // as a native table's overlays (below) -- merging them into the same dictionary means
+            // ReadableMarkdownSerializer's existing overlay-shape suppression needs no changes at all.
+            foreach (var grid in shapeGridTables)
+                foreach (var overlayId in grid.OverlayShapeIds)
+                    tableOverlayHostByShapeId[overlayId] = grid.GridShapeId;
+            var visualExclusionShapeIds = shapeGridTables.Count == 0
+                ? tableOverlayShapeIds
+                : tableOverlayShapeIds.Concat(shapeGridTables.SelectMany(grid => grid.MemberShapeIds.Concat(grid.OverlayShapeIds)))
+                    .ToHashSet(StringComparer.Ordinal);
+            var visualGraphs = BuildVisualGraphs(
+                visualExclusionShapeIds.Count > 0 ? slide with { Shapes = slide.Shapes.Where(s => !visualExclusionShapeIds.Contains(s.ShapeId)).ToArray() } : slide,
+                out var visualLabelShapeIds, VisualInferenceTimeout, cancellationToken);
             visualDiagnostics.AddRange(visualGraphs.SelectMany(graph => graph.Diagnostics ?? []));
             var visual = visualGraphs.FirstOrDefault();
             var visualConnectorShapeIds = visualGraphs.SelectMany(graph => graph.Edges).Where(edge => edge.SourceId is not null && edge.TargetId is not null)
@@ -80,6 +139,12 @@ public sealed class PptxAdapter
                 .Where(id => id is not null).Cast<string>());
             foreach (var shape in slide.Shapes)
             {
+                // P-ShapeGrid: insert the synthesized grid Table node right before its header's
+                // first shape's own node (spec: "合成表ノードはヘッダ先頭図形のノードの直前に挿
+                // 入"); `order` is a single running counter shared with every node below, so this
+                // renumbers everything after it for free.
+                if (gridInsertBeforeShapeId.TryGetValue(shape.ShapeId, out var hostGrid))
+                    nodes.Add(BuildShapeGridTableNode(hostGrid, slide, order++));
                 var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["shape_id"] = JsonSerializer.SerializeToElement(shape.ShapeId), ["shape_name"] = JsonSerializer.SerializeToElement(shape.Name), ["shape_role"] = JsonSerializer.SerializeToElement(shape.Role) };
                 extension["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden);
                 extension["hidden_object"] = JsonSerializer.SerializeToElement(shape.IsHidden);
@@ -92,6 +157,18 @@ public sealed class PptxAdapter
                 if (shape.Paragraphs is not null) extension["paragraphs"] = JsonSerializer.SerializeToElement(shape.Paragraphs);
                 if (shape.ParagraphDetails is not null) extension["paragraph_details"] = JsonSerializer.SerializeToElement(shape.ParagraphDetails);
                 if (shape.IsTable) extension["is_table"] = JsonSerializer.SerializeToElement(true);
+                if (shape.IsTable && tableOverlaysByTable.TryGetValue(shape.ShapeId, out var overlaysForTable) && overlaysForTable.Count > 0)
+                    extension["table_overlays"] = JsonSerializer.SerializeToElement(overlaysForTable);
+                if (tableOverlayHostByShapeId.TryGetValue(shape.ShapeId, out var overlayHostId))
+                {
+                    extension["table_overlay_host"] = JsonSerializer.SerializeToElement(overlayHostId);
+                    extension["table_overlay"] = JsonSerializer.SerializeToElement(true);
+                }
+                // P-ShapeGrid: this shape is a header/label/body-cell member of a synthesized grid
+                // table -- ReadableMarkdownSerializer suppresses its standalone paragraph the same
+                // way it already does for table_overlay_host (the host table renders its text).
+                if (gridMemberHostByShapeId.TryGetValue(shape.ShapeId, out var gridMemberHostId))
+                    extension["table_grid_member_host"] = JsonSerializer.SerializeToElement(gridMemberHostId);
                 extension["shape_type"] = JsonSerializer.SerializeToElement(shape.ShapeType);
                 if (!string.IsNullOrWhiteSpace(shape.ShapePreset)) extension["shape_preset"] = JsonSerializer.SerializeToElement(shape.ShapePreset);
                 if (visualLabelShapeIds.Contains(shape.ShapeId)) extension["visual_edge_label"] = JsonSerializer.SerializeToElement(true);
@@ -407,9 +484,13 @@ public sealed class PptxAdapter
                 offX = ParseDouble(subtree.GetAttribute("x"));
                 offY = ParseDouble(subtree.GetAttribute("y"));
             }
-            else if (subtree.LocalName == "ext")
+            else if (subtree.LocalName == "ext" && subtree.GetAttribute("cx") is { } groupExtCx)
             {
-                extX = ParseDouble(subtree.GetAttribute("cx"));
+                // F1: this loop matches any descendant named "ext" regardless of nesting, including
+                // a PowerPoint 2016+ <a:extLst><a:ext uri="..."/></a:extLst> decoy that can follow
+                // this xfrm's own real ext (e.g. on grpSpPr). That decoy carries no cx/cy, so
+                // ParseDouble(null) would silently re-zero the group's already-parsed extent.
+                extX = ParseDouble(groupExtCx);
                 extY = ParseDouble(subtree.GetAttribute("cy"));
                 hasExt = true;
             }
@@ -499,6 +580,9 @@ public sealed class PptxAdapter
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
             var tableRows = new List<IReadOnlyList<TableCell>>(); List<TableCell>? tableRow = null; var tcGridSpan = 1; var tcRowSpan = 1; var tcHMerge = false; var tcVMerge = false;
+            // P-Overlay: table-overlay detection needs the table's own column/row sizing (a:tblGrid
+            // gridCol@w, a:tr@h) and whether a plain "sp" is a PowerPoint text box (p:cNvSpPr@txBox).
+            var tableColumnWidths = new List<double>(); var tableRowHeights = new List<double>(); var isTextBox = false;
             // Each a:p inside a cell becomes one entry here, joined with '\n' at </a:tc> (P17):
             // GFM tables have no native multi-paragraph cell, and ReadableMarkdownSerializer's
             // TableText already turns '\n' into "<br>" for exactly this purpose.
@@ -507,13 +591,15 @@ public sealed class PptxAdapter
             while (subtree.Read())
             {
                 if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); shapeHidden = IsOn(subtree.GetAttribute("hidden")); }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvSpPr") isTextBox = IsOn(subtree.GetAttribute("txBox"));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ph") { placeholderType = subtree.GetAttribute("type") ?? "body"; placeholderIdx = subtree.GetAttribute("idx"); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "stCxn") connectorStartId = subtree.GetAttribute("id");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "endCxn") connectorEndId = subtree.GetAttribute("id");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "headEnd") connectorHeadArrow = subtree.GetAttribute("type");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tailEnd") connectorTailArrow = subtree.GetAttribute("type");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "prstGeom") shapePreset = subtree.GetAttribute("prst");
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") tableRow = [];
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "gridCol") tableColumnWidths.Add(ParseDouble(subtree.GetAttribute("w")));
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
                     inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null;
@@ -593,9 +679,15 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "blip") { var rid = subtree.GetAttribute("embed", PresentationRelNs) ?? subtree.GetAttribute("r:embed"); if (rid is not null) imageRels.Add(rid); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "xfrm") { pendingRotation = ParseDoubleNullable(subtree.GetAttribute("rot")); flipH = IsOn(subtree.GetAttribute("flipH")); flipV = IsOn(subtree.GetAttribute("flipV")); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "off") { var x = ParseDouble(subtree.GetAttribute("x")); var y = ParseDouble(subtree.GetAttribute("y")); geometry = new Geometry("pptx-emu", x, y, 0, 0, (pendingRotation ?? 0) / 60000.0); }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ext")
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ext" && subtree.GetAttribute("cx") is { } shapeExtCx)
                 {
-                    var width = ParseDouble(subtree.GetAttribute("cx")); var height = ParseDouble(subtree.GetAttribute("cy"));
+                    // F1: PowerPoint 2016+ appends <a:extLst><a:ext uri="..."><a16:rowId/colId .../>
+                    // </a:ext></a:extLst> to every a:tr/a:gridCol of a saved table, AFTER this shape's
+                    // own real xfrm/off/ext. Without the cx guard, this flat "ext" matcher would treat
+                    // that decoy (no cx/cy) as a resize and zero out the table's already-parsed
+                    // Width/Height (ParseDouble(null) == 0) -- the same failure mode as a bare
+                    // <p:cNvPr><a:extLst>...creationId...</a:extLst></p:cNvPr> earlier in the subtree.
+                    var width = ParseDouble(shapeExtCx); var height = ParseDouble(subtree.GetAttribute("cy"));
                     geometry = geometry is null ? new Geometry("pptx-emu", 0, 0, width, height, (pendingRotation ?? 0) / 60000.0)
                         : geometry with { Width = width, Height = height };
                 }
@@ -642,7 +734,10 @@ public sealed class PptxAdapter
             var paragraphText = paragraphs.Count == 0 ? text.ToString().TrimEnd('\r', '\n') : string.Join('\n', paragraphs);
             result.Add(new(slideId, shapeId, name, paragraphText, isTable, imageRels, geometry, tableRows, role, paragraphs, paragraphDetails,
                 string.IsNullOrWhiteSpace(description) ? null : description, shapeType, chartRels, diagramRels, connectorStartId, connectorEndId, shapeHidden || groupHidden, shapePreset,
-                connectorHeadArrow, connectorTailArrow, connectorPathPoints, placeholderType is not null, groupHidden));
+                connectorHeadArrow, connectorTailArrow, connectorPathPoints, placeholderType is not null, groupHidden,
+                TableColumnWidths: tableColumnWidths.Count > 0 ? tableColumnWidths : null,
+                TableRowHeights: tableRowHeights.Count > 0 ? tableRowHeights : null,
+                IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV));
         }
         if (inferTitle && !result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
@@ -687,6 +782,906 @@ public sealed class PptxAdapter
             if (start.Length == 0 || end.Length == 0) continue;
             shapes[index] = shape with { Text = $"{start} → {end}" };
         }
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // P-Overlay: table-overlay detection (table-overlay-spec.md "抽出側の契約" / "判定アルゴリズム").
+    // Japanese schedule slides draw arrow/bar/marker/line shapes directly on top of a native table
+    // whose columns are dates. This maps each such shape to the table row/column range it visually
+    // covers, so ReadableMarkdownSerializer can fold it into the cell text later instead of losing
+    // the relationship as an unrelated floating paragraph -- and so it never becomes phantom
+    // "Visual flow" material via IsDirectionalShape (BuildVisualGraph runs on the shapes this
+    // method excludes).
+    // -------------------------------------------------------------------------------------------
+
+    private sealed record HostTable(string ShapeId, IReadOnlyList<double> ColumnBoundaries, IReadOnlyList<double> RowBoundaries);
+
+    private static readonly (string Preset, string Direction, string Axis)[] OverlayArrowPresets =
+    [
+        ("rightarrow", "right", "horizontal"), ("notchedrightarrow", "right", "horizontal"),
+        ("stripedrightarrow", "right", "horizontal"), ("homeplate", "right", "horizontal"), ("chevron", "right", "horizontal"),
+        ("leftarrow", "left", "horizontal"),
+        ("uparrow", "up", "vertical"),
+        ("downarrow", "down", "vertical"),
+        ("leftrightarrow", "both", "horizontal"),
+        ("updownarrow", "both", "vertical"),
+    ];
+    private static readonly string[] OverlayMarkerPresets =
+        ["diamond", "flowchartdecision", "ellipse", "flowchartconnector", "triangle", "flowchartoffpageconnector"];
+    private static readonly string[] OverlayDirectionCycle = ["right", "down", "left", "up"];
+
+    private static bool IsOverlayMarkerPreset(string preset) =>
+        OverlayMarkerPresets.Contains(preset) ||
+        (preset.StartsWith("star", StringComparison.Ordinal) && preset.Length > 4 && preset[4..].All(char.IsAsciiDigit));
+
+    // F1: a table whose Width/Height was zeroed out by a PowerPoint 2016+ extLst decoy (see the
+    // ReadShapes/ParseGroupTransform "ext" guards) must never become a host -- every boundary
+    // in BuildHostTable would otherwise collapse to the same origin point.
+    // F3(b): a 1xN or Nx1 "table" is never a genuine schedule grid worth overlaying.
+    // Shared by DetectTableOverlays and DetectShapeGridTables' native-table overlap guard (rail 8c).
+    private static HostTable[] GetNativeHostTables(IReadOnlyList<PptxShapeRecord> shapes) =>
+        shapes.Where(shape => shape.IsTable && shape.Geometry is not null &&
+                shape.Geometry.Width > 0 && shape.Geometry.Height > 0 &&
+                shape.TableRows is { Count: >= 2 } && shape.TableColumnWidths is { Count: >= 2 } &&
+                !shape.IsHidden && shape.InheritedFrom is null)
+            .Select(BuildHostTable).ToArray();
+
+    // G11: shared by ClassifyOverlayCandidates (F3(a): a connector's own start/end shape is always
+    // that connector's diagram node, never overlay/grid content) and DetectShapeGridTables' own
+    // box-candidate gate. Computed once per slide by the caller (Extract) instead of once per call.
+    private static HashSet<string> GetWiredShapeIds(IReadOnlyList<PptxShapeRecord> shapes) =>
+        shapes.Where(shape => StringComparer.Ordinal.Equals(shape.ShapeType, "connector"))
+            .SelectMany(shape => new[] { shape.ConnectorStartId, shape.ConnectorEndId })
+            .Where(id => id is not null).Cast<string>()
+            .ToHashSet(StringComparer.Ordinal);
+
+    // G9: mirrors ClassifyOverlayCandidates' own media/diagram exclusion below -- a picture,
+    // chart, or SmartArt diagram shape must never be treated as ordinary schedule content just
+    // because it happens to use a "rect"-family preset as its placeholder frame.
+    private static bool HasMediaOrDiagramRelationship(PptxShapeRecord shape) =>
+        shape.ImageRelationshipIds.Count > 0 || shape.ChartRelationshipIds is { Count: > 0 } || shape.DiagramRelationshipIds is { Count: > 0 };
+
+    private static (IReadOnlyDictionary<string, IReadOnlyList<PptxTableOverlay>> ByTable, HashSet<string> OverlayShapeIds)
+        DetectTableOverlays(IReadOnlyList<PptxShapeRecord> shapes, IReadOnlyList<HostTable> hosts, IReadOnlySet<string> wiredShapeIds)
+    {
+        var overlaysByTable = new Dictionary<string, List<PptxTableOverlay>>(StringComparer.Ordinal);
+        var overlayShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        if (hosts.Count == 0)
+            return (overlaysByTable.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<PptxTableOverlay>)kv.Value, StringComparer.Ordinal), overlayShapeIds);
+
+        ClassifyOverlayCandidates(shapes, hosts, EmptyShapeIdSet, wiredShapeIds, overlaysByTable, overlayShapeIds);
+
+        var result = overlaysByTable.ToDictionary(
+            kv => kv.Key,
+            kv => (IReadOnlyList<PptxTableOverlay>)kv.Value
+                .OrderBy(overlay => overlay.StartRow).ThenBy(overlay => overlay.StartColumn)
+                .ThenBy(overlay => overlay.ShapeId, OverlayShapeIdComparer.Instance)
+                .ToArray(),
+            StringComparer.Ordinal);
+        return (result, overlayShapeIds);
+    }
+
+    // G11: a genuinely immutable empty set -- this is shared, static, and passed around as
+    // "the empty exclusion set" from several call sites; a plain mutable HashSet only happened to
+    // stay empty because nothing ever called Add on it.
+    private static readonly IReadOnlySet<string> EmptyShapeIdSet = FrozenSet<string>.Empty;
+
+    // Shared candidate-classification core for BOTH native-table overlay detection
+    // (DetectTableOverlays, `excludedShapeIds` always empty -- this is a pure refactor of its
+    // former inline loop, no behaviour change) and shape-grid-table overlay detection
+    // (DetectShapeGridTables, `excludedShapeIds` = every shape already claimed as a grid member so
+    // it is never double-counted as an overlay too). Every rule -- candidacy gate, best-host
+    // selection, the label-candidate containment gate, classification -- is identical between the
+    // two callers so their marker/glyph output can never drift apart (shape-grid-table-spec.md
+    // step 9: "DetectTableOverlays と同じ規則を適用").
+    private static void ClassifyOverlayCandidates(
+        IReadOnlyList<PptxShapeRecord> shapes,
+        IReadOnlyList<HostTable> hosts,
+        IReadOnlySet<string> excludedShapeIds,
+        IReadOnlySet<string> wiredShapeIds,
+        Dictionary<string, List<PptxTableOverlay>> overlaysByTable,
+        HashSet<string> overlayShapeIds)
+    {
+        if (hosts.Count == 0) return;
+
+        foreach (var shape in shapes)
+        {
+            if (excludedShapeIds.Contains(shape.ShapeId)) continue;
+            // Candidacy gate (spec "オーバーレイ候補"): never the table itself or another table,
+            // never hidden/placeholder/inherited furniture, never a picture/chart/diagram shape,
+            // never a shape natively wired into a connector elsewhere on the slide.
+            if (shape.IsTable || shape.Geometry is null || shape.IsHidden || shape.IsHiddenByGroup ||
+                shape.InheritedFrom is not null || shape.IsPlaceholder ||
+                StringComparer.Ordinal.Equals(shape.ShapeType, "picture") ||
+                HasMediaOrDiagramRelationship(shape) ||
+                wiredShapeIds.Contains(shape.ShapeId))
+                continue;
+            var isConnector = StringComparer.Ordinal.Equals(shape.ShapeType, "connector");
+            // A connector wired to both a start AND an end shape is a native diagram edge (an
+            // existing graph relationship), not schedule-overlay content -- leave it alone.
+            if (isConnector && shape.ConnectorStartId is not null && shape.ConnectorEndId is not null) continue;
+
+            HostTable? bestHost = null; var bestScore = 0.0; var bestContainment = 0.0;
+            foreach (var host in hosts)
+            {
+                if (!TryScoreTableOverlay(shape.Geometry, host, out var score, out var containment)) continue;
+                if (bestHost is null || score > bestScore) { bestHost = host; bestScore = score; bestContainment = containment; }
+            }
+            if (bestHost is null) continue;
+            // F3(c): a plain label/note textbox needs much stronger containment than the general
+            // 50% gate below -- a note box that merely brushes a table's edge must never be
+            // swallowed into a cell the way a genuine schedule arrow/bar/marker/line would be.
+            if (IsOverlayLabelCandidate(shape, isConnector) && bestContainment < 0.9) continue;
+
+            var overlay = ClassifyTableOverlay(shape, bestHost, isConnector);
+            if (!overlaysByTable.TryGetValue(bestHost.ShapeId, out var list)) overlaysByTable[bestHost.ShapeId] = list = [];
+            list.Add(overlay);
+            overlayShapeIds.Add(shape.ShapeId);
+        }
+    }
+
+    // Spec ordering rule: "(StartRow, StartColumn, ShapeId を数値として...非数値は後ろ、序数比較)".
+    private sealed class OverlayShapeIdComparer : IComparer<string>
+    {
+        public static readonly OverlayShapeIdComparer Instance = new();
+        public int Compare(string? x, string? y)
+        {
+            var xIsNumeric = long.TryParse(x, out var xValue);
+            var yIsNumeric = long.TryParse(y, out var yValue);
+            if (xIsNumeric && yIsNumeric) return xValue.CompareTo(yValue);
+            if (xIsNumeric) return -1;
+            if (yIsNumeric) return 1;
+            return string.CompareOrdinal(x, y);
+        }
+    }
+
+    private static HostTable BuildHostTable(PptxShapeRecord table)
+    {
+        var geometry = table.Geometry!;
+        var columnWidths = ScaleWidthsToTotal(table.TableColumnWidths!, geometry.Width);
+        var rowHeights = ScaleWidthsToTotal(ReconcileRowHeightCount(table.TableRowHeights ?? [], table.TableRows!.Count), geometry.Height);
+        return new HostTable(table.ShapeId, ToBoundaries(geometry.X, columnWidths), ToBoundaries(geometry.Y, rowHeights));
+    }
+
+    // Spec: "TableRowHeightsの要素数がTableRows.Countと違う場合は行数に合わせて不足分を平均高で補う／
+    // 余剰を切る" -- pad a short list with the average of the values it does have (no data at all
+    // just means "divide evenly", handled by padding a list of 1.0 placeholders that ScaleWidthsToTotal
+    // then normalizes to the frame height), or truncate an over-long one.
+    private static IReadOnlyList<double> ReconcileRowHeightCount(IReadOnlyList<double> raw, int rowCount)
+    {
+        if (raw.Count == rowCount) return raw;
+        if (raw.Count == 0) return [.. Enumerable.Repeat(1.0, rowCount)];
+        if (raw.Count < rowCount) return [.. raw, .. Enumerable.Repeat(raw.Average(), rowCount - raw.Count)];
+        return [.. raw.Take(rowCount)];
+    }
+
+    // PowerPoint treats a:tblGrid gridCol@w / a:tr@h as *minimums*; the frame's own ext cx/cy is
+    // the authoritative rendered size (spec: "1%超ずれる場合は比例スケール"). An exact match (the
+    // common case) is left untouched rather than introducing floating-point churn.
+    private static IReadOnlyList<double> ScaleWidthsToTotal(IReadOnlyList<double> values, double target)
+    {
+        var sum = values.Sum();
+        // F4: a:gridCol/a:tr with no w/h attribute at all (ParseDouble(null) == 0) used to fall
+        // through untouched -- every boundary in ToBoundaries collapses to the same origin point,
+        // so every overlay on that axis resolves to index 0 instead of being spread across the
+        // frame's own declared size.
+        if (sum <= 0) return target > 0 && values.Count > 0
+            ? [.. Enumerable.Repeat(target / values.Count, values.Count)]
+            : values;
+        if (target <= 0) return values;
+        var deviation = Math.Abs(sum - target) / target;
+        if (deviation <= 0.01) return values;
+        var scale = target / sum;
+        return values.Select(value => value * scale).ToArray();
+    }
+
+    private static IReadOnlyList<double> ToBoundaries(double origin, IReadOnlyList<double> sizes)
+    {
+        var boundaries = new double[sizes.Count + 1];
+        boundaries[0] = origin;
+        for (var i = 0; i < sizes.Count; i++) boundaries[i + 1] = boundaries[i] + sizes[i];
+        return boundaries;
+    }
+
+    // Candidacy test (spec "オーバーレイ候補" / the 90% background-frame exclusion). A normal 2-D
+    // shape must cover >= 50% of its own area inside the table; a degenerate line (zero width or
+    // height -- the common case for a straight connector, and the note in the spec about not
+    // treating it as a 1-EMU-thick shape) has zero area, so candidacy instead compares how much of
+    // its *length* falls inside the table. Either way a shape that blankets almost the whole table
+    // (>= 90% of the table's own area) is a background frame, not overlay content, and is excluded.
+    // The returned score is also the tie-break metric when the same shape overlaps more than one
+    // table (spec: assign to the single largest-intersection table only).
+    // F3(c): containmentRatio is how much of the shape's OWN area/length falls inside the table --
+    // the general candidacy gate needs only >= 50% of it, but a label/note textbox (see
+    // IsOverlayLabelCandidate) is held to a much stricter >= 90% by its caller.
+    private static bool TryScoreTableOverlay(Geometry geometry, HostTable host, out double score, out double containmentRatio)
+    {
+        score = 0; containmentRatio = 0;
+        var tableLeft = host.ColumnBoundaries[0]; var tableRight = host.ColumnBoundaries[^1];
+        var tableTop = host.RowBoundaries[0]; var tableBottom = host.RowBoundaries[^1];
+        var tableArea = Math.Max(0, tableRight - tableLeft) * Math.Max(0, tableBottom - tableTop);
+        if (tableArea <= 0) return false;
+
+        var left = geometry.X; var right = geometry.X + geometry.Width;
+        var top = geometry.Y; var bottom = geometry.Y + geometry.Height;
+        var overlapX = Math.Max(0, Math.Min(right, tableRight) - Math.Max(left, tableLeft));
+        var overlapY = Math.Max(0, Math.Min(bottom, tableBottom) - Math.Max(top, tableTop));
+        var intersectionArea = overlapX * overlapY;
+
+        if (geometry.Width > 0 && geometry.Height > 0)
+        {
+            var shapeArea = geometry.Width * geometry.Height;
+            containmentRatio = shapeArea > 0 ? intersectionArea / shapeArea : 0;
+            if (intersectionArea < shapeArea * 0.5) return false;
+            if (intersectionArea >= tableArea * 0.9) return false;
+            score = intersectionArea;
+            return true;
+        }
+
+        // Degenerate line: exactly one of width/height is zero (or both -- a true point never
+        // qualifies, below). Its "in-table" fraction is the overlap of its long axis with the
+        // table, gated on its fixed cross-axis coordinate actually falling inside the table's span
+        // on that axis (a horizontal line drawn above or below the table never counts, however
+        // wide its X overlap happens to be).
+        var length = Math.Max(geometry.Width, geometry.Height);
+        if (length <= 0) return false;
+        var inside = geometry.Height <= geometry.Width
+            ? (top >= tableTop && top <= tableBottom ? overlapX : 0)
+            : (left >= tableLeft && left <= tableRight ? overlapY : 0);
+        containmentRatio = inside / length;
+        if (containmentRatio < 0.5) return false;
+        if (intersectionArea >= tableArea * 0.9) return false;
+        score = inside;
+        return true;
+    }
+
+    // F3(c): mirrors ClassifyTableOverlay's own branching for exactly the shapes that fall through
+    // to its "label" branch there (a plain text box that is not an arrow/line/marker preset),
+    // without duplicating that classification itself.
+    private static bool IsOverlayLabelCandidate(PptxShapeRecord shape, bool isConnector)
+    {
+        if (isConnector || !shape.IsTextBox) return false;
+        var presetKey = shape.ShapePreset?.ToLowerInvariant();
+        if (presetKey is not null && Array.Exists(OverlayArrowPresets, p => p.Preset == presetKey)) return false;
+        if (presetKey == "line") return false;
+        if (presetKey is not null && IsOverlayMarkerPreset(presetKey)) return false;
+        return true;
+    }
+
+    // Shared row/column resolution (spec "行・列範囲"): a band is "covered" when the shape's span
+    // on that axis overlaps it by at least half the band's own width. This one rule also handles a
+    // degenerate line (zero width or height) without a separate code path: a zero-length span
+    // overlaps every band at exactly 0%, so the loop below covers nothing and falls through to the
+    // center-point fallback -- precisely the spec's "被覆列が無ければ図形中心Xを含む列" rule, and
+    // equally what the spec calls out separately for a connector/line segment ("線分が通る列").
+    private static (int Start, int End) ComputeOverlayAxisRange(double min, double max, IReadOnlyList<double> boundaries)
+    {
+        var covered = new List<int>();
+        for (var i = 0; i < boundaries.Count - 1; i++)
+        {
+            var bandStart = boundaries[i]; var bandEnd = boundaries[i + 1];
+            var bandWidth = bandEnd - bandStart;
+            if (bandWidth <= 0) continue;
+            var overlap = Math.Max(0, Math.Min(max, bandEnd) - Math.Max(min, bandStart));
+            if (overlap >= bandWidth * 0.5) covered.Add(i);
+        }
+        if (covered.Count > 0) return (covered[0], covered[^1]);
+
+        var clamped = Math.Clamp((min + max) / 2, boundaries[0], boundaries[^1]);
+        for (var i = 0; i < boundaries.Count - 1; i++)
+            if (clamped >= boundaries[i] && clamped <= boundaries[i + 1]) return (i, i);
+        return (0, 0);
+    }
+
+    private static PptxTableOverlay ClassifyTableOverlay(PptxShapeRecord shape, HostTable host, bool isConnector)
+    {
+        var geometry = shape.Geometry!;
+        var (startRow, endRow) = ComputeOverlayAxisRange(geometry.Y, geometry.Y + geometry.Height, host.RowBoundaries);
+        var (startColumn, endColumn) = ComputeOverlayAxisRange(geometry.X, geometry.X + geometry.Width, host.ColumnBoundaries);
+
+        string kind; string direction; string? axis;
+        if (isConnector)
+        {
+            var (connectorKind, connectorDirection, connectorAxis) = ClassifyOverlayConnector(shape);
+            kind = connectorKind; direction = connectorDirection;
+            // A directionless connector ("line": no head/tail arrowhead) falls back to the general
+            // coverage-based axis rule below, same as bar/marker/label -- only an actual arrowhead
+            // makes the path vector's own axis authoritative (spec "Axis" summary bullet).
+            axis = connectorKind == "arrow" ? connectorAxis : null;
+        }
+        else
+        {
+            var presetKey = shape.ShapePreset?.ToLowerInvariant();
+            var arrowPresetMatch = presetKey is null ? default : Array.Find(OverlayArrowPresets, p => p.Preset == presetKey);
+            (string Preset, string Direction, string Axis)? arrowPreset = arrowPresetMatch.Preset is null ? null : arrowPresetMatch;
+            if (arrowPreset is { } preset)
+            {
+                kind = "arrow";
+                (direction, axis) = RotateAndFlipOverlayDirection(preset.Direction, preset.Axis, geometry.RotationDegrees, shape.FlipH, shape.FlipV);
+            }
+            else if (presetKey == "line") { kind = "line"; direction = "none"; axis = null; }
+            else if (presetKey is not null && IsOverlayMarkerPreset(presetKey)) { kind = "marker"; direction = "none"; axis = null; }
+            else if (shape.IsTextBox) { kind = "label"; direction = "none"; axis = null; }
+            else { kind = "bar"; direction = "none"; axis = null; }
+        }
+
+        // Coverage-based axis (spec): "被覆列数 > 1 または(被覆行数 == 1)" -> horizontal; only a
+        // multi-row, single-column span reads as vertical.
+        axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
+        return new PptxTableOverlay(shape.ShapeId, shape.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, shape.ShapePreset);
+    }
+
+    private static (string Kind, string Direction, string Axis) ClassifyOverlayConnector(PptxShapeRecord shape)
+    {
+        var head = !string.IsNullOrWhiteSpace(shape.ConnectorHeadArrow) && !StringComparer.OrdinalIgnoreCase.Equals(shape.ConnectorHeadArrow, "none"); // start-side arrowhead
+        var tail = !string.IsNullOrWhiteSpace(shape.ConnectorTailArrow) && !StringComparer.OrdinalIgnoreCase.Equals(shape.ConnectorTailArrow, "none"); // end-side arrowhead
+        var points = shape.ConnectorPathPoints;
+        double dx, dy;
+        if (points is { Count: >= 2 })
+        {
+            dx = points[^1].X - points[0].X; dy = points[^1].Y - points[0].Y;
+        }
+        else { dx = shape.Geometry!.Width; dy = shape.Geometry!.Height; } // defensive fallback; ReadShapes always populates path points for connectors with geometry
+        var axis = Math.Abs(dx) >= Math.Abs(dy) ? "horizontal" : "vertical";
+        var forward = axis == "horizontal" ? (dx >= 0 ? "right" : "left") : (dy >= 0 ? "down" : "up");
+        if (!head && !tail) return ("line", "none", axis);
+        if (head && tail) return ("arrow", "both", axis);
+        return tail ? ("arrow", forward, axis) : ("arrow", OppositeOverlayDirection(forward), axis);
+    }
+
+    private static string OppositeOverlayDirection(string direction) => direction switch
+    {
+        "right" => "left", "left" => "right", "up" => "down", "down" => "up", _ => direction,
+    };
+
+    // F2: DrawingML (and ShapeOrientation above, which composes T(c)*R*FlipH*FlipV*T(-c) -- flip
+    // applied to the LOCAL point first, rotation second) mirrors a shape BEFORE rotating it, not
+    // after. Mirror the base preset direction first (flipH swaps left/right, flipV swaps up/down),
+    // THEN rotate the mirrored direction around the cycle (right -> down -> left -> up) and derive
+    // Axis from the *final*, rotated direction -- rotating first and mirroring the result (the
+    // previous, incorrect order) only agrees with this for an even number of quarter-turns. "both"
+    // keeps its Direction (mirroring a symmetric double arrow is a no-op) but its Axis still
+    // toggles on an odd number of quarter-turns (a horizontal double arrow rotated 90 degrees reads
+    // as vertical; rotated 180 it is still horizontal).
+    //
+    // F8: this only accounts for the shape's OWN flipH/flipV (PptxShapeRecord.FlipH/FlipV, as read
+    // off this shape's own a:xfrm by ReadShapes). An ancestor p:grpSp's flipH/flipV is folded into
+    // ParseGroupTransform's group transform matrix and never surfaces as a shape's own flip flag,
+    // so a flip applied only at the group level is out of scope here -- e.g. a downArrow nested
+    // inside a flipV group still reports Direction "down" (it is never mirrored to "up").
+    private static (string Direction, string Axis) RotateAndFlipOverlayDirection(string baseDirection, string baseAxis, double rotationDegrees, bool flipH, bool flipV)
+    {
+        // TransformGeometry (ReadShapes) measures RotationDegrees from the shape's transformed
+        // *top edge* vector (local (1,0) direction). A horizontal flip (Scale(-1,1)) negates
+        // exactly that vector's X component, which folds a +180 degree offset into the measured
+        // angle even at zero genuine rotation -- e.g. flipH alone (rot=0) reports 180, not 0.
+        // A vertical flip never touches this particular (horizontal) reference vector, so it
+        // never contaminates the reading. Undo that artifact before deriving quarter-turn steps.
+        var genuineRotationDegrees = flipH ? rotationDegrees - 180 : rotationDegrees;
+        var steps = (int)Math.Round(genuineRotationDegrees / 90.0, MidpointRounding.AwayFromZero);
+        steps = ((steps % 4) + 4) % 4;
+
+        var mirroredDirection = baseDirection switch
+        {
+            "left" when flipH => "right",
+            "right" when flipH => "left",
+            "up" when flipV => "down",
+            "down" when flipV => "up",
+            _ => baseDirection,
+        };
+
+        string direction; string axis;
+        if (mirroredDirection == "both")
+        {
+            direction = "both";
+            axis = steps % 2 == 1 ? (baseAxis == "horizontal" ? "vertical" : "horizontal") : baseAxis;
+        }
+        else
+        {
+            var index = Array.IndexOf(OverlayDirectionCycle, mirroredDirection);
+            direction = OverlayDirectionCycle[(index + steps) % 4];
+            axis = direction is "right" or "left" ? "horizontal" : "vertical";
+        }
+        return (direction, axis);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // P-ShapeGrid: "shape-grid table" detection (shape-grid-table-spec.md). Japanese schedule
+    // slides very often build their "table" from adjacent rectangle shapes (a header row of date
+    // rectangles, an optional label column of task-name rectangles, an empty or rect-tiled body)
+    // instead of a native a:tbl, then draw arrow/bar/marker/line overlays on top exactly like the
+    // native-table case above. This synthesizes a NodeKind.Table node for that grid and reuses
+    // ClassifyOverlayCandidates (this file's shared overlay-scoring core, just above) against a
+    // HostTable built from the grid's own derived column/row boundaries, so the two features share
+    // one glyph/marker vocabulary. Must run AFTER DetectTableOverlays (so a grid can never claim a
+    // shape a native table already absorbed); its result must be excluded from BuildVisualGraphs'
+    // input exactly like a native table's overlays are (see Extract).
+    // -------------------------------------------------------------------------------------------
+
+    private sealed record ShapeGridTable(
+        string GridShapeId,
+        string InsertBeforeShapeId,
+        Geometry Geometry,
+        IReadOnlyList<IReadOnlyList<TableCell>> Rows,
+        IReadOnlyList<string> MemberShapeIdsOrdered,
+        IReadOnlySet<string> MemberShapeIds,
+        IReadOnlyList<PptxTableOverlay> Overlays,
+        IReadOnlySet<string> OverlayShapeIds);
+
+    // Presets a "box" grid member (header/label/body cell) can use -- spec step 1: "矢印・
+    // マーカー・line以外の「箱」". Arrow/marker/line presets are handled exclusively by the overlay
+    // pipeline (ClassifyOverlayCandidates) and are deliberately absent from this list.
+    private static bool IsShapeGridBoxPreset(string? preset)
+    {
+        if (string.IsNullOrWhiteSpace(preset)) return false;
+        var value = preset.ToLowerInvariant();
+        return value switch
+        {
+            "rect" or "roundrect" or "flowchartprocess" or "flowchartalternateprocess" or
+                "homeplate" or "chevron" or "parallelogram" or "hexagon" => true,
+            _ => (value.StartsWith("snip", StringComparison.Ordinal) || value.StartsWith("round", StringComparison.Ordinal))
+                && value.EndsWith("rect", StringComparison.Ordinal),
+        };
+    }
+
+    private static double Median(IEnumerable<double> values)
+    {
+        var sorted = values.OrderBy(value => value).ToArray();
+        if (sorted.Length == 0) return 0;
+        var middle = sorted.Length / 2;
+        return sorted.Length % 2 == 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
+    }
+
+    // Sequential 1-D clustering (spec steps 2/6): sort by `key`, then group a value into the
+    // running band as long as it stays within `tolerance` of that band's FIRST member's own key
+    // (G11: not the band's running average -- an average lets the band's effective anchor drift a
+    // little further with every new member it accepts, so a long enough run of individually-in-
+    // tolerance members could walk arbitrarily far from where the band actually started; anchoring
+    // on the first member's key instead bounds every member's distance from one fixed point).
+    private static List<List<PptxShapeRecord>> ClusterByAxis(IReadOnlyList<PptxShapeRecord> shapes, Func<PptxShapeRecord, double> key, double tolerance)
+    {
+        var effectiveTolerance = Math.Max(tolerance, 1);
+        var bands = new List<List<PptxShapeRecord>>();
+        foreach (var shape in shapes.OrderBy(key))
+        {
+            var band = bands.Count > 0 ? bands[^1] : null;
+            if (band is not null && key(shape) - key(band[0]) <= effectiveTolerance) band.Add(shape);
+            else bands.Add([shape]);
+        }
+        return bands;
+    }
+
+    // Drops a boundary that coincides (within `tolerance`) with the one immediately before it --
+    // e.g. a label column's first shape's top edge is, by construction, identical to the header
+    // row's own bottom edge (both rows tile flush against each other), and step 6's literal
+    // boundary list ("ヘッダ行の上端・下端 + ラベル列の各図形の上端 + 最後の図形の下端") would
+    // otherwise produce a zero-height phantom row between them. G3: `tolerance` is caller-supplied
+    // and relative to this grid's own row height (medianRowHeight * 0.1) rather than a fixed 0.5
+    // EMU epsilon -- a fixed threshold cannot scale down for a genuinely tiny hand-drawn grid, nor
+    // reliably separate "these two boundaries are the same seam" from "this is a real, if narrow,
+    // row" for a normally-sized one.
+    private static IReadOnlyList<double> DedupeAdjacentBoundaries(IReadOnlyList<double> raw, double tolerance)
+    {
+        var result = new List<double>(raw.Count);
+        foreach (var value in raw)
+            if (result.Count == 0 || value - result[^1] > tolerance) result.Add(value);
+        return result;
+    }
+
+    // Fraction of `subject`'s own outer area that falls inside `other`'s outer bounds (spec 8c: a
+    // grid must not overlap an existing native table by >= 50% of the GRID's own area).
+    private static double HostOverlapRatioOfFirst(HostTable subject, HostTable other)
+    {
+        var left = subject.ColumnBoundaries[0]; var right = subject.ColumnBoundaries[^1];
+        var top = subject.RowBoundaries[0]; var bottom = subject.RowBoundaries[^1];
+        var area = Math.Max(0, right - left) * Math.Max(0, bottom - top);
+        if (area <= 0) return 0;
+        var otherLeft = other.ColumnBoundaries[0]; var otherRight = other.ColumnBoundaries[^1];
+        var otherTop = other.RowBoundaries[0]; var otherBottom = other.RowBoundaries[^1];
+        var overlapX = Math.Max(0, Math.Min(right, otherRight) - Math.Max(left, otherLeft));
+        var overlapY = Math.Max(0, Math.Min(bottom, otherBottom) - Math.Max(top, otherTop));
+        return overlapX * overlapY / area;
+    }
+
+    // G2: containment/coverage tolerances for IsFlushGridMember, below. The containment figure is
+    // deliberately far looser than a first-pass "just enough for float rounding" guess would
+    // suggest: schedule-shape-grid-gapped.pptx's own 工程 label column is authored 20% wider than
+    // its (gap-trimmed) header cell BY DESIGN (process_label_geometry/PROCESS_WIDTH_MULT), which
+    // measures out to ~17.9% of the resolved cell's own width overflowing past that cell's trailing
+    // edge -- comfortably inside 20%, while remaining far below the ~40-50%+ single-edge overflow
+    // (or, for an UNDERSIZED shape, the coverage shortfall below) that would make a genuine overlay
+    // bar/label plausible as a "member" instead. Coverage stays the primary discriminator against
+    // an inset overlay (e.g. add_bar_shape's ~60%-of-row-height bar): it never overflows its cell
+    // at all, so only the coverage gate -- not containment -- can and does reject it.
+    private const double GridMemberContainmentTolerance = 0.20;
+    private const double GridMemberCoverageThreshold = 0.85;
+
+    // G2: is `shape` a genuine MEMBER of the cell(s) `host`'s boundaries resolve it to, as opposed
+    // to an overlay shape that merely happens to share the same "rect" preset but is deliberately
+    // inset/undersized against the grid lines (add_bar_shape/add_label_textbox's INSET_IN/
+    // height_frac)? The original test required near-EXACT tiling (2% tolerance on every edge),
+    // which only ever holds for a machine-perfect, zero-gap grid -- a hand-drawn one (a 2pt gap
+    // between every cell, a label column 20% wider than its header, a body row inset for visual
+    // centring) fails it outright even though a human reading the slide would unhesitatingly call
+    // every one of those boxes "the process/owner label for this row". Membership is now
+    // "containment + coverage" instead: (a) `shape` may not spill more than
+    // GridMemberContainmentTolerance of the cell's own width/height outside the cell on any one
+    // edge, and (b) `shape` must still cover at least GridMemberCoverageThreshold of the cell on
+    // both axes. A bar overlay deliberately sized to ~60% of its row's height (add_bar_shape) still
+    // fails the coverage test and stays a non-member, exactly as before.
+    private static bool IsFlushGridMember(PptxShapeRecord shape, HostTable host)
+    {
+        var geometry = shape.Geometry!;
+        var (startRow, endRow) = ComputeOverlayAxisRange(geometry.Y, geometry.Y + geometry.Height, host.RowBoundaries);
+        var (startColumn, endColumn) = ComputeOverlayAxisRange(geometry.X, geometry.X + geometry.Width, host.ColumnBoundaries);
+        var expectedLeft = host.ColumnBoundaries[startColumn]; var expectedRight = host.ColumnBoundaries[endColumn + 1];
+        var expectedTop = host.RowBoundaries[startRow]; var expectedBottom = host.RowBoundaries[endRow + 1];
+        var cellWidth = expectedRight - expectedLeft; var cellHeight = expectedBottom - expectedTop;
+        if (cellWidth <= 0 || cellHeight <= 0) return false;
+
+        var left = geometry.X; var right = geometry.X + geometry.Width;
+        var top = geometry.Y; var bottom = geometry.Y + geometry.Height;
+        var leftOverflow = Math.Max(0, expectedLeft - left);
+        var rightOverflow = Math.Max(0, right - expectedRight);
+        var topOverflow = Math.Max(0, expectedTop - top);
+        var bottomOverflow = Math.Max(0, bottom - expectedBottom);
+        if (leftOverflow > cellWidth * GridMemberContainmentTolerance || rightOverflow > cellWidth * GridMemberContainmentTolerance ||
+            topOverflow > cellHeight * GridMemberContainmentTolerance || bottomOverflow > cellHeight * GridMemberContainmentTolerance)
+            return false;
+
+        var overlapWidth = Math.Max(0, Math.Min(right, expectedRight) - Math.Max(left, expectedLeft));
+        var overlapHeight = Math.Max(0, Math.Min(bottom, expectedBottom) - Math.Max(top, expectedTop));
+        return overlapWidth >= cellWidth * GridMemberCoverageThreshold && overlapHeight >= cellHeight * GridMemberCoverageThreshold;
+    }
+
+    // G8: does `shape` resolve to exactly one column band of `host`? A textless box spanning >= 2
+    // columns is body-area "bar" overlay content (DetectShapeGridTables' belowHeaderMembers filter
+    // below), never a grid member -- a label column's own cells are always 1 column wide, so this
+    // never affects them.
+    private static bool SpansSingleColumn(PptxShapeRecord shape, HostTable host)
+    {
+        var geometry = shape.Geometry!;
+        var (startColumn, endColumn) = ComputeOverlayAxisRange(geometry.X, geometry.X + geometry.Width, host.ColumnBoundaries);
+        return startColumn == endColumn;
+    }
+
+    // A shape can only ever inform "no label column" row derivation (below) if it could NEVER be
+    // mistaken for a grid box member: an arrow/marker/line preset, a connector, or a text box. This
+    // deliberately excludes an ordinary box-preset shape (e.g. a second row of unrelated card
+    // shapes, or a textless "bar" overlay sharing the "rect" preset) from ever seeding a phantom
+    // row band on its own -- guard rail 8b (see DetectShapeGridTables) still lets a genuine
+    // box-preset "bar" overlay register once the real row boundaries are known, just not before.
+    private static bool IsUnambiguousOverlayShape(PptxShapeRecord shape) =>
+        shape.IsTextBox || StringComparer.Ordinal.Equals(shape.ShapeType, "connector") || !IsShapeGridBoxPreset(shape.ShapePreset);
+
+    private static IReadOnlyList<ShapeGridTable> DetectShapeGridTables(
+        IReadOnlyList<PptxShapeRecord> shapes, IReadOnlySet<string> nativeTableOverlayShapeIds,
+        IReadOnlyList<HostTable> nativeHostTables, IReadOnlySet<string> wiredShapeIds)
+    {
+        var results = new List<ShapeGridTable>();
+
+        // Step 1 (spec "格子メンバー候補"): plain, visible, non-inherited "box" shapes. A text box is
+        // excluded even when its own prstGeom happens to be "rect" -- ClassifyTableOverlay always
+        // resolves a text box to Kind "label" ahead of the generic "bar" branch, so a text box is
+        // exclusively overlay-eligible, never a structural grid member. G9: a picture/chart/diagram
+        // shape is excluded too, even if it uses a "rect"-family preset as its placeholder frame --
+        // same media/diagram gate ClassifyOverlayCandidates applies to overlay candidates.
+        var boxCandidates = shapes.Where(shape =>
+                StringComparer.Ordinal.Equals(shape.ShapeType, "shape") && !shape.IsTextBox &&
+                !shape.IsHidden && !shape.IsHiddenByGroup && !shape.IsPlaceholder && shape.InheritedFrom is null &&
+                shape.Geometry is { Width: > 0, Height: > 0 } &&
+                IsShapeGridBoxPreset(shape.ShapePreset) && !HasMediaOrDiagramRelationship(shape) &&
+                !nativeTableOverlayShapeIds.Contains(shape.ShapeId) && !wiredShapeIds.Contains(shape.ShapeId))
+            .ToArray();
+        if (boxCandidates.Length < 3) return results;
+
+        // Step 2: row/column banding.
+        var heightMedian = Median(boxCandidates.Select(shape => shape.Geometry!.Height));
+        var widthMedian = Median(boxCandidates.Select(shape => shape.Geometry!.Width));
+        var rowBands = ClusterByAxis(boxCandidates, shape => shape.Geometry!.Y, heightMedian * 0.25);
+        var columnBands = ClusterByAxis(boxCandidates, shape => shape.Geometry!.X, widthMedian * 0.25);
+
+        // Step 3: header row = the row band with the most members (ties broken by topmost) that
+        // ALSO independently satisfies >= 3 members, X-ordered adjacency, and near-equal heights.
+        // A body row can occasionally out-count the true header once an inset overlay shape (e.g.
+        // a textless "bar" sharing the box-preset pool -- IsFlushGridMember only tells members
+        // from overlays apart AFTER boundaries exist, so it cannot help here yet) lands within row-
+        // banding tolerance of that row's own Y and gets clustered in alongside it; rather than
+        // let that single contaminated top-ranked band's failed validation kill detection outright,
+        // try every band with >= 3 members in (count desc, topmost) order and take the first one
+        // that actually validates -- failing every candidate is what spec step 3's "これを満たさな
+        // ければ格子なし" means.
+        PptxShapeRecord[]? headerOrdered = null;
+        foreach (var candidateBand in rowBands.Where(band => band.Count >= 3)
+                     .OrderByDescending(band => band.Count).ThenBy(band => band.Average(shape => shape.Geometry!.Y)))
+        {
+            var ordered = candidateBand.OrderBy(shape => shape.Geometry!.X).ToArray();
+            var adjacent = true;
+            for (var i = 1; i < ordered.Length; i++)
+            {
+                var gap = ordered[i].Geometry!.X - (ordered[i - 1].Geometry!.X + ordered[i - 1].Geometry!.Width);
+                // G4: tightened from widthMedian*0.5 -- that loose a gate let an ordinary,
+                // visibly-spaced card layout (e.g. a KPI-card row) read as "adjacent" purely by
+                // accident. A genuine hand-drawn schedule header (this feature's whole reason to
+                // exist) sits at most a couple of points apart; widthMedian*0.1 comfortably covers
+                // that gap while still rejecting a card grid's much wider spacing.
+                if (gap > widthMedian * 0.1) { adjacent = false; break; }
+            }
+            if (!adjacent) continue;
+            var heights = ordered.Select(shape => shape.Geometry!.Height).ToArray();
+            if (heights.Max() / Math.Max(1, heights.Min()) > 1.5) continue;
+            // G4: header cells may legitimately differ in WIDTH (a 工程/担当 label column is
+            // usually wider than a plain date column) but not without bound -- cap the ratio so an
+            // unrelated mix of very wide and very narrow boxes can never masquerade as one header.
+            var widths = ordered.Select(shape => shape.Geometry!.Width).ToArray();
+            if (widths.Max() / Math.Max(1, widths.Min()) > 2.0) continue;
+            headerOrdered = ordered;
+            break;
+        }
+        if (headerOrdered is null) return results;
+
+        var headerShapeIds = headerOrdered.Select(shape => shape.ShapeId).ToHashSet(StringComparer.Ordinal);
+        var headerFirstShapeId = headerOrdered[0].ShapeId;
+        var headerTop = headerOrdered.Min(shape => shape.Geometry!.Y);
+        var headerBottom = headerOrdered.Max(shape => shape.Geometry!.Y + shape.Geometry!.Height);
+        var columnBoundaries = headerOrdered.Select(shape => shape.Geometry!.X)
+            .Append(headerOrdered[^1].Geometry!.X + headerOrdered[^1].Geometry!.Width).ToArray();
+
+        // Step 4: label column -- a column band (other than a purely-header-only one) with >= 2
+        // below-header members that are Y-adjacent. Prefer the band aligned with the header's own
+        // first (leftmost) shape (spec: "ヘッダ先頭図形の列帯"); otherwise the leftmost qualifying
+        // band.
+        PptxShapeRecord[]? primaryLabel = null;
+        var headerFirstLeft = headerOrdered[0].Geometry!.X;
+        foreach (var band in columnBands.OrderByDescending(band => Math.Abs(band.Average(shape => shape.Geometry!.X) - headerFirstLeft) < widthMedian * 0.5)
+                     .ThenBy(band => band.Average(shape => shape.Geometry!.X)))
+        {
+            var belowHeader = band.Where(shape => !headerShapeIds.Contains(shape.ShapeId) && shape.Geometry!.Y >= headerBottom - heightMedian * 0.1)
+                .OrderBy(shape => shape.Geometry!.Y).ToArray();
+            if (belowHeader.Length < 2) continue;
+            var labelHeightMedian = Median(belowHeader.Select(shape => shape.Geometry!.Height));
+            // G11: carve out the leading contiguous run (starting right below the header) instead
+            // of discarding the whole band the moment ANY gap exceeds tolerance -- a single stray
+            // outlier far below an otherwise perfectly adjacent label column (e.g. an unrelated
+            // shape that happened to land in the same column band) used to disqualify every label
+            // above it too, even though rows 1..k were a perfectly good label column on their own.
+            var contiguous = new List<PptxShapeRecord> { belowHeader[0] };
+            for (var i = 1; i < belowHeader.Length; i++)
+            {
+                var gap = belowHeader[i].Geometry!.Y - (belowHeader[i - 1].Geometry!.Y + belowHeader[i - 1].Geometry!.Height);
+                if (gap > labelHeightMedian * 0.75) break;
+                contiguous.Add(belowHeader[i]);
+            }
+            if (contiguous.Count < 2) continue;
+            primaryLabel = contiguous.ToArray();
+            break;
+        }
+        // Spec step 5: a label column genuinely to the LEFT of every header column gets its own
+        // leading column boundary (an implicit "工程"-like column the header itself has no cell
+        // for); a label column that instead shares the header's own first column (the common case
+        // exercised by every fixture: 工程 IS a header cell) needs no extra boundary.
+        var hasLeadingLabelColumn = primaryLabel is not null && primaryLabel[0].Geometry!.X < columnBoundaries[0] - widthMedian * 0.25;
+        if (hasLeadingLabelColumn) columnBoundaries = new[] { primaryLabel![0].Geometry!.X }.Concat(columnBoundaries).ToArray();
+
+        // G3: the dedupe tolerance scales with this grid's own row height instead of a fixed 0.5
+        // EMU epsilon -- see DedupeAdjacentBoundaries for why a fixed threshold cannot work here.
+        var rowBoundaryDedupeTolerance = Math.Max(heightMedian * 0.1, 0.5);
+        IReadOnlyList<double> rowBoundaries;
+        if (primaryLabel is not null)
+        {
+            // G3: chain each row boundary through the MIDPOINT between adjacent members --
+            // header-bottom <-> first label's top, then each label's own bottom <-> the next
+            // label's top -- instead of using either member's own literal edge. A literal-edge
+            // boundary list produces a zero/negative-height phantom row the instant there is ANY
+            // gap or overlap between two adjacent members, and a hand-drawn grid regularly has
+            // both (a small author-left gap between cells; a mis-sized label column that overlaps
+            // its header). The midpoint always lands cleanly between the two cells regardless of
+            // which way the discrepancy goes, and collapses to the exact original boundary when
+            // the two members are already flush (member.Bottom == nextMember.Top), so the
+            // untouched, zero-gap fixture's output cannot regress.
+            var raw = new List<double> { headerTop, (headerBottom + primaryLabel[0].Geometry!.Y) / 2 };
+            for (var i = 0; i < primaryLabel.Length - 1; i++)
+                raw.Add((primaryLabel[i].Geometry!.Y + primaryLabel[i].Geometry!.Height + primaryLabel[i + 1].Geometry!.Y) / 2);
+            raw.Add(primaryLabel[^1].Geometry!.Y + primaryLabel[^1].Geometry!.Height);
+            rowBoundaries = DedupeAdjacentBoundaries(raw, rowBoundaryDedupeTolerance);
+        }
+        else
+        {
+            // Step 6 (no label column): derive rows purely from clustering overlay-candidate
+            // shapes' Y centres. Bootstrap with a provisional single-body-row host (real column
+            // boundaries, a generous body-row bottom) purely to harvest which shapes qualify as
+            // overlay candidates at all -- TryScoreTableOverlay's candidacy gate only needs the
+            // table's OUTER bounds, never its internal row divisions. Restricting the harvest to
+            // IsUnambiguousOverlayShape shapes keeps an unrelated second row of ordinary boxes (or
+            // a genuinely connected diagram sharing the slide) from ever seeding a phantom row.
+            // G1(3a): clamp the provisional bottom to "header bottom + 8 header heights" instead
+            // of letting it reach all the way to the slide's own lowest shape (a footer, a page
+            // number, anything) -- an unrelated shape far down the slide must never be harvested as
+            // a row-seeding overlay candidate for THIS grid just because the provisional host
+            // happened to stretch that far to reach it.
+            var headerHeight = headerBottom - headerTop;
+            var provisionalBottomCap = headerBottom + headerHeight * 8;
+            var provisionalBottom = Math.Min(
+                Math.Max(
+                    shapes.Where(shape => shape.Geometry is not null).Select(shape => shape.Geometry!.Y + shape.Geometry!.Height).DefaultIfEmpty(headerBottom).Max(),
+                    headerBottom + heightMedian),
+                provisionalBottomCap);
+            var provisionalHost = new HostTable("grid:" + headerFirstShapeId, columnBoundaries, [headerTop, headerBottom, provisionalBottom]);
+            var provisionalOverlaysByTable = new Dictionary<string, List<PptxTableOverlay>>(StringComparer.Ordinal);
+            var provisionalOverlayShapeIds = new HashSet<string>(StringComparer.Ordinal);
+            // G7: also exclude every shape a NATIVE table already claimed as ITS OWN overlay --
+            // otherwise a shape near both a native table and a headerless grid on the same slide
+            // could seed a phantom row for this grid purely because it already scored against the
+            // other table.
+            var provisionalExclusions = headerShapeIds.Concat(nativeTableOverlayShapeIds).ToHashSet(StringComparer.Ordinal);
+            ClassifyOverlayCandidates(shapes, [provisionalHost], provisionalExclusions, wiredShapeIds, provisionalOverlaysByTable, provisionalOverlayShapeIds);
+            var provisionalCandidates = shapes.Where(shape => provisionalOverlayShapeIds.Contains(shape.ShapeId) && IsUnambiguousOverlayShape(shape)).ToArray();
+            var derivedRowBoundaries = DeriveRowBoundariesFromOverlayBands(provisionalCandidates, headerTop, headerBottom);
+            if (derivedRowBoundaries is null) return results;
+            rowBoundaries = derivedRowBoundaries;
+        }
+
+        // Guard rail (a): >= 3 columns, >= 2 rows.
+        if (columnBoundaries.Length - 1 < 3 || rowBoundaries.Count - 1 < 2) return results;
+
+        var gridShapeId = "grid:" + headerFirstShapeId;
+        var host = new HostTable(gridShapeId, columnBoundaries, rowBoundaries);
+
+        // Guard rail (c): must not overlap an existing native table by >= 50% of the grid's own
+        // area. G11: `nativeHostTables` is computed once per slide by the caller (Extract) instead
+        // of being recomputed here from scratch every time this function runs.
+        if (nativeHostTables.Any(native => HostOverlapRatioOfFirst(host, native) >= 0.5)) return results;
+
+        // Body-region members (spec step 7): any OTHER box candidate at/below the header that tiles
+        // a cell flush (IsFlushGridMember) -- this naturally re-includes the primary label column
+        // (which trivially tiles, having defined the very boundaries it is tested against), plus
+        // any sibling label-like column (e.g. 担当) and any flush body-cell rectangle, while
+        // excluding an inset/oversized "box"-preset overlay (e.g. a textless bar sharing the "rect"
+        // preset) so it is scored as an overlay instead, never double-counted as a member.
+        var belowHeaderMembers = boxCandidates
+            .Where(shape => !headerShapeIds.Contains(shape.ShapeId) && shape.Geometry!.Y >= headerBottom - heightMedian * 0.1)
+            .Where(shape => IsFlushGridMember(shape, host))
+            // G8: a TEXTLESS box that flush-tiles >= 2 columns at once is body-area "bar" overlay
+            // content (rendered once per spanned column, e.g. "━━ ━━ ━━"), never a single grid
+            // member -- PlaceMember below only ever places a shape's text in the ONE cell its own
+            // (startRow, startColumn) resolves to, which would silently swallow a multi-column
+            // bar's visual signal into a single (empty) cell instead of surfacing it as an overlay.
+            // A label column's own cells are always 1 column wide, so this never touches them, and
+            // any body cell that DOES carry text is unaffected regardless of its span.
+            .Where(shape => shape.Text.Trim().Length > 0 || SpansSingleColumn(shape, host))
+            .ToArray();
+        var memberShapeIds = headerShapeIds.Concat(belowHeaderMembers.Select(shape => shape.ShapeId)).ToHashSet(StringComparer.Ordinal);
+
+        // Overlay detection (step 9): reuse the exact native-table scoring/classification pipeline
+        // against this synthesized host, excluding every identified grid member and anything a
+        // native table already claimed.
+        var overlaysByTable = new Dictionary<string, List<PptxTableOverlay>>(StringComparer.Ordinal);
+        var overlayShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        var overlayExclusions = memberShapeIds.Concat(nativeTableOverlayShapeIds).ToHashSet(StringComparer.Ordinal);
+        ClassifyOverlayCandidates(shapes, [host], overlayExclusions, wiredShapeIds, overlaysByTable, overlayShapeIds);
+        var overlays = overlaysByTable.TryGetValue(gridShapeId, out var overlayList)
+            ? overlayList.OrderBy(overlay => overlay.StartRow).ThenBy(overlay => overlay.StartColumn)
+                .ThenBy(overlay => overlay.ShapeId, OverlayShapeIdComparer.Instance).ToArray()
+            : [];
+
+        // Guard rail (b): at least one overlay must actually reach the body (a row below the
+        // header) -- an aligned rectangle group with zero body overlays stays ordinary shapes
+        // (spec 8b: never turn a plain card layout into a table).
+        if (!overlays.Any(overlay => overlay.EndRow >= 1)) return results;
+
+        // Cell assembly: header row from the header shapes' own text; every other member (label
+        // column(s), sibling label-like columns, flush body-text rectangles) resolved to its
+        // (row, column) via the same coverage rule as an overlay, joined with "\n" (spec: "複数な
+        // ら\n結合、Y→X順") when more than one member lands on the same cell.
+        var rowCount = rowBoundaries.Count - 1;
+        var columnCount = columnBoundaries.Length - 1;
+        var cellText = new string?[rowCount, columnCount];
+        void PlaceMember(PptxShapeRecord shape)
+        {
+            var text = shape.Text.Trim();
+            if (text.Length == 0) return;
+            var geometry = shape.Geometry!;
+            var (startRow, _) = ComputeOverlayAxisRange(geometry.Y, geometry.Y + geometry.Height, host.RowBoundaries);
+            var (startColumn, _) = ComputeOverlayAxisRange(geometry.X, geometry.X + geometry.Width, host.ColumnBoundaries);
+            cellText[startRow, startColumn] = cellText[startRow, startColumn] is { Length: > 0 } existing ? existing + "\n" + text : text;
+        }
+        foreach (var shape in headerOrdered) PlaceMember(shape);
+        foreach (var shape in belowHeaderMembers.OrderBy(shape => shape.Geometry!.Y).ThenBy(shape => shape.Geometry!.X)) PlaceMember(shape);
+        var rows = new TableCell[rowCount][];
+        for (var r = 0; r < rowCount; r++)
+        {
+            rows[r] = new TableCell[columnCount];
+            for (var c = 0; c < columnCount; c++) rows[r][c] = new TableCell(cellText[r, c] ?? string.Empty);
+        }
+
+        // synthesized_from_shapes order (spec): header (X order), label column (Y order), body
+        // rectangles (Y then X). G5: built ONLY from `memberShapeIds` -- a primaryLabel shape used
+        // to be appended unconditionally here even when it failed IsFlushGridMember (and so was
+        // never part of memberShapeIds/belowHeaderMembers), which listed an id with no matching
+        // table_grid_member_host tag on its own node. Filtering primaryLabel through
+        // `belowHeaderMemberIds` keeps the desired ordering while guaranteeing the two sets can
+        // never drift apart.
+        var belowHeaderMemberIds = belowHeaderMembers.Select(shape => shape.ShapeId).ToHashSet(StringComparer.Ordinal);
+        var orderedMembers = new List<string>(headerOrdered.Select(shape => shape.ShapeId));
+        var primaryLabelIds = primaryLabel?.Select(shape => shape.ShapeId).ToHashSet(StringComparer.Ordinal) ?? EmptyShapeIdSet;
+        if (primaryLabel is not null)
+            orderedMembers.AddRange(primaryLabel.Where(shape => belowHeaderMemberIds.Contains(shape.ShapeId)).Select(shape => shape.ShapeId));
+        orderedMembers.AddRange(belowHeaderMembers.Where(shape => !primaryLabelIds.Contains(shape.ShapeId))
+            .OrderBy(shape => shape.Geometry!.Y).ThenBy(shape => shape.Geometry!.X).Select(shape => shape.ShapeId));
+
+        var gridGeometry = new Geometry("pptx-emu", columnBoundaries[0], rowBoundaries[0],
+            columnBoundaries[^1] - columnBoundaries[0], rowBoundaries[^1] - rowBoundaries[0]);
+        results.Add(new ShapeGridTable(gridShapeId, headerFirstShapeId, gridGeometry,
+            rows.Select(row => (IReadOnlyList<TableCell>)row).ToArray(),
+            orderedMembers, memberShapeIds, overlays, overlayShapeIds));
+        return results;
+    }
+
+    // Spec step 6 ("行境界...ラベル列が無い場合"): cluster overlay candidates' Y centres (tolerance =
+    // half the median candidate height), then derive row boundaries as the midpoint between
+    // consecutive cluster centres (equivalent to bisecting the gap between two centre±halfHeight
+    // bands, since the shared halfHeight cancels out), with the header's own bottom edge opening
+    // the first row and the last cluster's own centre+halfHeight closing the last.
+    // G1: three independent false-positive guards on top of the original clustering (fix 1: a
+    // cluster built ENTIRELY from degenerate/zero-area shapes -- e.g. a lone decorative line with
+    // no companion 2-D shape -- can never seed a row by itself, "線分だけでは行を作らない"; fix 2:
+    // without a label column, at least 2 derived body rows are required, since a single stray
+    // element under an otherwise ordinary row of boxes is exactly the shape this feature must not
+    // turn into a table; fix 3b: once a cluster's centre sits more than 2x the median candidate
+    // height past the previous SURVIVING cluster's centre, it and everything after it reads as
+    // unrelated content far down the slide rather than the next row of this grid, so it -- and any
+    // cluster beyond it -- is dropped, "以降は切り捨てる").
+    private static IReadOnlyList<double>? DeriveRowBoundariesFromOverlayBands(IReadOnlyList<PptxShapeRecord> overlayCandidates, double headerTop, double headerBottom)
+    {
+        var withGeometry = overlayCandidates.Where(shape => shape.Geometry is not null).ToArray();
+        if (withGeometry.Length == 0) return null;
+        var heightMedian = Median(withGeometry.Select(shape => shape.Geometry!.Height));
+        var tolerance = Math.Max(heightMedian * 0.5, 1);
+        var clusters = ClusterByAxis(withGeometry, shape => shape.Geometry!.Y + shape.Geometry!.Height / 2, tolerance);
+
+        // Fix 1: drop a cluster with no shape of positive area.
+        clusters.RemoveAll(cluster => cluster.All(shape => shape.Geometry!.Width <= 0 || shape.Geometry!.Height <= 0));
+        var clusterCenters = clusters.Select(cluster => cluster.Average(shape => shape.Geometry!.Y + shape.Geometry!.Height / 2))
+            .OrderBy(value => value).ToArray();
+        if (clusterCenters.Length == 0) return null;
+
+        // Fix 3b: truncate once a cluster drifts more than 2x the median candidate height past the
+        // previous surviving cluster.
+        for (var i = 1; i < clusterCenters.Length; i++)
+        {
+            if (clusterCenters[i] - clusterCenters[i - 1] > heightMedian * 2)
+            {
+                clusterCenters = clusterCenters[..i];
+                break;
+            }
+        }
+
+        // Fix 2: without a label column, at least 2 derived body rows are required.
+        if (clusterCenters.Length < 2) return null;
+
+        var boundaries = new List<double> { headerTop, headerBottom };
+        for (var i = 0; i < clusterCenters.Length - 1; i++) boundaries.Add((clusterCenters[i] + clusterCenters[i + 1]) / 2);
+        boundaries.Add(clusterCenters[^1] + heightMedian / 2);
+        return DedupeAdjacentBoundaries(boundaries, Math.Max(heightMedian * 0.1, 0.5));
+    }
+
+    // Node output (spec "ノード出力"): NodeKind.Table, ContentLayer.Derived, Editability.Protected,
+    // shape_id="grid:<headerFirstShapeId>", synthesized_from_shapes, shape_grid_table=true, and
+    // table_overlays when the grid carries any (guard rail 8b guarantees it always does). DRMD/
+    // roundtrip (DocRedockMarkdown.cs) explicitly skips any Table node carrying shape_grid_table, so
+    // this node only ever reaches the readable projection.
+    private static DocumentNode BuildShapeGridTableNode(ShapeGridTable grid, PptxSlideRecord slide, int order)
+    {
+        var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["shape_id"] = JsonSerializer.SerializeToElement(grid.GridShapeId),
+            ["synthesized_from_shapes"] = JsonSerializer.SerializeToElement(grid.MemberShapeIdsOrdered),
+            ["shape_grid_table"] = JsonSerializer.SerializeToElement(true),
+        };
+        if (grid.Overlays.Count > 0) extension["table_overlays"] = JsonSerializer.SerializeToElement(grid.Overlays);
+        return new($"n_{Hash(slide.SlideId + ":" + grid.GridShapeId)[..16]}", NodeKind.Table, null, order, ContentLayer.Derived,
+            new TableNodeContent(grid.Rows), new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", grid.GridShapeId)]),
+            Geometry: grid.Geometry, Editability: NodeEditability.Protected, Extensions: extension);
     }
 
     private static IReadOnlyList<VisualGraph> BuildVisualGraphs(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,

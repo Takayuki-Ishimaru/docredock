@@ -97,7 +97,13 @@ public static class DocRedockInlineMarkdown
         {
             if (markdown[index] == '\\' && index + 1 < markdown.Length)
             {
-                text.Append(markdown[index + 1]);
+                // A backslash-escaped ampersand is a literal '&' and must never start a character
+                // reference ("\\&amp;" is the text "&amp;", not "&"). Standing it in with the shared
+                // placeholder keeps that true no matter what follows it, which appending a bare '&'
+                // here could not: DecodeEntities below restores the literal after decoding.
+                text.Append(markdown[index + 1] == '&'
+                    ? MarkdownCharacterReferences.EscapedAmpersandPlaceholder
+                    : markdown[index + 1]);
                 index += 2;
                 continue;
             }
@@ -297,8 +303,12 @@ public static class DocRedockInlineMarkdown
         return output.ToString();
     }
 
-    internal static string DecodeEntities(string value) => value.Replace("&lt;", "<", StringComparison.Ordinal)
-        .Replace("&gt;", ">", StringComparison.Ordinal).Replace("&amp;", "&", StringComparison.Ordinal);
+    // Delegates to the product's one character-reference policy so this reader, the DRMD restore
+    // path (MarkdownGraphEditor) and MarkdownRenderer all resolve "&amp;", "&#65;" and "&#x41;"
+    // identically. Escape always writes a literal '&' back out as "&amp;", so text that was never a
+    // reference still round-trips byte for byte through Serialize/Parse.
+    internal static string DecodeEntities(string value) =>
+        MarkdownCharacterReferences.RestoreEscapedAmpersands(MarkdownCharacterReferences.Decode(value));
 
     private static bool StartsWith(string value, int index, string token) =>
         index + token.Length <= value.Length && value.AsSpan(index, token.Length).SequenceEqual(token.AsSpan());

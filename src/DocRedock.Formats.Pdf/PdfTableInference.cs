@@ -9,16 +9,57 @@ public static class PdfTableInference
     private const int MaxGridLines = 4_096;
     private const int MaxGridIntersections = 16_384;
     private const int MaxTextRegions = 10_000;
+    // Defensive bound on the "disconnected components recurse independently" branch below.
+    // Narrowing a component back down to its own raw paths cannot preserve a same-component
+    // coordinate-duplicate-removal decision made at a shallower recursion level (path-level
+    // filtering has no notion of "this ONE segment of a shared rectangle path was already
+    // dropped"), so a pathological input could otherwise keep regenerating an ambiguous split
+    // indefinitely. An ordinary page's independent tables/diagrams resolve in 1-2 levels.
+    private const int MaxComponentRecursionDepth = 8;
 
     public static IReadOnlyList<PdfTable> Infer(int pageNumber, IReadOnlyList<PdfTextRegion> regions,
-        VisualGraph graph, int maxCandidates = 64, bool nativeTagged = false)
+        VisualGraph graph, int maxCandidates = 64, bool nativeTagged = false, int recursionDepth = 0)
     {
         ArgumentNullException.ThrowIfNull(regions); ArgumentNullException.ThrowIfNull(graph);
-        var lines = (graph.Paths ?? []).SelectMany(AxisLine.CreateAll).ToArray();
-        if (lines.Length > MaxGridLines || regions.Count > MaxTextRegions) return [];
+        var rawPaths = graph.Paths ?? [];
+        if (rawPaths.Count > MaxGridLines || regions.Count > MaxTextRegions) return [];
+        // P-Overlay: a schedule "today line" (a stroked shaft with a small filled triangular
+        // arrowhead at one end, drawn ON TOP OF a table -- see PdfTableOverlayDetector) must never
+        // be mistaken for one of the table's own ruling lines merely because it happens to span
+        // the table's own extent on one axis. ArrowShaftPathIds mirrors the proximity test
+        // PdfTextExtractor itself already uses to recognize an arrowhead triangle attached to a
+        // shaft, applied directly to the raw path population so this works whether or not that
+        // shaft ever resolved into a promoted, directed VisualEdge.
+        var arrowShaftPathIds = FindArrowShaftMatches(rawPaths).Select(match => match.ShaftPathId).ToHashSet(StringComparer.Ordinal);
+        var lines = rawPaths.Where(path => !arrowShaftPathIds.Contains(path.Id)).SelectMany(AxisLine.CreateAll).ToArray();
+        if (lines.Length > MaxGridLines) return [];
+        // P3 fix: a filled overlay bar/rectangle drawn ON a table (see PdfTableOverlayDetector) is
+        // itself a closed `re`-painted path, which AxisLine.CreateAll -- correctly, for a genuine
+        // rectangular cell border -- decomposes into 4 straight segments sharing that one path's
+        // id. The previous rule dropped EVERY rectangle-sourced segment in a crossing-connected
+        // component (the same grouping SeparateGridComponents uses below) as soon as that component
+        // also contained ANY plain (non-rectangle-sourced) line -- which erased a perfectly
+        // ordinary table's own outer `re S` frame whenever its interior used plain `m`/`l` rules (an
+        // everyday, non-overlay authoring style), reducing its row/column count or losing the table
+        // entirely (an output CHANGE for a PDF with no overlay at all). Replaced with per-coordinate
+        // duplicate removal, scoped to the same component: a rectangle-sourced segment is dropped
+        // only when a plain segment ALREADY occupies the same axis and coordinate (+-1.5pt) in that
+        // component -- a genuine duplicate of a boundary the plain lines already established.
+        // Anything else (a uniquely positioned frame side, or an entire rectangle-bordered table
+        // with no plain lines at all) is retained exactly as before.
+        var rectangleSourcedPathIds = rawPaths.Where(IsRectangleSourced).Select(path => path.Id).ToHashSet(StringComparer.Ordinal);
+        lines = SeparateGridComponents(lines).SelectMany(component =>
+        {
+            var plainCoordinatesByAxis = component.Where(line => !rectangleSourcedPathIds.Contains(line.PathId))
+                .GroupBy(line => line.Horizontal).ToDictionary(group => group.Key, group => group.Select(line => line.Fixed).ToArray());
+            return component.Where(line => !rectangleSourcedPathIds.Contains(line.PathId) ||
+                !(plainCoordinatesByAxis.TryGetValue(line.Horizontal, out var coordinates) &&
+                  coordinates.Any(coordinate => Math.Abs(coordinate - line.Fixed) <= 1.5)));
+        }).ToArray();
         var components = SeparateGridComponents(lines);
         if (components.Count > 1)
         {
+            if (recursionDepth >= MaxComponentRecursionDepth) return [];
             // Infer disconnected grids independently so a table beside a second table or
             // diagram cannot inflate one candidate's bounds. Marked-content scope is not
             // available per component, therefore confidence remains inferred conservatively.
@@ -27,7 +68,7 @@ public static class PdfTableInference
             {
                 var ids = component.Select(line => line.PathId).ToHashSet(StringComparer.Ordinal);
                 var componentGraph = graph with { Paths = (graph.Paths ?? []).Where(path => ids.Contains(path.Id)).ToArray() };
-                var table = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false).FirstOrDefault();
+                var table = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1).FirstOrDefault();
                 if (table is not null) tables.Add(table with { Id = $"pdf-p{pageNumber}-table-{tables.Count + 1}" });
             }
             return tables;
@@ -36,6 +77,42 @@ public static class PdfTableInference
         var vertical = lines.Where(line => !line.Horizontal).ToArray();
         if (horizontal.Length < 3 || vertical.Length < 3 || maxCandidates <= 0) return [];
         if ((long)horizontal.Length * vertical.Length > MaxGridIntersections) return [];
+
+        // P3 fix, part two: a filled overlay bar/rectangle sitting INSIDE a single cell (not
+        // spanning the table's own extent) also decomposes into 4 short AxisLine segments whose
+        // coordinates sit at brand-new, non-boundary positions -- the per-coordinate dedup above
+        // only removes an EXACT duplicate of an existing boundary, so these survive it and would
+        // otherwise pollute Cluster's column/row detection with a spurious, irregular extra
+        // coordinate (breaking Regular() and changing -- or losing -- the very table the bar was
+        // drawn on top of). Exclude a segment here only when it is BOTH short (under half the
+        // observed table span on its own axis) AND never reaches an established boundary on the
+        // OTHER axis -- checked against a segment from a DIFFERENT source path that is either a
+        // plain line or itself long enough to be a genuine boundary. The "different path" alone is
+        // not sufficient: the SAME shape drawn twice at identical coordinates (e.g. a bar painted
+        // once filled, once stroked) decomposes into two DIFFERENT-PathId but equally short,
+        // equally spurious rectangles, which would otherwise "confirm" each other's coordinate as a
+        // boundary. A genuine full (or half-or-more) span ruling line, or any short segment that
+        // legitimately lands exactly on another (genuinely long) line's own coordinate (e.g. a
+        // densely rectangle-bordered table with no plain lines at all), is always retained.
+        var tableWidthEstimate = horizontal.Max(line => line.Maximum) - horizontal.Min(line => line.Minimum);
+        var tableHeightEstimate = vertical.Max(line => line.Maximum) - vertical.Min(line => line.Minimum);
+        bool ReachesBoundary(AxisLine line, IReadOnlyList<AxisLine> perpendicular, double perpendicularSpanEstimate) =>
+            perpendicular.Any(other => other.PathId != line.PathId &&
+                (Math.Abs(other.Fixed - line.Minimum) <= 1.5 || Math.Abs(other.Fixed - line.Maximum) <= 1.5) &&
+                (!rectangleSourcedPathIds.Contains(other.PathId) || other.Maximum - other.Minimum >= perpendicularSpanEstimate * 0.5));
+        var filteredHorizontal = horizontal.Where(line =>
+            line.Maximum - line.Minimum >= tableWidthEstimate * 0.5 || ReachesBoundary(line, vertical, tableHeightEstimate)).ToArray();
+        var filteredVertical = vertical.Where(line =>
+            line.Maximum - line.Minimum >= tableHeightEstimate * 0.5 || ReachesBoundary(line, horizontal, tableWidthEstimate)).ToArray();
+        horizontal = filteredHorizontal;
+        vertical = filteredVertical;
+        if (horizontal.Length < 3 || vertical.Length < 3) return [];
+        // Propagate the exclusion back into `lines` itself: `sourceIds` below re-derives which
+        // paths belong to this table from `lines`, not from `horizontal`/`vertical` alone, so a
+        // short bar segment excluded above (but left dangling in the original `lines`) would
+        // otherwise still be folded into the table's own SourcePathIds -- silently hiding the
+        // whole bar from PdfTableOverlayDetector instead of leaving it as overlay content.
+        lines = [.. horizontal, .. vertical];
 
         // This release recognizes one fully covered, rectilinear grid at a time. A second
         // independent grid is still safely left as native text/vector fallback.
@@ -72,10 +149,36 @@ public static class PdfTableInference
         var sourceIds = lines.Where(line => line.Horizontal
                 ? line.Fixed >= bottom - 1.5 && line.Fixed <= top + 1.5 && line.Maximum >= left - 1.5 && line.Minimum <= right + 1.5
                 : line.Fixed >= left - 1.5 && line.Fixed <= right + 1.5 && line.Maximum >= bottom - 1.5 && line.Minimum <= top + 1.5)
-            .Select(line => line.PathId).Distinct().ToArray();
+            .Select(line => line.PathId).Distinct()
+            // P-Overlay: a rectangle-sourced path excluded from grid-building above (e.g. a
+            // header-row background fill sitting exactly behind the header, whose own left/right
+            // edges duplicate the table's outer boundary and whose top/bottom duplicate a row
+            // boundary) is redundant table furniture, not overlay content -- fold its path id in
+            // here too so PdfTableOverlayDetector never mistakes a full-width background rectangle
+            // for a bar spanning the header row. A rectangle whose OWN edges do not each coincide
+            // with an established grid coordinate (e.g. a schedule-overlay bar sitting inside a
+            // single cell) is excluded from this fold-back and stays a genuine overlay candidate.
+            // P7 fix: also require the candidate furniture rectangle's own geometry to actually
+            // intersect THIS table's bounds. IsGridAlignedFurniture tests xs/ys coordinate
+            // membership only, over rectangleSourcedPathIds drawn from the WHOLE page's raw paths
+            // -- without this gate a rectangle belonging to an entirely different table (e.g. a
+            // second table stacked below this one, reusing the same column positions) could satisfy
+            // that coordinate check purely by numeric coincidence and be wrongly folded into THIS
+            // table's own pdf_source_path_ids/readable output.
+            .Concat(rectangleSourcedPathIds.Where(pathId => IsGridAlignedFurniture(rawPaths, pathId, xs, ys, bounds)))
+            .Distinct().ToArray();
         // A flow elsewhere on the page must not prevent a well-formed table from being
-        // reconstructed. Only directed evidence that crosses this candidate disqualifies it.
-        if (graph.Edges.Any(edge => edge.EdgeDirection == VisualEdgeDirection.Directed && edge.Geometry is { } geometry && Intersects(bounds, geometry))) return [];
+        // reconstructed. Only directed evidence that crosses this candidate disqualifies it --
+        // P-Overlay: unless most of that edge's own bbox/length lies inside the table AND it does
+        // not coincide with one of the table's own ruling-line coordinates: that shape is a
+        // schedule overlay (an arrow/line drawn ON the table), not a diagram connector the table
+        // happens to cross, and PdfTableOverlayDetector re-attaches it to the table's own
+        // row/column range once the table exists (table-overlay-spec-xlsx-docx-pdf.md section 3).
+        // An edge that still spends most of its own bbox/length OUTSIDE the table disqualifies it
+        // exactly as before.
+        if (graph.Edges.Any(edge => edge.EdgeDirection == VisualEdgeDirection.Directed && edge.Geometry is { } geometry &&
+                Intersects(bounds, geometry) && !IsOverlayCandidateEdge(geometry, bounds, xs, ys)))
+            return [];
         return [new PdfTable($"pdf-p{pageNumber}-table-1", pageNumber, bounds, ordered,
             nativeTagged ? PdfTableConfidence.NativeTagged : PdfTableConfidence.HighConfidenceInferred, sourceIds)];
     }
@@ -157,6 +260,154 @@ public static class PdfTableInference
     {
         var cell = cells.First(candidate => candidate.SourceTextIds.Contains(sourceTextId));
         return cell.Row * 10000 + cell.Column;
+    }
+
+    /// <summary>A small closed shape (<see cref="MarkerPathId"/>) matched to the straight
+    /// two-point shaft (<see cref="ShaftPathId"/>) it sits at one end of -- an arrowhead attached
+    /// to its line, recognized purely from raw path geometry (see <see
+    /// cref="FindArrowShaftMatches"/>). <see cref="MarkerNearEnd"/> says which of the shaft's two
+    /// points (its <c>Points[1]</c> when true, else <c>Points[0]</c>) the marker sits closest to --
+    /// the same "start"/"end" distinction <see cref="Core.Documents.VisualConnectionEvidence.ArrowheadEvidence"/>
+    /// uses elsewhere in this codebase.</summary>
+    internal readonly record struct ArrowShaftMatch(string ShaftPathId, string MarkerPathId, bool MarkerNearEnd);
+
+    // P-Overlay: identifies which raw paths are the straight SHAFT of a schedule "today line"
+    // (a stroked line + small filled triangular arrowhead, drawn ON TOP OF a table -- see
+    // PdfTableOverlayDetector / table-overlay-spec-xlsx-docx-pdf.md section 3), so it is never
+    // mistaken for one of the table's own ruling lines even when BuildVisualGraph itself could not
+    // resolve it into a promoted, directed VisualEdge (no diagram node sits at either endpoint),
+    // and so PdfTableOverlayDetector can tell an arrow shaft's own overlay classification apart
+    // from its (separately drawn, but not an independent overlay) arrowhead triangle. Mirrors the
+    // *pairing discipline* of PdfTextExtractor.BuildVisualGraph's own triangle-to-shaft matching:
+    // each small marker-shaped candidate is matched to its single NEAREST shaft (not "any shaft
+    // within a loose radius"), so one small shape can implicate at most one line -- otherwise a
+    // small marker sitting near a table CORNER (where many long ruling lines converge, e.g. a
+    // milestone diamond a few points from the table's bottom-right corner) would satisfy a
+    // length-scaled tolerance against several long lines at once and wrongly strip the whole grid.
+    internal static IReadOnlyList<ArrowShaftMatch> FindArrowShaftMatches(IReadOnlyList<VisualPath> allPaths)
+    {
+        var shafts = allPaths.Where(path => path.Points is { Count: 2 }).ToArray();
+        var matches = new List<ArrowShaftMatch>();
+        foreach (var marker in allPaths)
+        {
+            // A degenerate (zero-width or zero-height) bbox is another straight line -- most often
+            // one of the table's own OTHER ruling lines meeting this one at a shared corner --
+            // never a plausible small triangular arrowhead marker. Requiring both dimensions
+            // strictly positive is what keeps a regular grid from matching itself.
+            if (marker.Geometry is not { Width: > 0, Height: > 0 } geometry) continue;
+            var markerSize = Math.Sqrt(geometry.Width * geometry.Width + geometry.Height * geometry.Height);
+            if (markerSize <= 0) continue;
+            var center = new VisualPathPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2);
+            VisualPath? nearestShaft = null; var nearestDistance = double.PositiveInfinity; var nearestLength = 0d; var nearestIsEnd = false;
+            foreach (var shaft in shafts)
+            {
+                if (ReferenceEquals(shaft, marker)) continue;
+                var points = shaft.Points!;
+                var length = Distance(points[0], points[1]);
+                if (length <= 0) continue;
+                var toStart = Distance(center, points[0]); var toEnd = Distance(center, points[1]);
+                var distance = Math.Min(toStart, toEnd);
+                if (distance >= nearestDistance) continue;
+                nearestShaft = shaft; nearestDistance = distance; nearestLength = length; nearestIsEnd = toEnd <= toStart;
+            }
+            // P4 fix: the purely length-relative cap below (30% of the shaft's own length) alone
+            // let an ordinary, unrelated filled shape (e.g. a legend box) sitting anywhere near one
+            // end of a LONG ruling line -- a table's own full-width/height rule is easily
+            // hundreds of points long -- pass as a plausible arrowhead purely because it was small
+            // relative to that great length, wrongly excluding the line from grid candidacy
+            // (an output CHANGE for a PDF with no genuine arrow at all). A real arrowhead marker is
+            // always small in absolute terms; MaxArrowheadMarkerSize is a hard, length-independent
+            // ceiling on top of the existing relative one.
+            if (nearestShaft is null || markerSize > nearestLength * .30 || markerSize > MaxArrowheadMarkerSize) continue;
+            // Deliberately tighter than PdfTextExtractor's own `Math.Max(markerSize * 1.5,
+            // shaftLength * .08)`: that second, length-scaled term exists for a genuine diagram
+            // connector, which is typically much shorter than a table's own full-width/height
+            // ruling line, so scaling tolerance by the (here, very long) shaft length reintroduces
+            // exactly the corner false-positive this rewrite exists to avoid. An arrowhead
+            // genuinely attached to its shaft always sits within a small multiple of its own size.
+            // P4 fix: also require the marker's own center to sit close to the shaft's AXIS itself
+            // (perpendicular distance <= markerSize), not merely close to one of its two endpoints
+            // -- a shape can be near an endpoint in straight-line distance while sitting well off to
+            // the side of the line it supposedly tips (e.g. beside a table corner where several
+            // long rules converge), which is never a genuine attached arrowhead.
+            if (nearestDistance <= markerSize * 1.5 && DistanceToSegment(center, nearestShaft.Points![0], nearestShaft.Points[1]) <= markerSize)
+                matches.Add(new ArrowShaftMatch(nearestShaft.Id, marker.Id, nearestIsEnd));
+        }
+        return matches;
+    }
+
+    // P4: absolute upper bound (points) on a plausible arrowhead marker's own diagonal size,
+    // regardless of how long the shaft it might attach to is.
+    private const double MaxArrowheadMarkerSize = 15;
+
+    internal static double Distance(VisualPathPoint a, VisualPathPoint b) =>
+        Math.Sqrt(Math.Pow(a.X - b.X, 2) + Math.Pow(a.Y - b.Y, 2));
+
+    // P4: shortest distance from `point` to the line SEGMENT a-b (not the infinite line through
+    // it), used to confirm a candidate marker sits near the shaft's own axis, not merely near one
+    // of its two endpoints in straight-line distance.
+    private static double DistanceToSegment(VisualPathPoint point, VisualPathPoint a, VisualPathPoint b)
+    {
+        var dx = b.X - a.X; var dy = b.Y - a.Y;
+        var lengthSquared = dx * dx + dy * dy;
+        if (lengthSquared <= 1e-9) return Distance(point, a);
+        var t = Math.Clamp(((point.X - a.X) * dx + (point.Y - a.Y) * dy) / lengthSquared, 0, 1);
+        return Distance(point, new VisualPathPoint(a.X + t * dx, a.Y + t * dy));
+    }
+
+    // `re` (and any other closed, axis-aligned quadrilateral path) is always represented as a
+    // 5-point closed subpath (first point repeated last) -- see AxisLine.CreateAll's own rectangle
+    // branch just below, which this mirrors as a plain data check with no line-derivation of its own.
+    private static bool IsRectangleSourced(VisualPath path) =>
+        path.Points is { Count: 5 } points && points[0] == points[^1];
+
+    // A rectangle is "furniture" (part of the table's own established structure, not overlay
+    // content) only when EVERY one of its 4 own edges coincides with a coordinate the final grid
+    // already established on the matching axis -- e.g. a header-row background fill whose left and
+    // right edges duplicate the table's own outer left/right boundary, and whose top and bottom
+    // duplicate two adjacent row boundaries. A schedule-overlay bar dropped inside a single cell
+    // never satisfies this (none of its 4 edges land on an established xs/ys coordinate).
+    private static bool IsGridAlignedFurniture(IReadOnlyList<VisualPath> rawPaths, string pathId,
+        IReadOnlyList<double> xs, IReadOnlyList<double> ys, Geometry bounds)
+    {
+        var path = rawPaths.FirstOrDefault(candidate => candidate.Id == pathId);
+        // P7 fix: gate on actual spatial intersection with THIS table's own bounds first, so a
+        // rectangle belonging to a different table/component can never qualify merely because its
+        // coordinates numerically coincide with this table's xs/ys by chance.
+        if (path?.Geometry is not { } geometry || !Intersects(bounds, geometry)) return false;
+        var left = geometry.X; var right = geometry.X + geometry.Width;
+        var bottom = geometry.Y; var top = geometry.Y + geometry.Height;
+        return xs.Any(x => Math.Abs(x - left) <= 1.5) && xs.Any(x => Math.Abs(x - right) <= 1.5) &&
+            ys.Any(y => Math.Abs(y - bottom) <= 1.5) && ys.Any(y => Math.Abs(y - top) <= 1.5);
+    }
+
+    // P-Overlay: candidacy test for the directed-edge relaxation above -- mirrors
+    // PptxAdapter.TryScoreTableOverlay's degenerate-line handling (a connector/line has no area, so
+    // candidacy compares how much of its *length*, not area, falls inside the table).
+    private static bool IsOverlayCandidateEdge(Geometry geometry, Geometry bounds, IReadOnlyList<double> xs, IReadOnlyList<double> ys)
+    {
+        if (CoincidesWithGridBoundary(geometry, xs, ys)) return false;
+        var overlapX = Math.Max(0, Math.Min(geometry.X + geometry.Width, bounds.X + bounds.Width) - Math.Max(geometry.X, bounds.X));
+        var overlapY = Math.Max(0, Math.Min(geometry.Y + geometry.Height, bounds.Y + bounds.Height) - Math.Max(geometry.Y, bounds.Y));
+        if (geometry.Width > 0 && geometry.Height > 0)
+        {
+            var area = geometry.Width * geometry.Height;
+            return area > 0 && overlapX * overlapY >= area * 0.5;
+        }
+        var length = Math.Max(geometry.Width, geometry.Height);
+        if (length <= 0) return false;
+        var inside = geometry.Height <= geometry.Width ? overlapX : overlapY;
+        return inside >= length * 0.5;
+    }
+
+    // P-Overlay: a near-zero-width (vertical) or near-zero-height (horizontal) bbox sitting at one
+    // of the table's own row/column boundary coordinates is the boundary line itself (or a
+    // residual fragment of it), not overlay content drawn on top of the table.
+    private static bool CoincidesWithGridBoundary(Geometry geometry, IReadOnlyList<double> xs, IReadOnlyList<double> ys)
+    {
+        if (geometry.Width <= .5 && xs.Any(x => Math.Abs(geometry.X - x) <= 1.5)) return true;
+        if (geometry.Height <= .5 && ys.Any(y => Math.Abs(geometry.Y - y) <= 1.5)) return true;
+        return false;
     }
     private static bool IsInside(Geometry cell, Geometry text)
     {

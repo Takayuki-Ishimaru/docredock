@@ -275,7 +275,8 @@ public static class TsvParser
             .ToArray();
         var fullText = rows.GroupBy(row => (row.Page, row.Block, row.Paragraph, row.LineNumber))
             .OrderBy(group => group.Key.Page).ThenBy(group => group.Min(row => row.Top)).ThenBy(group => group.Min(row => row.Left))
-            .Select(group => string.Join(" ", group.OrderBy(row => row.Left).ThenBy(row => row.SourceOrder).Select(row => row.Text)))
+            .Select(group => OcrLineAssembler.AssembleLine(group.OrderBy(row => row.Left).ThenBy(row => row.SourceOrder)
+                .Select(row => new OcrLineAssembler.Word(row.Text, row.Left, row.Width, row.Height, row.Confidence)).ToArray()))
             .Where(line => line.Length > 0);
         return new OcrResult(string.Join("\n", fullText), regions);
     }

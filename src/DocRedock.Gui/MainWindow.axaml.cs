@@ -56,6 +56,12 @@ public partial class MainWindow : Window
     private Uri? _updateReleaseUri;
     private bool _componentsInitialized;
 
+    // Test-only seam: when set, file/folder-picker calls use this instead of StorageProvider's
+    // native OS dialog, which cannot run under a headless test host (e.g. CI, Xvfb without a
+    // desktop portal). Production code always leaves these null, so behavior is unchanged.
+    internal Func<FilePickerOpenOptions, Task<IReadOnlyList<IStorageFile>>>? FilePickerOverride { get; set; }
+    internal Func<FolderPickerOpenOptions, Task<IReadOnlyList<IStorageFolder>>>? FolderPickerOverride { get; set; }
+
     // This keeps the window usable by a plain App.axaml.cs while Program may
     // also construct it with its configured GuiWorkflowService instance.
     public MainWindow() : this(new GuiWorkflowService(), new UpdateCheckService(), new CapabilityReporter(), DescribeRasterizer)
@@ -110,23 +116,29 @@ public partial class MainWindow : Window
 
     private async void OnPickExportFile(object? sender, RoutedEventArgs e)
     {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        var options = new FilePickerOpenOptions
         {
             Title = "変換する文書を選択",
             AllowMultiple = true,
             FileTypeFilter = [new FilePickerFileType("対応文書") { Patterns = SourcePatterns() }],
-        });
+        };
+        var files = FilePickerOverride is not null
+            ? await FilePickerOverride(options)
+            : await StorageProvider.OpenFilePickerAsync(options);
         if (files.Count > 0) SelectExportFiles(files);
     }
 
     private async void OnPickRestoreFiles(object? sender, RoutedEventArgs e)
     {
-        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        var options = new FilePickerOpenOptions
         {
             Title = "編集済みMarkdownとDocRedock復元ファイルを選択",
             AllowMultiple = true,
             FileTypeFilter = [new FilePickerFileType("DocRedock 復元ファイル") { Patterns = ["*.md", "*.drmd", "*.drmdpkg"] }],
-        });
+        };
+        var files = FilePickerOverride is not null
+            ? await FilePickerOverride(options)
+            : await StorageProvider.OpenFilePickerAsync(options);
         if (!SelectRestoreFiles(files)) return;
         await TrySelectCompanionPackageAsync();
     }
@@ -226,15 +238,13 @@ public partial class MainWindow : Window
         var native = report.Single(item => item.Id == "ocr-native");
         var jpn = report.Single(item => item.Id == "ocr-jpn");
         var eng = report.Single(item => item.Id == "ocr-eng");
-        var available = capability.Status == "ready" && (engine.Status == "ready" || native.Status is "ready" or "partial");
-        OcrToggle.IsEnabled = available;
-        if (!available) OcrToggle.IsChecked = false;
-        OcrLanguagesPanel.IsVisible = available && OcrToggle.IsChecked == true;
-        OcrUnavailableText.Text = available
-            ? native.Status == "partial" && engine.Status != "ready"
-                ? $"PDF OCR: Verification pending ({native.Provider})\n画像の最初のOCR時にネイティブプロバイダーを確認します。失敗時は警告を表示します。"
-                : $"PDF OCR: Ready ({capability.Provider}, {engine.Provider})\n言語: 日本語 {jpn.Status}, English {eng.Status}"
-            : $"画像PDFのOCRは現在 {engine.Status} です。rasterizer: {capability.Status}。{engine.Action ?? capability.Action ?? "Tesseract と対応言語データを構成してください。"}";
+        // The enable/disable and message logic is a pure function so it can be unit-tested without
+        // an Avalonia window; see GuiWorkflowService.DescribeOcrCapability.
+        var decision = GuiWorkflowService.DescribeOcrCapability(capability, engine, native, jpn, eng);
+        OcrToggle.IsEnabled = decision.Enabled;
+        if (!decision.Enabled) OcrToggle.IsChecked = false;
+        OcrLanguagesPanel.IsVisible = decision.Enabled && OcrToggle.IsChecked == true;
+        OcrUnavailableText.Text = decision.StatusText;
         OcrUnavailableText.IsVisible = true;
     }
 
@@ -556,11 +566,14 @@ public partial class MainWindow : Window
 
     private async void OnPickSidecarFolder(object? sender, RoutedEventArgs e)
     {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        var sidecarFolderOptions = new FolderPickerOpenOptions
         {
             Title = "DocRedockサイドカーフォルダー（.drmd）を選択",
             AllowMultiple = false,
-        });
+        };
+        var folders = FolderPickerOverride is not null
+            ? await FolderPickerOverride(sidecarFolderOptions)
+            : await StorageProvider.OpenFolderPickerAsync(sidecarFolderOptions);
         if (folders.Count == 0 || LocalPath(folders[0]) is not { } path) return;
         if (!Path.GetExtension(path).Equals(".drmd", StringComparison.OrdinalIgnoreCase))
         {
@@ -579,7 +592,10 @@ public partial class MainWindow : Window
 
     private async Task<string?> PickDirectoryAsync(string title)
     {
-        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions { Title = title, AllowMultiple = false });
+        var options = new FolderPickerOpenOptions { Title = title, AllowMultiple = false };
+        var folders = FolderPickerOverride is not null
+            ? await FolderPickerOverride(options)
+            : await StorageProvider.OpenFolderPickerAsync(options);
         return folders.Count == 0 ? null : LocalPath(folders[0]);
     }
 

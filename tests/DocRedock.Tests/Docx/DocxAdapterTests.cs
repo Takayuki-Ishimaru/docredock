@@ -2196,4 +2196,584 @@ public sealed class DocxAdapterTests
         await input.CopyToAsync(output);
         return output.ToArray();
     }
+
+    // =============================================================================================
+    // P-Overlay (DOCX table-overlay port): hand-authored WordprocessingML packages exercising
+    // DocxAdapter.DetectDocxTableOverlays. See table-overlay-spec.md / table-overlay-spec-xlsx-docx-pdf.md
+    // "2. DOCX" for the spec these assert against.
+    // =============================================================================================
+
+    private sealed record OverlayDto(string ShapeId, string Text, string Kind, string Direction, string Axis,
+        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
+
+    private static OverlayDto[] TableOverlaysOf(DocumentNode node) =>
+        node.Extensions is not null && node.Extensions.TryGetValue("table_overlays", out var element)
+            ? element.Deserialize<OverlayDto[]>() ?? []
+            : [];
+
+    private const string OverlayNsDecl =
+        "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" " +
+        "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" " +
+        "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" " +
+        "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\" " +
+        "xmlns:v=\"urn:schemas-microsoft-com:vml\" " +
+        "xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" " +
+        "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
+
+    private static string OverlayInline(string docPrId, string prst, long cx, long cy, string? text = null) =>
+        $"<w:r><w:drawing><wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">" +
+        $"<wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:docPr id=\"{docPrId}\" name=\"S{docPrId}\"/>" +
+        $"<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">" +
+        $"<wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>" +
+        $"<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom></wps:spPr>" +
+        (text is null ? "" : $"<wps:txbx><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx>") +
+        "</wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>";
+
+    private static string OverlayAnchor(string docPrId, string prst, long cx, long cy,
+        string hRelFrom, long hOffsetEmu, string vRelFrom, long vOffsetEmu,
+        string? text = null, long? rot = null, bool flipH = false,
+        string? headEnd = null, string? tailEnd = null, bool txBox = false, string? cNvPrId = null)
+    {
+        var rotAttr = rot is { } r ? $" rot=\"{r}\"" : "";
+        var flipAttr = flipH ? " flipH=\"1\"" : "";
+        var line = headEnd is not null || tailEnd is not null
+            ? $"<a:ln>{(headEnd is not null ? $"<a:headEnd type=\"{headEnd}\"/>" : "")}{(tailEnd is not null ? $"<a:tailEnd type=\"{tailEnd}\"/>" : "")}</a:ln>"
+            : "";
+        var cNvPr = cNvPrId is null ? "" : $"<wps:cNvPr id=\"{cNvPrId}\" name=\"Owner{cNvPrId}\"/>";
+        var cnvSpPr = txBox ? "<wps:cNvSpPr txBox=\"1\"/>" : "<wps:cNvSpPr/>";
+        var txbx = text is null ? "" : $"<wps:txbx><w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent></wps:txbx>";
+        return
+            $"<w:r><w:drawing><wp:anchor distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\" simplePos=\"0\" relativeHeight=\"1\" behindDoc=\"0\" locked=\"0\" layoutInCell=\"1\" allowOverlap=\"1\">" +
+            $"<wp:simplePos x=\"0\" y=\"0\"/>" +
+            $"<wp:positionH relativeFrom=\"{hRelFrom}\"><wp:posOffset>{hOffsetEmu}</wp:posOffset></wp:positionH>" +
+            $"<wp:positionV relativeFrom=\"{vRelFrom}\"><wp:posOffset>{vOffsetEmu}</wp:posOffset></wp:positionV>" +
+            $"<wp:extent cx=\"{cx}\" cy=\"{cy}\"/><wp:wrapNone/>" +
+            $"<wp:docPr id=\"{docPrId}\" name=\"S{docPrId}\"/>" +
+            $"<a:graphic><a:graphicData uri=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">" +
+            $"<wps:wsp>{cNvPr}{cnvSpPr}<wps:spPr><a:xfrm{rotAttr}{flipAttr}><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>" +
+            $"<a:prstGeom prst=\"{prst}\"><a:avLst/></a:prstGeom>{line}</wps:spPr>{txbx}</wps:wsp>" +
+            $"</a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>";
+    }
+
+    private static string OverlayCell(string content, int? gridSpan = null)
+    {
+        var tcPr = gridSpan is { } span ? $"<w:tcPr><w:gridSpan w:val=\"{span}\"/></w:tcPr>" : "";
+        return $"<w:tc>{tcPr}<w:p>{content}</w:p></w:tc>";
+    }
+
+    private static string OverlayTable(string[] gridColTwips, (string? TrHeight, string[] Cells)[] rows, string tblPrExtra = "")
+    {
+        var grid = string.Concat(gridColTwips.Select(w => $"<w:gridCol w:w=\"{w}\"/>"));
+        var rowsXml = new StringBuilder();
+        foreach (var (trHeight, cells) in rows)
+        {
+            var trPr = trHeight is null ? "" : $"<w:trPr><w:trHeight w:val=\"{trHeight}\" w:hRule=\"exact\"/></w:trPr>";
+            rowsXml.Append($"<w:tr>{trPr}{string.Concat(cells)}</w:tr>");
+        }
+        return $"<w:tbl><w:tblPr>{tblPrExtra}</w:tblPr><w:tblGrid>{grid}</w:tblGrid>{rowsXml}</w:tbl>";
+    }
+
+    private const string OverlaySectPr = "<w:sectPr><w:pgMar w:left=\"1440\" w:top=\"1440\" w:right=\"1440\" w:bottom=\"1440\"/></w:sectPr>";
+
+    private static async Task<string> WriteOverlayDocxAsync(string name, string body) => await WriteDocxAsync(name,
+        $"<w:document {OverlayNsDecl}><w:body>{body}{OverlaySectPr}</w:body></w:document>");
+
+    [Fact]
+    public async Task InlineArrow_in_cell_spans_two_columns()
+    {
+        var shape = OverlayInline("101", "rightArrow", 1_270_000, 190_500); // 2000 twips wide x 300 twips tall.
+        var table = OverlayTable(["2000", "1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>")]),
+            ("500", [OverlayCell("<w:r><w:t>Task</w:t></w:r>"), OverlayCell(shape), OverlayCell(""), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-inline-arrow.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal("horizontal", overlay.Axis);
+        Assert.Equal(1, overlay.StartRow);
+        Assert.Equal(1, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(2, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task AnchoredArrow_column_paragraph_spans_three_columns()
+    {
+        // Small insets (50000 EMU ~ 79 twips) so the shape still starts inside its own cell.
+        var shape = OverlayAnchor("201", "rightArrow", 1_905_000, 190_500, "column", 50_000, "paragraph", 50_000);
+        var table = OverlayTable(["2000", "1000", "1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>"), OverlayCell("<w:r><w:t>D</w:t></w:r>")]),
+            ("500", [OverlayCell("<w:r><w:t>Task</w:t></w:r>"), OverlayCell(shape), OverlayCell(""), OverlayCell(""), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-anchor-arrow.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal(1, overlay.StartRow);
+        Assert.Equal(1, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(3, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task Textless_rect_becomes_bar_overlay()
+    {
+        var shape = OverlayInline("301", "rect", 635_000, 190_500); // no text at all.
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-bar.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("bar", overlay.Kind);
+        Assert.Equal("none", overlay.Direction);
+        Assert.Equal("", overlay.Text);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(1, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task Diamond_becomes_marker_overlay()
+    {
+        var shape = OverlayInline("401", "diamond", 228_600, 228_600);
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(""), OverlayCell(shape)]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-diamond.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("marker", overlay.Kind);
+        Assert.Equal("diamond", overlay.ShapePreset);
+        Assert.Equal(2, overlay.StartColumn);
+        Assert.Equal(2, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task TxBoxLabel_95_percent_inside_is_overlay_note_30_percent_is_not()
+    {
+        // gridCol = [2000(工程), 1000(A), 1000(B)]; pgMar left = 1440 (OverlaySectPr) -> table
+        // left = 1440, table right = 5440, column B = [4440, 5440].
+        var label = OverlayAnchor("501", "rect", 635_000, 190_500, "column", 31_750 /* 50 twips */, "paragraph", 0,
+            text: "Label95", txBox: true); // x=4490..5490: 950/1000 = 95% inside.
+        var note = OverlayAnchor("502", "rect", 635_000, 190_500, "column", 444_500 /* 700 twips */, "paragraph", 0,
+            text: "Note30", txBox: true); // x=5140..6140: 300/1000 = 30% inside.
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(""), OverlayCell(label + note)]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-label-vs-note.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlays = TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table));
+
+        var overlay = Assert.Single(overlays);
+        Assert.Equal("label", overlay.Kind);
+        Assert.Equal("Label95", overlay.Text);
+        Assert.Equal(2, overlay.StartColumn);
+        Assert.Equal(2, overlay.EndColumn);
+        Assert.DoesNotContain(overlays, item => item.Text == "Note30");
+    }
+
+    [Fact]
+    public async Task Rotated180_rightArrow_resolves_to_left()
+    {
+        var shape = OverlayAnchor("601", "rightArrow", 635_000, 190_500, "column", 0, "paragraph", 0, rot: 10_800_000);
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-rot180.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("left", overlay.Direction);
+    }
+
+    [Fact]
+    public async Task FlipH_rightArrow_resolves_to_left()
+    {
+        var shape = OverlayAnchor("701", "rightArrow", 635_000, 190_500, "column", 0, "paragraph", 0, flipH: true);
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-fliph.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("left", overlay.Direction);
+    }
+
+    [Fact]
+    public async Task VerticalLine_with_tailEnd_spans_all_rows_as_downward_arrow()
+    {
+        // 4 rows (header + 3 data rows), all trHeight=500 -> row boundaries [0,500,1000,1500,2000].
+        // cx="0" (a true vertical line); cy spans the full table height. A 500-twip (317500 EMU)
+        // horizontal offset lands the line at the midpoint of column A's band, safely off the
+        // column boundary itself (a point exactly ON a boundary is an inherent tie the shared
+        // center-point fallback -- mirrored from PptxAdapter.ComputeOverlayAxisRange -- resolves to
+        // the earlier band, same as it would for PPTX/XLSX).
+        var shape = OverlayAnchor("801", "straightConnector1", 0, 1_270_000, "column", 317_500, "paragraph", 0, tailEnd: "triangle");
+        var table = OverlayTable(["2000", "1000"],
+        [
+            ("500", [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell(shape)]),
+            ("500", [OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("")]),
+            ("500", [OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("")]),
+            ("500", [OverlayCell("<w:r><w:t>C</w:t></w:r>"), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-vline.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("down", overlay.Direction);
+        Assert.Equal("vertical", overlay.Axis);
+        Assert.Equal(0, overlay.StartRow);
+        Assert.Equal(3, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(1, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task Missing_trHeight_falls_back_to_single_row()
+    {
+        // Neither row declares w:trHeight -> both fall back to the 480-twip default; row
+        // boundaries become [0, 480, 960].
+        var shape = OverlayInline("901", "rightArrow", 317_500, 190_500); // 500 x 300 twips.
+        var table = OverlayTable(["2000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>")]),
+            (null, [OverlayCell("<w:r><w:t>Task</w:t></w:r>"), OverlayCell(shape)]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-no-trheight.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal(1, overlay.StartRow);
+        Assert.Equal(1, overlay.EndRow);
+    }
+
+    [Fact]
+    public async Task GridSpan_row_keeps_column_alignment_for_later_cell()
+    {
+        // Row1's first cell spans grid columns 0-1 (工程+A merged); the shape sits in the THIRD
+        // physical <w:tc> of that row, which must still resolve to grid column 3 (C), not the
+        // physical index 2.
+        var shape = OverlayInline("1001", "rightArrow", 635_000, 190_500);
+        var table = OverlayTable(["2000", "1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>")]),
+            ("500", [OverlayCell("<w:r><w:t>Merged</w:t></w:r>", gridSpan: 2), OverlayCell(""), OverlayCell(shape)]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-gridspan.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal(3, overlay.StartColumn);
+        Assert.Equal(3, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task PrecedingParagraph_paragraph_relativeFrom_becomes_overlay_and_tags_textbox()
+    {
+        // "column" for a (B) shape resolves against pgMar@left (1440, from OverlaySectPr) alone:
+        // offset = 2050 twips places it inside column A ([3440,4440] table-absolute).
+        var shape = OverlayAnchor("1101", "rightArrow", 571_500 /* 900 twips */, 190_500,
+            "column", 1_301_750 /* 2050 twips */, "paragraph", 215_900 /* 340 twips */,
+            text: "レビュー", cNvPrId: "1101");
+        var precedingParagraph = $"<w:p>{shape}</w:p>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(""), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-preceding-paragraph.docx", precedingParagraph + table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(TableOverlaysOf(tableNode));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal(0, overlay.StartRow);
+        Assert.Equal(0, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(1, overlay.EndColumn);
+
+        var textBox = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.TextBox);
+        Assert.Equal(tableNode.Id, textBox.Extensions!["table_overlay_host"].GetString());
+        Assert.True(textBox.Extensions!["table_overlay"].GetBoolean());
+
+        var readable = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, Path.Combine(Path.GetDirectoryName(source)!, "overlay-preceding-paragraph-readable.md")));
+        var markdown = await File.ReadAllTextAsync(readable.MarkdownPath);
+        Assert.DoesNotContain("\nレビュー\n", markdown + "\n"); // no longer a stray standalone paragraph.
+        Assert.Contains("レビュー", markdown); // still present, folded into the cell instead.
+    }
+
+    [Fact]
+    public async Task PrecedingParagraph_page_relativeFrom_is_not_an_overlay()
+    {
+        var shape = OverlayAnchor("1201", "rightArrow", 571_500, 190_500, "page", 1_301_750, "page", 215_900, text: "無関係");
+        var precedingParagraph = $"<w:p>{shape}</w:p>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(""), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-preceding-page.docx", precedingParagraph + table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+
+        Assert.Empty(TableOverlaysOf(tableNode));
+        var textBox = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.TextBox);
+        Assert.False(textBox.Extensions?.ContainsKey("table_overlay_host") ?? false);
+    }
+
+    [Fact]
+    public async Task PrecedingParagraph_textbox_tag_never_lands_on_an_unrelated_paragraphs_same_numbered_shape()
+    {
+        // D5: TagPrecedingParagraphOverlayTextBoxes used to match a candidate TextBox node
+        // ANYWHERE in the document by shape_id alone -- a small integer a producer can (and real
+        // documents do) reuse across unrelated shapes elsewhere. "decoy" is an EARLIER, unrelated
+        // paragraph whose own textbox happens to share cNvPr id 1101 with the actual (B) overlay
+        // shape in the paragraph immediately before the table; only the immediate predecessor's
+        // textbox may be tagged table_overlay_host.
+        var decoyShape = OverlayAnchor("1102", "rightArrow", 571_500, 190_500,
+            "column", 1_301_750, "paragraph", 215_900, text: "無関係な同一ID", cNvPrId: "1101");
+        var decoyParagraph = $"<w:p>{decoyShape}</w:p>";
+        const string filler = "<w:p><w:r><w:t>filler</w:t></w:r></w:p>";
+        var realShape = OverlayAnchor("1103", "rightArrow", 571_500, 190_500,
+            "column", 1_301_750, "paragraph", 215_900, text: "レビュー", cNvPrId: "1101");
+        var precedingParagraph = $"<w:p>{realShape}</w:p>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(""), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-preceding-duplicate-id.docx", decoyParagraph + filler + precedingParagraph + table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.Single(TableOverlaysOf(tableNode));
+
+        var textBoxes = export.Graph.Nodes.Where(node => node.Kind == NodeKind.TextBox).ToArray();
+        Assert.Equal(2, textBoxes.Length);
+        var reviewBox = Assert.Single(textBoxes, node => ((DocRedock.Core.Documents.TextNodeContent)node.Content).Text == "レビュー");
+        var decoyBox = Assert.Single(textBoxes, node => ((DocRedock.Core.Documents.TextNodeContent)node.Content).Text == "無関係な同一ID");
+        Assert.Equal(tableNode.Id, reviewBox.Extensions!["table_overlay_host"].GetString());
+        Assert.False(decoyBox.Extensions?.ContainsKey("table_overlay_host") ?? false);
+    }
+
+    [Fact]
+    public async Task AlternateContent_wrapped_cell_shape_is_detected()
+    {
+        var shape = OverlayInline("1301", "rightArrow", 635_000, 190_500);
+        var wrapped = $"<mc:AlternateContent><mc:Choice Requires=\"wps\">{shape}</mc:Choice>" +
+            "<mc:Fallback><w:r><w:t>Unsupported</w:t></w:r></mc:Fallback></mc:AlternateContent>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(wrapped), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-alternate-content.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal(1, overlay.StartColumn);
+    }
+
+    [Fact]
+    public async Task VmlRect_bar_in_a_cell_is_detected()
+    {
+        // D1: 50pt/15pt convert via the pt x 20 twips-per-point constant to exactly 1000/300
+        // twips -- deliberately the SAME numbers the old (buggy) test used as bare, unit-less
+        // "twips", so this still exercises the same cell geometry now that the unit is real.
+        var shape = "<w:r><w:pict><v:rect id=\"1401\" style=\"position:absolute;margin-left:0;margin-top:0;width:50pt;height:15pt\"/></w:pict></w:r>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-vml-rect.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("bar", overlay.Kind);
+        Assert.Equal(1, overlay.StartRow);
+        Assert.Equal(1, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(1, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task VmlRect_bar_with_cm_units_is_detected()
+    {
+        // D1: 1cm/0.3cm convert via the cm x 566.93 twips-per-cm constant to ~567/~170 twips --
+        // comfortably inside the same 1000-twips column and 500-twips row
+        // VmlRect_bar_in_a_cell_is_detected exercises with pt units instead.
+        var shape = "<w:r><w:pict><v:rect id=\"1402\" style=\"position:absolute;margin-left:0;margin-top:0;width:1cm;height:0.3cm\"/></w:pict></w:r>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-vml-rect-cm.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal("bar", overlay.Kind);
+        Assert.Equal(1, overlay.StartRow);
+        Assert.Equal(1, overlay.EndRow);
+        Assert.Equal(1, overlay.StartColumn);
+        Assert.Equal(1, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task TblInd_shifts_the_column_mapping()
+    {
+        // pgMar left = 1440 (OverlaySectPr), tblInd = 500 -> table left = 1940.
+        // Columns (twips, table-absolute): A=[1940,2940], B=[2940,3940], C=[3940,4940].
+        // A page-relative X of 3480 (ignoring tblInd it would land in a *different* column:
+        // with tableLeft wrongly treated as 1440, B'=[2440,3440]/C'=[3440,4440] would put it in C).
+        var shape = OverlayAnchor("1501", "rightArrow", 63_500 /* 100 twips */, 190_500,
+            "page", 2_209_800 /* 3480 twips */, "paragraph", 0);
+        var table = OverlayTable(["1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>")]),
+            ("500", [OverlayCell(shape), OverlayCell(""), OverlayCell("")]),
+        ], tblPrExtra: "<w:tblInd w:w=\"500\" w:type=\"dxa\"/>");
+        var source = await WriteOverlayDocxAsync("overlay-tblind.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal(1, overlay.StartColumn); // column B (0-based), not C.
+        Assert.Equal(1, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task TblInd_with_type_pct_is_ignored_and_does_not_shift_the_column_mapping()
+    {
+        // D3: w:tblInd@w is only a twips length when w:type is absent or "dxa" -- "pct" means the
+        // @w value is a fiftieths-of-a-percent measure, not twips at all. Same shape/page-X as
+        // TblInd_shifts_the_column_mapping (3480 twips), but tblInd must be treated as 0 here, so
+        // the table left stays at pgMar@left (1440) alone -- landing that SAME 3480 page-X in
+        // column C, not the B a wrongly-applied 500-twips dxa shift would produce.
+        var shape = OverlayAnchor("1502", "rightArrow", 63_500 /* 100 twips */, 190_500,
+            "page", 2_209_800 /* 3480 twips */, "paragraph", 0);
+        var table = OverlayTable(["1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>")]),
+            ("500", [OverlayCell(shape), OverlayCell(""), OverlayCell("")]),
+        ], tblPrExtra: "<w:tblInd w:w=\"500\" w:type=\"pct\"/>");
+        var source = await WriteOverlayDocxAsync("overlay-tblind-pct.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var overlay = Assert.Single(TableOverlaysOf(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table)));
+
+        Assert.Equal(2, overlay.StartColumn); // column C (0-based) -- tblInd ignored (type=pct).
+        Assert.Equal(2, overlay.EndColumn);
+    }
+
+    [Fact]
+    public async Task GridBefore_shifts_the_rows_starting_grid_column_and_pads_placeholder_cells()
+    {
+        // D2: <w:trPr><w:gridBefore w:val="2"/></w:trPr> means this row's <w:tc> elements start
+        // at grid column 2 (C), not 0 -- Word omits <w:tc> entirely for the 2 skipped leading
+        // columns (A, B) rather than emitting empty placeholder cells for them. Without
+        // accounting for gridBefore, the row's only real <w:tc> (containing the shape) would be
+        // looked up against column A's boundaries instead of C's, AND AddTable's own TableCell
+        // count for this row would be short by 2 relative to w:tblGrid's 4 columns.
+        var shape = OverlayInline("1701", "rightArrow", 635_000, 190_500); // 1000 twips wide x 300 twips tall.
+        var headerRow = $"<w:tr>{OverlayCell("<w:r><w:t>A</w:t></w:r>")}{OverlayCell("<w:r><w:t>B</w:t></w:r>")}{OverlayCell("<w:r><w:t>C</w:t></w:r>")}{OverlayCell("<w:r><w:t>D</w:t></w:r>")}</w:tr>";
+        var dataRow = $"<w:tr><w:trPr><w:gridBefore w:val=\"2\"/><w:trHeight w:val=\"500\" w:hRule=\"exact\"/></w:trPr>{OverlayCell(shape)}</w:tr>";
+        var table = $"<w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/></w:tblGrid>{headerRow}{dataRow}</w:tbl>";
+        var source = await WriteOverlayDocxAsync("overlay-gridbefore.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(TableOverlaysOf(tableNode));
+
+        Assert.Equal(2, overlay.StartColumn); // column C (0-based), not A.
+        Assert.Equal(2, overlay.EndColumn);
+
+        var content = Assert.IsType<DocRedock.Core.Documents.TableNodeContent>(tableNode.Content);
+        Assert.Equal(3, content.Rows[1].Count); // 2 gridBefore placeholders + the shape's own cell.
+        Assert.Equal(string.Empty, content.Rows[1][0].Text);
+        Assert.Equal(string.Empty, content.Rows[1][1].Text);
+    }
+
+    [Fact]
+    public async Task BidiVisual_table_never_gets_overlay_detection()
+    {
+        // D6: a right-to-left table (w:tblPr/w:bidiVisual) lays its grid out with logical column
+        // 0 on the RIGHT -- every column-boundary computation in DetectDocxTableOverlays assumes
+        // left-to-right, so detecting overlays on a bidi table would silently place them in
+        // mirrored (wrong) columns. Same geometry as InlineArrow_in_cell_spans_two_columns, but
+        // with bidiVisual set -- must produce NO overlays at all rather than a wrong-column one.
+        var shape = OverlayInline("1801", "rightArrow", 1_270_000, 190_500);
+        var table = OverlayTable(["2000", "1000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>"), OverlayCell("<w:r><w:t>C</w:t></w:r>")]),
+            ("500", [OverlayCell("<w:r><w:t>Task</w:t></w:r>"), OverlayCell(shape), OverlayCell(""), OverlayCell("")]),
+        ], tblPrExtra: "<w:bidiVisual/>");
+        var source = await WriteOverlayDocxAsync("overlay-bidi.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+
+        Assert.Empty(TableOverlaysOf(tableNode));
+    }
+
+    [Fact]
+    public async Task FloatingTable_is_skipped()
+    {
+        var shape = OverlayInline("1601", "rightArrow", 635_000, 190_500);
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ], tblPrExtra: "<w:tblpPr w:leftFromText=\"180\" w:topFromText=\"180\" w:vertAnchor=\"text\" w:horzAnchor=\"margin\" w:tblpX=\"0\" w:tblpY=\"0\"/>");
+        var source = await WriteOverlayDocxAsync("overlay-floating-table.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+
+        Assert.False(HasExtension(tableNode, "table_overlays"));
+    }
+
+    private static bool HasExtension(DocumentNode node, string key) => node.Extensions?.ContainsKey(key) == true;
 }

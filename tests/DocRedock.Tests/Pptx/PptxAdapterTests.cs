@@ -1108,4 +1108,1060 @@ public sealed class PptxAdapterTests
         Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "HIDDEN-MASTER-TEXT");
         Assert.Contains(extraction.Graph.Nodes, node => node.Content is TextNodeContent text && text.Text == "MASTER-TEXT");
     }
+
+    // ---------------------------------------------------------------------------------------
+    // P-Overlay: table-overlay detection (table-overlay-spec.md "抽出側の契約").
+    // ---------------------------------------------------------------------------------------
+
+    private static byte[] CreateTableOverlayPackage(string spTreeBody)
+    {
+        var parts = new Dictionary<string, string>
+        {
+            ["[Content_Types].xml"] = "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />",
+            ["ppt/presentation.xml"] = "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"rId1\" /></p:sldIdLst></p:presentation>",
+            ["ppt/_rels/presentation.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rId1\" Type=\"slide\" Target=\"slides/slide1.xml\" /></Relationships>",
+            ["ppt/slides/slide1.xml"] =
+                "<p:sld xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:cSld><p:spTree>" +
+                spTreeBody + "</p:spTree></p:cSld></p:sld>",
+            ["ppt/slides/_rels/slide1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />",
+        };
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var part in parts)
+            { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
+        return output.ToArray();
+    }
+
+    // 6 columns x 1,200,000 EMU, 3 rows x 400,000 EMU; frame off/ext exactly matches the declared
+    // grid (no scaling engaged). Column bounds: 0/1.2M/2.4M/3.6M/4.8M/6.0M/7.2M. Row bounds:
+    // 0/0.4M/0.8M/1.2M.
+    private static string SixByThreeScheduleTableXml() =>
+        "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"Schedule\" /></p:nvGraphicFramePr>" +
+        "<p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"7200000\" cy=\"1200000\" /></p:xfrm>" +
+        "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" +
+        string.Concat(Enumerable.Repeat("<a:gridCol w=\"1200000\" />", 6)) +
+        "</a:tblGrid>" +
+        string.Concat(Enumerable.Repeat("<a:tr h=\"400000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 6)) + "</a:tr>", 3)) +
+        "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+
+    [Fact]
+    public void DetectsScheduleOverlaysAndExcludesNonOverlappingHiddenAndBackgroundShapes()
+    {
+        const string shapes =
+            // Arrow: rightArrow "設計" over row1, columns 1-3 (3 columns fully covered).
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1200000\" y=\"400000\" /><a:ext cx=\"3600000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>設計</a:t></a:r></a:p></p:txBody></p:sp>" +
+            // Bar: textless rect over row2, columns 3-5.
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"11\" name=\"Bar\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"3600000\" y=\"800000\" /><a:ext cx=\"3600000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>" +
+            // Marker: small diamond centered in row2, column 5 (too narrow to cover 50% of the
+            // column band -> falls back to the center-X column rule; tall enough to cover >=50%
+            // of the row band directly).
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"12\" name=\"Marker\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"6500000\" y=\"850000\" /><a:ext cx=\"200000\" cy=\"300000\" /></a:xfrm><a:prstGeom prst=\"diamond\"><a:avLst /></a:prstGeom></p:spPr></p:sp>" +
+            // Vertical connector (no stCxn/endCxn): a zero-width straight line through column 4,
+            // spanning all 3 rows, with a tail-side (end-point) arrowhead only.
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"13\" name=\"Vertical\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"5400000\" y=\"0\" /><a:ext cx=\"0\" cy=\"1200000\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>" +
+            // Label: a text box "▲レビュー" filling row1, column 4.
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"14\" name=\"Label\" /><p:cNvSpPr txBox=\"1\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"4800000\" y=\"400000\" /><a:ext cx=\"1200000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>▲レビュー</a:t></a:r></a:p></p:txBody></p:sp>" +
+            // NOT an overlay: a rect far away from the table (zero intersection).
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"15\" name=\"FarAway\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"20000000\" y=\"20000000\" /><a:ext cx=\"500000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>" +
+            // NOT an overlay: a hidden arrow directly over the table.
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"16\" name=\"HiddenArrow\" hidden=\"1\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"2400000\" y=\"400000\" /><a:ext cx=\"1200000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(SixByThreeScheduleTableXml() + shapes)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        // Sort order is (StartRow, StartColumn, ShapeId-as-number): (0,4) < (1,1) < (1,4) < (2,3) < (2,5).
+        Assert.Equal(["13", "10", "14", "11", "12"], overlays.Select(o => o.ShapeId).ToArray());
+
+        var connector = overlays.Single(o => o.ShapeId == "13");
+        Assert.Equal(("arrow", "down", "vertical", 0, 2, 4, 4),
+            (connector.Kind, connector.Direction, connector.Axis, connector.StartRow, connector.EndRow, connector.StartColumn, connector.EndColumn));
+        Assert.Equal("", connector.Text);
+        Assert.Null(connector.ShapePreset);
+
+        var arrow = overlays.Single(o => o.ShapeId == "10");
+        Assert.Equal(("arrow", "right", "horizontal", 1, 1, 1, 3),
+            (arrow.Kind, arrow.Direction, arrow.Axis, arrow.StartRow, arrow.EndRow, arrow.StartColumn, arrow.EndColumn));
+        Assert.Equal("設計", arrow.Text);
+        Assert.Equal("rightArrow", arrow.ShapePreset);
+
+        var label = overlays.Single(o => o.ShapeId == "14");
+        Assert.Equal(("label", "none", "horizontal", 1, 1, 4, 4),
+            (label.Kind, label.Direction, label.Axis, label.StartRow, label.EndRow, label.StartColumn, label.EndColumn));
+        Assert.Equal("▲レビュー", label.Text);
+
+        var bar = overlays.Single(o => o.ShapeId == "11");
+        Assert.Equal(("bar", "none", "horizontal", 2, 2, 3, 5),
+            (bar.Kind, bar.Direction, bar.Axis, bar.StartRow, bar.EndRow, bar.StartColumn, bar.EndColumn));
+        Assert.Equal("rect", bar.ShapePreset);
+
+        var marker = overlays.Single(o => o.ShapeId == "12");
+        Assert.Equal(("marker", "none", "horizontal", 2, 2, 5, 5),
+            (marker.Kind, marker.Direction, marker.Axis, marker.StartRow, marker.EndRow, marker.StartColumn, marker.EndColumn));
+        Assert.Equal("diamond", marker.ShapePreset);
+
+        foreach (var overlayId in new[] { "10", "11", "12", "13", "14" })
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == overlayId) == true);
+            Assert.Equal("3", node.Extensions!["table_overlay_host"].GetString());
+            Assert.True(node.Extensions!["table_overlay"].GetBoolean());
+        }
+
+        foreach (var nonOverlayId in new[] { "15", "16" })
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == nonOverlayId) == true);
+            Assert.False(node.Extensions!.ContainsKey("table_overlay_host"));
+            Assert.False(node.Extensions!.ContainsKey("table_overlay"));
+        }
+
+        // Every directional shape on the slide is an overlay, so the visual-flow inference input
+        // is empty (no connectors, no directional shapes) and no phantom "Visual flow" diagram
+        // node is produced.
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+    }
+
+    [Fact]
+    public void RightArrowRotated180DegreesResolvesLeftDirection()
+    {
+        // Two 500,000-tall rows (F3(b): a host table needs >= 2 rows); the arrow only covers the
+        // first, so its row range stays (0,0) exactly as when this table was a single 1,000,000
+        // EMU row.
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000\" /><a:gridCol w=\"1000000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm rot=\"10800000\"><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal(("arrow", "left", "horizontal", 0, 0, 0, 0), (overlay.Kind, overlay.Direction, overlay.Axis, overlay.StartRow, overlay.EndRow, overlay.StartColumn, overlay.EndColumn));
+    }
+
+    [Fact]
+    public void RightArrowFlippedHorizontallyResolvesLeftDirection()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000\" /><a:gridCol w=\"1000000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm flipH=\"1\"><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal("left", overlay.Direction);
+    }
+
+    [Fact]
+    public void RightArrowFlippedHorizontallyWithNinetyDegreeRotationResolvesUpDirection()
+    {
+        // F2: flip is applied BEFORE rotation (DrawingML / ShapeOrientation order), not after --
+        // flipH mirrors "right" to "left" first, then a 90-degree turn (right->down->left->up)
+        // advances "left" to "up".
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"800000\" cy=\"1200000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"400000\" /><a:gridCol w=\"400000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"400000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 3)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm rot=\"5400000\" flipH=\"1\"><a:off x=\"-400000\" y=\"400000\" /><a:ext cx=\"1200000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal(("up", "vertical"), (overlay.Direction, overlay.Axis));
+    }
+
+    [Fact]
+    public void RightArrowFlippedVerticallyWithNinetyDegreeRotationResolvesDownDirection()
+    {
+        // F2: flipV only mirrors up/down, so it leaves the base "right" direction untouched; the
+        // measured rotation is the plain 90 degrees (flipV never touches the horizontal reference
+        // vector TransformGeometry measures rotation from), and that 90-degree turn alone
+        // (right -> down) is what produces "down" here.
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"800000\" cy=\"1200000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"400000\" /><a:gridCol w=\"400000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"400000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 3)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm rot=\"5400000\" flipV=\"1\"><a:off x=\"-400000\" y=\"400000\" /><a:ext cx=\"1200000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal(("down", "vertical"), (overlay.Direction, overlay.Axis));
+    }
+
+    [Fact]
+    public void LeftRightArrowRotated90DegreesStaysBothButTogglesToVerticalAxis()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000\" /><a:gridCol w=\"1000000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm rot=\"5400000\"><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"leftRightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal(("both", "vertical"), (overlay.Direction, overlay.Axis));
+    }
+
+    [Fact]
+    public void RightArrowRotated90DegreesResolvesDownDirectionAndVerticalAxis()
+    {
+        // Two 400,000-wide columns (so the arrow, which only ever covers column 0, never reaches
+        // the 90% background-frame exclusion threshold), 3 rows of 400,000 each. The arrow's
+        // pre-rotation local geometry is a short-wide rightArrow (1,200,000 x 400,000); after a
+        // 90-degree rotation about its own center, TransformGeometry's AABB becomes the tall-thin
+        // box (0,0)-(400000,1200000) that spans column 0 across all 3 rows.
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"800000\" cy=\"1200000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"400000\" /><a:gridCol w=\"400000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"400000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 3)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm rot=\"5400000\"><a:off x=\"-400000\" y=\"400000\" /><a:ext cx=\"1200000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal(("arrow", "down", "vertical", 0, 2, 0, 0), (overlay.Kind, overlay.Direction, overlay.Axis, overlay.StartRow, overlay.EndRow, overlay.StartColumn, overlay.EndColumn));
+    }
+
+    [Fact]
+    public void OverlayDetectionUsesAbsoluteBoundsForATableInsideAGroupTransform()
+    {
+        // The table lives inside a group whose transform doubles its child coordinate space
+        // (chExt half of ext) and offsets it by (500000,500000). The table's absolute geometry
+        // becomes (500000,500000,2000000,1000000); its 4 local gridCol widths (250000 each,
+        // summing to only half the absolute width) get proportionally re-scaled to 500000 each.
+        // The arrow lives OUTSIDE the group at plain absolute coordinates and must still resolve
+        // against those absolute, group-transformed table bounds.
+        var groupAndTable =
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"20\" name=\"Group\" /></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x=\"500000\" y=\"500000\" /><a:ext cx=\"2000000\" cy=\"1000000\" /><a:chOff x=\"0\" y=\"0\" /><a:chExt cx=\"1000000\" cy=\"500000\" /></a:xfrm></p:grpSpPr>" +
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"500000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" + string.Concat(Enumerable.Repeat("<a:gridCol w=\"250000\" />", 4)) + "</a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"250000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 4)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:grpSp>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1000000\" y=\"1000000\" /><a:ext cx=\"1000000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(groupAndTable + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal((1, 2), (overlay.StartColumn, overlay.EndColumn));
+        Assert.Equal((1, 1), (overlay.StartRow, overlay.EndRow));
+    }
+
+    [Fact]
+    public void DeclaredRowHeightsAreScaledToTheFrameHeightBeforeAssigningRows()
+    {
+        // 3 rows declared h="300000" (summing to 900,000) but the frame's own ext cy is
+        // 1,500,000 -- PowerPoint treats a:tr@h as a minimum, so the real per-row height is
+        // scaled by 1,500,000/900,000 to 500,000 each (bounds 0/500000/1000000/1500000). A shape
+        // at y=700000..900000 falls in the *scaled* second row; under the raw (unscaled)
+        // boundaries it would instead land in the third.
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1500000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000\" /><a:gridCol w=\"1000000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"300000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 3)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"700000\" /><a:ext cx=\"1000000\" cy=\"200000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal((1, 1), (overlay.StartRow, overlay.EndRow));
+        Assert.Equal((0, 0), (overlay.StartColumn, overlay.EndColumn));
+    }
+
+    [Fact]
+    public void BackgroundFrameCoveringTheWholeTableIsExcludedWhileARealConnectorFlowElsewhereStillYieldsADiagram()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"600000\" cy=\"600000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"300000\" /><a:gridCol w=\"300000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"300000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Exactly coincides with the table -- 100% of the table's area, well over the 90%
+        // background-frame exclusion threshold.
+        const string background =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"9\" name=\"Background\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"600000\" cy=\"600000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        // A genuine native-connector flow, far from the table: two labeled rects plus a
+        // stCxn/endCxn connector whose endpoints exactly touch both shapes (same pattern as
+        // Reserves_all_connector_endpoints_before_assigning_edge_labels above).
+        const string flow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"30\" name=\"FlowA\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"2000000\" y=\"2000000\" /><a:ext cx=\"200000\" cy=\"200000\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FlowA</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"31\" name=\"FlowB\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"3000000\" y=\"2000000\" /><a:ext cx=\"200000\" cy=\"200000\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>FlowB</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"32\" name=\"Flow\" /><a:stCxn id=\"30\" /><a:endCxn id=\"31\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"2200000\" y=\"2100000\" /><a:ext cx=\"800000\" cy=\"0\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + background + flow)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.False(tableNode.Extensions!.ContainsKey("table_overlays"));
+        var backgroundNode = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "9") == true);
+        Assert.False(backgroundNode.Extensions!.ContainsKey("table_overlay_host"));
+
+        var visual = VisualGraphOf(extraction);
+        Assert.Equal(2, visual.Nodes.Count);
+        var edge = Assert.Single(visual.Edges);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+    }
+
+    [Fact]
+    public void ConnectorWithBothStartAndEndConnectionsIsNeverTreatedAsATableOverlay()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"600000\" cy=\"300000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"300000\" /><a:gridCol w=\"300000\" /></a:tblGrid>" +
+            "<a:tr h=\"300000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>" +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Both ends wired (to ids that need not resolve to real shapes for this rule): a native
+        // connector edge, never schedule-overlay content, regardless of geometry.
+        const string connector =
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"20\" name=\"Native\" /><a:stCxn id=\"900\" /><a:endCxn id=\"901\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"150000\" /><a:ext cx=\"600000\" cy=\"0\" /></a:xfrm></p:spPr></p:cxnSp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + connector)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.False(tableNode.Extensions!.ContainsKey("table_overlays"));
+        var connectorNode = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "20") == true);
+        Assert.False(connectorNode.Extensions!.ContainsKey("table_overlay_host"));
+        Assert.False(connectorNode.Extensions!.ContainsKey("table_overlay"));
+    }
+
+    [Fact]
+    public void OverlaysOnTheSameCellSortByNumericShapeIdNotOrdinalText()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1000000\" /><a:gridCol w=\"1000000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Ordinal string comparison would put "10" before "2"; numeric comparison (spec: "ShapeId
+        // を数値として...序数比較") must put "2" first.
+        const string bars =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"BarTen\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"2\" name=\"BarTwo\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + bars))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        Assert.Equal(["2", "10"], overlays.Select(o => o.ShapeId).ToArray());
+    }
+
+    [Fact]
+    public void PowerPoint2016ExtensionListDecoysOnGridColAndTrDoNotZeroTheHostTableGeometry()
+    {
+        // PowerPoint 2016+ writes <a:extLst><a:ext uri="..."><a16:rowId/colId .../></a:ext></a:extLst>
+        // on every a:tr and a:gridCol of a saved table, positioned AFTER the graphicFrame's own
+        // p:xfrm/a:ext -- each such <a:ext> lacks cx/cy, so ReadShapes' flat "ext" element matcher
+        // must not mistake it for that authoritative size element and zero out the table's own
+        // Width/Height (F1). A p:cNvPr/a:extLst/a:ext (a16:creationId, PowerPoint's own shape-id
+        // extension) on the arrow shape exercises the same guard from the other direction.
+        const string a16Ns = "xmlns:a16=\"http://schemas.microsoft.com/office/drawing/2014/main\"";
+        static string ColExt(int id, string ns) =>
+            $"<a:extLst><a:ext uri=\"{{9D8B030D-6E8A-4147-A177-3AD203B41FA5}}\"><a16:colId {ns} val=\"{id}\" /></a:ext></a:extLst>";
+        static string RowExt(int id, string ns) =>
+            $"<a:extLst><a:ext uri=\"{{0D108BD9-81ED-4DB2-BD59-A6C34878D82A}}\"><a16:rowId {ns} val=\"{id}\" /></a:ext></a:extLst>";
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"2000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" +
+            $"<a:gridCol w=\"1000000\">{ColExt(0, a16Ns)}</a:gridCol><a:gridCol w=\"1000000\">{ColExt(1, a16Ns)}</a:gridCol>" +
+            "</a:tblGrid>" +
+            $"<a:tr h=\"500000\"><a:tc><a:txBody><a:p /></a:txBody></a:tc><a:tc><a:txBody><a:p /></a:txBody></a:tc>{RowExt(0, a16Ns)}</a:tr>" +
+            $"<a:tr h=\"500000\"><a:tc><a:txBody><a:p /></a:txBody></a:tc><a:tc><a:txBody><a:p /></a:txBody></a:tc>{RowExt(1, a16Ns)}</a:tr>" +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        var arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\"><a:extLst><a:ext uri=\"{FF2B5EF4-FFF2-40B4-BE49-F238E27FC236}\">" +
+            $"<a16:creationId {a16Ns} id=\"{{00000000-0000-0000-0000-000000000000}}\" /></a:ext></a:extLst></p:cNvPr></p:nvSpPr>" +
+            "<p:spPr><a:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + arrow)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.Equal(2000000, tableNode.Geometry!.Width);
+        Assert.Equal(1000000, tableNode.Geometry!.Height);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal("arrow", overlay.Kind);
+    }
+
+    [Fact]
+    public void GroupTransformExtLstAfterXfrmDoesNotZeroTheGroupChildExtent()
+    {
+        // Mirrors OverlayDetectionUsesAbsoluteBoundsForATableInsideAGroupTransform but with a
+        // PowerPoint-style <a:extLst><a:ext uri="..."/></a:extLst> appended to grpSpPr AFTER its
+        // own a:xfrm (F1): ParseGroupTransform's "ext" handler must ignore this decoy the same way
+        // ReadShapes' shape-level one does, or it re-zeroes the group's already-parsed ext and the
+        // scale/absolute-position computation for everything nested inside collapses.
+        var groupAndTable =
+            "<p:grpSp><p:nvGrpSpPr><p:cNvPr id=\"20\" name=\"Group\" /></p:nvGrpSpPr>" +
+            "<p:grpSpPr><a:xfrm><a:off x=\"500000\" y=\"500000\" /><a:ext cx=\"2000000\" cy=\"1000000\" /><a:chOff x=\"0\" y=\"0\" /><a:chExt cx=\"1000000\" cy=\"500000\" /></a:xfrm>" +
+            "<a:extLst><a:ext uri=\"{D1512A61-5D53-4211-9C90-8DDD4CB6BEF4}\" /></a:extLst></p:grpSpPr>" +
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"500000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" + string.Concat(Enumerable.Repeat("<a:gridCol w=\"250000\" />", 4)) + "</a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"250000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 4)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame></p:grpSp>";
+        const string arrow =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Arrow\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1000000\" y=\"1000000\" /><a:ext cx=\"1000000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(groupAndTable + arrow))).Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal((1, 2), (overlay.StartColumn, overlay.EndColumn));
+        Assert.Equal((1, 1), (overlay.StartRow, overlay.EndRow));
+    }
+
+    [Fact]
+    public void ShapeWiredAsAConnectorEndpointIsNeverTreatedAsATableOverlayEvenWhenItOverlapsTheTable()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"500000\" /><a:gridCol w=\"500000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // A roundRect that overlaps the table's bottom edge by 60% of its own area (600,000 of a
+        // 1,000,000 EMU square is inside the table -- comfortably above the 50% overlay threshold)
+        // but is wired as a connector's stCxn target elsewhere on the slide (F3(a)): it must stay a
+        // diagram node, and the connector flow it participates in must still produce a Diagram.
+        const string node =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"40\" name=\"Node\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"400000\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></a:xfrm><a:prstGeom prst=\"roundRect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Node</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"41\" name=\"Other\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"3000000\" y=\"3000000\" /><a:ext cx=\"200000\" cy=\"200000\" /></a:xfrm></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Other</a:t></a:r></a:p></p:txBody></p:sp>" +
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"42\" name=\"Flow\" /><a:stCxn id=\"40\" /><a:endCxn id=\"41\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"1000000\" y=\"800000\" /><a:ext cx=\"2000000\" cy=\"2200000\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + node)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, n => n.Kind == NodeKind.Table);
+        Assert.False(tableNode.Extensions!.ContainsKey("table_overlays"));
+        var nodeShape = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "40") == true);
+        Assert.False(nodeShape.Extensions!.ContainsKey("table_overlay_host"));
+
+        var visual = VisualGraphOf(extraction);
+        Assert.Equal(2, visual.Nodes.Count);
+        var edge = Assert.Single(visual.Edges);
+        Assert.NotNull(edge.SourceId);
+        Assert.NotNull(edge.TargetId);
+    }
+
+    [Fact]
+    public void ShapeOverlappingATableEdgeByLessThanHalfItsAreaIsNotAnOverlay()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"500000\" /><a:gridCol w=\"500000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // A 1,000,000 EMU square (homePlate, an arrow-classified preset) positioned so only
+        // 400,000 EMU of its width -- 40% of its own area -- falls inside the table's right edge:
+        // below the general 50% overlay threshold.
+        const string shape =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Edge\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"600000\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></a:xfrm><a:prstGeom prst=\"homePlate\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + shape))).Graph.Nodes, n => n.Kind == NodeKind.Table);
+        Assert.False(tableNode.Extensions!.ContainsKey("table_overlays"));
+    }
+
+    [Fact]
+    public void TextBoxOverlayRequiresNinetyPercentContainmentWhileOtherKindsUseTheGeneralFiftyPercentThreshold()
+    {
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1000000\" cy=\"1000000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"500000\" /><a:gridCol w=\"500000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"500000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Same 400,000 EMU square text box (deliberately much smaller than the table, so its own
+        // containment ratio and the table's background-frame coverage ratio never coincide) at two
+        // positions along the table's right edge: 60% of its own area inside the table
+        // (comfortably above the general 50% overlay threshold, but below the stricter 90% (F3(c))
+        // a label/note textbox needs so a note box hanging off a table edge is never swallowed)
+        // and 95% inside.
+        static string TextBox(string id, int x) =>
+            $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"Note{id}\" /><p:cNvSpPr txBox=\"1\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"0\" /><a:ext cx=\"400000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>Note</a:t></a:r></a:p></p:txBody></p:sp>";
+
+        var sixtyPercent = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + TextBox("10", 760000))));
+        var sixtyPercentTable = Assert.Single(sixtyPercent.Graph.Nodes, n => n.Kind == NodeKind.Table);
+        Assert.False(sixtyPercentTable.Extensions!.ContainsKey("table_overlays"));
+
+        var ninetyFivePercent = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + TextBox("11", 620000))));
+        var ninetyFivePercentTable = Assert.Single(ninetyFivePercent.Graph.Nodes, n => n.Kind == NodeKind.Table);
+        var overlay = Assert.Single(ninetyFivePercentTable.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal("label", overlay.Kind);
+    }
+
+    [Fact]
+    public void MissingGridColWidthAndRowHeightAttributesDistributeSizeEvenlyInsteadOfCollapsingToZero()
+    {
+        // Neither a:gridCol nor a:tr declares w/h (ParseDouble(null) == 0 for both, so
+        // ScaleWidthsToTotal's sum <= 0 branch is exercised on both axes) -- F4: the frame's own
+        // declared ext must still be distributed evenly across columns/rows instead of every
+        // boundary collapsing onto the same origin point.
+        var table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"T\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"800000\" cy=\"600000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" + string.Concat(Enumerable.Repeat("<a:gridCol />", 4)) + "</a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr>" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 4)) + "</a:tr>", 3)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Evenly-distributed bounds: columns [0,200000,400000,600000,800000], rows
+        // [0,200000,400000,600000]. This shape sits in column index 2 (400000-600000) of row
+        // index 1 (200000-400000) -- the third column of the second row.
+        const string shape =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Bar\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"400000\" y=\"200000\" /><a:ext cx=\"200000\" cy=\"200000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var tableNode = Assert.Single(new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + shape))).Graph.Nodes, n => n.Kind == NodeKind.Table);
+        var overlay = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal((1, 1), (overlay.StartRow, overlay.EndRow));
+        Assert.Equal((2, 2), (overlay.StartColumn, overlay.EndColumn));
+    }
+
+    [Fact]
+    public void GridSpanAndHMergeCellsDoNotShiftOverlayColumnAlignmentThroughTheRealAdapterAndSerializer()
+    {
+        // F9: drives the REAL adapter and serializer end-to-end (raw XML -> PptxAdapter.Extract ->
+        // ReadableMarkdownSerializer.Serialize) to prove an overlay over a:gridCol indices 2-3
+        // lands in the right Markdown columns even though an earlier gridSpan="2"/hMerge="1" pair
+        // in the same row shrinks that row's physical a:tc/TableCell count from 4 to 3.
+        var xml =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"Schedule\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"400000\" cy=\"400000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid>" + string.Concat(Enumerable.Repeat("<a:gridCol w=\"100000\" />", 4)) + "</a:tblGrid>" +
+            "<a:tr h=\"200000\">" +
+            "<a:tc><a:txBody><a:p><a:r><a:t>工程</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p><a:r><a:t>9/1</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p><a:r><a:t>9/2</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p><a:r><a:t>9/3</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "</a:tr>" +
+            "<a:tr h=\"200000\">" +
+            "<a:tc gridSpan=\"2\"><a:txBody><a:p><a:r><a:t>結合</a:t></a:r></a:p></a:txBody></a:tc>" +
+            "<a:tc hMerge=\"1\"><a:txBody><a:p /></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p /></a:txBody></a:tc>" +
+            "<a:tc><a:txBody><a:p /></a:txBody></a:tc>" +
+            "</a:tr>" +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Bar overlay over a:gridCol indices 2-3 (columns 9/2 and 9/3) of the second row --
+        // geometry deliberately avoids the merged columns 0-1 so the test isolates the
+        // index-alignment question from the merge itself.
+        const string bar =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Bar\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"200000\" y=\"200000\" /><a:ext cx=\"200000\" cy=\"200000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(xml + bar)));
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+
+        Assert.Contains(
+            "| 工程 | 9/1 | 9/2 | 9/3 |\n" +
+            "| --- | --- | --- | --- |\n" +
+            "| 結合 |  | ━━ | ━━ |\n",
+            markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShapeOverlappingTwoTablesIsAssignedOnlyToTheLargerIntersectionTable()
+    {
+        var tableA =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"TableA\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"400000\" cy=\"400000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"200000\" /><a:gridCol w=\"200000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"200000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        var tableB =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"4\" name=\"TableB\" /></p:nvGraphicFramePr><p:xfrm><a:off x=\"400000\" y=\"0\" /><a:ext cx=\"800000\" cy=\"400000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"400000\" /><a:gridCol w=\"400000\" /></a:tblGrid>" +
+            string.Concat(Enumerable.Repeat("<a:tr h=\"200000\">" + string.Concat(Enumerable.Repeat("<a:tc><a:txBody><a:p /></a:txBody></a:tc>", 2)) + "</a:tr>", 2)) +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        // Overlaps table A by only 100,000x200,000 EMU (25% of its own area -- below the 50% gate)
+        // and table B by 300,000x200,000 EMU (75% -- comfortably above it): must be assigned to B
+        // alone, never to both and never to A.
+        const string shape =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Bar\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"300000\" y=\"0\" /><a:ext cx=\"400000\" cy=\"200000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(tableA + tableB + shape)));
+
+        var tableNodeA = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "3") == true);
+        Assert.False(tableNodeA.Extensions!.ContainsKey("table_overlays"));
+        var tableNodeB = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "4") == true);
+        var overlay = Assert.Single(tableNodeB.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal("10", overlay.ShapeId);
+        Assert.Equal((0, 0), (overlay.StartColumn, overlay.EndColumn));
+        Assert.Equal((0, 0), (overlay.StartRow, overlay.EndRow));
+
+        var shapeNode = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "10") == true);
+        Assert.Equal("4", shapeNode.Extensions!["table_overlay_host"].GetString());
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // P-ShapeGrid: shape-grid table detection (shape-grid-table-spec.md). A grid of adjacent
+    // rectangle shapes (header row + optional label column(s) + optional body cells) standing in
+    // for a native a:tbl, with the same overlay vocabulary as the table-overlay feature above.
+    // Geometry below is generated from the same column/row arithmetic every assertion also uses
+    // (Cumulative), so a shape's on-slide position and its "which row/column" answer can never
+    // drift apart -- same discipline as SixByThreeScheduleTableXml/print_overlay_assignments in the
+    // real schedule-shape-grid.pptx fixture and its generator.
+    // ---------------------------------------------------------------------------------------
+
+    private static readonly double[] ShapeGridColWidths = [800_000, 700_000, 900_000, 900_000, 900_000, 900_000, 900_000, 900_000];
+    private static readonly double[] ShapeGridRowHeights = [500_000, 600_000, 600_000, 600_000, 600_000, 600_000];
+    private static readonly string[] ShapeGridHeaderTexts = ["工程", "担当", "D1", "D2", "D3", "D4", "D5", "D6"];
+    private static readonly string[] ShapeGridProcessTexts = ["要件定義", "設計", "実装", "テスト", "リリース"];
+    private static readonly string[] ShapeGridOwnerTexts = ["山田", "佐藤", "鈴木", "田中", "全員"];
+
+    private static double[] Cumulative(double[] sizes)
+    {
+        var result = new double[sizes.Length + 1];
+        for (var i = 0; i < sizes.Length; i++) result[i + 1] = result[i] + sizes[i];
+        return result;
+    }
+
+    private static string ShapeGridRect(string id, string name, double x, double y, double width, double height,
+        string text = "", string preset = "rect", bool textBox = false) =>
+        $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"{name}\" />{(textBox ? "<p:cNvSpPr txBox=\"1\" />" : "")}</p:nvSpPr>" +
+        $"<p:spPr><a:xfrm><a:off x=\"{(long)x}\" y=\"{(long)y}\" /><a:ext cx=\"{(long)width}\" cy=\"{(long)height}\" /></a:xfrm>" +
+        $"<a:prstGeom prst=\"{preset}\"><a:avLst /></a:prstGeom></p:spPr>" +
+        (text.Length > 0 ? $"<p:txBody><a:bodyPr /><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody>" : "") + "</p:sp>";
+
+    private static string ShapeGridVerticalConnector(string id, string name, double x, double y0, double y1) =>
+        $"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"{id}\" name=\"{name}\" /></p:nvCxnSpPr>" +
+        $"<p:spPr><a:xfrm><a:off x=\"{(long)x}\" y=\"{(long)y0}\" /><a:ext cx=\"0\" cy=\"{(long)(y1 - y0)}\" /></a:xfrm>" +
+        "<a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+
+    // 8 header rects (工程, 担当, D1..D6) flush across ShapeGridColWidths, plus (when requested) 5
+    // process-label rects under 工程 and 5 owner-label rects under 担当, flush down ShapeGridRowHeights[1..].
+    private static string ShapeGridHeaderAndLabelsXml(bool includeLabels = true)
+    {
+        var colLeft = Cumulative(ShapeGridColWidths);
+        var rowTop = Cumulative(ShapeGridRowHeights);
+        var xml = new StringBuilder();
+        for (var c = 0; c < ShapeGridHeaderTexts.Length; c++)
+            xml.Append(ShapeGridRect($"h{c}", $"GridHeader-{c}", colLeft[c], rowTop[0], ShapeGridColWidths[c], ShapeGridRowHeights[0], ShapeGridHeaderTexts[c]));
+        if (includeLabels)
+        {
+            for (var r = 0; r < ShapeGridProcessTexts.Length; r++)
+                xml.Append(ShapeGridRect($"p{r}", $"GridLabelProcess-{r}", colLeft[0], rowTop[r + 1], ShapeGridColWidths[0], ShapeGridRowHeights[r + 1], ShapeGridProcessTexts[r]));
+            for (var r = 0; r < ShapeGridOwnerTexts.Length; r++)
+                xml.Append(ShapeGridRect($"o{r}", $"GridLabelOwner-{r}", colLeft[1], rowTop[r + 1], ShapeGridColWidths[1], ShapeGridRowHeights[r + 1], ShapeGridOwnerTexts[r]));
+        }
+        return xml.ToString();
+    }
+
+    [Fact]
+    public void ShapeGrid_header_and_two_label_columns_with_five_overlay_kinds_synthesizes_the_expected_table()
+    {
+        var colLeft = Cumulative(ShapeGridColWidths);
+        var rowTop = Cumulative(ShapeGridRowHeights);
+        var headerAndLabels = ShapeGridHeaderAndLabelsXml();
+
+        // Right arrow "要件定義": row1 (要件定義), columns 2-3 (D1-D2) -- flush across both columns.
+        var arrow = ShapeGridRect("10", "Overlay-Arrow", colLeft[2], rowTop[1], colLeft[4] - colLeft[2], ShapeGridRowHeights[1], "要件定義", "rightArrow");
+        // Textless bar: row3 (実装), columns 4-6 (D3-D5) -- deliberately INSET (30,000 EMU each
+        // horizontal edge, 60% of the row's own height, vertically centred) so it does NOT tile a
+        // whole cell -- IsFlushGridMember must reject it as a member; it must resolve as an overlay.
+        var barWidth = colLeft[7] - colLeft[4] - 60_000;
+        var barHeight = ShapeGridRowHeights[3] * 0.6;
+        var bar = ShapeGridRect("11", "Overlay-Bar", colLeft[4] + 30_000, rowTop[3] + (ShapeGridRowHeights[3] - barHeight) / 2, barWidth, barHeight, preset: "rect");
+        // Diamond marker: row5 (リリース), column 7 (D6), centred in its cell.
+        var diamondCenterX = colLeft[7] + ShapeGridColWidths[7] / 2;
+        var diamondCenterY = rowTop[5] + ShapeGridRowHeights[5] / 2;
+        var diamond = ShapeGridRect("12", "Overlay-Diamond", diamondCenterX - 100_000, diamondCenterY - 100_000, 200_000, 200_000, preset: "diamond");
+        // Vertical connector (a "today line"): column 4 (D3), spanning every row INCLUDING the
+        // header, tailEnd-only (no headEnd) -- promoted to arrow/down, same edge case as the real
+        // schedule-arrows/schedule-shape-grid today-line connectors.
+        var connector = ShapeGridVerticalConnector("13", "Overlay-TodayLine", colLeft[4] + ShapeGridColWidths[4] / 2, rowTop[0], rowTop[6]);
+        // Text box label "▲レビュー": row2 (設計), column 6 (D5) -- inset like a real label textbox.
+        var label = ShapeGridRect("14", "Overlay-Label", colLeft[6] + 50_000, rowTop[2] + 50_000, ShapeGridColWidths[6] - 100_000, ShapeGridRowHeights[2] - 100_000, "▲レビュー", textBox: true);
+        // Flush body-cell text: row4 (テスト), column 2 (D1) -- exactly tiles its cell, so it is a
+        // grid MEMBER (not an overlay) and its text lands directly in that cell (spec step 7).
+        var bodyText = ShapeGridRect("20", "GridBody-r4c2", colLeft[2], rowTop[4], ShapeGridColWidths[2], ShapeGridRowHeights[4], "済");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(
+            CreateTableOverlayPackage(headerAndLabels + arrow + bar + diamond + connector + label + bodyText)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.Equal("grid:h0", tableNode.Extensions!["shape_id"].GetString());
+        Assert.True(tableNode.Extensions!["shape_grid_table"].GetBoolean());
+        Assert.Equal(ContentLayer.Derived, tableNode.Layer);
+        Assert.Equal(NodeEditability.Protected, tableNode.Editability);
+
+        var table = Assert.IsType<TableNodeContent>(tableNode.Content);
+        Assert.Equal(6, table.Rows.Count);
+        Assert.Equal(ShapeGridHeaderTexts, table.Rows[0].Select(cell => cell.Text).ToArray());
+        Assert.Equal(new[] { "要件定義", "山田", "", "", "", "", "", "" }, table.Rows[1].Select(cell => cell.Text).ToArray());
+        Assert.Equal(new[] { "設計", "佐藤", "", "", "", "", "", "" }, table.Rows[2].Select(cell => cell.Text).ToArray());
+        Assert.Equal(new[] { "実装", "鈴木", "", "", "", "", "", "" }, table.Rows[3].Select(cell => cell.Text).ToArray());
+        // The flush body rect's "済" lands at (row4=テスト, column2=D1), not folded into an overlay.
+        Assert.Equal(new[] { "テスト", "田中", "済", "", "", "", "", "" }, table.Rows[4].Select(cell => cell.Text).ToArray());
+        Assert.Equal(new[] { "リリース", "全員", "", "", "", "", "", "" }, table.Rows[5].Select(cell => cell.Text).ToArray());
+
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        Assert.Equal(["13", "10", "14", "11", "12"], overlays.Select(o => o.ShapeId).ToArray());
+        var connectorOverlay = overlays.Single(o => o.ShapeId == "13");
+        Assert.Equal(("arrow", "down", "vertical", 0, 5, 4, 4), (connectorOverlay.Kind, connectorOverlay.Direction, connectorOverlay.Axis, connectorOverlay.StartRow, connectorOverlay.EndRow, connectorOverlay.StartColumn, connectorOverlay.EndColumn));
+        var arrowOverlay = overlays.Single(o => o.ShapeId == "10");
+        Assert.Equal(("arrow", "right", "horizontal", 1, 1, 2, 3), (arrowOverlay.Kind, arrowOverlay.Direction, arrowOverlay.Axis, arrowOverlay.StartRow, arrowOverlay.EndRow, arrowOverlay.StartColumn, arrowOverlay.EndColumn));
+        Assert.Equal("要件定義", arrowOverlay.Text);
+        var labelOverlay = overlays.Single(o => o.ShapeId == "14");
+        Assert.Equal(("label", "none", "horizontal", 2, 2, 6, 6), (labelOverlay.Kind, labelOverlay.Direction, labelOverlay.Axis, labelOverlay.StartRow, labelOverlay.EndRow, labelOverlay.StartColumn, labelOverlay.EndColumn));
+        var barOverlay = overlays.Single(o => o.ShapeId == "11");
+        Assert.Equal(("bar", "none", "horizontal", 3, 3, 4, 6), (barOverlay.Kind, barOverlay.Direction, barOverlay.Axis, barOverlay.StartRow, barOverlay.EndRow, barOverlay.StartColumn, barOverlay.EndColumn));
+        var diamondOverlay = overlays.Single(o => o.ShapeId == "12");
+        Assert.Equal(("marker", "none", "horizontal", 5, 5, 7, 7), (diamondOverlay.Kind, diamondOverlay.Direction, diamondOverlay.Axis, diamondOverlay.StartRow, diamondOverlay.EndRow, diamondOverlay.StartColumn, diamondOverlay.EndColumn));
+
+        // Every header/label/flush-body-text shape is tagged as a member of this grid table...
+        foreach (var memberId in new[] { "h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "p0", "p1", "p2", "p3", "p4", "o0", "o1", "o2", "o3", "o4", "20" })
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == memberId) == true);
+            Assert.Equal("grid:h0", node.Extensions!["table_grid_member_host"].GetString());
+        }
+        // ...while every overlay shape is tagged with the SAME table_overlay_host/table_overlay
+        // extensions a native table's own overlays would carry (shared mechanism, shared markup).
+        foreach (var overlayId in new[] { "10", "11", "12", "13", "14" })
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == overlayId) == true);
+            Assert.Equal("grid:h0", node.Extensions!["table_overlay_host"].GetString());
+            Assert.True(node.Extensions!["table_overlay"].GetBoolean());
+        }
+
+        // synthesized_from_shapes: header (X order), label column (Y order: 工程), then remaining
+        // body members (Y then X: 担当 column, interleaved with the flush body-text rect -- "20"
+        // shares row4's Y with "o3" but sits at a larger X, so it sorts immediately after "o3" and
+        // before "o4").
+        var expectedMembers = new[] { "h0", "h1", "h2", "h3", "h4", "h5", "h6", "h7", "p0", "p1", "p2", "p3", "p4", "o0", "o1", "o2", "o3", "20", "o4" };
+        Assert.Equal(expectedMembers, tableNode.Extensions!["synthesized_from_shapes"].Deserialize<string[]>());
+
+        // Every directional/overlay shape on the slide is either a grid member or a grid overlay --
+        // none remain to feed visual-flow inference, so no phantom "Visual flow" diagram appears.
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+    }
+
+    [Fact]
+    public void ShapeGrid_without_a_label_column_derives_rows_from_overlay_y_band_clustering()
+    {
+        // 6 date-only header columns (no 工程/担当), 900,000 EMU wide each, no label rects at all --
+        // rows must come purely from clustering the 3 arrows' + 1 diamond's Y centres (spec step 6).
+        double[] colWidths = [900_000, 900_000, 900_000, 900_000, 900_000, 900_000];
+        var colLeft = Cumulative(colWidths);
+        const double headerHeight = 500_000;
+        string[] headers = ["D1", "D2", "D3", "D4", "D5", "D6"];
+        var header = new StringBuilder();
+        for (var c = 0; c < headers.Length; c++)
+            header.Append(ShapeGridRect($"h{c}", $"GridHeader-{c}", colLeft[c], 0, colWidths[c], headerHeight, headers[c]));
+
+        // Overlay bars: 360,000 EMU tall, centred on Y = 800,000 / 1,400,000 / 2,000,000 (600,000
+        // apart, directly below the header) -- same spacing convention as schedule-shape-grid.pptx
+        // slide 4's Y bands.
+        var arrow1 = ShapeGridRect("20", "Overlay-Arrow1", colLeft[0], 620_000, colLeft[2] - colLeft[0], 360_000, "要件定義", "rightArrow");
+        var arrow2 = ShapeGridRect("21", "Overlay-Arrow2", colLeft[1], 1_220_000, colLeft[4] - colLeft[1], 360_000, "設計", "rightArrow");
+        var arrow3 = ShapeGridRect("22", "Overlay-Arrow3", colLeft[2], 1_820_000, colLeft[5] - colLeft[2], 360_000, "実装", "rightArrow");
+        var diamond = ShapeGridRect("23", "Overlay-Diamond", colLeft[5] + colWidths[5] / 2 - 100_000, 2_500_000, 200_000, 200_000, preset: "diamond");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(
+            CreateTableOverlayPackage(header.ToString() + arrow1 + arrow2 + arrow3 + diamond)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var table = Assert.IsType<TableNodeContent>(tableNode.Content);
+        Assert.Equal(5, table.Rows.Count); // header + 4 overlay-derived rows
+        Assert.Equal(headers, table.Rows[0].Select(cell => cell.Text).ToArray());
+        // No label column: every data row starts blank (spec: "先頭に空セルすら無い").
+        Assert.All(table.Rows.Skip(1), row => Assert.All(row, cell => Assert.Equal("", cell.Text)));
+
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        var arrow1Overlay = overlays.Single(o => o.ShapeId == "20");
+        Assert.Equal((1, 1, 0, 1), (arrow1Overlay.StartRow, arrow1Overlay.EndRow, arrow1Overlay.StartColumn, arrow1Overlay.EndColumn));
+        var arrow2Overlay = overlays.Single(o => o.ShapeId == "21");
+        Assert.Equal((2, 2, 1, 3), (arrow2Overlay.StartRow, arrow2Overlay.EndRow, arrow2Overlay.StartColumn, arrow2Overlay.EndColumn));
+        var arrow3Overlay = overlays.Single(o => o.ShapeId == "22");
+        Assert.Equal((3, 3, 2, 4), (arrow3Overlay.StartRow, arrow3Overlay.EndRow, arrow3Overlay.StartColumn, arrow3Overlay.EndColumn));
+        var diamondOverlay = overlays.Single(o => o.ShapeId == "23");
+        Assert.Equal((4, 4, 5, 5), (diamondOverlay.StartRow, diamondOverlay.EndRow, diamondOverlay.StartColumn, diamondOverlay.EndColumn));
+    }
+
+    [Fact]
+    public void ShapeGrid_aligned_card_layout_without_any_overlay_is_not_synthesized_into_a_table()
+    {
+        // A 2x3 grid of aligned roundRect "cards", flush and adjacent, but with NO overlay/arrow/
+        // marker anywhere -- guard rail 8b ("少なくとも1つのオーバーレイが本体領域に存在する") must
+        // reject this as a table, leaving it as ordinary shape nodes (a card layout, not a schedule).
+        const double cardWidth = 900_000; const double cardHeight = 500_000; const double gap = 100_000;
+        var xml = new StringBuilder();
+        for (var i = 0; i < 6; i++)
+        {
+            var (r, c) = (i / 3, i % 3);
+            xml.Append(ShapeGridRect($"card{i}", $"Card-{i}", c * (cardWidth + gap), r * (cardHeight + gap), cardWidth, cardHeight, $"機能{i}", "roundRect"));
+        }
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(xml.ToString())));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("table_grid_member_host") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_with_only_two_header_candidates_is_not_synthesized()
+    {
+        var xml = ShapeGridRect("1", "GridHeader-0", 0, 0, 800_000, 500_000, "工程") +
+                  ShapeGridRect("2", "GridHeader-1", 800_000, 0, 900_000, 500_000, "D1");
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(xml)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+    }
+
+    [Fact]
+    public void ShapeGrid_overlapping_a_native_table_by_at_least_half_its_own_area_is_not_synthesized()
+    {
+        // A 3-column shape-grid header + one overlay, positioned entirely inside a native 6x3
+        // schedule table's own frame (guard rail 8c): the grid's own area is 100% covered by the
+        // native table, well past the 50% threshold, so no second, redundant table is synthesized.
+        var nativeTable = SixByThreeScheduleTableXml(); // X=0..7,200,000, Y=0..1,200,000 (see its own comment)
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 700_000, 400_000, "H0") +
+                     ShapeGridRect("h1", "GridHeader-1", 700_000, 0, 700_000, 400_000, "H1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_400_000, 0, 700_000, 400_000, "H2");
+        var overlay = ShapeGridRect("50", "Overlay-Arrow", 0, 600_000, 1_400_000, 200_000, "X", "rightArrow");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(nativeTable + header + overlay)));
+
+        // The native table itself is unaffected; no shape-grid table is layered on top of it.
+        Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_detection_does_not_interfere_with_a_genuinely_connected_flow_elsewhere_on_the_slide()
+    {
+        // A valid, minimal shape-grid table (3 header columns, rows from overlay Y-band
+        // clustering) far to the left, plus a completely separate, natively-connected two-shape
+        // flow (real a:stCxn/a:endCxn, like schedule-shape-grid.pptx slide 3's 開始→完了) far to
+        // the right -- detecting/excluding the grid's own shapes must never swallow the unrelated
+        // flow's connector or its endpoints. Two overlays (G1 fix 2: a label-less grid now needs
+        // >= 2 derived body rows) sit on distinct Y bands well within the 2x-median-height cutoff
+        // (G1 fix 3b) of one another.
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 700_000, 400_000, "H0") +
+                     ShapeGridRect("h1", "GridHeader-1", 700_000, 0, 700_000, 400_000, "H1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_400_000, 0, 700_000, 400_000, "H2");
+        var overlay = ShapeGridRect("50", "Overlay-Arrow", 0, 600_000, 1_400_000, 200_000, "X", "rightArrow");
+        var overlay2 = ShapeGridRect("51", "Overlay-Arrow2", 700_000, 900_000, 700_000, 200_000, "Y", "rightArrow");
+
+        const string start = "<p:sp><p:nvSpPr><p:cNvPr id=\"60\" name=\"Start\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"9000000\" y=\"0\" /><a:ext cx=\"900000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"roundRect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>開始</a:t></a:r></a:p></p:txBody></p:sp>";
+        const string end = "<p:sp><p:nvSpPr><p:cNvPr id=\"61\" name=\"End\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"10500000\" y=\"0\" /><a:ext cx=\"900000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"roundRect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>完了</a:t></a:r></a:p></p:txBody></p:sp>";
+        const string connector = "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"62\" name=\"Flow\" /><p:cNvCxnSpPr><a:stCxn id=\"60\" idx=\"1\" /><a:endCxn id=\"61\" idx=\"3\" /></p:cNvCxnSpPr></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"9900000\" y=\"200000\" /><a:ext cx=\"600000\" cy=\"0\" /></a:xfrm><a:ln><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>";
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(header + overlay + overlay2 + start + end + connector)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.True(tableNode.Extensions!["shape_grid_table"].GetBoolean());
+        var diagram = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+        var graph = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var edge = Assert.Single(graph.Edges);
+        var startNode = graph.Nodes.Single(n => n.SourceNodeId == "60");
+        var endNode = graph.Nodes.Single(n => n.SourceNodeId == "61");
+        Assert.Equal(startNode.Id, edge.SourceId);
+        Assert.Equal(endNode.Id, edge.TargetId);
+    }
+
+    [Fact]
+    public void ShapeGrid_gapped_card_layout_with_caption_is_not_synthesized_due_to_header_adjacency()
+    {
+        // G4: header adjacency tightened from widthMedian*0.5 to widthMedian*0.1 -- a 3x3 card
+        // grid with an ~11% gap between cards (previously "adjacent enough" by accident under the
+        // old, looser gate) must now fail the header-row check outright, before guard rail (b)
+        // even gets a chance to run. A caption textbox sitting below the cards (common on a real
+        // card layout) must not change that outcome, nor be swallowed by anything.
+        const double cardWidth = 900_000; const double cardHeight = 500_000; const double gap = 100_000; // ~11.1% of cardWidth, safely above widthMedian*0.1 (90,000 EMU)
+        var xml = new StringBuilder();
+        for (var i = 0; i < 9; i++)
+        {
+            var (r, c) = (i / 3, i % 3);
+            xml.Append(ShapeGridRect($"card{i}", $"Card-{i}", c * (cardWidth + gap), r * (cardHeight + gap), cardWidth, cardHeight, $"機能{i}", "roundRect"));
+        }
+        const string caption = "<p:sp><p:nvSpPr><p:cNvPr id=\"90\" name=\"Caption\" /><p:cNvSpPr txBox=\"1\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"0\" y=\"1900000\" /><a:ext cx=\"2900000\" cy=\"300000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:t>主要機能一覧</a:t></a:r></a:p></p:txBody></p:sp>";
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(xml.ToString() + caption)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("table_grid_member_host") == true);
+        Assert.Contains(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "90") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_non_member_label_is_not_double_registered_in_synthesized_from_shapes()
+    {
+        // G5: `synthesized_from_shapes` must list EXACTLY the shapes tagged table_grid_member_host.
+        // The middle process label ("B") is deliberately shrunk to 50% of its row's own height
+        // (vertically centred, so it never overflows its cell) -- it still helps derive the row
+        // boundaries themselves (G3 uses every primaryLabel member's own Top/Bottom regardless of
+        // whether that member later turns out to be a flush "member"), but fails IsFlushGridMember's
+        // 85% coverage gate (G2) and so must never appear in synthesized_from_shapes nor carry
+        // table_grid_member_host.
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 900_000, 500_000, "工程") +
+                     ShapeGridRect("h1", "GridHeader-1", 900_000, 0, 900_000, 500_000, "D1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_800_000, 0, 900_000, 500_000, "D2");
+        var labelA = ShapeGridRect("la", "GridLabel-A", 0, 500_000, 900_000, 600_000, "A");
+        var labelB = ShapeGridRect("lb", "GridLabel-B", 0, 1_250_000, 900_000, 300_000, "B");
+        var labelC = ShapeGridRect("lc", "GridLabel-C", 0, 1_700_000, 900_000, 600_000, "C");
+        var overlay = ShapeGridRect("50", "Overlay-Arrow", 900_000, 500_000, 1_800_000, 400_000, "X", "rightArrow");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(header + labelA + labelB + labelC + overlay)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var table = Assert.IsType<TableNodeContent>(tableNode.Content);
+        Assert.Equal(4, table.Rows.Count); // header + A + B + C
+        Assert.Equal("A", table.Rows[1][0].Text);
+        // "B" was excluded from membership, so PlaceMember never ran for it -- its row's own label
+        // cell stays blank rather than showing "B".
+        Assert.Equal("", table.Rows[2][0].Text);
+        Assert.Equal("C", table.Rows[3][0].Text);
+
+        var members = tableNode.Extensions!["synthesized_from_shapes"].Deserialize<string[]>()!;
+        Assert.DoesNotContain("lb", members);
+        Assert.Equal(members.Length, members.Distinct(StringComparer.Ordinal).Count()); // no double registration
+
+        // Every id `synthesized_from_shapes` lists carries a REAL table_grid_member_host tag
+        // pointing at this same grid -- the two sets can never drift apart (G5's guarantee).
+        var gridId = tableNode.Extensions!["shape_id"].GetString();
+        foreach (var memberId in members)
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == memberId) == true);
+            Assert.Equal(gridId, node.Extensions!["table_grid_member_host"].GetString());
+        }
+
+        // "B" itself never became a member -- it must not carry the suppression tag either.
+        var labelBNode = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "lb") == true);
+        Assert.False(labelBNode.Extensions!.ContainsKey("table_grid_member_host"));
+    }
+
+    [Fact]
+    public void ShapeGrid_textless_flush_rect_spanning_three_columns_becomes_a_bar_overlay_not_a_member()
+    {
+        // G8: a TEXTLESS box that flush-tiles >= 2 columns at once (here 3) is body-area "bar"
+        // overlay content, not a single grid member -- membership would place its (nonexistent)
+        // text in just ONE cell, silently dropping the multi-column visual signal a real
+        // "━━ ━━ ━━" bar needs to convey, and could even starve guard rail (b) of its one
+        // required overlay.
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 900_000, 500_000, "工程") +
+                     ShapeGridRect("h1", "GridHeader-1", 900_000, 0, 900_000, 500_000, "H1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_800_000, 0, 900_000, 500_000, "H2") +
+                     ShapeGridRect("h3", "GridHeader-3", 2_700_000, 0, 900_000, 500_000, "H3");
+        var labelR1 = ShapeGridRect("r1", "GridLabel-R1", 0, 500_000, 900_000, 600_000, "R1");
+        var labelR2 = ShapeGridRect("r2", "GridLabel-R2", 0, 1_100_000, 900_000, 600_000, "R2");
+        // Flush across H1/H2/H3 (columns 1-3), textless.
+        var bar = ShapeGridRect("40", "Overlay-Bar", 900_000, 500_000, 2_700_000, 600_000, preset: "rect");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(header + labelR1 + labelR2 + bar)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var table = Assert.IsType<TableNodeContent>(tableNode.Content);
+        Assert.Equal(new[] { "R1", "", "", "" }, table.Rows[1].Select(cell => cell.Text).ToArray());
+
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        var barOverlay = Assert.Single(overlays);
+        Assert.Equal(("bar", 1, 1, 1, 3), (barOverlay.Kind, barOverlay.StartRow, barOverlay.EndRow, barOverlay.StartColumn, barOverlay.EndColumn));
+        var barNode = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == "40") == true);
+        Assert.False(barNode.Extensions!.ContainsKey("table_grid_member_host"));
+        Assert.True(barNode.Extensions!.ContainsKey("table_overlay_host"));
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+        Assert.Contains("| R1 | ━━ | ━━ | ━━ |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShapeGrid_picture_fill_shape_is_excluded_from_box_candidates_even_with_a_box_preset()
+    {
+        // G9: mirrors ClassifyOverlayCandidates' own media/diagram exclusion -- a shape whose FILL
+        // is a picture (embedded directly on a plain p:sp via a:blipFill, not via a separate
+        // p:pic) must never become a grid header/label/body member just because its own outline
+        // uses a "rect" preset. Without this gate, this photo placeholder would complete a valid
+        // 3-member header row; with it, only 2 real candidates remain and no grid is synthesized.
+        var h0 = ShapeGridRect("h0", "GridHeader-0", 0, 0, 900_000, 500_000, "H0");
+        const string hImg = "<p:sp><p:nvSpPr><p:cNvPr id=\"h1\" name=\"GridHeader-1-Photo\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"900000\" y=\"0\" /><a:ext cx=\"900000\" cy=\"500000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom><a:blipFill><a:blip r:embed=\"rIdPhoto\" /></a:blipFill></p:spPr></p:sp>";
+        var h2 = ShapeGridRect("h2", "GridHeader-2", 1_800_000, 0, 900_000, 500_000, "H2");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(h0 + hImg + h2)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_bounding_box_overlapping_native_table_area_is_rejected_even_though_no_member_shape_individually_overlaps_it()
+    {
+        // G10 test rework: a DIFFERENT rejection path than
+        // ShapeGrid_overlapping_a_native_table_by_at_least_half_its_own_area_is_not_synthesized
+        // above -- there, every grid shape sits INSIDE the native table and gets individually
+        // absorbed as one of its overlays before shape-grid detection even runs. Here, every
+        // header/label shape sits entirely OUTSIDE the native table (zero individual overlap, so
+        // none of them is ever claimed as a native-table overlay), yet the GRID's own overall
+        // bounding rectangle -- header width x (header height + both label rows) -- still overlaps
+        // the table by more than 50% of the GRID's own area, purely because two of its three
+        // columns (D1/D2, with no actual shape dipping below the header there) sit directly above
+        // where the table extends down to. Guard rail (c) (HostOverlapRatioOfFirst) must catch
+        // this on the abstract bounding box alone.
+        const string nativeTable =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"90\" name=\"NativeTable\" /></p:nvGraphicFramePr>" +
+            "<p:xfrm><a:off x=\"700000\" y=\"500000\" /><a:ext cx=\"1400000\" cy=\"2500000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"700000\" /><a:gridCol w=\"700000\" /></a:tblGrid>" +
+            "<a:tr h=\"1250000\"><a:tc><a:txBody><a:p /></a:txBody></a:tc><a:tc><a:txBody><a:p /></a:txBody></a:tc></a:tr>" +
+            "<a:tr h=\"1250000\"><a:tc><a:txBody><a:p /></a:txBody></a:tc><a:tc><a:txBody><a:p /></a:txBody></a:tc></a:tr>" +
+            "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 700_000, 500_000, "工程") +
+                     ShapeGridRect("h1", "GridHeader-1", 700_000, 0, 700_000, 500_000, "D1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_400_000, 0, 700_000, 500_000, "D2");
+        var labelR1 = ShapeGridRect("r1", "GridLabel-R1", 0, 500_000, 700_000, 1_000_000, "行1");
+        var labelR2 = ShapeGridRect("r2", "GridLabel-R2", 0, 1_500_000, 700_000, 1_000_000, "行2");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(nativeTable + header + labelR1 + labelR2)));
+
+        // The native table itself is unaffected; no shape-grid table is layered over/under it.
+        Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+        // None of the header/label shapes were individually absorbed as a native-table overlay
+        // either -- they were rejected by guard rail (c), not by ClassifyOverlayCandidates.
+        foreach (var id in new[] { "h0", "h1", "h2", "r1", "r2" })
+        {
+            var node = Assert.Single(extraction.Graph.Nodes, n => n.Source?.Locators.Any(l => l.Value == id) == true);
+            Assert.False(node.Extensions!.ContainsKey("table_overlay_host"));
+            Assert.False(node.Extensions!.ContainsKey("table_grid_member_host"));
+        }
+    }
+
+    [Fact]
+    public void ShapeGrid_label_column_present_flush_grid_without_any_overlay_is_not_synthesized()
+    {
+        // G10 test rework: the EXISTING "aligned card layout" negative test
+        // (ShapeGrid_aligned_card_layout_without_any_overlay_is_not_synthesized_into_a_table) has
+        // no label column at all. This covers the OTHER branch through DetectShapeGridTables -- a
+        // label column IS present (rows come from G3's label-boundary derivation, not from
+        // clustering overlay Y bands), the grid is perfectly flush (zero gaps), but there is still
+        // no arrow/bar/marker/line anywhere in the body -- guard rail (b) must reject it regardless
+        // of which row-derivation path was taken.
+        var header = ShapeGridRect("h0", "GridHeader-0", 0, 0, 700_000, 500_000, "工程") +
+                     ShapeGridRect("h1", "GridHeader-1", 700_000, 0, 700_000, 500_000, "D1") +
+                     ShapeGridRect("h2", "GridHeader-2", 1_400_000, 0, 700_000, 500_000, "D2");
+        var labelR1 = ShapeGridRect("r1", "GridLabel-R1", 0, 500_000, 700_000, 600_000, "行1");
+        var labelR2 = ShapeGridRect("r2", "GridLabel-R2", 0, 1_100_000, 700_000, 600_000, "行2");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(header + labelR1 + labelR2)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("table_grid_member_host") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_four_candidates_split_across_two_row_bands_never_forms_a_header()
+    {
+        // G10 test rework: pins down the "try every row band with >= 3 members" header-selection
+        // logic's own boundary case -- 4 boxes that LOOK like they could be one 4-column header,
+        // but happen to fall into two separate Y bands of 2 members each (neither reaches the
+        // required minimum of 3), so no band is ever even a CANDIDATE for the header-row role and
+        // detection correctly finds no grid at all (rather than merging the two thin bands or
+        // otherwise misbehaving).
+        var boxes = ShapeGridRect("b0", "Box-0", 0, 0, 700_000, 400_000, "B0") +
+                    ShapeGridRect("b1", "Box-1", 700_000, 0, 700_000, 400_000, "B1") +
+                    ShapeGridRect("b2", "Box-2", 1_400_000, 200_000, 700_000, 400_000, "B2") +
+                    ShapeGridRect("b3", "Box-3", 2_100_000, 200_000, 700_000, 400_000, "B3");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(boxes)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Extensions?.ContainsKey("shape_grid_table") == true);
+    }
+
+    [Fact]
+    public void ShapeGrid_leading_label_column_gets_a_synthetic_column_with_an_empty_header_cell()
+    {
+        // G10 test rework: the `hasLeadingLabelColumn` branch (spec step 5) -- unlike every other
+        // fixture/test in this file, the header here has NO "工程"-equivalent cell at all (just 3
+        // plain date columns); the label column sits strictly to the LEFT of the header's own
+        // leftmost column, so it gets its own synthetic leading column boundary, and the header
+        // row gets an empty first cell.
+        var header = ShapeGridRect("h0", "GridHeader-0", 700_000, 0, 700_000, 500_000, "D1") +
+                     ShapeGridRect("h1", "GridHeader-1", 1_400_000, 0, 700_000, 500_000, "D2") +
+                     ShapeGridRect("h2", "GridHeader-2", 2_100_000, 0, 700_000, 500_000, "D3");
+        var labelR1 = ShapeGridRect("r1", "GridLabel-R1", 0, 500_000, 700_000, 600_000, "行1");
+        var labelR2 = ShapeGridRect("r2", "GridLabel-R2", 0, 1_100_000, 700_000, 600_000, "行2");
+        // Right arrow covering D1-D2 (columns 1-2 once the synthetic leading column is column 0), row1.
+        var overlay = ShapeGridRect("50", "Overlay-Arrow", 700_000, 500_000, 1_400_000, 400_000, "X", "rightArrow");
+
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(header + labelR1 + labelR2 + overlay)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var table = Assert.IsType<TableNodeContent>(tableNode.Content);
+        Assert.Equal(new[] { "", "D1", "D2", "D3" }, table.Rows[0].Select(cell => cell.Text).ToArray());
+        Assert.Equal("行1", table.Rows[1][0].Text);
+        Assert.Equal("行2", table.Rows[2][0].Text);
+
+        var overlay50 = Assert.Single(tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!);
+        Assert.Equal((1, 1, 1, 2), (overlay50.StartRow, overlay50.EndRow, overlay50.StartColumn, overlay50.EndColumn));
+    }
 }

@@ -161,6 +161,16 @@ internal static class XlsxMermaidProjection
         };
         if (projection.VisualGraph is { } visualGraph)
             extensions["visual_graph"] = JsonSerializer.SerializeToElement(visualGraph);
+        // P-Overlay (XLSX) F-B: carried on the node so XlsxAdapter.Extract can tell which
+        // DrawingShapes this diagram actually consumed without recomputing anything -- the
+        // existing "visual_graph_member_shape_ids" convention (see PptxAdapter/DocxAdapter).
+        // X1: ConsumedShapeIds is a HashSet under IReadOnlySet<string> -- its enumeration order is
+        // not guaranteed, so serializing it directly made this array's element order (and hence the
+        // exported JSON bytes) non-deterministic across otherwise-identical extractions. Sort it the
+        // same way every other ordinal-sensitive collection in this codebase is sorted.
+        if (projection.ConsumedShapeIds is not null)
+            extensions["visual_graph_member_shape_ids"] = JsonSerializer.SerializeToElement(
+                projection.ConsumedShapeIds.OrderBy(id => id, StringComparer.Ordinal).ToArray());
         return new DocumentNode(
             "n_" + Hash(worksheet.Name + "!mermaid")[..16],
             NodeKind.Diagram,
@@ -245,7 +255,10 @@ internal static class XlsxMermaidProjection
             .ToArray();
         var minRow = visualCells.Select(cell => cell.RowIndex).DefaultIfEmpty(headingRow + 1).Min();
         var maxRow = visualCells.Select(cell => cell.RowIndex).DefaultIfEmpty(header.Key - 1).Max();
-        return new DiagramProjection("state", output.ToString().TrimEnd(), minRow, maxRow, "xlsx-state-table+cell-layout");
+        // Pure cell/table evidence -- no DrawingShapes were consulted at all -- so it is safe to
+        // report an explicit empty consumed-shape set (see the DiagramProjection comment).
+        return new DiagramProjection("state", output.ToString().TrimEnd(), minRow, maxRow, "xlsx-state-table+cell-layout",
+            ConsumedShapeIds: new HashSet<string>(StringComparer.Ordinal));
     }
 
     private static DiagramProjection? TryCreateSequence(XlsxWorksheetRecord worksheet)
@@ -649,7 +662,10 @@ internal static class XlsxMermaidProjection
         if (edgeCount == 0) return null;
         var minRow = laneRow.Row;
         var maxRow = nodes.Select(node => node.Region.MaxRow).Concat(arrows.Select(arrow => arrow.MaxRow)).DefaultIfEmpty(minRow).Max();
-        return new DiagramProjection("flowchart", output.ToString().TrimEnd(), minRow, maxRow, "xlsx-cell-layout");
+        // Pure cell/table evidence (arrow glyphs typed into cells, not DrawingShapes) -- report an
+        // explicit empty consumed-shape set (see the DiagramProjection comment).
+        return new DiagramProjection("flowchart", output.ToString().TrimEnd(), minRow, maxRow, "xlsx-cell-layout",
+            ConsumedShapeIds: new HashSet<string>(StringComparer.Ordinal));
     }
 
     private static DiagramProjection? TryCreateDrawingFlowchart(XlsxWorksheetRecord worksheet, bool useLanes,
@@ -711,6 +727,12 @@ internal static class XlsxMermaidProjection
             matched.Add((shape, region));
         }
         if (matched.Count < 2) return null;
+
+        // P-Overlay (XLSX) F-B: every shape that actually becomes part of THIS diagram (a matched
+        // node, or a connector/arrow shape that resolves into a rendered edge below) is recorded
+        // here so XlsxAdapter.Extract can still fold an unrelated, unconsumed shape elsewhere on
+        // the same sheet into a schedule-table overlay instead of skipping the whole sheet.
+        var consumedShapeIds = new HashSet<string>(matched.Select(item => item.Shape.Id), StringComparer.Ordinal);
 
         var nodes = matched.Select(item => new FlowNode(
                 ShapeNodeId(item.Shape),
@@ -852,7 +874,8 @@ internal static class XlsxMermaidProjection
         var type = useLanes ? "flowchart" : "architecture";
         var visualGraph = BuildDrawingVisualGraph(worksheet, shapes, nodes, visualEdges, visualEdgeSourceIds,
             visualDiagnostics, visualLabels);
-        return new DiagramProjection(type, output.ToString().TrimEnd(), minRow, maxRow, "xlsx-drawingml+cell-layout", visualGraph);
+        return new DiagramProjection(type, output.ToString().TrimEnd(), minRow, maxRow, "xlsx-drawingml+cell-layout", visualGraph,
+            ConsumedShapeIds: consumedShapeIds);
 
         void AppendEdge(FlowNode source, FlowNode target, string edgeLabel, XlsxDrawingShapeRecord? sourceShape,
             VisualEdgeResolution resolution, ConnectionPairCandidate? inferredPair = null)
@@ -878,7 +901,10 @@ internal static class XlsxMermaidProjection
                         : new VisualConnectionEvidence(sourceShape is null ? "xlsx-cell-layout" : "xlsx-directional-geometry",
                             "High", .99, ArrowheadEvidence: "end", ClusterId: worksheet.Name)));
             if (sourceShape is not null)
+            {
                 visualEdgeSourceIds[sourceShape.Id] = edgeId;
+                consumedShapeIds.Add(sourceShape.Id);
+            }
             if (!string.IsNullOrWhiteSpace(edgeLabel))
                 visualLabels.Add(("label:" + visualLabels.Count.ToString(System.Globalization.CultureInfo.InvariantCulture), edgeLabel,
                     sourceShape is null ? new SourceAnchor("xlsx", worksheet.PartUri,
@@ -1403,8 +1429,14 @@ internal static class XlsxMermaidProjection
     }
 
     private enum Direction { Left, Right, Up, Down }
+    // P-Overlay (XLSX) F-B: ConsumedShapeIds is the set of DrawingShapes this projection actually
+    // turned into diagram nodes/edges -- null means "undetermined" (XlsxAdapter.Extract then falls
+    // back to skipping schedule-overlay detection for the whole sheet, its pre-F-B safety net), a
+    // non-null (possibly empty) set is authoritative: any shape NOT in it is still eligible for
+    // schedule-overlay folding even though this sheet also has a diagram. A diagram built purely
+    // from cell text (no DrawingShapes involved at all) reports an explicit empty set.
     private sealed record DiagramProjection(string Type, string Mermaid, int MinRow, int MaxRow, string Source,
-        VisualGraph? VisualGraph = null);
+        VisualGraph? VisualGraph = null, IReadOnlySet<string>? ConsumedShapeIds = null);
     private sealed record StateTransition(string Source, string Target, string Event, string Guard);
     private sealed record InterfaceEdge(FlowNode Source, FlowNode Target, string Label);
     private sealed record SequenceLine(int Row, int Column, string? Text);

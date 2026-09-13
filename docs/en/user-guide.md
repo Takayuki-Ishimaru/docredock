@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.6 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.7 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -94,6 +94,8 @@ Check local capabilities with doctor. It is outside the experimental gate and re
     docredock doctor --json
 
 ready means the dependency was probed and is available, partial means only some functions (or OCR languages) are available, and unavailable means a dependency is missing or disabled. Native PDF OCR may still be partial when page content is unclear. Image-only PDF OCR needs both an OCR engine and a PDF rasterizer. Discovery checks an explicit path (DOCREDOCK_PDF_RASTERIZER), then pdftoppm, then mutool on PATH. Set DOCREDOCK_DISABLE_PDF_RASTERIZER=1 to disable discovery. If unavailable, install pdftoppm or mutool, or configure the executable path. Processing remains local and does not use the network. Raster fallback is bounded to 100 paths and 32,768 characters per page; native text is retained when fallback is compacted.
+
+**Enabling OCR on Windows.** Windows Media OCR (the native provider reported as `ocr-native`/`windows-media`) needs the OCR language feature for each language, which is a separate optional Windows component from the display language — installing Japanese as a display language does not install Japanese OCR. Check what is actually installed with `docredock doctor` (or `docredock doctor --json`): once a usable language pack is found, `ocr-native` reports `ready`, and its `action` text names exactly which language is still missing and how to add it. To install a language pack, use Settings > Time & Language > Language & region > Add a language > (language) > Options > "Optical character recognition" ("光学式文字認識 (OCR)" for Japanese), or run `Add-WindowsCapability -Online -Name Language.OCR~~~ja-JP~0.0.1.0` (Japanese) / `Language.OCR~~~en-US~0.0.1.0` (English) from an elevated PowerShell. The PDF rasterizer (pdftoppm/mutool) is unrelated to this: it is needed only to OCR image-only PDF pages, never for OCR of images embedded in DOCX/XLSX/PPTX or of PDF pages that already carry native text, so a missing rasterizer no longer disables the OCR toggle. If Windows Media OCR is unavailable, install Tesseract as a portable alternative (see [Supported features](supported-features.md)).
 
 Every capability carries a tier, `required` (docx-readable, xlsx-readable, pptx-readable, pdf-text) or `optional` (everything else, including OCR, the PDF rasterizer, and mermaid-render). Plain `docredock doctor` and `docredock doctor --json` always return the same exit code: 0 when every required capability is ready, 1 otherwise; optional gaps are reported but never change this exit code. Add `--strict` to fail (exit 1) on any capability that is not ready, including optional ones — except when an optional gap is already covered by a ready alternative, reported as `satisfied_by`. For example, on a platform with no bundled native OCR helper, `ocr-native` reports `satisfied_by: "tesseract"` once Tesseract is ready, and `--strict` does not fail on that gap; a `partial` alternative never counts as satisfying it. The JSON report adds `tier`, `satisfied_by`, `strict`, `exit_code`, and a `summary` (`required_ready`, `optional_gaps`, `strict_failures`) alongside the existing fields.
 

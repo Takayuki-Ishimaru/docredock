@@ -76,14 +76,23 @@ public sealed class MainWindowStartupTests
     }
 
     [AvaloniaFact]
-    public void Pdf_ocr_capability_is_explicitly_disabled_when_rasterizer_is_unavailable()
+    public void Pdf_ocr_capability_is_disabled_when_no_ocr_provider_is_available_at_all()
     {
+        // Both the Tesseract engine and the native OS provider are unavailable here, independent of
+        // the rasterizer, which is also forced unavailable via the env var below. This is the only
+        // combination that should disable the toggle.
         var previous = Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER");
         Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", "1");
+        var reporter = new CapabilityReporter(
+            _ => null,
+            (_, _, _) => Task.FromResult(new CapabilityProbeResult(false, string.Empty)),
+            () => new CapabilityStatus("ocr-native", "unavailable", "system",
+                Action: "No native OCR provider is bundled for this platform; install Tesseract."));
         MainWindow? window = null;
         try
         {
-            window = new MainWindow();
+            window = new MainWindow(new GuiWorkflowService(), reporter,
+                () => new CapabilityStatus("pdf-rasterizer", "unavailable", Action: "Install pdftoppm or mutool, or configure an executable path."));
             var ocrToggle = Get<ToggleSwitch>(window, "OcrToggle");
             var unavailable = Get<TextBlock>(window, "OcrUnavailableText");
 
@@ -98,6 +107,49 @@ public sealed class MainWindowStartupTests
             window?.Close();
             Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER", previous);
         }
+    }
+
+    [AvaloniaFact]
+    public void Pdf_ocr_capability_stays_enabled_when_the_rasterizer_is_unavailable_but_tesseract_is_ready()
+    {
+        // Regression test for the reported "OCR could not be enabled on Windows" bug: pdftoppm and
+        // mutool are rarely installed on Windows, but that must not disable OCR of images embedded
+        // in DOCX/XLSX/PPTX (or of Tesseract-OCR'd PDF pages) — only image-only PDF pages need the
+        // rasterizer. The toggle must stay enabled and explain the rasterizer gap as a side note.
+        var reporter = new CapabilityReporter(
+            name => name == "tesseract" ? "/tools/tesseract" : null,
+            (_, _, _) => Task.FromResult(new CapabilityProbeResult(true, "List of available languages in /data (2):\neng\njpn\n")),
+            () => new CapabilityStatus("ocr-native", "unavailable", "windows-media",
+                Action: "No Windows OCR language pack is installed."));
+        var window = new MainWindow(new GuiWorkflowService(), reporter,
+            () => new CapabilityStatus("pdf-rasterizer", "unavailable", Action: "Install pdftoppm or mutool, or configure an executable path."));
+        try
+        {
+            var ocrToggle = Get<ToggleSwitch>(window, "OcrToggle");
+            var status = Get<TextBlock>(window, "OcrUnavailableText");
+
+            Assert.True(ocrToggle.IsEnabled);
+            Assert.Contains("PDF OCR: Ready", status.Text, StringComparison.Ordinal);
+            Assert.Contains("pdftoppm", status.Text, StringComparison.Ordinal);
+        }
+        finally { window.Close(); }
+    }
+
+    [Fact]
+    public void Ocr_capability_decision_is_a_pure_function_independent_of_any_window()
+    {
+        // GuiWorkflowService.DescribeOcrCapability backs ApplyPdfOcrCapability above; exercising it
+        // directly (no AvaloniaFact/window needed) pins the same contract at the unit level.
+        var rasterizer = new CapabilityStatus("pdf-rasterizer", "unavailable", Action: "Install pdftoppm or mutool.");
+        var engineReady = new CapabilityStatus("ocr-engine", "ready", "tesseract");
+        var nativeUnavailable = new CapabilityStatus("ocr-native", "unavailable", "windows-media");
+        var jpn = new CapabilityStatus("ocr-jpn", "ready", "tesseract");
+        var eng = new CapabilityStatus("ocr-eng", "ready", "tesseract");
+
+        var decision = GuiWorkflowService.DescribeOcrCapability(rasterizer, engineReady, nativeUnavailable, jpn, eng);
+
+        Assert.True(decision.Enabled);
+        Assert.Contains("PDF OCR: Ready", decision.StatusText, StringComparison.Ordinal);
     }
 
     [AvaloniaFact]

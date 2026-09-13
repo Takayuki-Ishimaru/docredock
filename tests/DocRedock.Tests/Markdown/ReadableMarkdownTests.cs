@@ -904,6 +904,426 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("line one<br>line two\\|end", markdown, StringComparison.Ordinal);
     }
 
+    // P-Overlay: PptxAdapter resolves schedule-arrow/bar/marker/line/label shapes onto a table's
+    // grid as a "table_overlays" extension (see the table-overlay design spec's "出力側の契約"
+    // section). These build the minimal DocumentGraph shapes that extension requires without going
+    // through the real PptxAdapter -- see PptxScheduleOverlayFixtureTests for the real-fixture E2E.
+
+    [Fact]
+    public void Table_overlays_render_the_design_spec_example_exactly()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1"), new TableCell("9/2"), new TableCell("9/3"), new TableCell("9/4"), new TableCell("9/5")],
+            [new TableCell("設計"), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell("")],
+            [new TableCell("実装"), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell("")],
+            [new TableCell("リリース"), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell(""), new TableCell("")],
+        ],
+            new OverlaySpec("1", "arrow", "right", "horizontal", 1, 1, 1, 3, Text: "設計"),
+            new OverlaySpec("2", "bar", "none", "horizontal", 2, 2, 3, 5),
+            new OverlaySpec("3", "marker", "none", "horizontal", 3, 3, 5, 5, ShapePreset: "diamond"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-spec-example", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 9/1 | 9/2 | 9/3 | 9/4 | 9/5 |\n" +
+            "| --- | --- | --- | --- | --- | --- |\n" +
+            "| 設計 | 設計 ━━ | ━━ | ━━▶ |  |  |\n" +
+            "| 実装 |  |  | ━━ | ━━ | ━━ |\n" +
+            "| リリース |  |  |  |  | ◆ |\n",
+            markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_appends_marker_after_existing_cell_text()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("既存"), new TableCell("既存")],
+        ],
+            new OverlaySpec("1", "bar", "none", "horizontal", 1, 1, 1, 1));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-existing-text", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 既存 | 既存<br>━ |\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_multiple_writes_to_one_cell_append_in_array_order()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("行"), new TableCell("")],
+        ],
+            // Array order is (line, marker) even though "12" sorts after "9" as a shape id -- the
+            // extraction side is what sorts table_overlays; the serializer must trust that order
+            // verbatim rather than re-sorting by ShapeId itself.
+            new OverlaySpec("12", "line", "none", "horizontal", 1, 1, 1, 1),
+            new OverlaySpec("9", "marker", "none", "horizontal", 1, 1, 1, 1, ShapePreset: "ellipse"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-stack-order", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 行 | ─<br>● |\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_vertical_arrow_spans_header_through_last_row_alongside_a_label()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("要件定義"), new TableCell("")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            new OverlaySpec("1", "arrow", "down", "vertical", 0, 2, 1, 1),
+            new OverlaySpec("2", "label", "none", "horizontal", 1, 1, 0, 0, Text: "注記"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-vertical-header", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 9/1<br>│ |\n" +
+            "| --- | --- |\n" +
+            "| 要件定義<br>注記 | │ |\n" +
+            "| 設計 | ▼ |\n",
+            markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_vertical_arrow_spanning_two_columns_labels_only_the_start_cell()
+    {
+        // F-C: pins label placement for a vertical arrow spanning MORE than one column (2 columns
+        // x 3 rows here). ApplyTableOverlays' isLabelSlot check only ever writes the overlay's own
+        // Text into the (StartRow, StartColumn) slot; every other slot the overlay covers --
+        // including the neighbouring column on that very same row -- gets the bare row-position
+        // glyph (OverlayGlyph's vertical branch repeats the same glyph across every covered
+        // column, per its own doc comment on "the unusual case of a vertical overlay spanning more
+        // than one column").
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1"), new TableCell("9/2")],
+            [new TableCell("要件定義"), new TableCell(""), new TableCell("")],
+            [new TableCell("設計"), new TableCell(""), new TableCell("")],
+            [new TableCell("実装"), new TableCell(""), new TableCell("")],
+        ],
+            new OverlaySpec("1", "arrow", "down", "vertical", 1, 3, 1, 2, Text: "本日"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-vertical-two-columns", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 9/1 | 9/2 |\n" +
+            "| --- | --- | --- |\n" +
+            "| 要件定義 | 本日 │ | │ |\n" +
+            "| 設計 | │ | │ |\n" +
+            "| 実装 | ▼ | ▼ |\n",
+            markdown, StringComparison.Ordinal);
+        // Exactly the six slots above carry overlay content: one label (sharing its slot with a
+        // "│" glyph), three more bare "│" glyphs on StartRow's neighbouring column and the middle
+        // row's two columns, and two "▼" glyphs on the last row.
+        Assert.Equal(1, markdown.Split("本日", StringSplitOptions.None).Length - 1);
+        Assert.Equal(4, markdown.Split("│", StringSplitOptions.None).Length - 1);
+        Assert.Equal(2, markdown.Split("▼", StringSplitOptions.None).Length - 1);
+    }
+
+    [Fact]
+    public void Table_overlay_on_merged_cell_writes_once_to_the_origin_cell()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1"), new TableCell("9/2")],
+            [new TableCell("設計", RowSpan: 2), new TableCell("A", ColSpan: 2)],
+            [new TableCell(string.Empty, RowSpan: 0), new TableCell("B", ColSpan: 2)],
+        ],
+            // Vertical arrow over the rowspan cell: both grid rows resolve to the same origin, so
+            // only the first slot's glyph ("│", not the "▼" the second slot would have produced) is
+            // written -- once.
+            new OverlaySpec("1", "arrow", "down", "vertical", 1, 2, 0, 0),
+            // Horizontal bar over the colspan cell: both grid columns resolve to the same origin.
+            new OverlaySpec("2", "bar", "none", "horizontal", 1, 1, 1, 2));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-merged-cell", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 設計<br>│ | A<br>━━ |  |\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("|  | B |  |\n", markdown, StringComparison.Ordinal);
+        // If the merged-cell dedup were broken, the rowspan overlay would also have written the
+        // second slot's "▼" glyph, and the colspan overlay would have doubled its "━━" write.
+        Assert.DoesNotContain("▼", markdown, StringComparison.Ordinal);
+        Assert.Equal(1, markdown.Split("━━").Length - 1);
+    }
+
+    [Fact]
+    public void Table_overlay_host_shapes_are_suppressed_only_when_their_table_actually_renders()
+    {
+        var table = TableOverlayNode("host-table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            new OverlaySpec("1", "marker", "none", "horizontal", 1, 1, 1, 1, ShapePreset: "ellipse"));
+        // Absorbed: its host id matches the rendered table's own shape_id extension above, so it
+        // must not print a heading/paragraph or its rotation annotation.
+        var absorbed = OverlayHostShape("absorbed", 1, "host-table", "▲レビュー", rotationDegrees: 180);
+        // Orphaned: its host id does not match any table that actually reaches the switch, so it
+        // must still render exactly like an ordinary rotated shape would.
+        var orphaned = OverlayHostShape("orphaned", 2, "missing-host", "孤立注記", rotationDegrees: 90);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-suppression", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [table, absorbed, orphaned])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.DoesNotContain("▲レビュー", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("回転180", markdown, StringComparison.Ordinal);
+        Assert.Contains("孤立注記", markdown, StringComparison.Ordinal);
+        Assert.Contains("回転90", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_out_of_range_indices_are_ignored_without_throwing()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            // Wholly out of the 2x2 grid.
+            new OverlaySpec("1", "marker", "none", "horizontal", 9, 9, 9, 9, ShapePreset: "ellipse"),
+            // Partially out of range: only grid column 1 exists.
+            new OverlaySpec("2", "bar", "none", "horizontal", 1, 1, 1, 5));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-out-of-range", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // F5: the second overlay's EndColumn (5) clamps to the grid's single remaining column (1),
+        // so it renders as that column's single-column bar glyph ("━"), not the multi-column "━━"
+        // the un-clamped EndColumn would otherwise have implied.
+        Assert.Contains("| 設計 | ━ |\n", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("●", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_right_arrow_clamped_at_the_grid_edge_still_ends_in_its_arrowhead_glyph()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1"), new TableCell("9/2")],
+            [new TableCell("設計"), new TableCell(""), new TableCell("")],
+        ],
+            // EndColumn (10) is far past the 3-column grid (indices 0-2); after clamping to
+            // columns 1-2 the last surviving column must still render the arrowhead ("━━▶"), not
+            // lose it to a comparison against the un-clamped EndColumn (F5).
+            new OverlaySpec("1", "arrow", "right", "horizontal", 1, 1, 1, 10, Text: "設計"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-clamped-arrow", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 設計 | 設計 ━━ | ━━▶ |\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_marker_glyph_matches_shape_preset_case_insensitively()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            // The adapter classifies presets case-insensitively (ToLowerInvariant); a ShapePreset
+            // that reaches the serializer in mixed case must still resolve to its glyph (F6).
+            new OverlaySpec("1", "marker", "none", "horizontal", 1, 1, 1, 1, ShapePreset: "Ellipse"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-marker-case", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 設計 | ● |\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlays_extension_accepts_camelCase_property_names()
+    {
+        // F7: every other JSON reader in this file accepts both PascalCase and camelCase (see
+        // JsonString(paragraph, "Text", "text")); table_overlays must too, for all ten properties.
+        var overlaysJson = JsonSerializer.SerializeToElement(new[]
+        {
+            new Dictionary<string, object?>
+            {
+                ["shapeId"] = "1", ["text"] = "設計", ["kind"] = "arrow", ["direction"] = "right", ["axis"] = "horizontal",
+                ["startRow"] = 1, ["endRow"] = 1, ["startColumn"] = 1, ["endColumn"] = 1, ["shapePreset"] = "rightArrow",
+            },
+        });
+        var table = new DocumentNode("table", NodeKind.Table, null, 0, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ]),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["shape_id"] = JsonSerializer.SerializeToElement("table"),
+                ["table_overlays"] = overlaysJson,
+            });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-camel-case", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| 設計 | 設計 ━▶ |\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Table_overlay_label_text_is_escaped_exactly_like_ordinary_cell_text()
+    {
+        const string special = "A*B|C[D";
+        const string escaped = "A\\*B\\|C\\[D";
+        var overlayTable = TableOverlayNode("overlay-table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("行"), new TableCell("")],
+        ],
+            new OverlaySpec("1", "label", "none", "horizontal", 1, 1, 1, 1, Text: special));
+        var plainTable = new DocumentNode("plain-table", NodeKind.Table, null, 1, ContentLayer.Body, new TableNodeContent(
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("行"), new TableCell(special)],
+        ]));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-label-escaping", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [overlayTable, plainTable])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // Once from the overlay-produced label cell, once from the plain reference cell -- both
+        // must escape identically, with no extra escaping layered on top of the label.
+        Assert.Equal(2, markdown.Split(escaped).Length - 1);
+        Assert.DoesNotContain(special, markdown, StringComparison.Ordinal);
+    }
+
+    // P-ShapeGrid: PptxAdapter synthesizes a NodeKind.Table (ContentLayer.Derived,
+    // shape_grid_table=true) from a grid of adjacent rectangle shapes (see shape-grid-table-spec.md
+    // and PptxAdapterTests for the real-extraction-side coverage). These build the minimal
+    // DocumentGraph shapes that requires directly, without going through PptxAdapter, to pin down
+    // two output-side contracts: (1) a Derived Table still renders as a normal GFM table under the
+    // default (visible) content policy -- DocumentContentPolicyRules.Includes already includes
+    // ContentLayer.Derived outside the Sanitized policy, same as the existing "Visual flow" Derived
+    // Diagram node, so no serializer change was needed for this half; (2) a member shape
+    // (table_grid_member_host) is suppressed by the same mechanism as an overlay's
+    // table_overlay_host, keyed by the host table's own "shape_id" extension.
+
+    [Fact]
+    public void ShapeGrid_derived_table_renders_as_a_normal_table_and_suppresses_its_member_shapes()
+    {
+        var table = ShapeGridTableNode("grid-table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1"), new TableCell("9/2")],
+            [new TableCell("要件定義"), new TableCell(""), new TableCell("")],
+        ],
+            new OverlaySpec("10", "arrow", "right", "horizontal", 1, 1, 1, 2, Text: "要件定義"));
+        // Absorbed: a header-row member shape whose table_grid_member_host matches the rendered
+        // grid table's own shape_id -- its standalone paragraph must not appear.
+        var headerMember = GridMemberShape("header-member", 1, "grid:grid-table", "工程");
+        // A plain, unrelated shape elsewhere on the slide must still render normally.
+        var unrelated = new DocumentNode("unrelated", NodeKind.Shape, null, 2, ContentLayer.Body, new TextNodeContent("無関係な図形"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-shape-grid-derived", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [table, headerMember, unrelated])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 9/1 | 9/2 |\n" +
+            "| --- | --- | --- |\n" +
+            "| 要件定義 | 要件定義 ━━ | ━━▶ |\n",
+            markdown, StringComparison.Ordinal);
+        // The header member's own "工程" text lives only inside the table cell above -- suppressed,
+        // it must not ALSO appear a second time as its own standalone paragraph.
+        Assert.Equal(1, markdown.Split("工程", StringSplitOptions.None).Length - 1);
+        Assert.Contains("無関係な図形", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ShapeGrid_member_host_shapes_are_suppressed_only_when_their_grid_table_actually_renders()
+    {
+        var table = ShapeGridTableNode("grid-table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            new OverlaySpec("10", "marker", "none", "horizontal", 1, 1, 1, 1, ShapePreset: "diamond"));
+        // Absorbed: its host id matches the rendered grid table's own shape_id extension above.
+        var absorbed = GridMemberShape("absorbed", 1, "grid:grid-table", "設計");
+        // Orphaned: its host id does not match any table that actually reaches the switch (e.g. the
+        // content policy dropped it), so it must still render exactly like an ordinary shape would.
+        var orphaned = GridMemberShape("orphaned", 2, "grid:missing-host", "孤立した図形");
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-shape-grid-suppression", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [table, absorbed, orphaned])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        // "設計" appears once, from the table's own row-label cell -- the absorbed member shape's
+        // duplicate copy of that same text must not also render as a standalone paragraph.
+        Assert.Equal(1, markdown.Split("設計", StringSplitOptions.None).Length - 1);
+        Assert.Contains("孤立した図形", markdown, StringComparison.Ordinal);
+    }
+
+    // G10 test rework: the test above proves host-presence suppression using a deliberately FAKE,
+    // never-rendered host id ("grid:missing-host"). This proves the SAME generic mechanism also
+    // reacts correctly to a REAL match whose host stops rendering for an entirely different,
+    // realistic reason -- the Sanitized content policy drops every ContentLayer.Derived node
+    // outright (DocumentContentPolicyRules.Includes), including this synthesized grid table; once
+    // that happens, the member shape's own table_grid_member_host id no longer names anything that
+    // actually rendered, so its paragraph must revive exactly as if the host had never existed.
+    [Fact]
+    public void ShapeGrid_member_paragraph_revives_under_sanitized_policy_using_the_real_host_id()
+    {
+        var table = ShapeGridTableNode("grid-table", 0,
+        [
+            [new TableCell("工程"), new TableCell("9/1")],
+            [new TableCell("設計"), new TableCell("")],
+        ],
+            new OverlaySpec("10", "marker", "none", "horizontal", 1, 1, 1, 1, ShapePreset: "diamond"));
+        var member = GridMemberShape("member", 1, "grid:grid-table", "設計");
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-shape-grid-sanitized", DocumentFormatKind.Pptx,
+            [new DocumentPartition("slide1", 0, [table, member])]);
+
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ContentPolicy: "sanitized")).Serialize(graph);
+
+        // The Derived table itself is gone under Sanitized -- no GFM table row survives.
+        Assert.DoesNotContain("| 工程 | 9/1 |", markdown, StringComparison.Ordinal);
+        // ...and the member's own "設計" text -- no longer suppressed by a host that never
+        // rendered -- must still appear somewhere in the output.
+        Assert.Contains("設計", markdown, StringComparison.Ordinal);
+    }
+
+    private static DocumentNode ShapeGridTableNode(string id, int order, IReadOnlyList<IReadOnlyList<TableCell>> rows, params OverlaySpec[] overlays) => new(
+        id, NodeKind.Table, null, order, ContentLayer.Derived, new TableNodeContent(rows),
+        Editability: NodeEditability.Protected,
+        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["shape_id"] = JsonSerializer.SerializeToElement("grid:" + id),
+            ["shape_grid_table"] = JsonSerializer.SerializeToElement(true),
+            ["synthesized_from_shapes"] = JsonSerializer.SerializeToElement(Array.Empty<string>()),
+            ["table_overlays"] = JsonSerializer.SerializeToElement(overlays),
+        });
+
+    private static DocumentNode GridMemberShape(string id, int order, string hostShapeId, string text) => new(
+        id, NodeKind.Shape, null, order, ContentLayer.Body, new TextNodeContent(text),
+        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["table_grid_member_host"] = JsonSerializer.SerializeToElement(hostShapeId),
+        });
+
     [Fact]
     public void Heading_and_list_item_escape_underscore_and_asterisk()
     {
@@ -1096,4 +1516,135 @@ public sealed class ReadableMarkdownTests
     private static DocumentNode Node(string id, NodeKind kind, int order, string value, params (string Key, int Value)[] extensions) => new(
         id, kind, null, order, ContentLayer.Body, new TextNodeContent(value),
         Extensions: extensions.ToDictionary(item => item.Key, item => JsonSerializer.SerializeToElement(item.Value), StringComparer.Ordinal));
+
+    // P-Overlay test helpers: mirror the PptxTableOverlay JSON contract (PascalCase properties,
+    // see table-overlay-spec.md) without depending on the real PptxAdapter record type.
+    private sealed record OverlaySpec(
+        string ShapeId, string Kind, string Direction, string Axis,
+        int StartRow, int EndRow, int StartColumn, int EndColumn,
+        string Text = "", string? ShapePreset = null);
+
+    private static DocumentNode TableOverlayNode(string id, int order, IReadOnlyList<IReadOnlyList<TableCell>> rows, params OverlaySpec[] overlays) => new(
+        id, NodeKind.Table, null, order, ContentLayer.Body, new TableNodeContent(rows),
+        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["shape_id"] = JsonSerializer.SerializeToElement(id),
+            ["table_overlays"] = JsonSerializer.SerializeToElement(overlays),
+        });
+
+    private static DocumentNode OverlayHostShape(string id, int order, string hostShapeId, string text, double rotationDegrees = 0) => new(
+        id, NodeKind.Shape, null, order, ContentLayer.Body, new TextNodeContent(text),
+        Geometry: new Geometry("pptx-emu", 0, 0, 100, 100, rotationDegrees),
+        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["table_overlay_host"] = JsonSerializer.SerializeToElement(hostShapeId),
+            ["table_overlay"] = JsonSerializer.SerializeToElement(true),
+        });
+
+    // P-Overlay (XLSX): XlsxAdapter.DetectSheetOverlays emits one NodeKind.Shape node per overlay
+    // (not an array extension on the table the way PptxAdapter does) with a "sheet_overlay"
+    // extension holding the XlsxSheetOverlay JSON (PascalCase). These build that shape directly,
+    // without going through the real XlsxAdapter -- see XlsxScheduleOverlayFixtureTests for the
+    // real-fixture E2E and XlsxAdapterTests for extraction-side coverage.
+    private static DocumentNode SheetOverlay(string id, int order, string shapeId, string text, string kind, string direction, string axis,
+        int startRow, int endRow, int startColumn, int endColumn, string? shapePreset = null, string? sheetState = null) => new(
+        id, NodeKind.Shape, null, order, ContentLayer.Hidden, new TextNodeContent(text),
+        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["sheet_name"] = JsonSerializer.SerializeToElement("スケジュール"),
+            ["shape_id"] = JsonSerializer.SerializeToElement(shapeId),
+            ["table_overlay"] = JsonSerializer.SerializeToElement(true),
+            ["sheet_overlay"] = JsonSerializer.SerializeToElement(new
+            {
+                ShapeId = shapeId, Text = text, Kind = kind, Direction = direction, Axis = axis,
+                StartRow = startRow, EndRow = endRow, StartColumn = startColumn, EndColumn = endColumn, ShapePreset = shapePreset,
+            }),
+        }.Concat(sheetState is null ? [] : new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["sheet_state"] = JsonSerializer.SerializeToElement(sheetState) })
+            .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));
+
+    [Fact]
+    public void Sheet_overlay_shape_folds_into_covered_cells_and_synthesizes_blank_columns()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-sheet-overlay", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-スケジュール", 0,
+            [
+                Cell("B1", 1, 1, "工程"), Cell("C1", 1, 2, "担当"), Cell("D1", 1, 3, "9/1"), Cell("E1", 1, 4, "9/2"),
+                Cell("F1", 1, 5, "9/3"), Cell("G1", 1, 6, "9/4"), Cell("H1", 1, 7, "9/5"), Cell("I1", 1, 8, "9/8"),
+                Cell("B2", 2, 1, "設計"), Cell("C2", 2, 2, "佐藤"),
+                SheetOverlay("overlay-1", 10, "3", "設計", "arrow", "right", "horizontal", 2, 2, 4, 6),
+            ]),
+        ]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 担当 | 9/1 | 9/2 | 9/3 | 9/4 | 9/5 | 9/8 |\n" +
+            "| --- | --- | --- | --- | --- | --- | --- | --- |\n" +
+            "| 設計 | 佐藤 |  | 設計 ━━ | ━━ | ━━▶ |  |  |\n",
+            markdown, StringComparison.Ordinal);
+        // The overlay's own Shape node never prints as a separate block -- SerializeWorkbook has no
+        // code path that renders a NodeKind.Shape node at all, so the table above is everything.
+        Assert.Equal(2, markdown.Split("設計").Length - 1); // the row label, and the overlay's own label
+    }
+
+    [Fact]
+    public void Sheet_overlay_appends_marker_after_an_existing_cells_text()
+    {
+        // Mirrors schedule-arrows.xlsx's own today-line connector: a vertical overlay spanning the
+        // header row down through the last data row, so the header cell's own date text ("9/3")
+        // must gain the marker as a second, "\n"-joined line rather than replacing it.
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-sheet-overlay-merge", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-スケジュール", 0,
+            [
+                Cell("B1", 1, 1, "工程"), Cell("C1", 1, 2, "担当"), Cell("D1", 1, 3, "9/1"), Cell("E1", 1, 4, "9/2"),
+                Cell("B2", 2, 1, "要件定義"), Cell("C2", 2, 2, "山田"),
+                Cell("B3", 3, 1, "設計"), Cell("C3", 3, 2, "佐藤"),
+                SheetOverlay("overlay-1", 10, "7", string.Empty, "arrow", "down", "vertical", 1, 3, 4, 4),
+            ]),
+        ]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| 工程 | 担当 | 9/1 | 9/2<br>│ |\n" +
+            "| --- | --- | --- | --- |\n" +
+            "| 要件定義 | 山田 |  | │ |\n" +
+            "| 設計 | 佐藤 |  | ▼ |\n",
+            markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Sheet_overlay_on_a_genuinely_hidden_sheet_stays_excluded_under_the_default_visible_policy()
+    {
+        // The IsAlwaysReadableSheetOverlay bypass (ReadableMarkdownSerializer.Serialize) must not
+        // leak a hidden *sheet*'s content through just because one of its nodes is a sheet_overlay
+        // Shape -- XlsxAdapter.Extract stamps a "sheet_state" extension (not "visible") on every
+        // node of a hidden sheet, cell nodes included, so with the cell also hidden there is
+        // nothing left to fold the marker into either way.
+        var hiddenCell = Cell("B2", 2, 1, "設計") with
+        {
+            Layer = ContentLayer.Hidden,
+            Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            {
+                ["row"] = JsonSerializer.SerializeToElement(2),
+                ["column"] = JsonSerializer.SerializeToElement(1),
+                ["sheet_state"] = JsonSerializer.SerializeToElement("hidden"),
+            },
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-sheet-overlay-hidden-sheet", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-非表示", 0,
+            [
+                hiddenCell,
+                SheetOverlay("overlay-1", 10, "3", "設計", "arrow", "right", "horizontal", 2, 2, 1, 1, sheetState: "hidden"),
+            ]),
+        ]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.DoesNotContain("設計", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("━", markdown, StringComparison.Ordinal);
+    }
 }

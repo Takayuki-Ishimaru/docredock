@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using DocRedock.Core.Documents;
-using DocRedock.Markdown;
 using DocRedock.Render.Fonts;
 
 namespace DocRedock.Render;
@@ -46,17 +45,6 @@ public sealed record RenderReport(string Operation, RenderFormat Format, string 
 public sealed class MarkdownRenderer
 {
     private const int MaxMermaidDiagrams = 32;
-    // The 32 ASCII punctuation characters CommonMark allows a backslash to escape, in code-point
-    // order. While inline text is tokenized, an escaped one is stood in for by the Unicode
-    // noncharacter U+FDD0 + its index here: the U+FDD0..U+FDEF block is reserved by Unicode for
-    // exactly this kind of internal, never-interchanged use, so unlike a private-use character it
-    // can never collide with a symbol-font glyph that a source document legitimately contains.
-    private const string AsciiPunctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
-    private const char PlaceholderBase = '\uFDD0';
-    private const char PlaceholderLast = '\uFDEF';
-    private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*|_(?<emUnderscore>[^_\r\n]+)_",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private readonly IMermaidRenderer mermaidRenderer;
 
     public MarkdownRenderer(IMermaidRenderer? mermaidRenderer = null) =>
@@ -231,8 +219,12 @@ public sealed class MarkdownRenderer
     private static void WriteHtml(MarkdownDocument document, string path, RenderOptions? options, bool sanitizedDocRedock)
     {
         var sourceTitle = options?.Title ?? document.Blocks.OfType<MarkdownHeading>().FirstOrDefault()?.Text ?? "DocRedock Preview";
-        var title = Regex.Replace(Regex.Replace(sourceTitle, @"<[^>]+>", " ", RegexOptions.CultureInvariant), @"[*_`~]+", string.Empty, RegexOptions.CultureInvariant);
-        title = Regex.Replace(title, @"\s+", " ", RegexOptions.CultureInvariant).Trim();
+        // Raw markup is dropped from the SOURCE text first, so a tag the author wrote survives as a
+        // tag and is removed, while the same tag written as "&lt;u&gt;" is text and is kept. The
+        // shared inline reader then removes the Markdown delimiters and resolves the character
+        // references, which is what makes the title read exactly like the heading it came from.
+        var stripped = Regex.Replace(sourceTitle, @"<[^>]+>", " ", RegexOptions.CultureInvariant);
+        var title = Regex.Replace(MarkdownInlineParser.PlainText(stripped), @"\s+", " ", RegexOptions.CultureInvariant).Trim();
         var language = ContainsNonAscii(document) ? "ja" : "en";
         var output = new StringBuilder(16_384);
         output.Append("<!doctype html><html lang=\"").Append(language).Append("\"><head><meta charset=\"utf-8\">")
@@ -258,7 +250,7 @@ public sealed class MarkdownRenderer
         if (sanitizedDocRedock)
             output.AppendLine("<div class=\"preview-bar\"><span class=\"preview-badge\">ROUNDTRIP PREVIEW</span><span class=\"preview-note\">編集用メタデータを隠し、復元対象の内容だけを表示しています。</span></div>");
         output.AppendLine("<main>");
-        string Inline(string value) => HtmlInline(value, options?.SourceDirectory, options?.RelativeLinkOutputPath ?? path);
+        string Inline(string value) => MarkdownInlineParser.Html(value, options?.SourceDirectory, options?.RelativeLinkOutputPath ?? path);
         foreach (var block in document.Blocks)
         {
             switch (block)
@@ -334,155 +326,10 @@ public sealed class MarkdownRenderer
         }
     }
 
-    private static string HtmlInline(string value, string? sourceDirectory = null, string? outputPath = null)
-    {
-        var protectedValue = ProtectEscapes(value);
-        var output = new StringBuilder(protectedValue.Length + 32);
-        var cursor = 0;
-        foreach (Match match in HtmlInlineToken.Matches(protectedValue))
-        {
-            output.Append(HtmlText(protectedValue[cursor..match.Index]));
-            var imageUrl = DecodePlaceholdersVerbatim(match.Groups["imageUrl"].Value);
-            var linkUrl = DecodePlaceholdersVerbatim(match.Groups["linkUrl"].Value);
-            if (match.Groups["safeTag"].Success) output.Append(match.Value);
-            else if (match.Groups["imageUrl"].Success && IsSafeHtmlUrl(imageUrl, image: true))
-                output.Append("<img class=\"inline-image\" loading=\"lazy\" src=\"").Append(Html(ResolveHtmlImageUrl(imageUrl, sourceDirectory, outputPath)))
-                    .Append("\" alt=\"").Append(Html(match.Groups["imageAlt"].Value)).Append("\">");
-            else if (match.Groups["linkUrl"].Success && IsSafeHtmlUrl(linkUrl, image: false))
-                output.Append("<a href=\"").Append(Html(linkUrl)).Append("\">").Append(Html(match.Groups["linkText"].Value)).Append("</a>");
-            else if (match.Groups["code"].Success) output.Append("<code>").Append(Html(match.Groups["code"].Value)).Append("</code>");
-            else if (match.Groups["strike"].Success) output.Append("<del>").Append(Html(match.Groups["strike"].Value)).Append("</del>");
-            else if (match.Groups["strong"].Success) output.Append("<strong>").Append(Html(match.Groups["strong"].Value)).Append("</strong>");
-            else if (match.Groups["em"].Success) output.Append("<em>").Append(Html(match.Groups["em"].Value)).Append("</em>");
-            else if (match.Groups["emUnderscore"].Success) output.Append("<em>").Append(Html(match.Groups["emUnderscore"].Value)).Append("</em>");
-            else output.Append(Html(match.Value));
-            cursor = match.Index + match.Length;
-        }
-        output.Append(HtmlText(protectedValue[cursor..]));
-        return output.ToString();
-    }
-
-    // CommonMark backslash escapes (https://spec.commonmark.org/current/#backslash-escapes): a
-    // backslash followed by an ASCII punctuation character is that literal character and must not
-    // start or end emphasis, code spans, links, or images; escapes are not processed inside code
-    // spans or link/image destinations. ReadableMarkdownSerializer.EscapeLiteral and
-    // DocRedockInlineMarkdown.Escape (D07) rely on the reader honouring this -- without it this
-    // renderer's own regex tokenizer (HtmlInlineToken above) has no notion of escaping and turns an
-    // escaped literal such as "\[LABEL\](url)" back into a live link with a stray backslash left
-    // over, and in a table cell the backslash was silently dropped upstream while the link stayed
-    // live (see MarkdownAstParser.SplitTableRow).
-    //
-    // Rather than teach the tokenizer's regex about escaping directly, every backslash-escaped
-    // punctuation character is replaced with an opaque placeholder in the Unicode Private Use Area
-    // (U+FDD0 plus the punctuation's index in AsciiPunctuation) before the regex ever runs. None of the regex's
-    // character classes (`[^\]]`, `[^`\r\n]`, a bare `*`, `_`, ...) can match a placeholder, so an
-    // escaped delimiter can no longer start or end syntax -- and an escaped closing bracket inside a
-    // link/image label (`[see \[spec\]](url)`) is simply skipped over by `[^\]]+` the same way,
-    // letting the existing regex find the real, unescaped delimiters with no extra bracket-matching
-    // logic. Html/HtmlText decode the placeholder back to the literal character wherever they emit
-    // text; link/image URLs instead go through DecodePlaceholdersVerbatim, which restores the
-    // original two-character "\X" sequence, since escapes are not processed inside a destination.
-    private static string ProtectEscapes(string value)
-    {
-        if (value.IndexOf('\\') < 0) return value;
-        var output = new StringBuilder(value.Length);
-        var index = 0;
-        while (index < value.Length)
-        {
-            var character = value[index];
-            if (character == '`')
-            {
-                // Mirrors HtmlInlineToken's own code-span rule exactly (a single backtick, one or
-                // more characters that are not a backtick/CR/LF, then a single backtick) so a span
-                // recognized here is always the span the tokenizer recognizes later. Escapes are not
-                // processed inside code spans, so the whole span is copied through untouched.
-                var close = -1;
-                for (var probe = index + 1; probe < value.Length; probe++)
-                {
-                    if (value[probe] == '`') { close = probe; break; }
-                    if (value[probe] is '\r' or '\n') break;
-                }
-                if (close > index + 1)
-                {
-                    output.Append(value, index, close - index + 1);
-                    index = close + 1;
-                    continue;
-                }
-                output.Append('`');
-                index++;
-                continue;
-            }
-            if (character == '\\' && index + 1 < value.Length && IsAsciiPunctuation(value[index + 1]))
-            {
-                output.Append((char)(PlaceholderBase + AsciiPunctuation.IndexOf(value[index + 1])));
-                index += 2;
-                continue;
-            }
-            output.Append(character);
-            index++;
-        }
-        return output.ToString();
-    }
-
-    private static bool IsAsciiPunctuation(char character) => AsciiPunctuation.IndexOf(character) >= 0;
-
-    private static bool IsPlaceholder(char character) => character is >= PlaceholderBase and <= PlaceholderLast;
-
-    private static string DecodePlaceholders(string value)
-    {
-        if (value.Length == 0) return value;
-        var output = new StringBuilder(value.Length);
-        foreach (var character in value)
-            output.Append(IsPlaceholder(character) ? AsciiPunctuation[character - PlaceholderBase] : character);
-        return output.ToString();
-    }
-
-    private static string DecodePlaceholdersVerbatim(string value)
-    {
-        if (value.Length == 0) return value;
-        var output = new StringBuilder(value.Length);
-        foreach (var character in value)
-        {
-            if (IsPlaceholder(character)) output.Append('\\').Append(AsciiPunctuation[character - PlaceholderBase]);
-            else output.Append(character);
-        }
-        return output.ToString();
-    }
-
-    private static string HtmlText(string value) => Html(value)
-        .Replace("  \n", "<br>\n", StringComparison.Ordinal)
-        .Replace("\n", " ", StringComparison.Ordinal);
-
-    private static string ResolveHtmlImageUrl(string value, string? sourceDirectory, string? outputPath)
-    {
-        if (string.IsNullOrWhiteSpace(sourceDirectory) || string.IsNullOrWhiteSpace(outputPath) ||
-            Uri.TryCreate(value, UriKind.Absolute, out _)) return value;
-        var decoded = Uri.UnescapeDataString(value).Replace('/', Path.DirectorySeparatorChar);
-        var sourceRoot = Path.GetFullPath(sourceDirectory);
-        var sourcePath = Path.GetFullPath(Path.Combine(sourceRoot, decoded));
-        var sourceRelative = Path.GetRelativePath(sourceRoot, sourcePath);
-        if (Path.IsPathRooted(sourceRelative) || sourceRelative == ".." ||
-            sourceRelative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
-            return "about:blank";
-        var relative = Path.GetRelativePath(Path.GetDirectoryName(Path.GetFullPath(outputPath))!, sourcePath).Replace('\\', '/');
-        return string.Join('/', relative.Split('/').Select(Uri.EscapeDataString));
-    }
-
-    private static bool IsSafeHtmlUrl(string value, bool image)
-    {
-        if (value.Length == 0 || value.StartsWith("//", StringComparison.Ordinal) || value.Contains('\0')) return false;
-        if (image && (value.StartsWith("data:image/png;base64,", StringComparison.OrdinalIgnoreCase) ||
-                      value.StartsWith("data:image/jpeg;base64,", StringComparison.OrdinalIgnoreCase) ||
-                      value.StartsWith("data:image/gif;base64,", StringComparison.OrdinalIgnoreCase) ||
-                      value.StartsWith("data:image/webp;base64,", StringComparison.OrdinalIgnoreCase))) return true;
-        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
-            return !Regex.IsMatch(value, @"^[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant);
-        return uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
-               uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) ||
-               !image && uri.Scheme.Equals(Uri.UriSchemeMailto, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string Html(string value) => System.Net.WebUtility.HtmlEncode(DecodePlaceholders(value));
+    // Every HTML encode in this writer goes through the one inline reader's encoder: the text it
+    // is given has already had its character references resolved, so encoding here is the single
+    // escape on the way out and "&amp;" can never become "&amp;amp;".
+    private static string Html(string value) => MarkdownInlineParser.Encode(value);
 
     private static string ValidateTemplate(string path, RenderFormat format)
     {
@@ -570,7 +417,7 @@ public sealed class MarkdownRenderer
                 case MarkdownList list: foreach (var item in list.Items) body.Add(WordParagraph(w, item, numbered: true)); break;
                 case MarkdownCodeBlock code:
                     foreach (var line in code.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n'))
-                        body.Add(WordParagraph(w, EscapeInlineLiteral(line), "Code"));
+                        body.Add(WordLiteralParagraph(w, line, "Code"));
                     break;
                 case MarkdownDiagram diagram:
                     diagramIndex++;
@@ -626,7 +473,18 @@ public sealed class MarkdownRenderer
             if (numbered) properties.Add(new XElement(w + "numPr", new XElement(w + "ilvl", new XAttribute(w + "val", "0")), new XElement(w + "numId", new XAttribute(w + "val", "1"))));
             paragraph.Add(properties);
         }
-        foreach (var run in DocRedockInlineMarkdown.Parse(inlineMarkdown).Runs) paragraph.Add(WordRun(w, run));
+        foreach (var run in MarkdownInlineParser.Runs(inlineMarkdown)) paragraph.Add(WordRun(w, run));
+        if (!paragraph.Elements(w + "r").Any()) paragraph.Add(new XElement(w + "r", new XElement(w + "t", string.Empty)));
+        return paragraph;
+    }
+
+    // A fenced code block is not inline Markdown: no syntax is read and no character reference is
+    // resolved, so "&amp;" and "[x](y)" reach the document exactly as the author wrote them.
+    private static XElement WordLiteralParagraph(XNamespace w, string literal, string styleId)
+    {
+        var paragraph = new XElement(w + "p",
+            new XElement(w + "pPr", new XElement(w + "pStyle", new XAttribute(w + "val", styleId))));
+        foreach (var run in MarkdownInlineParser.LiteralRuns(literal)) paragraph.Add(WordRun(w, run));
         if (!paragraph.Elements(w + "r").Any()) paragraph.Add(new XElement(w + "r", new XElement(w + "t", string.Empty)));
         return paragraph;
     }
@@ -817,7 +675,7 @@ public sealed class MarkdownRenderer
         foreach (var table in document.Blocks.OfType<MarkdownTable>()) { rows.Add(table.Headers.Select(PlainInlineText).ToArray()); rows.AddRange(table.Rows.Select(row => (IReadOnlyList<string>)row.Select(PlainInlineText).ToArray())); }
         if (rows.Count == 0)
         {
-            var text = document.Blocks.Select(block => block switch { MarkdownHeading heading => heading.Text, MarkdownParagraph paragraph => paragraph.Text, _ => null })
+            var text = document.Blocks.Select(block => block switch { MarkdownHeading heading => PlainInlineText(heading.Text), MarkdownParagraph paragraph => PlainInlineText(paragraph.Text), _ => null })
                 .Where(value => value is not null).Cast<string>().ToArray();
             if (text.Length > 0) rows.Add(text);
         }
@@ -881,10 +739,7 @@ public sealed class MarkdownRenderer
         var name = ""; for (var value = column + 1; value > 0; value = (value - 1) / 26) name = (char)('A' + (value - 1) % 26) + name; return name + (row + 1);
     }
 
-    private static string PlainInlineText(string value) => string.Concat(DocRedockInlineMarkdown.Parse(value).Runs.Select(run => run.Text));
-    private static string EscapeInlineLiteral(string value) => value.Replace("\\", "\\\\", StringComparison.Ordinal)
-        .Replace("*", "\\*", StringComparison.Ordinal).Replace("_", "\\_", StringComparison.Ordinal)
-        .Replace("~", "\\~", StringComparison.Ordinal).Replace("`", "\\`", StringComparison.Ordinal);
+    private static string PlainInlineText(string value) => MarkdownInlineParser.PlainText(value);
 
     private static PdfWriteResult WritePdf(MarkdownDocument document, string path, RenderOptions? options)
     {

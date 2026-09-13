@@ -71,13 +71,45 @@ public sealed record XlsxDrawingShapeRecord(
     long ToColumnOffset = 0,
     long ToRowOffset = 0,
     string? DrawingPartUri = null,
-    int AnchorIndex = 0)
+    int AnchorIndex = 0,
+    // --- P-Overlay (XLSX): table-overlay detection inputs (see
+    // table-overlay-spec-xlsx-docx-pdf.md "1. XLSX"). All optional/default-safe so the existing
+    // positional constructor call in ReadDrawingShapes keeps compiling.
+    double RotationDegrees = 0,
+    string? HeadArrow = null,
+    string? TailArrow = null,
+    bool IsTextBox = false,
+    bool IsHidden = false,
+    // X6: true when this shape's own grpSp is itself nested inside ANOTHER grpSp (two or
+    // more group levels deep). Computed in ReadDrawingShapes -- see the comment there --
+    // and consulted by DetectSheetOverlays to exclude these shapes from schedule-overlay
+    // candidacy, since only one level of group-transform resolution is implemented.
+    bool IsInNestedGroup = false)
 {
     /// <summary>Absolute worksheet-space bounds after anchor and metric resolution.</summary>
     public XlsxDrawingBounds? AbsoluteBounds => AbsoluteWidthEmu > 0 || AbsoluteHeightEmu > 0
         ? new(AbsoluteXEmu, AbsoluteYEmu, AbsoluteWidthEmu, AbsoluteHeightEmu)
         : null;
 }
+
+/// <summary>
+/// A shape (arrow/bar/marker/line/label) detected as visually overlaying a schedule table's
+/// row/column range on an XLSX worksheet -- the SpreadsheetML port of
+/// <see cref="DocRedock.Formats.OpenXml.Pptx.PptxTableOverlay"/> (see table-overlay-spec.md and
+/// table-overlay-spec-xlsx-docx-pdf.md "1. XLSX"). Unlike the PPTX record, Row/Column here are
+/// 1-based worksheet coordinates -- the same basis as the "row"/"column" extensions XlsxAdapter
+/// stamps on every <see cref="NodeKind.Cell"/> node -- End-inclusive. Serialized with default
+/// <see cref="JsonSerializer"/> options (PascalCase).
+/// </summary>
+public sealed record XlsxSheetOverlay(
+    string ShapeId,
+    string Text,
+    string Kind,
+    string Direction,
+    string Axis,
+    int StartRow, int EndRow,
+    int StartColumn, int EndColumn,
+    string? ShapePreset);
 
 public sealed record XlsxDrawingBounds(long XEmu, long YEmu, long WidthEmu, long HeightEmu)
 {
@@ -308,8 +340,54 @@ public sealed class XlsxAdapter
                     }
                 }
             }
-            else if (drawingShapes.Count > 0)
-                warnings.Add($"{sheet.Name}: {drawingShapes.Count} DrawingML shape(s) were retained but not projected as a diagram.");
+            if (drawingShapes.Count > 0)
+            {
+                // P-Overlay (XLSX) F-B: a diagram no longer forfeits the WHOLE sheet's overlay
+                // detection -- only the DrawingShapes it actually consumed (reported per diagram
+                // node via "visual_graph_member_shape_ids", the same convention DocxAdapter/
+                // PptxAdapter use) are excluded; every other shape, including one that happens to
+                // sit on the schedule table but has nothing to do with that diagram, is still a
+                // schedule-overlay candidate. consumedShapeIds stays null (safety net, matching the
+                // pre-F-B behavior of skipping the whole sheet) when any diagram on this sheet does
+                // not report what it consumed -- e.g. a sequence-diagram projection, whose shape
+                // usage (activation bars, note callouts, fragment frames, ...) is not tracked.
+                HashSet<string>? consumedShapeIds = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var diagram in diagrams)
+                {
+                    if (consumedShapeIds is null) break;
+                    if (diagram.Extensions is not null && diagram.Extensions.TryGetValue("visual_graph_member_shape_ids", out var raw))
+                    {
+                        try
+                        {
+                            var ids = raw.Deserialize<string[]>();
+                            if (ids is null) { consumedShapeIds = null; continue; }
+                            consumedShapeIds.UnionWith(ids);
+                            continue;
+                        }
+                        catch (JsonException) { /* fall through to undetermined */ }
+                    }
+                    consumedShapeIds = null;
+                }
+                if (consumedShapeIds is not null)
+                {
+                    var (sheetOverlays, overlayShapeIds) = DetectSheetOverlays(worksheet, consumedShapeIds);
+                    foreach (var (overlay, shape) in sheetOverlays)
+                        nodes.Add(ToSheetOverlayNode(sheet, overlay, shape, nodes.Count));
+                    // X3: this is the pre-P-Overlay "retained but not projected" warning -- its
+                    // original meaning was "this sheet's shapes never became anything", which only
+                    // applies when the sheet produced NO diagram at all. A sheet that DOES have a
+                    // diagram can still have leftover shapes that are neither diagram members nor
+                    // schedule overlays (e.g. purely decorative shapes); that is expected and not
+                    // worth a warning, so this must not fire for it.
+                    if (diagrams.Count == 0)
+                    {
+                        var remainingShapeCount = drawingShapes.Count(shape =>
+                            !overlayShapeIds.Contains(shape.Id) && !consumedShapeIds.Contains(shape.Id));
+                        if (remainingShapeCount > 0)
+                            warnings.Add($"{sheet.Name}: {remainingShapeCount} DrawingML shape(s) were retained but not projected as a diagram.");
+                    }
+                }
+            }
             foreach (var picture in pictures)
                 nodes.Add(ToPictureNode(sheet, picture, nodes.Count));
             foreach (var chart in charts)
@@ -387,20 +465,30 @@ public sealed class XlsxAdapter
         if (plan.Edits.Count == 0) return new(source, true, plan, Array.Empty<string>());
         var package = Open(source);
         var workbook = ReadWorkbook(package, ReadRelationships(package, "xl/_rels/workbook.xml.rels"));
+        // A formula ADDED or CHANGED by an edit is not the only way the calc chain goes stale: an
+        // edit that REMOVES an existing formula (a formula cell rewritten as a literal) leaves a
+        // calcChain.xml entry pointing at a cell that no longer has one, which is exactly the kind
+        // of inconsistency Excel's "we found a problem with some content" repair prompt flags. So
+        // this is tracked from the worksheet patch itself - it already knows, cell by cell, whether
+        // an <f> it is removing was there before the edit - rather than only from the edit's own
+        // (necessarily forward-looking) Formula field.
+        var calcChainNeedsInvalidation = plan.Edits.Any(edit => edit.Formula is not null);
         foreach (var editGroup in plan.Edits.GroupBy(x => x.SheetName, StringComparer.Ordinal))
         {
             var partUri = editGroup.Select(x => x.WorksheetPartUri).FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.TrimStart('/');
             var sheet = partUri is null ? workbook.Sheets.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.Name, editGroup.Key)) : workbook.Sheets.FirstOrDefault(x => StringComparer.Ordinal.Equals(x.PartUri, partUri));
             if (sheet is null) throw new InvalidDataException($"Worksheet not found: {editGroup.Key}");
             var xml = package[sheet.PartUri];
-            package[sheet.PartUri] = PatchWorksheet(xml, editGroup);
+            var (patched, removedFormula) = PatchWorksheet(xml, editGroup);
+            package[sheet.PartUri] = patched;
+            calcChainNeedsInvalidation |= removedFormula;
         }
         package["xl/workbook.xml"] = MarkWorkbookForRecalculation(package["xl/workbook.xml"]);
         var warnings = new List<string>
         {
             "Cell edits require formula recalculation; DocRedock requested a full calculation on the next workbook open without evaluating formulas."
         };
-        if (plan.Edits.Any(edit => edit.Formula is not null) && package.ContainsKey("xl/calcChain.xml"))
+        if (calcChainNeedsInvalidation && package.ContainsKey("xl/calcChain.xml"))
         {
             package["xl/calcChain.xml"] = Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?><calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>");
             warnings.Add("Formula edits invalidated the calculation chain; no formula was evaluated by DocRedock.");
@@ -541,6 +629,352 @@ public sealed class XlsxAdapter
         return new("n_" + Hash($"{sheet.Name}!chart:{chart.DrawingPartUri}:{chart.Id}:{chart.RelationshipId}")[..16], NodeKind.Chart, null, order,
             chart.IsHidden ? ContentLayer.Hidden : ContentLayer.Body, new TextNodeContent(chart.Title ?? chart.Name), new SourceAnchor("xlsx", sheet.PartUri, locators),
             Editability: NodeEditability.Protected, Provenance: [new ProvenanceItem(EvidenceKind.Native)], Extensions: extension);
+    }
+
+    private static DocumentNode ToSheetOverlayNode(SheetInfo sheet, XlsxSheetOverlay overlay, XlsxDrawingShapeRecord shape, int order)
+    {
+        var bounds = shape.AbsoluteBounds!;
+        var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["sheet_name"] = JsonSerializer.SerializeToElement(sheet.Name),
+            ["shape_id"] = JsonSerializer.SerializeToElement(overlay.ShapeId),
+            ["sheet_overlay"] = JsonSerializer.SerializeToElement(overlay),
+            ["table_overlay"] = JsonSerializer.SerializeToElement(true),
+        };
+        if (!string.IsNullOrWhiteSpace(overlay.ShapePreset)) extension["shape_preset"] = JsonSerializer.SerializeToElement(overlay.ShapePreset);
+        return new(
+            "n_" + Hash($"{sheet.Name}!overlay:{overlay.ShapeId}")[..16],
+            NodeKind.Shape,
+            null,
+            order,
+            // P-Overlay (XLSX): ContentLayer.Hidden is a deliberate, load-bearing choice, not a
+            // "this is hidden content" judgment -- these shapes are ordinary, visible schedule
+            // arrows/bars. Xlsx drawings never became DocumentNodes before this feature, so
+            // introducing a brand-new Shape node here would, under any layer the generic "visible"
+            // DocumentContentPolicyRules.Includes gate keeps (Body/Furniture/Derived all pass that
+            // gate identically), start rendering a new, disconnected block in the DRMD/roundtrip
+            // projection (DocRedockMarkdown.cs) -- which this feature intentionally does not
+            // touch, and which applies that exact same gate. Hidden is the one layer value that
+            // gate always excludes by default, keeping DRMD/roundtrip output byte-for-byte
+            // unaffected. ReadableMarkdownSerializer.Serialize carries a narrow, extension-keyed
+            // bypass (see IsAlwaysReadableSheetOverlay) so its own ReadRows can still see this node
+            // and fold its marker into the covered cell -- read that comment alongside this one.
+            ContentLayer.Hidden,
+            new TextNodeContent(overlay.Text),
+            new SourceAnchor("xlsx", sheet.PartUri, [new AnchorLocator("shape_id", overlay.ShapeId)]),
+            Geometry: new Geometry("xlsx-emu", bounds.XEmu, bounds.YEmu, bounds.WidthEmu, bounds.HeightEmu),
+            Editability: NodeEditability.Protected,
+            Provenance: [new ProvenanceItem(EvidenceKind.Native)],
+            Extensions: extension);
+    }
+
+    // -------------------------------------------------------------------------------------------
+    // P-Overlay (XLSX port of PptxAdapter.DetectTableOverlays -- see table-overlay-spec.md and
+    // table-overlay-spec-xlsx-docx-pdf.md "1. XLSX"). The small preset/rotation/axis-range helpers
+    // below intentionally duplicate PptxAdapter's private ones (OverlayArrowPresets,
+    // IsOverlayMarkerPreset, RotateAndFlipOverlayDirection, ComputeOverlayAxisRange, ...) instead
+    // of factoring a shared Common/ helper: this task's constraints forbid touching PptxAdapter.cs,
+    // and extracting a shared class would require editing it (removing the methods it currently
+    // owns) to avoid two divergent copies living side by side. A few pieces are genuinely
+    // XLSX-specific rather than mechanical copies: there is no "host table" shape to test AABB
+    // containment against (Xlsx has no native table element backing a schedule grid), so
+    // coverage is resolved directly against the worksheet's own column/row metrics, and the "is
+    // this shape sitting on a table" gate is the left-label/above-header test from the spec
+    // instead of PPTX's table-AABB containment ratio.
+    // -------------------------------------------------------------------------------------------
+
+    private static readonly (string Preset, string Direction, string Axis)[] SheetOverlayArrowPresets =
+    [
+        ("rightarrow", "right", "horizontal"), ("notchedrightarrow", "right", "horizontal"),
+        ("stripedrightarrow", "right", "horizontal"), ("homeplate", "right", "horizontal"), ("chevron", "right", "horizontal"),
+        ("leftarrow", "left", "horizontal"),
+        ("uparrow", "up", "vertical"),
+        ("downarrow", "down", "vertical"),
+        ("leftrightarrow", "both", "horizontal"),
+        ("updownarrow", "both", "vertical"),
+    ];
+    private static readonly string[] SheetOverlayMarkerPresets =
+        ["diamond", "flowchartdecision", "ellipse", "flowchartconnector", "triangle", "flowchartoffpageconnector"];
+    private static readonly string[] SheetOverlayDirectionCycle = ["right", "down", "left", "up"];
+
+    private static bool IsSheetOverlayMarkerPreset(string preset) =>
+        SheetOverlayMarkerPresets.Contains(preset) ||
+        (preset.StartsWith("star", StringComparison.Ordinal) && preset.Length > 4 && preset[4..].All(char.IsAsciiDigit));
+
+    private static (IReadOnlyList<(XlsxSheetOverlay Overlay, XlsxDrawingShapeRecord Shape)> Overlays, HashSet<string> OverlayShapeIds)
+        DetectSheetOverlays(XlsxWorksheetRecord worksheet, IReadOnlySet<string>? excludedShapeIds = null)
+    {
+        var empty = (Overlays: (IReadOnlyList<(XlsxSheetOverlay, XlsxDrawingShapeRecord)>)[], OverlayShapeIds: new HashSet<string>(StringComparer.Ordinal));
+        if (worksheet.DrawingShapes is not { Count: > 0 } shapes || worksheet.Metrics is not { } metrics) return empty;
+
+        // F3(a) (spec parity with PptxAdapter.DetectTableOverlays): a shape natively wired as any
+        // connector's start or end point is always that connector's diagram node (see the real
+        // 開始/完了/実データフロー接続 flow in the "グループ" fixture sheet), never schedule-overlay
+        // content, however much it happens to overlap the table.
+        var wiredShapeIds = shapes.Where(shape => shape.IsConnector)
+            .SelectMany(shape => new[] { shape.StartConnectionId, shape.EndConnectionId })
+            .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
+        var mergeOrigins = BuildSheetMergeOriginLookup(worksheet.Cells);
+
+        var overlays = new List<(XlsxSheetOverlay Overlay, XlsxDrawingShapeRecord Shape)>();
+        var overlayShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var shape in shapes)
+        {
+            // X6: see IsInNestedGroup's definition in ReadDrawingShapes for why a doubly-nested
+            // group child is never a schedule-overlay candidate.
+            if (shape.IsHidden || shape.IsInNestedGroup || wiredShapeIds.Contains(shape.Id)) continue;
+            // P-Overlay (XLSX) F-B: a shape XlsxMermaidProjection actually turned into a diagram
+            // node/edge on this sheet is that diagram's content, never schedule-overlay content --
+            // even though this sheet also has a table (see the "グループ" fixture sheet's real
+            // 開始/完了 flow, which sits well below the table it shares a worksheet with).
+            if (excludedShapeIds is not null && excludedShapeIds.Contains(shape.Id)) continue;
+            // A connector wired to both a start AND an end shape is a native diagram edge (an
+            // existing graph relationship), not schedule-overlay content -- leave it alone.
+            if (shape.IsConnector && shape.StartConnectionId is not null && shape.EndConnectionId is not null) continue;
+            if (shape.AbsoluteBounds is not { } bounds) continue;
+
+            var (x, y, width, height) = EffectiveSheetOverlayAabb(bounds.XEmu, bounds.YEmu, bounds.WidthEmu, bounds.HeightEmu, shape.RotationDegrees);
+            var (rawStartColumn, rawEndColumn) = ComputeSheetOverlayAxisRange(x, x + width, metrics, isColumn: true);
+            var (rawStartRow, rawEndRow) = ComputeSheetOverlayAxisRange(y, y + height, metrics, isColumn: false);
+
+            // Spec "結合セル": a covered cell inside a merged range is assigned to that range's
+            // origin cell; the overlay's final range is the bounding box of every covered cell's
+            // resolved origin (a no-op whenever nothing in the raw band is merged).
+            var rows = new List<int>(); var columns = new List<int>();
+            for (var row = rawStartRow; row <= rawEndRow; row++)
+            for (var column = rawStartColumn; column <= rawEndColumn; column++)
+            {
+                var origin = mergeOrigins.TryGetValue((row, column), out var mapped) ? mapped : (Row: row, Column: column);
+                rows.Add(origin.Row); columns.Add(origin.Column);
+            }
+            var startRow = rows.Min(); var endRow = rows.Max();
+            var startColumn = columns.Min(); var endColumn = columns.Max();
+
+            if (!IsSheetOverlayOnTable(startRow, endRow, startColumn, endColumn, worksheet.Cells)) continue;
+
+            overlays.Add((ClassifySheetOverlay(shape, startRow, endRow, startColumn, endColumn), shape));
+            overlayShapeIds.Add(shape.Id);
+        }
+
+        var ordered = overlays
+            .OrderBy(item => item.Overlay.StartRow).ThenBy(item => item.Overlay.StartColumn)
+            .ThenBy(item => item.Overlay.ShapeId, SheetOverlayShapeIdComparer.Instance)
+            .ToArray();
+        return (ordered, overlayShapeIds);
+    }
+
+    // Spec ordering rule (shared with PptxAdapter.OverlayShapeIdComparer): "(StartRow, StartColumn,
+    // ShapeId を数値として...非数値は後ろ、序数比較)".
+    private sealed class SheetOverlayShapeIdComparer : IComparer<string>
+    {
+        public static readonly SheetOverlayShapeIdComparer Instance = new();
+        public int Compare(string? x, string? y)
+        {
+            var xIsNumeric = long.TryParse(x, out var xValue);
+            var yIsNumeric = long.TryParse(y, out var yValue);
+            if (xIsNumeric && yIsNumeric) return xValue.CompareTo(yValue);
+            if (xIsNumeric) return -1;
+            if (yIsNumeric) return 1;
+            return string.CompareOrdinal(x, y);
+        }
+    }
+
+    // Spec "結合セル": every cell inside a merged range maps to that range's origin (RowIndex,
+    // ColumnIndex); a cell with its own MergedToRow/MergedToColumn set (ApplyMergedRanges stamps
+    // these on the range's origin cell only) is that range's origin.
+    private static IReadOnlyDictionary<(int Row, int Column), (int Row, int Column)> BuildSheetMergeOriginLookup(IReadOnlyList<XlsxCellRecord> cells)
+    {
+        var lookup = new Dictionary<(int Row, int Column), (int Row, int Column)>();
+        foreach (var cell in cells)
+        {
+            if (cell.MergedToRow is not { } maxRow || cell.MergedToColumn is not { } maxColumn) continue;
+            for (var row = cell.RowIndex; row <= maxRow; row++)
+            for (var column = cell.ColumnIndex; column <= maxColumn; column++)
+                lookup[(row, column)] = (cell.RowIndex, cell.ColumnIndex);
+        }
+        return lookup;
+    }
+
+    // "「表の上にある」判定（XLSX固有）" -- XLSX has no native table element to test AABB
+    // containment against (unlike PptxAdapter.TryScoreTableOverlay), so this substitutes a
+    // domain-specific pair of cell-grid checks: some covered row has a row label to the left, and
+    // some covered column has evidence of a date header. The header check is intentionally
+    // inclusive of the overlay's own StartRow (not strictly "above" it): the fixture's own
+    // 本日線 (today-line) connector starts exactly at the header row (it visually runs from the
+    // header's top edge down through the last data row), so the header cell itself must count as
+    // "the date header" evidence -- otherwise a connector that begins at the header would be
+    // rejected purely because nothing exists above row 1.
+    private static bool IsSheetOverlayOnTable(int startRow, int endRow, int startColumn, int endColumn, IReadOnlyList<XlsxCellRecord> cells)
+    {
+        // X2: the original rule (some non-blank cell anywhere to the left of the covered rows,
+        // AND some non-blank cell anywhere above the covered columns within 20 rows) folded
+        // ordinary decorative diagram shapes on non-table sheets into bogus table overlays --
+        // e.g. a design workbook's diagram-only sheet, where a stray label above and to the left
+        // of a shape is common but there is no actual table underneath. Require the covered band
+        // to actually look like a schedule table instead: most of the covered COLUMNS must share
+        // one real header row above the shape, AND at least one covered ROW must have a label
+        // immediately (within 6 columns) to the left. Cells in hidden rows/columns never count as
+        // evidence either way.
+        bool IsVisible(XlsxCellRecord cell) => !cell.IsBlank && !cell.IsHiddenRow && !cell.IsHiddenColumn;
+        var visible = cells.Where(IsVisible).Select(cell => (cell.RowIndex, cell.ColumnIndex)).ToHashSet();
+
+        var coveredColumns = endColumn - startColumn + 1;
+        var headerThreshold = Math.Min(3, coveredColumns);
+        var hasHeaderRow = false;
+        // Inclusive of startRow itself: a connector that visually spans the whole table (e.g. a
+        // schedule's vertical "today" line) starts at the TOP of the header row, not below it --
+        // the header row IS the shape's own StartRow in that case, same as the pre-X2 rule's `<=`.
+        for (var headerRow = Math.Max(1, startRow - 20); headerRow <= startRow && !hasHeaderRow; headerRow++)
+        {
+            var hits = 0;
+            for (var column = startColumn; column <= endColumn; column++)
+                if (visible.Contains((headerRow, column))) hits++;
+            if (hits >= headerThreshold) hasHeaderRow = true;
+        }
+        if (!hasHeaderRow) return false;
+
+        for (var row = startRow; row <= endRow; row++)
+        for (var column = Math.Max(1, startColumn - 6); column < startColumn; column++)
+            if (visible.Contains((row, column))) return true;
+        return false;
+    }
+
+    // Spec: "回転は90/270は幅高を入れ替えてから" -- mirrors PptxAdapter's own effective-AABB rule
+    // for a rotated shape, swapping width/height around a fixed center.
+    private static (long X, long Y, long Width, long Height) EffectiveSheetOverlayAabb(long x, long y, long width, long height, double rotationDegrees)
+    {
+        var normalized = ((rotationDegrees % 360) + 360) % 360;
+        var steps = (int)Math.Round(normalized / 90.0, MidpointRounding.AwayFromZero) % 4;
+        if (steps != 1 && steps != 3) return (x, y, width, height);
+        var centerX = x + width / 2.0;
+        var centerY = y + height / 2.0;
+        return (checked((long)Math.Round(centerX - height / 2.0)), checked((long)Math.Round(centerY - width / 2.0)), height, width);
+    }
+
+    // Shared row/column resolution (spec "行・列範囲", mirroring PptxAdapter.ComputeOverlayAxisRange):
+    // a band is "covered" when the shape's span on that axis overlaps it by at least half the
+    // band's own width; degenerate (zero-width/height) spans fall through to the center-point
+    // fallback, which is also what a straight connector/line segment resolves through. The search
+    // window around the shape's own fractional coordinate keeps this from ever looping over all
+    // 16,384 columns or 1,048,576 rows for a shape spanning a handful of cells.
+    private static (int Start, int End) ComputeSheetOverlayAxisRange(double min, double max, XlsxWorksheetMetrics metrics, bool isColumn)
+    {
+        var maxIndex = isColumn ? MaxExcelColumns : MaxExcelRows;
+        long Boundary(int index) => isColumn ? metrics.ColumnStartEmu(Math.Max(1, index)) : metrics.RowStartEmu(Math.Max(1, index));
+        double FromEmu(double emu) => isColumn ? metrics.ColumnFromEmu((long)Math.Round(emu)) : metrics.RowFromEmu((long)Math.Round(emu));
+
+        var approxStart = Math.Max(1, (int)Math.Floor(FromEmu(min)) - 2);
+        var approxEnd = Math.Min(maxIndex, (int)Math.Ceiling(FromEmu(max)) + 2);
+        var covered = new List<int>();
+        for (var index = approxStart; index <= approxEnd; index++)
+        {
+            var bandStart = Boundary(index); var bandEnd = Boundary(index + 1);
+            var bandWidth = bandEnd - bandStart;
+            if (bandWidth <= 0) continue;
+            var overlap = Math.Max(0, Math.Min(max, bandEnd) - Math.Max(min, bandStart));
+            if (overlap >= bandWidth * 0.5) covered.Add(index);
+        }
+        if (covered.Count > 0) return (covered[0], covered[^1]);
+
+        var clamped = Math.Clamp((min + max) / 2, Boundary(1), Boundary(maxIndex + 1));
+        for (var index = approxStart; index <= approxEnd; index++)
+            if (clamped >= Boundary(index) && clamped <= Boundary(index + 1)) return (index, index);
+        return (Math.Max(1, approxStart), Math.Max(1, approxStart));
+    }
+
+    private static XlsxSheetOverlay ClassifySheetOverlay(XlsxDrawingShapeRecord shape, int startRow, int endRow, int startColumn, int endColumn)
+    {
+        string kind; string direction; string? axis;
+        if (shape.IsConnector)
+        {
+            var (connectorKind, connectorDirection, connectorAxis) = ClassifySheetOverlayConnector(shape);
+            kind = connectorKind; direction = connectorDirection;
+            // A directionless connector ("line": no head/tail arrowhead) falls back to the general
+            // coverage-based axis rule below, same as bar/marker/label -- only an actual arrowhead
+            // makes the path vector's own axis authoritative (spec "Axis" summary bullet).
+            axis = connectorKind == "arrow" ? connectorAxis : null;
+        }
+        else
+        {
+            var presetKey = shape.Geometry.ToLowerInvariant();
+            var arrowPresetMatch = Array.Find(SheetOverlayArrowPresets, p => p.Preset == presetKey);
+            (string Preset, string Direction, string Axis)? arrowPreset = arrowPresetMatch.Preset is null ? null : arrowPresetMatch;
+            if (arrowPreset is { } preset)
+            {
+                kind = "arrow";
+                (direction, axis) = RotateAndFlipSheetOverlayDirection(preset.Direction, preset.Axis, shape.RotationDegrees, shape.FlipHorizontal, shape.FlipVertical);
+            }
+            else if (presetKey == "line") { kind = "line"; direction = "none"; axis = null; }
+            else if (IsSheetOverlayMarkerPreset(presetKey)) { kind = "marker"; direction = "none"; axis = null; }
+            else if (shape.IsTextBox) { kind = "label"; direction = "none"; axis = null; }
+            else { kind = "bar"; direction = "none"; axis = null; }
+        }
+        // Coverage-based axis (spec): "被覆列数 > 1 または(被覆行数 == 1)" -> horizontal; only a
+        // multi-row, single-column span reads as vertical.
+        axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
+        return new XlsxSheetOverlay(shape.Id, shape.Text ?? string.Empty, kind, direction, axis,
+            startRow, endRow, startColumn, endColumn, shape.Geometry == "unknown" ? null : shape.Geometry);
+    }
+
+    private static (string Kind, string Direction, string Axis) ClassifySheetOverlayConnector(XlsxDrawingShapeRecord shape)
+    {
+        var head = !string.IsNullOrWhiteSpace(shape.HeadArrow) && !StringComparer.OrdinalIgnoreCase.Equals(shape.HeadArrow, "none");
+        var tail = !string.IsNullOrWhiteSpace(shape.TailArrow) && !StringComparer.OrdinalIgnoreCase.Equals(shape.TailArrow, "none");
+        // Unlike PptxShapeRecord, XlsxDrawingShapeRecord carries no parsed connector path-point
+        // list -- the only available direction signal is the anchor's own bounding-box diagonal,
+        // which Excel always stores top-left -> bottom-right regardless of which way the shape was
+        // actually drawn. A connector drawn bottom-to-top or right-to-left is therefore
+        // indistinguishable here from one drawn the opposite way; this is acceptable for the "today
+        // line" case this feature targets (a top-to-bottom vertical connector with a tailEnd
+        // arrowhead -- see table-overlay-spec-xlsx-docx-pdf.md "1. XLSX").
+        var bounds = shape.AbsoluteBounds!;
+        double dx = bounds.WidthEmu; double dy = bounds.HeightEmu;
+        var axis = Math.Abs(dx) >= Math.Abs(dy) ? "horizontal" : "vertical";
+        var forward = axis == "horizontal" ? "right" : "down";
+        if (!head && !tail) return ("line", "none", axis);
+        if (head && tail) return ("arrow", "both", axis);
+        return tail ? ("arrow", forward, axis) : ("arrow", OppositeSheetOverlayDirection(forward), axis);
+    }
+
+    private static string OppositeSheetOverlayDirection(string direction) => direction switch
+    {
+        "right" => "left", "left" => "right", "up" => "down", "down" => "up", _ => direction,
+    };
+
+    // Mirrors PptxAdapter.RotateAndFlipOverlayDirection's mirror-then-rotate composition (OOXML
+    // DrawingML always flips a shape's local point before rotating it), but -- unlike that
+    // method -- does NOT undo a flipH-induced +180 artifact first: that adjustment compensates for
+    // how PptxAdapter's TransformGeometry *derives* RotationDegrees from a transformed reference
+    // vector, which folds flipH into the measured angle. XlsxDrawingShapeRecord.RotationDegrees is
+    // read directly off the shape's own raw a:xfrm@rot attribute (see ReadDrawingShapes), which
+    // OOXML defines independently of flipH/flipV, so no such artifact exists here to undo.
+    private static (string Direction, string Axis) RotateAndFlipSheetOverlayDirection(string baseDirection, string baseAxis, double rotationDegrees, bool flipH, bool flipV)
+    {
+        var steps = (int)Math.Round(rotationDegrees / 90.0, MidpointRounding.AwayFromZero);
+        steps = ((steps % 4) + 4) % 4;
+
+        var mirroredDirection = baseDirection switch
+        {
+            "left" when flipH => "right",
+            "right" when flipH => "left",
+            "up" when flipV => "down",
+            "down" when flipV => "up",
+            _ => baseDirection,
+        };
+
+        string direction; string axis;
+        if (mirroredDirection == "both")
+        {
+            direction = "both";
+            axis = steps % 2 == 1 ? (baseAxis == "horizontal" ? "vertical" : "horizontal") : baseAxis;
+        }
+        else
+        {
+            var index = Array.IndexOf(SheetOverlayDirectionCycle, mirroredDirection);
+            direction = SheetOverlayDirectionCycle[(index + steps) % 4];
+            axis = direction is "right" or "left" ? "horizontal" : "vertical";
+        }
+        return (direction, axis);
     }
 
     private static IReadOnlyDictionary<string, JsonElement> WithExtension(IReadOnlyDictionary<string, JsonElement>? source, string key, string value)
@@ -1866,6 +2300,40 @@ public sealed class XlsxAdapter
         return cells;
     }
 
+    // X4: the drawing root's real children are the three anchor kinds below; a shape that uses a
+    // newer-schema feature can also be wrapped in mc:AlternateContent (guarded by an
+    // mc:Choice/Requires the reader may not support), with mc:Fallback markup alongside it for
+    // older consumers. Scanning every root child unconditionally used to silently skip such a
+    // shape entirely -- mc:AlternateContent is not itself an anchor, so it produced nothing, and
+    // its wrapped anchor(s) were never visited. Read only the first mc:Choice's anchors, falling
+    // back to mc:Fallback's when there is no mc:Choice at all -- never both, which would
+    // double-register the same shape.
+    private static IEnumerable<XmlElement> EnumerateDrawingAnchors(XmlElement root)
+    {
+        foreach (var child in root.ChildNodes.OfType<XmlElement>())
+        {
+            if (IsDrawingAnchorElement(child)) { yield return child; continue; }
+            if (child.LocalName != "AlternateContent") continue;
+            var branch = child.ChildNodes.OfType<XmlElement>().FirstOrDefault(e => e.LocalName == "Choice")
+                ?? child.ChildNodes.OfType<XmlElement>().FirstOrDefault(e => e.LocalName == "Fallback");
+            if (branch is null) continue;
+            foreach (var anchor in branch.ChildNodes.OfType<XmlElement>().Where(IsDrawingAnchorElement))
+                yield return anchor;
+        }
+    }
+
+    private static bool IsDrawingAnchorElement(XmlElement element) =>
+        element.LocalName is "twoCellAnchor" or "oneCellAnchor" or "absoluteAnchor";
+
+    // X6: walks upward from `node` (NOT including the shape itself) looking for another grpSp
+    // ancestor -- used to detect a shape nested two or more group levels deep.
+    private static bool HasAncestorGrpSp(XmlNode? node)
+    {
+        for (var current = node; current is not null; current = current.ParentNode)
+            if (current is XmlElement element && element.LocalName == "grpSp") return true;
+        return false;
+    }
+
     private static IReadOnlyList<XlsxDrawingShapeRecord> ReadDrawingShapes(
         Dictionary<string, byte[]> package,
         string worksheetPartUri,
@@ -1886,7 +2354,7 @@ public sealed class XlsxAdapter
             var root = document.DocumentElement;
             if (root is null) continue;
             var anchorIndex = 0;
-            foreach (var anchor in root.ChildNodes.OfType<XmlElement>())
+            foreach (var anchor in EnumerateDrawingAnchors(root))
             {
                 anchorIndex++;
                 var from = DirectChild(anchor, "from");
@@ -1927,10 +2395,31 @@ public sealed class XlsxAdapter
                     var group = shape.ParentNode as XmlElement;
                     while (group is not null && group.LocalName != "grpSp") group = group.ParentNode as XmlElement;
                     var groupId = group is null ? null : Descendant(group, "cNvPr")?.GetAttribute("id");
+                    // X6: a shape whose own group is itself nested inside ANOTHER grpSp is two or
+                    // more group levels deep. The F-A absolute-position fix below only resolves
+                    // ONE level of chOff/chExt scaling, so a doubly-nested shape's shapeX/shapeY
+                    // would silently be wrong -- flag it so DetectSheetOverlays can exclude it from
+                    // schedule-overlay candidacy instead of risking a wrong-position "overlay".
+                    var isInNestedGroup = group is not null && HasAncestorGrpSp(group.ParentNode);
                     var startConnection = Descendant(shape, "stCxn")?.GetAttribute("id");
                     var endConnection = Descendant(shape, "endCxn")?.GetAttribute("id");
+                    // P-Overlay (XLSX): read the raw a:xfrm@rot attribute directly rather than
+                    // deriving it from a transformed reference vector (contrast PptxAdapter's
+                    // TransformGeometry) -- OOXML stores flip and rotation as independent xfrm
+                    // attributes, so this value never has a flipH-induced +180 artifact folded
+                    // into it the way PptxShapeRecord.Geometry.RotationDegrees can.
+                    var rotationDegrees = AttributeLong(transform, "rot") / 60000.0;
+                    // X5: only xdr:spPr/a:ln's OWN headEnd/tailEnd is a real arrowhead. a:ln can
+                    // carry an a:extLst/a14:hiddenLine compatibility extension holding a nested
+                    // a:ln with its OWN headEnd/tailEnd (the line's pre-transform formatting for
+                    // older consumers); Descendant's whole-subtree scan could match that nested
+                    // one when the visible line has no arrowhead of its own at all.
+                    var lineProperties = DirectChild(shape, "spPr") is { } shapeProperties ? DirectChild(shapeProperties, "ln") : null;
+                    var headArrow = lineProperties is null ? null : DirectChild(lineProperties, "headEnd")?.GetAttribute("type");
+                    var tailArrow = lineProperties is null ? null : DirectChild(lineProperties, "tailEnd")?.GetAttribute("type");
+                    var isTextBox = IsHiddenFlag(Descendant(shape, "cNvSpPr")?.GetAttribute("txBox"));
+                    var isHiddenShape = IsHiddenFlag(properties?.GetAttribute("hidden"));
                     var groupTransform = group is null ? null : Descendant(group, "xfrm");
-                    var groupOffset = groupTransform is null ? null : DirectChild(groupTransform, "off");
                     var groupExtent = groupTransform is null ? null : DirectChild(groupTransform, "ext");
                     var groupChildOffset = groupTransform is null ? null : DirectChild(groupTransform, "chOff");
                     var groupChildExtent = groupTransform is null ? null : DirectChild(groupTransform, "chExt");
@@ -1940,10 +2429,21 @@ public sealed class XlsxAdapter
                         ? AttributeLong(groupExtent, "cy") / (double)AttributeLong(groupChildExtent, "cy") : 1d;
                     var localX = AttributeLong(shapeOffset, "x");
                     var localY = AttributeLong(shapeOffset, "y");
-                    var shapeX = isTopLevel ? anchorX : anchorX + AttributeLong(groupOffset, "x") +
-                        (localX - AttributeLong(groupChildOffset, "x")) * groupScaleX;
-                    var shapeY = isTopLevel ? anchorY : anchorY + AttributeLong(groupOffset, "y") +
-                        (localY - AttributeLong(groupChildOffset, "y")) * groupScaleY;
+                    // F-A fix: a one-level grpSp child's absolute position is
+                    //   anchorAbsolute + (child a:off - group a:chOff) * (group a:ext / a:chExt)
+                    // added exactly once. The group's own a:off/a:ext (grpSpPr/xfrm) is NOT added
+                    // again here: for a top-level grpSp placed via a twoCellAnchor/oneCellAnchor/
+                    // absoluteAnchor, that a:off is always the SAME absolute EMU position the
+                    // anchor's own from/to (or pos) already resolves into anchorX/anchorY above --
+                    // adding it a second time double-counted the anchor whenever the group sat away
+                    // from column/row 0 (see schedule-arrows.xlsx sheet "グループ", where a:off ==
+                    // anchorX/anchorY exactly, previously resolving the grouped arrows into the
+                    // wrong column). Only ONE level of grouping is resolved here; a grpSp nested
+                    // inside another grpSp is intentionally out of scope.
+                    var shapeX = isTopLevel ? anchorX :
+                        anchorX + (localX - AttributeLong(groupChildOffset, "x")) * groupScaleX;
+                    var shapeY = isTopLevel ? anchorY :
+                        anchorY + (localY - AttributeLong(groupChildOffset, "y")) * groupScaleY;
                     var topLevelWidth = anchorWidth > 0 ? anchorWidth : AttributeLong(shapeExtent, "cx");
                     var topLevelHeight = anchorHeight > 0 ? anchorHeight : AttributeLong(shapeExtent, "cy");
                     var shapeWidth = isTopLevel ? Math.Max(anchorRight - anchorX, topLevelWidth) : (long)Math.Round(AttributeLong(shapeExtent, "cx") * groupScaleX);
@@ -1976,7 +2476,13 @@ public sealed class XlsxAdapter
                         toColumnOffset,
                         toRowOffset,
                         drawingPart,
-                        anchorIndex));
+                        anchorIndex,
+                        rotationDegrees,
+                        string.IsNullOrWhiteSpace(headArrow) ? null : headArrow,
+                        string.IsNullOrWhiteSpace(tailArrow) ? null : tailArrow,
+                        isTextBox,
+                        isHiddenShape,
+                        isInNestedGroup));
                 }
             }
         }
@@ -2029,15 +2535,20 @@ public sealed class XlsxAdapter
             {
                 var min = AttributeInt(reader, "min", 1);
                 var max = Math.Min(MaxExcelColumns, AttributeInt(reader, "max", min));
-                var width = AttributeDouble(reader, "width", defaultColumnWidth);
-                if (min <= max && width > 0)
+                // X7: a hidden column contributes zero width to DrawingML anchor math (Excel
+                // visually collapses it), and an explicit width="0" column -- not necessarily
+                // marked hidden -- means the same thing. Both were previously ignored by a
+                // `width > 0` guard below, which fell back to the DEFAULT column width instead and
+                // skewed every absoluteAnchor arrow that crossed a hidden/zero-width column.
+                var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : AttributeDouble(reader, "width", defaultColumnWidth);
+                if (min <= max)
                     for (var column = Math.Max(1, min); column <= max; column++) columns[column] = width;
             }
             else if (reader.LocalName == "row")
             {
                 var row = AttributeInt(reader, "r", 0);
-                var height = AttributeDouble(reader, "ht", defaultRowHeight);
-                if (row > 0 && height > 0) rows[row] = height;
+                var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : AttributeDouble(reader, "ht", defaultRowHeight);
+                if (row > 0) rows[row] = height;
             }
         }
         return new(defaultColumnWidth, defaultRowHeight, columns, rows);
@@ -2084,11 +2595,12 @@ public sealed class XlsxAdapter
         return result.ToString();
     }
 
-    private static byte[] PatchWorksheet(byte[] bytes, IEnumerable<XlsxCellEdit> edits)
+    private static (byte[] Bytes, bool RemovedFormula) PatchWorksheet(byte[] bytes, IEnumerable<XlsxCellEdit> edits)
     {
         var document = new XmlDocument { PreserveWhitespace = true }; using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml); document.Load(reader);
         var ns = new XmlNamespaceManager(document.NameTable); ns.AddNamespace("x", "http://schemas.openxmlformats.org/spreadsheetml/2006/main");
         var data = document.SelectSingleNode("//x:sheetData", ns) ?? document.DocumentElement!.AppendChild(document.CreateElement("sheetData", ns.LookupNamespace("x")))!;
+        var removedFormula = false;
         foreach (var edit in edits)
         {
             var cell = data.SelectSingleNode($"x:row/x:c[@r='{edit.CellReference}']", ns) as XmlElement;
@@ -2104,7 +2616,7 @@ public sealed class XlsxAdapter
             if (edit.Formula is not null) { if (f is null) { f = document.CreateElement("f", ns.LookupNamespace("x")); cell.AppendChild(f); } f.InnerText = edit.Formula.TrimStart('='); if (v is not null) cell.RemoveChild(v); cell.SetAttribute("t", "n"); }
             else if (edit.Value is not null)
             {
-                if (f is not null) cell.RemoveChild(f);
+                if (f is not null) { cell.RemoveChild(f); removedFormula = true; }
                 var inline = cell.SelectSingleNode("x:is", ns);
                 var preserveNumeric = originalType is "" or "n" &&
                     double.TryParse(edit.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out _);
@@ -2126,7 +2638,7 @@ public sealed class XlsxAdapter
                 }
             }
         }
-        using var output = new MemoryStream(); using (var writer = XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false), OmitXmlDeclaration = false, Indent = false })) document.Save(writer); return output.ToArray();
+        using var output = new MemoryStream(); using (var writer = XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false), OmitXmlDeclaration = false, Indent = false })) document.Save(writer); return (output.ToArray(), removedFormula);
     }
 
     private static byte[] MarkWorkbookForRecalculation(byte[] bytes)

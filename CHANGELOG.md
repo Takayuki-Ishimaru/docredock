@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.2.7]
+
+- Preserved supported arrows, duration bars, and markers over schedule tables as readable Markdown cell symbols in Word, Excel, PowerPoint, and PDF.
+- Recognized supported PowerPoint schedules built from aligned rectangle shapes as readable tables.
+- Improved Japanese OCR spacing and clarified OCR availability and Windows language requirements.
+- Unified character-reference handling in experimental Markdown rendering while preserving literal code text.
+- Improved experimental Word restoration of nested-table cell text while retaining the existing table structure.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.7.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.7.md)
+
 ## [0.2.6] - 2026-09-07
 
 - Kept literal `[text](url)`, `![alt](path)` and reference-link notation in source documents as plain text in readable and round-trip Markdown while preserving real hyperlinks, images, emphasis and generated diagrams.

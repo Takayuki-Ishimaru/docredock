@@ -929,6 +929,572 @@ public sealed class XlsxAdapterTests
         Assert.Contains("N_S_2{\"Approve?\"}", source, StringComparison.Ordinal);        Assert.Contains("N_S_3[\"Custom node\"]", source, StringComparison.Ordinal);
     }
 
+    // -------------------------------------------------------------------------------------------
+    // P-Overlay (XLSX): XlsxAdapter.DetectSheetOverlays -- see table-overlay-spec-xlsx-docx-pdf.md
+    // "1. XLSX". ScheduleOverlayWorksheetXml mirrors schedule-arrows.xlsx's own 「スケジュール」 sheet
+    // (工程/担当 label columns B/C, dates D-I on the header row 2, data rows 3-7) so every overlay
+    // candidate below has a genuine row label to its left and a date header above it.
+    // -------------------------------------------------------------------------------------------
+
+    // Mirrors schedule-arrows.xlsx's own <cols>/<row ht> exactly (custom column widths, 24pt data
+    // rows) and declares an explicit (blank) cell for every table position, not just the labels:
+    // several tests below reuse EMU offsets straight out of generate_schedule_xlsx.py, which were
+    // computed against these exact metrics, and ApplyMergedRanges (XlsxAdapter.cs) only tags a
+    // merge's origin cell when that cell already has its own <c> element to attach to.
+    private const string ScheduleOverlayWorksheetXml = """
+        <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+          <cols><col min="1" max="1" width="8.43" customWidth="1"/><col min="2" max="2" width="14" customWidth="1"/><col min="3" max="3" width="10" customWidth="1"/><col min="4" max="9" width="8" customWidth="1"/></cols>
+          <sheetData>
+            <row r="1" ht="15" customHeight="1" />
+            <row r="2" ht="24" customHeight="1"><c r="B2" t="inlineStr"><is><t>工程</t></is></c><c r="C2" t="inlineStr"><is><t>担当</t></is></c><c r="D2" t="inlineStr"><is><t>9/1</t></is></c><c r="E2" t="inlineStr"><is><t>9/2</t></is></c><c r="F2" t="inlineStr"><is><t>9/3</t></is></c><c r="G2" t="inlineStr"><is><t>9/4</t></is></c><c r="H2" t="inlineStr"><is><t>9/5</t></is></c><c r="I2" t="inlineStr"><is><t>9/8</t></is></c></row>
+            <row r="3" ht="24" customHeight="1"><c r="B3" t="inlineStr"><is><t>要件定義</t></is></c><c r="C3" t="inlineStr"><is><t>山田</t></is></c><c r="D3"/><c r="E3"/><c r="F3"/><c r="G3"/><c r="H3"/><c r="I3"/></row>
+            <row r="4" ht="24" customHeight="1"><c r="B4" t="inlineStr"><is><t>設計</t></is></c><c r="C4" t="inlineStr"><is><t>佐藤</t></is></c><c r="D4"/><c r="E4"/><c r="F4"/><c r="G4"/><c r="H4"/><c r="I4"/></row>
+            <row r="5" ht="24" customHeight="1"><c r="B5" t="inlineStr"><is><t>実装</t></is></c><c r="C5" t="inlineStr"><is><t>鈴木</t></is></c><c r="D5"/><c r="E5"/><c r="F5"/><c r="G5"/><c r="H5"/><c r="I5"/></row>
+            <row r="6" ht="24" customHeight="1"><c r="B6" t="inlineStr"><is><t>テスト</t></is></c><c r="C6" t="inlineStr"><is><t>田中</t></is></c><c r="D6"/><c r="E6"/><c r="F6"/><c r="G6"/><c r="H6"/><c r="I6"/></row>
+            <row r="7" ht="24" customHeight="1"><c r="B7" t="inlineStr"><is><t>リリース</t></is></c><c r="C7" t="inlineStr"><is><t>全員</t></is></c><c r="D7"/><c r="E7"/><c r="F7"/><c r="G7"/><c r="H7"/><c r="I7"/></row>
+          </sheetData>
+          <drawing r:id="rDrawing" />
+        </worksheet>
+        """;
+
+    private static (DocumentNode Node, XlsxSheetOverlay Overlay) SingleSheetOverlay(XlsxExtractionResult extraction)
+    {
+        var node = Assert.Single(extraction.Graph.Nodes, n => n.Kind == NodeKind.Shape);
+        Assert.Equal(ContentLayer.Hidden, node.Layer);
+        Assert.Equal(NodeEditability.Protected, node.Editability);
+        Assert.True(node.Extensions!["table_overlay"].GetBoolean());
+        return (node, node.Extensions!["sheet_overlay"].Deserialize<XlsxSheetOverlay>()!);
+    }
+
+    [Fact]
+    public void Right_arrow_over_two_cells_becomes_an_arrow_overlay()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="要件定義"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>要件定義</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (node, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("2", overlay.ShapeId);
+        Assert.Equal("要件定義", overlay.Text);
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal("horizontal", overlay.Axis);
+        Assert.Equal(3, overlay.StartRow); Assert.Equal(3, overlay.EndRow);
+        Assert.Equal(4, overlay.StartColumn); Assert.Equal(5, overlay.EndColumn);
+        Assert.Equal("rightArrow", overlay.ShapePreset);
+        Assert.Equal("Sheet1", node.Extensions!["sheet_name"].GetString());
+        Assert.Equal("2", node.Extensions!["shape_id"].GetString());
+    }
+
+    [Fact]
+    public void Textless_rectangle_becomes_a_bar_overlay_with_no_direction()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>7</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="実装バー"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr><xdr:txBody><a:p><a:endParaRPr/></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("bar", overlay.Kind);
+        Assert.Equal("none", overlay.Direction);
+        Assert.Equal(string.Empty, overlay.Text);
+        Assert.Equal(5, overlay.StartRow); Assert.Equal(5, overlay.EndRow);
+        Assert.Equal(6, overlay.StartColumn); Assert.Equal(8, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Diamond_one_cell_anchor_becomes_a_marker_overlay()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:colOff>152400</xdr:colOff><xdr:row>6</xdr:row><xdr:rowOff>38100</xdr:rowOff></xdr:from><xdr:ext cx="228600" cy="228600"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="リリース"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="diamond"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("marker", overlay.Kind);
+        Assert.Equal("none", overlay.Direction);
+        Assert.Equal("diamond", overlay.ShapePreset);
+        Assert.Equal(7, overlay.StartRow); Assert.Equal(7, overlay.EndRow);
+        Assert.Equal(9, overlay.StartColumn); Assert.Equal(9, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Vertical_connector_with_tail_arrow_and_no_connection_sites_spans_rows_as_a_downward_arrow()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>5</xdr:col><xdr:colOff>266700</xdr:colOff><xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>266700</xdr:colOff><xdr:row>7</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="7" name="本日線"/><xdr:cNvCxnSpPr/></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/><a:ln><a:tailEnd type="triangle"/></a:ln></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("down", overlay.Direction);
+        Assert.Equal("vertical", overlay.Axis);
+        Assert.Equal(2, overlay.StartRow); Assert.Equal(7, overlay.EndRow);
+        Assert.Equal(6, overlay.StartColumn); Assert.Equal(6, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Text_box_becomes_a_label_overlay()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>7</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>7</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>3</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="8" name="レビュー注記"/><xdr:cNvSpPr txBox="1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>▲レビュー</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("label", overlay.Kind);
+        Assert.Equal("none", overlay.Direction);
+        Assert.Equal("▲レビュー", overlay.Text);
+        Assert.Equal(4, overlay.StartRow); Assert.Equal(4, overlay.EndRow);
+        Assert.Equal(8, overlay.StartColumn); Assert.Equal(8, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Rotated_180_degrees_right_arrow_becomes_left_direction()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="戻し"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm rot="10800000"/><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>戻し</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("left", overlay.Direction);
+        Assert.Equal("horizontal", overlay.Axis);
+    }
+
+    [Fact]
+    public void FlipH_right_arrow_becomes_left_direction()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="反転"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm flipH="1"/><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>反転</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("left", overlay.Direction);
+    }
+
+    [Fact]
+    public void Absolute_anchor_arrow_resolves_row_and_column_from_raw_emu_position()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:absoluteAnchor><xdr:pos x="2741295" y="845820"/><xdr:ext cx="1508760" cy="213360"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="設計(絶対配置)"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>設計</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("arrow", overlay.Kind);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal(4, overlay.StartRow); Assert.Equal(4, overlay.EndRow);
+        Assert.Equal(5, overlay.StartColumn); Assert.Equal(7, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void One_level_grouped_arrow_resolves_absolute_position_through_a_non_identity_group_transform()
+    {
+        // Anchored at D3's top-left corner (col 3 = D 0-based, row 2 = row 3 0-based, zero offset).
+        // The group's chOff/chExt (0/0, 2,000,000 x 400,000) is exactly 2x its own off/ext (0/0,
+        // 1,000,000 x 200,000) -- a deliberately non-identity, 0.5x uniform scale-down -- so
+        // resolving the child's local a:off/a:ext (200,000/0, 1,600,000 x 400,000) through that
+        // transform (XlsxAdapter.ReadDrawingShapes: shapeX = anchorX + groupOffset.x +
+        // (localX - groupChildOffset.x) * groupScaleX) must land the arrow's absolute bounds at
+        // anchorX + 100,000 .. anchorX + 900,000 (half-scaled local geometry), spanning columns
+        // D-E of the 8-wide (533,400 EMU) date columns and staying inside row 3 (304,800 EMU).
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                <xdr:grpSp>
+                  <xdr:nvGrpSpPr><xdr:cNvPr id="4" name="group"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                  <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="200000"/><a:chOff x="0" y="0"/><a:chExt cx="2000000" cy="400000"/></a:xfrm></xdr:grpSpPr>
+                  <xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="要件定義"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="200000" y="0"/><a:ext cx="1600000" cy="400000"/></a:xfrm><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>要件定義</a:t></a:r></a:p></xdr:txBody></xdr:sp>
+                </xdr:grpSp>
+              <xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("要件定義", overlay.Text);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal(3, overlay.StartRow); Assert.Equal(3, overlay.EndRow);
+        Assert.Equal(4, overlay.StartColumn); Assert.Equal(5, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Grouped_arrow_whose_group_anchor_offset_matches_the_anchor_does_not_double_count_it()
+    {
+        // F-A regression: mirrors schedule-arrows.xlsx sheet "グループ", where the grpSp's own
+        // a:off (grpSpPr/a:xfrm) is set to the SAME absolute EMU position as the twoCellAnchor's
+        // own from/to (2,162,175 / 495,300 -- column D's left edge / row 3's top edge under this
+        // fixture's own <cols>/<row ht> metrics, exactly like generate_schedule_xlsx.py's
+        // build_drawing2), unlike One_level_grouped_arrow_resolves_absolute_position_through_a_
+        // non_identity_group_transform above, whose group a:off is (0,0) and therefore can never
+        // exercise the double-counting bug (adding zero twice is harmless). Before the F-A fix,
+        // ReadDrawingShapes added this a:off a second time on top of the anchor's own absolute
+        // position, sliding the resolved arrow several columns to the right of D-E; the fix must
+        // resolve it back to the same D-E/row-3 cells as the identity-offset case.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                <xdr:grpSp>
+                  <xdr:nvGrpSpPr><xdr:cNvPr id="4" name="group"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                  <xdr:grpSpPr><a:xfrm><a:off x="2162175" y="495300"/><a:ext cx="1000000" cy="200000"/><a:chOff x="0" y="0"/><a:chExt cx="2000000" cy="400000"/></a:xfrm></xdr:grpSpPr>
+                  <xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="要件定義"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="200000" y="0"/><a:ext cx="1600000" cy="400000"/></a:xfrm><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>要件定義</a:t></a:r></a:p></xdr:txBody></xdr:sp>
+                </xdr:grpSp>
+              <xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("要件定義", overlay.Text);
+        Assert.Equal("right", overlay.Direction);
+        Assert.Equal(3, overlay.StartRow); Assert.Equal(3, overlay.EndRow);
+        Assert.Equal(4, overlay.StartColumn); Assert.Equal(5, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Shape_far_from_any_populated_block_is_not_an_overlay()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>20</xdr:col><xdr:row>40</xdr:row></xdr:from><xdr:ext cx="900000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="stray"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>迷子</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Fully_wired_connector_and_its_two_endpoint_shapes_are_never_overlays()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>10</xdr:row></xdr:from><xdr:to><xdr:col>3</xdr:col><xdr:row>12</xdr:row></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="開始"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="roundRect"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>開始</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+              <xdr:twoCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>10</xdr:row></xdr:from><xdr:to><xdr:col>6</xdr:col><xdr:row>12</xdr:row></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="完了"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="roundRect"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>完了</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:row>10</xdr:row></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:row>12</xdr:row></xdr:to><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="7" name="実データフロー接続"/><xdr:cNvCxnSpPr><a:stCxn id="6" idx="3"/><a:endCxn id="5" idx="1"/></xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Hidden_shape_over_the_table_is_not_an_overlay()
+    {
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="非表示矢印" hidden="1"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>非表示</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Shape_covering_the_leftmost_column_has_no_row_label_to_its_left_and_is_not_an_overlay()
+    {
+        // Covers columns A-B at row 3: nothing can ever be "to the left" of column A, even though
+        // column B's own header (工程, row 2) would otherwise satisfy the date-header check.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>2</xdr:row></xdr:from><xdr:ext cx="1200000" cy="200000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="leftmost"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Shape_far_below_the_table_has_no_date_header_within_twenty_rows_and_is_not_an_overlay()
+    {
+        // Row 30 has its own row label (孤立行, satisfying the left-label check) but the nearest
+        // date header for column E (row 2) is 28 rows above -- well outside the 20-row window.
+        var worksheet = ScheduleOverlayWorksheetXml.Replace(
+            "<row r=\"7\" ht=\"24\" customHeight=\"1\">",
+            "<row r=\"30\"><c r=\"B30\" t=\"inlineStr\"><is><t>孤立行</t></is></c></row><row r=\"7\" ht=\"24\" customHeight=\"1\">",
+            StringComparison.Ordinal);
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>29</xdr:row></xdr:from><xdr:ext cx="500000" cy="200000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="below"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Overlay_inside_a_merged_range_is_assigned_to_the_merges_origin_cell()
+    {
+        var worksheet = ScheduleOverlayWorksheetXml.Replace(
+            "</sheetData>",
+            "</sheetData><mergeCells count=\"1\"><mergeCell ref=\"D3:E3\"/></mergeCells>",
+            StringComparison.Ordinal);
+        // A small marker landing squarely in column E (the second half of the D3:E3 merge).
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:colOff>50000</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>50000</xdr:rowOff></xdr:from><xdr:ext cx="150000" cy="150000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="merged-marker"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="diamond"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        // Column E (the marker's own raw band) collapses to D -- the merge's origin cell.
+        Assert.Equal(4, overlay.StartColumn); Assert.Equal(4, overlay.EndColumn);
+        Assert.Equal(3, overlay.StartRow); Assert.Equal(3, overlay.EndRow);
+    }
+
+    [Fact]
+    public void Sheet_where_mermaid_projection_produced_a_diagram_only_excludes_the_shapes_it_consumed()
+    {
+        // P-Overlay (XLSX) F-B: the flow diagram below (START/PROCESS/DECIDE/END, row 21, plus the
+        // three rightArrow connectors between them) consumes exactly those seven shapes -- it must
+        // no longer forfeit overlay detection for the WHOLE sheet. "would-be-overlay" sits on the
+        // schedule table's D3:E3 cells (identical geometry to Right_arrow_over_two_cells_becomes_
+        // an_arrow_overlay), has nothing to do with the flow diagram, and must still be folded in.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="1" name="start"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="process"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartProcess"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>PROCESS</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="decision"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>DECIDE</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>12</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="4" name="end"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="5" name="arrow-1"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="6" name="arrow-2"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>10</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="7" name="arrow-3"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="8" name="would-be-overlay"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>要件定義</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("8", overlay.ShapeId);
+        Assert.Equal("要件定義", overlay.Text);
+        Assert.Equal(3, overlay.StartRow); Assert.Equal(3, overlay.EndRow);
+        Assert.Equal(4, overlay.StartColumn); Assert.Equal(5, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Diagram_consumed_shape_ids_are_serialized_in_deterministic_ordinal_order()
+    {
+        // X1: extensions["visual_graph_member_shape_ids"] used to serialize the raw
+        // IReadOnlySet<string> (a HashSet<string> underneath) directly -- its enumeration order
+        // is an implementation detail, not a contract, so the exported JSON bytes for otherwise
+        // identical input were not guaranteed stable. Deliberately non-numeric-order,
+        // non-insertion-order shape ids (9, 20, 41, 100) so an Ordinal sort visibly differs from
+        // both of those orderings -- extract the same bytes twice and confirm both the ordering
+        // (sorted) and the bytes (stable across runs) are now pinned down.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>0</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="start"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>START</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>4</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="20" name="decision"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartDecision"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>DECIDE</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>8</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="500000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="41" name="end"/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="flowChartTerminator"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>END</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+              <xdr:oneCellAnchor><xdr:from><xdr:col>2</xdr:col><xdr:row>20</xdr:row></xdr:from><xdr:ext cx="800000" cy="120000"/><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="100" name="edge"/><xdr:cNvCxnSpPr><a:stCxn id="9" idx="0"/><a:endCxn id="20" idx="0"/></xdr:cNvCxnSpPr></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var bytes = CreateDiagramPackage("Flow", "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheetData/><drawing r:id=\"rDrawing\" /></worksheet>", drawing);
+
+        string ConsumedShapeIdsJson(byte[] source)
+        {
+            var extraction = new XlsxAdapter().Extract(new MemoryStream(source));
+            var diagram = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Diagram);
+            return diagram.Extensions!["visual_graph_member_shape_ids"].GetRawText();
+        }
+
+        var first = ConsumedShapeIdsJson(bytes);
+        var second = ConsumedShapeIdsJson(bytes);
+        Assert.Equal(first, second);
+
+        var ids = JsonSerializer.Deserialize<string[]>(first)!;
+        Assert.NotEmpty(ids);
+        Assert.Equal(ids.OrderBy(id => id, StringComparer.Ordinal).ToArray(), ids);
+    }
+
+    [Fact]
+    public void Shape_with_a_label_but_scattered_single_column_headers_on_different_rows_is_not_an_overlay()
+    {
+        // X2's core tightening: a shape covering 3+ columns now needs at least 3 (or, covering
+        // fewer than 3, ALL) of those columns to share ONE common header row -- not merely "each
+        // column independently has some non-blank cell somewhere above it" (the old, too-loose
+        // rule). G/H each have a header, but on DIFFERENT rows (1 and 2); no single row ever has
+        // 2+ of the 3 covered columns (G-I) headed, so this must not become an overlay even though
+        // there is a label to the left (B3) and every individual column has *something* above it.
+        var worksheet = """
+            <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+              <sheetData>
+                <row r="1"><c r="G1" t="inlineStr"><is><t>G-header</t></is></c></row>
+                <row r="2"><c r="H2" t="inlineStr"><is><t>H-header</t></is></c></row>
+                <row r="3"><c r="B3" t="inlineStr"><is><t>Label</t></is></c><c r="G3"/><c r="H3"/><c r="I3"/></row>
+              </sheetData>
+              <drawing r:id="rDrawing" />
+            </worksheet>
+            """;
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:oneCellAnchor><xdr:from><xdr:col>6</xdr:col><xdr:row>2</xdr:row></xdr:from><xdr:ext cx="1500000" cy="200000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="scattered"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rect"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:oneCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Anchor_wrapped_in_mc_AlternateContent_choice_is_read_once()
+    {
+        // X4: mc:Choice is preferred over mc:Fallback -- both branches deliberately carry
+        // DIFFERENT shape ids/text here so a double-registration bug (reading both) or a
+        // wrong-branch bug (reading only Fallback) would both be visible in the assertions below.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">
+              <mc:AlternateContent>
+                <mc:Choice Requires="x14">
+                  <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="choice-shape"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>選択肢</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+                </mc:Choice>
+                <mc:Fallback>
+                  <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="3" name="fallback-shape"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>代替肢</a:t></a:r></a:p></xdr:txBody></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+                </mc:Fallback>
+              </mc:AlternateContent>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("2", overlay.ShapeId);
+        Assert.Equal("選択肢", overlay.Text);
+    }
+
+    [Fact]
+    public void Hidden_line_extension_head_and_tail_end_are_not_read_as_a_real_arrowhead()
+    {
+        // X5: the visible a:ln carries no headEnd/tailEnd of its own -- only its
+        // a:extLst/a14:hiddenLine compatibility payload (the line's pre-transform formatting for
+        // older consumers) does. Descendant's old whole-subtree scan would have found THAT nested
+        // headEnd/tailEnd and wrongly promoted this to an arrow; it must stay a plain "line".
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:cxnSp><xdr:nvCxnSpPr><xdr:cNvPr id="2" name="隠れ矢印"/><xdr:cNvCxnSpPr/></xdr:nvCxnSpPr><xdr:spPr><a:prstGeom prst="line"/><a:ln><a:extLst><a:ext uri="{DEB0A2D8-08D0-40CD-9D4F-11A9DDF54843}"><a14:hiddenLine xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"><a:headEnd type="triangle"/><a:tailEnd type="triangle"/></a14:hiddenLine></a:ext></a:extLst></a:ln></xdr:spPr></xdr:cxnSp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal("line", overlay.Kind);
+        Assert.Equal("none", overlay.Direction);
+    }
+
+    [Fact]
+    public void Shape_nested_two_group_levels_deep_is_not_an_overlay_candidate()
+    {
+        // X6: "inner" (the actual shape) sits inside a grpSp whose OWN parent is ANOTHER grpSp --
+        // two levels deep. ReadDrawingShapes' F-A absolute-position fix only resolves one level of
+        // chOff/chExt scaling, so this shape's resolved bounds are not trustworthy; it must never
+        // become a schedule-overlay candidate regardless of where it geometrically lands.
+        var drawing = """
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>5</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
+                <xdr:grpSp>
+                  <xdr:nvGrpSpPr><xdr:cNvPr id="10" name="outer"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                  <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="200000"/><a:chOff x="0" y="0"/><a:chExt cx="1000000" cy="200000"/></a:xfrm></xdr:grpSpPr>
+                  <xdr:grpSp>
+                    <xdr:nvGrpSpPr><xdr:cNvPr id="11" name="inner-group"/><xdr:cNvGrpSpPr/></xdr:nvGrpSpPr>
+                    <xdr:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="200000"/><a:chOff x="0" y="0"/><a:chExt cx="2000000" cy="400000"/></a:xfrm></xdr:grpSpPr>
+                    <xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="要件定義"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="200000" y="0"/><a:ext cx="1600000" cy="400000"/></a:xfrm><a:prstGeom prst="rightArrow"/></xdr:spPr><xdr:txBody><a:p><a:r><a:t>要件定義</a:t></a:r></a:p></xdr:txBody></xdr:sp>
+                  </xdr:grpSp>
+                </xdr:grpSp>
+              <xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        Assert.DoesNotContain(extraction.Graph.Nodes, node => node.Kind == NodeKind.Shape);
+    }
+
+    [Fact]
+    public void Hidden_column_contributes_zero_width_so_a_later_absolute_anchor_lands_in_the_correct_column()
+    {
+        var worksheet = ScheduleOverlayWorksheetXml.Replace(
+            "<col min=\"4\" max=\"9\" width=\"8\" customWidth=\"1\"/>",
+            "<col min=\"4\" max=\"6\" width=\"8\" customWidth=\"1\"/><col min=\"7\" max=\"7\" width=\"30\" hidden=\"1\" customWidth=\"1\"/><col min=\"8\" max=\"9\" width=\"8\" customWidth=\"1\"/>",
+            StringComparison.Ordinal);
+        // X7: column G (7) is hidden with a large nominal width (30 char units). If
+        // ReadWorksheetMetrics still counted that declared width (the pre-fix bug), column H would
+        // begin far to the right of where it actually starts once G correctly collapses to 0 --
+        // an absoluteAnchor placed just past A-F's combined width (a small nudge into where H
+        // actually begins) would then resolve into G's now-fictitious band instead of H.
+        double[] precedingColumnWidths = [8.43, 14, 10, 8, 8, 8]; // A-F, matching the <cols> above.
+        var startOfColumnH = precedingColumnWidths.Sum(XlsxWorksheetMetrics.ColumnWidthToEmu) + 5000;
+        var drawing = $"""
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:absoluteAnchor><xdr:pos x="{startOfColumnH}" y="845820"/><xdr:ext cx="150000" cy="150000"/><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="9" name="marker"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="diamond"/></xdr:spPr><xdr:clientData/></xdr:sp><xdr:clientData/></xdr:absoluteAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", worksheet, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal(8, overlay.StartColumn); Assert.Equal(8, overlay.EndColumn);
+    }
+
+    [Fact]
+    public void Real_world_design_workbook_diagram_sheet_has_no_bogus_table_overlays()
+    {
+        // X2: a real-world design document (not a test fixture -- deliberately left OUT of
+        // tests/DocRedock.Tests/Fixtures/Xlsx per this task's instructions) whose "sheet2" carries
+        // decorative DrawingML shapes (e.g. a "can" icon) alongside an unrelated diagram, with no
+        // actual schedule table underneath. The pre-X2 rule (any non-blank cell anywhere left, any
+        // non-blank cell anywhere above within 20 rows) folded that decoration into a bogus table
+        // overlay purely by incidental nearby text; the tightened rule must not. Skipped when the
+        // file is not present (it is untracked and not required for the suite to pass elsewhere).
+        var path = FindRepoRootFile("経費精算システム_設計書_検証用.xlsx");
+        if (path is null) return;
+
+        using var stream = File.OpenRead(path);
+        var extraction = new XlsxAdapter().Extract(stream);
+        var sheet2 = extraction.Worksheets.FirstOrDefault(w => w.Name.Contains("2", StringComparison.Ordinal))
+            ?? extraction.Worksheets.ElementAtOrDefault(1);
+        Assert.NotNull(sheet2);
+        var overlayCount = extraction.Graph.Nodes.Count(node => node.Kind == NodeKind.Shape &&
+            node.Extensions is not null && node.Extensions.ContainsKey("sheet_overlay") &&
+            node.Extensions.TryGetValue("sheet_name", out var sheetName) && sheetName.GetString() == sheet2!.Name);
+        Assert.Equal(0, overlayCount);
+    }
+
+    private static string? FindRepoRootFile(string fileName)
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current is not null)
+        {
+            var path = Path.Combine(current.FullName, fileName);
+            if (File.Exists(path)) return path;
+            current = current.Parent;
+        }
+        return null;
+    }
+
     private static byte[] CreateChartPackage(
         bool hideValueColumn = false,
         bool oversizedHiddenColumn = false,
