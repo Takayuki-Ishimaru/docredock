@@ -8,6 +8,59 @@ namespace DocRedock.Tests.Markdown;
 
 public sealed class ReadableMarkdownTests
 {
+    [Theory]
+    [InlineData(OcrReviewMode.LowConfidence, 2)]
+    [InlineData(OcrReviewMode.All, 3)]
+    [InlineData(OcrReviewMode.Summary, 0)]
+    public void Ocr_review_modes_reduce_details_without_changing_body(OcrReviewMode mode, int shown)
+    {
+        var image = new DocumentNode("image", NodeKind.Image, null, 0, ContentLayer.Body,
+            new ReferenceNodeContent("review.assets/source.png", "原画像"));
+        var regions = new[]
+        {
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("AP|", new Geometry("image-pixels", 10, 20, 30, 12), .42, 1),
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("2026", null, null, 1),
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("仕様書", null, .9, 2)
+        };
+        var ocr = new DocumentNode("ocr", NodeKind.ImageText, "image", 1, ContentLayer.Derived,
+            new TextNodeContent("AP| 2026\n仕様書"), Extensions: new Dictionary<string, JsonElement>
+            { ["ocr_regions"] = JsonSerializer.SerializeToElement(regions) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-review", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [image, ocr])]);
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(OcrReview: mode)).Serialize(graph);
+        Assert.Contains("> AP| 2026", markdown);
+        Assert.Contains("> 仕様書", markdown);
+        Assert.Contains($"全3件、低信頼・信頼度不明2件、詳細表示{shown}件。", markdown);
+        Assert.Equal(mode != OcrReviewMode.Summary, markdown.Contains("| 1 | AP\\| |"));
+        Assert.Equal(mode == OcrReviewMode.All, markdown.Contains("| 2 | 仕様書 |"));
+        Assert.DoesNotContain("API", markdown);
+        Assert.Contains("review.assets/source.png", markdown);
+    }
+
+    [Fact]
+    public void Raw_path_only_markdown_fallback_requires_source_review_despite_resolved_ledger()
+    {
+        var visual = new VisualGraph("raw", [], [], Paths: [new VisualPath("raw-path")],
+            SourceItems: [new VisualSourceItem("raw-path", VisualSourceItemKind.VectorPath,
+                VisualDisposition.IgnoredDecorative)]);
+        var node = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("diagram"), Extensions: new Dictionary<string, JsonElement>
+            { ["visual_graph"] = JsonSerializer.SerializeToElement(visual) });
+        Assert.False(visual.IsPartialProjection);
+        Assert.True(ReadableMarkdownSerializer.RequiresSourceReview(node));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "raw-review", DocumentFormatKind.Pdf,
+            [new DocumentPartition("page-0001", 0, [node])]);
+        var serializer = new ReadableMarkdownSerializer();
+        var markdown = serializer.Serialize(graph);
+        Assert.Contains("- パス: raw-path", markdown);
+        Assert.Contains(serializer.Diagnostics, d => d.Code == "VisualSemanticProjectionFallback");
+        var summary = DocRedock.Api.ExportSummaryBuilder.Build(graph, []);
+        Assert.Equal(0, summary.FallbackPages);
+        Assert.Equal(1, summary.ReviewPages);
+        Assert.Equal(0, summary.ReviewImagePages);
+        Assert.Equal(1, summary.UnresolvedElements);
+    }
+
     [Fact]
     public void Ocr_review_preserves_identifiers_and_shows_missing_and_low_confidence()
     {
@@ -24,7 +77,7 @@ public sealed class ReadableMarkdownTests
             { ["ocr_regions"] = JsonSerializer.SerializeToElement(regions) });
         var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-review", DocumentFormatKind.Docx,
             [new DocumentPartition("document", 0, [image, ocr])]);
-        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(OcrReview: OcrReviewMode.All)).Serialize(graph);
         Assert.Contains("AP\\|", markdown);
         Assert.DoesNotContain("API", markdown);
         Assert.Contains("要照合", markdown);

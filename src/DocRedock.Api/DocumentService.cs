@@ -45,7 +45,8 @@ public sealed record ReadableDocumentExportOptions(
     string? Title = null,
     bool EmbedImages = false,
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
-    bool IncludePdfFallbackImages = true);
+    bool IncludePdfFallbackImages = true,
+    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence);
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
 public sealed record DocumentPreflightResult(bool WorkspaceValid, bool ProjectionChanged, bool CanRestore, string Fidelity, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
@@ -326,7 +327,8 @@ public sealed class DocumentService
                 options.IncludeDiagrams,
                 options.Sheets,
                 options.Title,
-                options.ContentPolicy));
+                options.ContentPolicy,
+                options.OcrReview));
             var markdown = serializer.Serialize(graph);
             foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
                          existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
@@ -881,7 +883,7 @@ public sealed class DocumentService
     /// each image is cut out of the page raster and becomes its own asset, so OCR reads the picture
     /// alone; the whole-page raster is then only an intermediate and is not kept. Otherwise the
     /// page raster itself stands in for the image, as before.</summary>
-    private async Task<(IReadOnlyList<WorkspaceAsset> Assets, DocumentGraph Graph)> RasterizePdfImagePagesAsync(
+    internal async Task<(IReadOnlyList<WorkspaceAsset> Assets, DocumentGraph Graph)> RasterizePdfImagePagesAsync(
         string sourcePath,
         DocumentGraph graph,
         IReadOnlyList<PdfPageText> pdfPages,
@@ -890,9 +892,8 @@ public sealed class DocumentService
         bool enableOcr = true,
         bool includeVisualFallback = true)
     {
-        var reviewPages = graph.Partitions.Where(partition => includeVisualFallback && partition.Nodes.Any(node =>
-            node.Extensions?.TryGetValue("visual_graph", out var value) == true &&
-            value.Deserialize<VisualGraph>()?.IsPartialProjection == true)).Select(p => p.Order + 1).ToHashSet();
+        var reviewPages = graph.Partitions.Where(partition => includeVisualFallback &&
+            partition.Nodes.Any(ReadableMarkdownSerializer.RequiresSourceReview)).Select(p => p.Order + 1).ToHashSet();
         var pages = graph.Partitions.Where(partition => reviewPages.Contains(partition.Order + 1) ||
                 enableOcr && (partition.Nodes.Count == 0 || partition.Nodes.Any(IsPdfImagePlaceholder)))
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
@@ -970,6 +971,9 @@ public sealed class DocumentService
         {
             var reason = exception.Message.Length > 512 ? exception.Message[..512] + "…" : exception.Message;
             diagnostics.Add(new Diagnostic("PdfRasterizationFailed", $"PDF rasterization failed: {reason} Native text was retained. Check the configured provider or run docredock doctor.", DiagnosticSeverity.Warning));
+            foreach (var page in reviewPages)
+                diagnostics.Add(new Diagnostic("PdfReviewImageUnavailable", $"PDF page {page}: source comparison image could not be generated; compare with the source PDF.",
+                    DiagnosticSeverity.Warning, PartUri: $"pdf:page:{page}"));
             return ([], graph);
         }
     }

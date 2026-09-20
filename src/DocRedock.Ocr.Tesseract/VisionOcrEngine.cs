@@ -115,9 +115,9 @@ public sealed class VisionOcrEngine : IOcrEngine
                 var lines = JsonSerializer.Deserialize<VisionLine[]>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
                 var regions = lines
                     .Where(line => !string.IsNullOrWhiteSpace(line.Text) && line.Confidence >= 0)
-                    .Select(line => new OcrTextRegion(line.Text, new Geometry(
+                    .Select((line, index) => new OcrTextRegion(line.Text, new Geometry(
                         "vision-normalized-bottom-left", line.X, line.Y, line.Width, line.Height),
-                        Math.Clamp(line.Confidence, 0, 1)))
+                        Math.Clamp(line.Confidence, 0, 1), index + 1))
                     .ToArray();
                 return new(OcrProcessingStatus.Completed, new OcrResult(string.Join("\n", regions.Select(r => r.Text)), regions), []);
             }

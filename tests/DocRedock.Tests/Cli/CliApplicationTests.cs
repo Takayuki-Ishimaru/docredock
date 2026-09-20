@@ -15,6 +15,67 @@ public sealed class CliApplicationTests : IDisposable
     public void Dispose() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previousExperimental);
 
     [Fact]
+    public async Task Diagonal_pdf_returns_warning_exit_and_distinct_review_counters()
+    {
+        using var fixture = new Fixture();
+        var source = Path.Combine(fixture.Root, "diagonal.pdf");
+        await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule("170 165 m 410 85 l S"));
+        var stdout = new StringWriter();
+        var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(null, null, discoverPdfRasterizer: false));
+        var exit = await app.RunAsync(["export", source, "--output", fixture.MarkdownPath, "--ocr", "off", "--pdf-fallback-images", "auto", "--verbose"]);
+        Assert.Equal(1, exit);
+        Assert.Contains("Pages requiring review: 1", stdout.ToString());
+        Assert.Contains("Review image pages: 0", stdout.ToString());
+        Assert.Contains("PdfReviewImageUnavailable", stdout.ToString());
+        Assert.Contains("unresolved_elements=1", stdout.ToString());
+    }
+
+    [Theory]
+    [InlineData(null, 1)]
+    [InlineData("low-confidence", 1)]
+    [InlineData("all", 2)]
+    [InlineData("summary", 0)]
+    [InlineData("invalid", -1)]
+    public async Task Ocr_review_option_controls_readable_details(string? mode, int shown)
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx(withImage: true);
+        using (var archive = ZipFile.Open(fixture.SourcePath, ZipArchiveMode.Update))
+        await using (var media = archive.CreateEntry("word/media/image1.png").Open())
+            await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        var app = new CliApplication(new StringWriter(), new StringWriter(),
+            new DocRedock.Api.DocumentService(new ReviewOcrEngine(), null, discoverPdfRasterizer: false));
+        var args = new List<string> { "export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on" };
+        if (mode is not null) args.AddRange(["--ocr-review", mode]);
+        var exit = await app.RunAsync(args.ToArray());
+        if (shown < 0)
+        {
+            Assert.Equal(2, exit);
+            Assert.False(File.Exists(fixture.MarkdownPath));
+            return;
+        }
+        Assert.NotEqual(2, exit);
+        var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath);
+        Assert.Contains("全2件、低信頼・信頼度不明1件、詳細表示" + shown + "件。", markdown);
+        Assert.Contains("> Good AP|", markdown);
+        Assert.Equal(shown == 2, markdown.Contains("| 1 | Good |"));
+        Assert.Equal(shown > 0, markdown.Contains("| 1 | AP\\| |"));
+    }
+
+    private sealed class ReviewOcrEngine : DocRedock.Providers.Abstractions.Providers.IOcrEngine
+    {
+        public DocRedock.Providers.Abstractions.Providers.ProviderDescriptor Descriptor { get; } = new(
+            "test.review", new Version(1, 0), 1, new HashSet<string> { "ocr.text" }, "MIT", "test", true);
+        public ValueTask<DocRedock.Providers.Abstractions.Providers.OcrAttemptResult> RecognizeAsync(
+            DocRedock.Providers.Abstractions.Providers.OcrInput input,
+            DocRedock.Providers.Abstractions.Providers.OcrOptions options, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new DocRedock.Providers.Abstractions.Providers.OcrAttemptResult(
+                DocRedock.Core.Reporting.OcrProcessingStatus.Completed,
+                new DocRedock.Providers.Abstractions.Providers.OcrResult("Good AP|",
+                [new("Good", null, .95, 1), new("AP|", null, .4, 1)]), []));
+    }
+
+    [Fact]
     public async Task Historical_original_requires_explicit_replacement_and_retains_backup()
     {
         using var fixture = new Fixture();

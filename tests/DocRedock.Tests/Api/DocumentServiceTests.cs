@@ -39,6 +39,128 @@ public sealed class DocumentServiceTests
         finally { Directory.Delete(root, true); }
     }
 
+    [Theory]
+    [InlineData(false, "auto")]
+    [InlineData(false, "off")]
+    [InlineData(false, "unavailable")]
+    [InlineData(false, "failed")]
+    [InlineData(true, "auto")]
+    [InlineData(true, "off")]
+    [InlineData(true, "unavailable")]
+    [InlineData(true, "failed")]
+    public async Task Diagonal_pdf_retains_warning_and_review_image_contract(bool arrow, string mode)
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "diagonal.pdf");
+            var overlay = "170 165 m 410 85 l S";
+            if (arrow)
+            {
+                var length = Math.Sqrt(240 * 240 + 80 * 80);
+                var ux = 240 / length; var uy = -80 / length;
+                overlay += FormattableString.Invariant($"\n{410-uy*5} {85+ux*5} m {410+ux*10} {85+uy*10} l {410+uy*5} {85-ux*5} l h f");
+            }
+            await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule(overlay));
+            IPdfRasterizer? rasterizer = mode == "unavailable" ? null : mode == "failed" ? new FailingReviewRasterizer() : new PngPdfRasterizer(500, 250);
+            var service = new DocumentService(null, rasterizer, discoverPdfRasterizer: false);
+            var output = Path.Combine(root, "diagonal.md");
+            var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output,
+                EnableOcr: false, IncludePdfFallbackImages: mode != "off"));
+            var text = await File.ReadAllTextAsync(output);
+            Assert.Contains("DESIGN", text);
+            Assert.Contains(result.Diagnostics, d => d.Severity == DiagnosticSeverity.Warning);
+            Assert.Equal(mode == "auto", text.Contains("diagonal.assets/page-0001.png"));
+            Assert.Equal(mode == "auto", result.Diagnostics.Any(d => d.Code == "PdfReviewImageAttached"));
+            Assert.Equal(mode is "unavailable" or "failed", result.Diagnostics.Any(d => d.Code == "PdfReviewImageUnavailable"));
+            Assert.DoesNotContain(result.Graph.Nodes, n => n.Kind == NodeKind.ImageText);
+            var summary = ExportSummaryBuilder.Build(result.Graph, result.Diagnostics);
+            Assert.Equal(1, summary.ReviewPages);
+            Assert.Equal(mode == "auto" ? 1 : 0, summary.ReviewImagePages);
+            Assert.True(summary.UnresolvedElements > 0);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private sealed class FailingReviewRasterizer : IPdfRasterizer
+    {
+        public ProviderDescriptor Descriptor { get; } = new("test.failed-rasterizer", new Version(1, 0), 1,
+            new HashSet<string> { "pdf.rasterize" }, "MIT", "test", true);
+        public ValueTask<IReadOnlyList<RasterizedPdfPage>> RasterizeAsync(string sourcePath,
+            IReadOnlyList<int> pageNumbers, PdfRasterizationOptions options, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("Synthetic rasterizer failure");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bidirectional_pdf_markdown_is_identical_across_paint_and_point_order(bool vertical)
+    {
+        var root = TempDirectory();
+        try
+        {
+            string? expected = null;
+            foreach (var reverseMarkers in new[] { false, true })
+            foreach (var reverseShaft in new[] { false, true })
+            {
+                var start = vertical ? "210 85" : "170 165";
+                var end = vertical ? "210 165" : "420 165";
+                var heads = vertical
+                    ? new[] { "205 85 m 210 75 l 215 85 l h f", "205 165 m 210 175 l 215 165 l h f" }
+                    : new[] { "170 160 m 160 165 l 170 170 l h f", "420 160 m 430 165 l 420 170 l h f" };
+                var shaft = reverseShaft ? $"{end} m {start} l S" : $"{start} m {end} l S";
+                var source = Path.Combine(root, "both.pdf");
+                var output = Path.Combine(root, $"both-{reverseMarkers}-{reverseShaft}.md");
+                await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule(shaft + "\n" + string.Join("\n", reverseMarkers ? heads.Reverse() : heads)));
+                var result = await new DocumentService(null, null, discoverPdfRasterizer: false)
+                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+                var text = await File.ReadAllTextAsync(output);
+                Assert.DoesNotContain(result.Diagnostics, d => d.Severity != DiagnosticSeverity.Information);
+                if (vertical)
+                {
+                    Assert.Contains("| DESIGN | ▲ |", text);
+                    Assert.Contains("| BUILD | │ |", text);
+                    Assert.Contains("| TEST | ▼ |", text);
+                }
+                else Assert.Contains("| DESIGN | ◀━━ | ━━ | ━━▶ |", text);
+                expected ??= text;
+                Assert.Equal(expected, text);
+            }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData("auto")]
+    [InlineData("off")]
+    [InlineData("unavailable")]
+    [InlineData("failed")]
+    public async Task Raw_path_only_final_projection_obeys_review_image_policy(string mode)
+    {
+        var visual = new VisualGraph("raw", [], [], Paths: [new VisualPath("raw-path")],
+            SourceItems: [new VisualSourceItem("raw-path", VisualSourceItemKind.VectorPath,
+                VisualDisposition.IgnoredDecorative)]);
+        var node = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("diagram"), Extensions: new Dictionary<string, JsonElement>
+            { ["visual_graph"] = JsonSerializer.SerializeToElement(visual) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "raw-review", DocumentFormatKind.Pdf,
+            [new DocumentPartition("page-0001", 0, [node], "pdf:page:1")]);
+        Assert.False(visual.IsPartialProjection);
+        IPdfRasterizer? rasterizer = mode == "unavailable" ? null : mode == "failed" ? new FailingReviewRasterizer() : new PngPdfRasterizer(200, 200);
+        var diagnostics = new List<Diagnostic>();
+        var result = await new DocumentService(null, rasterizer, discoverPdfRasterizer: false)
+            .RasterizePdfImagePagesAsync("synthetic.pdf", graph, [], diagnostics, CancellationToken.None,
+                enableOcr: false, includeVisualFallback: mode != "off");
+        Assert.Equal(mode == "auto" ? 1 : 0, result.Assets.Count);
+        Assert.Equal(mode == "auto", result.Graph.Nodes.Any(n => n.Kind == NodeKind.Image));
+        Assert.Equal(mode == "auto", diagnostics.Any(d => d.Code == "PdfReviewImageAttached"));
+        Assert.Equal(mode is "unavailable" or "failed", diagnostics.Any(d => d.Code == "PdfReviewImageUnavailable"));
+        var summary = ExportSummaryBuilder.Build(result.Graph, diagnostics);
+        Assert.Equal(1, summary.ReviewPages);
+        Assert.Equal(mode == "auto" ? 1 : 0, summary.ReviewImagePages);
+        Assert.Equal(1, summary.UnresolvedElements);
+    }
+
     [Fact]
     public async Task Pdf_vector_visual_graph_is_available_to_readable_markdown()
     {
@@ -231,7 +353,7 @@ public sealed class DocumentServiceTests
         var service = new DocumentService(new FakeOcrEngine());
 
         await service.ExportReadableAsync(new ReadableDocumentExportOptions(
-            source, markdown, EnableOcr: true, OcrLanguages: ["jpn", "eng"]));
+            source, markdown, EnableOcr: true, OcrLanguages: ["jpn", "eng"], OcrReview: DocRedock.Markdown.OcrReviewMode.All));
 
         var text = await File.ReadAllTextAsync(markdown);
         Assert.Contains("### 埋め込み画像", text, StringComparison.Ordinal);
@@ -239,7 +361,7 @@ public sealed class DocumentServiceTests
         Assert.Contains("<details class=\"ocr-extraction\">", text, StringComparison.Ordinal);
         Assert.Contains("<summary>OCR抽出テキスト（クリックで展開）</summary>", text, StringComparison.Ordinal);
         Assert.Contains("> recognized text", text, StringComparison.Ordinal);
-        Assert.Contains("| 認識文字 | 信頼度 | 原画像の位置 |", text);
+        Assert.Contains("| 行 | 認識文字 | 信頼度 | 原画像の位置 |", text);
         Assert.Contains("92", text);
         Assert.Contains("#xywh=pixel:0,0,10,10", text);
         Assert.True(File.Exists(Path.Combine(outputDirectory, "source.assets", "img-0001.png")));

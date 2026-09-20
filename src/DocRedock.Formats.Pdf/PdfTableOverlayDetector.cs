@@ -66,11 +66,13 @@ public static class PdfTableOverlayDetector
         // An arrowhead triangle drawn at one end of a shaft (see FindArrowShaftMatches) is
         // evidence for that shaft's own arrow classification below, never an independent overlay
         // in its own right -- exclude every matched marker path id from separate candidacy.
-        var shaftMatchByShaftPathId = new Dictionary<string, PdfTableInference.ArrowShaftMatch>(StringComparer.Ordinal);
+        var shaftMatchByShaftPathId = new Dictionary<string, (bool Start, bool End)>(StringComparer.Ordinal);
         var markerPathIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var match in PdfTableInference.FindArrowShaftMatches(allPaths))
         {
-            shaftMatchByShaftPathId[match.ShaftPathId] = match;
+            var ends = shaftMatchByShaftPathId.GetValueOrDefault(match.ShaftPathId);
+            shaftMatchByShaftPathId[match.ShaftPathId] =
+                (ends.Start || !match.MarkerNearEnd, ends.End || match.MarkerNearEnd);
             markerPathIds.Add(match.MarkerPathId);
         }
 
@@ -98,10 +100,10 @@ public static class PdfTableOverlayDetector
             // "today line") never gets that field populated (VisualEdgeDirectionContradiction
             // forbids setting it on an Undirected edge), so fall back to the same geometric match
             // PdfTableInference.Infer itself uses to keep the shaft out of ruling-line candidacy.
-            if (arrowheadEvidence is null && shaftPathId is not null && shaftMatchByShaftPathId.TryGetValue(shaftPathId, out var geometricMatch))
+            if (shaftPathId is not null && shaftMatchByShaftPathId.TryGetValue(shaftPathId, out var geometricMatch))
             {
-                arrowheadEvidence = geometricMatch.MarkerNearEnd ? "end" : "start";
-                arrowheadAtEnd = geometricMatch.MarkerNearEnd;
+                arrowheadEvidence = geometricMatch.Start && geometricMatch.End ? "both" : geometricMatch.End ? "end" : "start";
+                arrowheadAtEnd = geometricMatch.End;
             }
             candidates.Add((edge.Id, shaftPathId ?? edge.Id, geometry, source?.Points ?? edge.Path, arrowheadEvidence, arrowheadAtEnd));
         }
@@ -109,16 +111,21 @@ public static class PdfTableOverlayDetector
         {
             if (path.Geometry is not { } geometry || consumedPathIds.Contains(path.Id) ||
                 excludedPathIds.Contains(path.Id) || markerPathIds.Contains(path.Id)) continue;
-            candidates.Add((path.Id, path.Id, geometry, path.Points, null, false));
+            var ends = shaftMatchByShaftPathId.GetValueOrDefault(path.Id);
+            var evidence = ends.Start && ends.End ? "both" : ends.End ? "end" : ends.Start ? "start" : null;
+            candidates.Add((path.Id, path.Id, geometry, path.Points, evidence, ends.End));
         }
 
         var overlays = new List<PdfTableOverlay>();
         var furniturePathIds = new List<string>();
         foreach (var (shapeId, rawPathId, geometry, points, arrowheadEvidence, arrowheadAtEnd) in candidates)
         {
-            if (excludedPathIds.Contains(shapeId)) continue;
+            if (excludedPathIds.Contains(shapeId) || excludedPathIds.Contains(rawPathId) || markerPathIds.Contains(rawPathId)) continue;
             if (!TryScoreOverlay(geometry, tableBounds, out _)) continue;
             var isLineShaped = geometry.Width <= 0 || geometry.Height <= 0;
+            // Open paths with extent on both axes cannot be represented by cell bar glyphs.
+            // Leave them in the visual graph for warning and source-image fallback.
+            if (!isLineShaped && points is { Count: >= 2 } && points[0] != points[^1]) continue;
             // Spec: a line segment that coincides with one of the table's own row/column
             // boundaries is a residual ruling-line fragment (e.g. a grid edge that
             // SuppressTableGridEdges could not fold away), not overlay content.
@@ -134,6 +141,13 @@ public static class PdfTableOverlayDetector
                 {
                     kind = "arrow";
                     (direction, axis) = ClassifyLineDirection(points, arrowheadAtEnd);
+                    if (StringComparer.OrdinalIgnoreCase.Equals(arrowheadEvidence, "both")) direction = "both";
+                    // A tip belongs to its endpoint cell even when the shaft covers less
+                    // than half that cell. Area-based coverage otherwise moves the tip.
+                    startRow = ComputeRowRange(geometry.Y + geometry.Height, geometry.Y + geometry.Height, ysTopDown).Start;
+                    endRow = ComputeRowRange(geometry.Y, geometry.Y, ysTopDown).End;
+                    startColumn = ComputeAxisRange(geometry.X, geometry.X, xs).Start;
+                    endColumn = ComputeAxisRange(geometry.X + geometry.Width, geometry.X + geometry.Width, xs).End;
                 }
                 else { kind = "line"; direction = "none"; axis = CoverageAxis(startRow, endRow, startColumn, endColumn); }
                 preset = null;

@@ -6,6 +6,8 @@ using DocRedock.Core.Documents;
 
 namespace DocRedock.Markdown;
 
+public enum OcrReviewMode { LowConfidence, All, Summary }
+
 /// <summary>Controls optional detail in the reader-oriented Markdown projection.</summary>
 public sealed record ReadableMarkdownOptions(
     bool ShowFormulas = false,
@@ -13,7 +15,8 @@ public sealed record ReadableMarkdownOptions(
     bool IncludeDiagrams = true,
     IReadOnlyList<string>? IncludedSheets = null,
     string? Title = null,
-    string ContentPolicy = "visible");
+    string ContentPolicy = "visible",
+    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence);
 
 /// <summary>
 /// Produces Markdown intended for reading rather than round-tripping. Unlike the
@@ -1609,7 +1612,7 @@ public sealed partial class ReadableMarkdownSerializer
         output.AppendLine();
     }
 
-    private static void WriteOcrDetails(StringBuilder output, string text, DocumentNode node, DocumentPartition partition)
+    private void WriteOcrDetails(StringBuilder output, string text, DocumentNode node, DocumentPartition partition)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
         output.AppendLine("<details class=\"ocr-extraction\">")
@@ -1621,10 +1624,24 @@ public sealed partial class ReadableMarkdownSerializer
         if (node.Extensions?.TryGetValue("ocr_regions", out var regions) == true && regions.ValueKind == JsonValueKind.Array)
         {
             var image = partition.Nodes.FirstOrDefault(n => n.Id == node.ParentId)?.Content as ReferenceNodeContent;
-            output.AppendLine("OCR照合情報：信頼度はエンジンの推定値です。識別子・品番・数値は原画像と照合してください。")
-                .AppendLine().AppendLine("| 認識文字 | 信頼度 | 原画像の位置 |")
-                .AppendLine("| --- | --- | --- |");
-            foreach (var region in regions.EnumerateArray())
+            var allRegions = regions.EnumerateArray().ToArray();
+            static double? Confidence(JsonElement region) =>
+                region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number &&
+                c.TryGetDouble(out var score) && double.IsFinite(score) ? score : null;
+            var needsReview = allRegions.Where(r => Confidence(r) is not { } value || value < .8).ToArray();
+            var shown = options.OcrReview switch
+            {
+                OcrReviewMode.All => allRegions,
+                OcrReviewMode.Summary => [],
+                _ => needsReview,
+            };
+            output.AppendLine("OCR照合情報：信頼度はエンジンの推定値であり、正解率ではありません。識別子・品番・数値は原画像と照合してください。")
+                .AppendLine($"全{allRegions.Length}件、低信頼・信頼度不明{needsReview.Length}件、詳細表示{shown.Length}件。")
+                .AppendLine();
+            if (shown.Length > 0)
+                output.AppendLine("| 行 | 認識文字 | 信頼度 | 原画像の位置 |")
+                    .AppendLine("| --- | --- | --- | --- |");
+            foreach (var region in shown)
             {
                 var word = region.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
                 var confidence = region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out var score) && double.IsFinite(score)
@@ -1645,7 +1662,9 @@ public sealed partial class ReadableMarkdownSerializer
                     }
                     else position = EscapeLiteral(position);
                 }
-                output.Append("| ").Append(TableText(word)).Append(" | ").Append(label).Append(" | ").Append(position).AppendLine(" |");
+                var line = region.TryGetProperty("line_number", out var lineNumber) && lineNumber.ValueKind == JsonValueKind.Number && lineNumber.TryGetInt32(out var number)
+                    ? number.ToString(CultureInfo.InvariantCulture) : "未提供";
+                output.Append("| ").Append(line).Append(" | ").Append(TableText(word)).Append(" | ").Append(label).Append(" | ").Append(position).AppendLine(" |");
             }
             output.AppendLine();
         }
@@ -1772,6 +1791,17 @@ public sealed partial class ReadableMarkdownSerializer
             output.Append("- ").AppendLine(EscapedInlineText(text));
         }
         output.AppendLine();
+    }
+
+    /// <summary>Uses the actual Markdown projection to decide whether source comparison is
+    /// needed, including raw-path-only fallback that graph accounting considers resolved.</summary>
+    public static bool RequiresSourceReview(DocumentNode node)
+    {
+        if (!TryGetVisualGraph(node, out var graph)) return false;
+        if (graph is null || graph.IsPartialProjection) return true;
+        var probe = new ReadableMarkdownSerializer();
+        probe.WriteVisualGraph(new StringBuilder(), node);
+        return probe.Diagnostics.Any(d => d.Severity is MarkdownDiagnosticSeverity.Warning or MarkdownDiagnosticSeverity.Error);
     }
 
     private void WriteVisualGraph(StringBuilder output, DocumentNode node)

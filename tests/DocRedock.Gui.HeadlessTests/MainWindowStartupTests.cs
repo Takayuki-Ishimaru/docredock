@@ -29,6 +29,10 @@ public sealed class MainWindowStartupTests
         try
         {
             Assert.NotNull(window);
+            var reviewMode = Get<ComboBox>(window, "OcrReviewModeComboBox");
+            Assert.Equal("OCR照合情報の詳細", AutomationProperties.GetName(reviewMode));
+            Assert.Equal(new[] { "low-confidence", "all", "summary" },
+                reviewMode.Items.Cast<ComboBoxItem>().Select(item => item.Tag?.ToString()));
         }
         finally
         {

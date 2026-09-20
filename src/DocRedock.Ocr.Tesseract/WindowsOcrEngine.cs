@@ -260,7 +260,7 @@ public static class WindowsOcrJsonParser
         var lines = JsonSerializer.Deserialize<WindowsOcrLine[]>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
         var regions = lines
             .Where(line => !string.IsNullOrWhiteSpace(line.Text))
-            .Select(line => new OcrTextRegion(NormalizeText(line.Text), new Geometry("image-pixels", line.X, line.Y, line.Width, line.Height), null))
+            .Select((line, index) => new OcrTextRegion(NormalizeText(line.Text), new Geometry("image-pixels", line.X, line.Y, line.Width, line.Height), null, index + 1))
             .ToArray();
         return new OcrResult(string.Join("\n", regions.Select(region => region.Text)), regions);
     }

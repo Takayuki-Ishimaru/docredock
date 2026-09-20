@@ -2,6 +2,18 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.2.9]
+
+- Preserved both ends of horizontal and vertical PDF schedule arrows regardless of drawing order, and kept arrowheads in their endpoint cells.
+- Retained unsupported diagonal table-crossing lines for warning and source-image review instead of silently removing them.
+- Attached PDF review images when only unresolved vector paths remain, and reported image-generation failures explicitly.
+- Removed unnecessary warnings for reconstructed table headers and frames.
+- Separated pages requiring review, attached review-image pages, and unresolved visual elements in export summaries.
+- Aligned OCR review details with body reading order and added line numbers and GUI/CLI detail controls. Readable output now defaults to low-confidence or missing-confidence details; full and summary views remain available.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.9.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.9.md)
+
 ## [0.2.8]
 
 - Kept PDF schedule rows/columns stable across duration-bar widths and separate arrowhead sizes using paint, continuous-grid, and connected-triangle evidence.

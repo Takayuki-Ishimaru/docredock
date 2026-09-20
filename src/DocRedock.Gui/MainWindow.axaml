@@ -272,6 +272,13 @@
                   </ComboBox>
                   <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
                              Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+                  <TextBlock Text="OCR照合情報の詳細" Classes="muted caption" />
+                  <ComboBox x:Name="OcrReviewModeComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
+                            AutomationProperties.Name="OCR照合情報の詳細">
+                    <ComboBoxItem Content="低信頼・信頼度不明のみ（推奨）" Tag="low-confidence" />
+                    <ComboBoxItem Content="全件（詳細確認用）" Tag="all" />
+                    <ComboBoxItem Content="件数の要約のみ" Tag="summary" />
+                  </ComboBox>
                   <WrapPanel>
                     <CheckBox x:Name="PdfFallbackImagesCheckBox" Content="PDFの未解決ページに原本照合用画像を添付" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
                     <CheckBox x:Name="IncludeDiagramsCheckBox" Content="図" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />

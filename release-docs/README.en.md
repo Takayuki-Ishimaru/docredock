@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.9 Public Beta
+
+- [v0.2.9 release notes](RELEASE_NOTES_v0.2.9.en.md)
+- Preserved horizontal and vertical double-headed PDF schedule arrows and endpoint cells
+- Kept unsupported diagonal lines available for source review and reduced unnecessary table warnings
+- Separated review-page and image counts, and improved OCR review order and detail controls
+
 ### v0.2.8 Public Beta
 
 - [v0.2.8 release notes](RELEASE_NOTES_v0.2.8.en.md)

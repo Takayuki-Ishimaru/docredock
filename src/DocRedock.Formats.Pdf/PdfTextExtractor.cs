@@ -832,7 +832,8 @@ public static class PdfTextExtractor
             foreach (var labelId in labelRegions.Keys.Where(labelId => !deferredLabels.ContainsKey(labelId)))
             {
                 diagnostics.Add($"VisualEdgeLabelUnresolved: PDF page {pageNumber} text remained independent.");
-                graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2));
+                graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2)
+                    with { SourceObjectId = "region:" + regions[labelRegions[labelId]].SourceTextIds[0].ToString(System.Globalization.CultureInfo.InvariantCulture), SourceObjectType = "text-region" });
             }
         }
 

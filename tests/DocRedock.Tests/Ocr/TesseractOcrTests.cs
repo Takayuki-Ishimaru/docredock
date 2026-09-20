@@ -8,6 +8,19 @@ namespace DocRedock.Tests.Ocr;
 public sealed class TesseractOcrTests
 {
     [Fact]
+    public void Tsv_review_regions_follow_body_line_order_even_with_shifted_word_tops()
+    {
+        const string tsv = "5\t1\t1\t1\t2\t2\t130\t38\t20\t12\t94\tline\n" +
+                           "5\t1\t1\t1\t1\t2\t130\t18\t20\t12\t94\tword\n" +
+                           "5\t1\t1\t1\t2\t1\t100\t40\t20\t12\t94\tNext\n" +
+                           "5\t1\t1\t1\t1\t1\t100\t20\t20\t12\t94\tFirst\n";
+        var result = TsvParser.Parse(tsv);
+        Assert.Equal("First word\nNext line", result.Text);
+        Assert.Equal(new[] { "First", "word", "Next", "line" }, result.Regions.Select(r => r.Text));
+        Assert.Equal(new int?[] { 1, 1, 2, 2 }, result.Regions.Select(r => r.LineNumber));
+    }
+
+    [Fact]
     public void Tsv_parser_returns_reading_order_regions_and_confidence()
     {
         const string tsv = "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n" +

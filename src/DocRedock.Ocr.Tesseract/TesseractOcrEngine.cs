@@ -270,14 +270,17 @@ public static class TsvParser
             rows.Add(new Row(page, block, paragraph, lineNumber, left, top, width, height, recognizedText, confidence / 100.0, sourceOrder++));
         }
 
-        var regions = rows.OrderBy(row => row.Page).ThenBy(row => row.Top).ThenBy(row => row.Left).ThenBy(row => row.SourceOrder)
-            .Select(row => new OcrTextRegion(row.Text, new Geometry("image-pixels", row.Left, row.Top, row.Width, row.Height), Math.Clamp(row.Confidence, 0, 1)))
-            .ToArray();
-        var fullText = rows.GroupBy(row => (row.Page, row.Block, row.Paragraph, row.LineNumber))
+        // Use the same line grouping and word order for the body and review records.
+        // Sorting word tops independently moves short punctuation ahead of its own line.
+        var lines = rows.GroupBy(row => (row.Page, row.Block, row.Paragraph, row.LineNumber))
             .OrderBy(group => group.Key.Page).ThenBy(group => group.Min(row => row.Top)).ThenBy(group => group.Min(row => row.Left))
-            .Select(group => OcrLineAssembler.AssembleLine(group.OrderBy(row => row.Left).ThenBy(row => row.SourceOrder)
-                .Select(row => new OcrLineAssembler.Word(row.Text, row.Left, row.Width, row.Height, row.Confidence)).ToArray()))
-            .Where(line => line.Length > 0);
+            .ThenBy(group => group.Min(row => row.SourceOrder))
+            .Select(group => group.OrderBy(row => row.Left).ThenBy(row => row.SourceOrder).ToArray()).ToArray();
+        var regions = lines.SelectMany((line, index) => line.Select(row => new OcrTextRegion(row.Text,
+            new Geometry("image-pixels", row.Left, row.Top, row.Width, row.Height),
+            Math.Clamp(row.Confidence, 0, 1), index + 1))).ToArray();
+        var fullText = lines.Select(line => OcrLineAssembler.AssembleLine(line
+            .Select(row => new OcrLineAssembler.Word(row.Text, row.Left, row.Width, row.Height, row.Confidence)).ToArray()));
         return new OcrResult(string.Join("\n", fullText), regions);
     }
 
