@@ -19,7 +19,8 @@ public sealed record OcrResult(
 public sealed record OcrTextRegion(
     [property: JsonPropertyName("text")] string Text,
     [property: JsonPropertyName("bounding_box")] Geometry? BoundingBox,
-    [property: JsonPropertyName("confidence")] double? Confidence);
+    [property: JsonPropertyName("confidence")] double? Confidence,
+    [property: JsonPropertyName("line_number")] int? LineNumber = null);
 public sealed record OcrDiagnostic(
     [property: JsonPropertyName("code")] string Code,
     [property: JsonPropertyName("message")] string Message,

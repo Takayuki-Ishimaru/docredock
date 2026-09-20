@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.8 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.9 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -114,6 +114,10 @@ The GUI distinguishes completion, completion with warnings, and failure. Warning
 Unresolved PDF figures/tables receive source page images when a rasterizer is available, independently of OCR. Use the GUI page-image checkbox or `--pdf-fallback-images auto|off` (default `auto`). Images use `.assets/`, or inline data with `--embed-images`. Attaching an image does not resolve semantic warnings. Unavailable or failed rasterization remains explicit.
 
 OCR details include provider word/line confidence and coordinates. Values below 80% are marked for review; missing confidence is reported as unavailable. Identifiers and numbers are never automatically corrected. External-image links include `xywh` media fragments; region navigation depends on viewer support. Coordinates remain available for manual comparison. Vision's bottom-left normalized coordinates are converted to top-left percentages in links.
+
+OCR review rows follow the body's line and within-line order and include line numbers. Readable output defaults to details only for confidence below 80% or missing confidence. Use the GUI OCR review detail selector or `--ocr-review low-confidence|all|summary`: `all` includes every record; `summary` includes counts only. All modes retain the OCR body and original image. Audit/roundtrip sidecars retain all records. Confidence is an engine estimate, not a measured accuracy rate.
+
+`Fallback pages` counts pages with vector path fallback. Separate counters show `Pages requiring review`, `Review image pages`, and `Unresolved visual elements` (shapes, connections, and labels). Attaching a review image does not reduce unresolved counts. A path and the unresolved connection backed by it count as one element.
 
 `DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
 

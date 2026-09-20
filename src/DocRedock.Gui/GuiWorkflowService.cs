@@ -70,7 +70,8 @@ public sealed class GuiWorkflowService
         bool zipSidecar = false,
         string contentPolicy = "visible",
         VisualInferenceMode inferenceMode = VisualInferenceMode.Safe,
-        bool includePdfFallbackImages = true)
+        bool includePdfFallbackImages = true,
+        DocRedock.Markdown.OcrReviewMode ocrReview = DocRedock.Markdown.OcrReviewMode.LowConfidence)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -105,7 +106,7 @@ public sealed class GuiWorkflowService
                     IncludeSvgPreviews: includeSvgPreviews,
                     IncludeDiagrams: includeDiagrams,
                     EmbedImages: embedReadableImages,
-                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages), cancellationToken).ConfigureAwait(false);
+                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview), cancellationToken).ConfigureAwait(false);
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
                 var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);

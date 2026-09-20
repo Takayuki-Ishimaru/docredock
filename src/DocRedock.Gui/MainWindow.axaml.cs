@@ -342,7 +342,9 @@ public partial class MainWindow : Window
                     zipSidecar: ZipSidecarCheckBox.IsChecked == true,
                     contentPolicy: SelectedContentPolicy(),
                     inferenceMode: SelectedInferenceMode(),
-                    includePdfFallbackImages: PdfFallbackImagesCheckBox.IsChecked == true));
+                    includePdfFallbackImages: PdfFallbackImagesCheckBox.IsChecked == true,
+                    ocrReview: OcrReviewModeComboBox.SelectedIndex switch { 1 => DocRedock.Markdown.OcrReviewMode.All,
+                        2 => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence }));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -1052,6 +1054,7 @@ public partial class MainWindow : Window
             if (settings.EmbedReadableImages is not null) EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
             if (settings.ZipSidecar is not null) ZipSidecarCheckBox.IsChecked = settings.ZipSidecar;
             ContentPolicyComboBox.SelectedIndex = settings.ContentPolicy switch { "complete" => 1, "sanitized" => 2, _ => 0 };
+            OcrReviewModeComboBox.SelectedIndex = settings.OcrReview switch { "all" => 1, "summary" => 2, _ => 0 };
             VisualInferenceModeComboBox.SelectedIndex = settings.InferenceMode switch { "native-only" => 0, "balanced" => 2, _ => 1 };
             ExportFolderText.Text = OutputFolderLabel(_exportDirectory);
             RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
@@ -1074,7 +1077,8 @@ public partial class MainWindow : Window
                 ReadableExportToggle.IsChecked, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
-                (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked)));
+                (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
+                (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence")));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1096,7 +1100,8 @@ public partial class MainWindow : Window
         bool? ZipSidecar = null,
         string? ContentPolicy = null,
         string? InferenceMode = null,
-        bool? IncludePdfFallbackImages = null);
+        bool? IncludePdfFallbackImages = null,
+        string? OcrReview = null);
 
     private static void ShowError(TextBlock control, string message)
     {

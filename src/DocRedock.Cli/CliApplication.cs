@@ -124,7 +124,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -164,6 +164,11 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (languages.Length == 0) return Invalid("--ocr-lang must contain at least one language identifier.");
         var pdfFallbackImages = args.Option("pdf-fallback-images") ?? "auto";
         if (pdfFallbackImages is not ("auto" or "off")) return Invalid("--pdf-fallback-images must be auto or off.");
+        var ocrReview = args.Option("ocr-review") ?? "low-confidence";
+        if (ocrReview is not ("low-confidence" or "all" or "summary"))
+            return Invalid("--ocr-review must be low-confidence, all, or summary.");
+        if (profile != "readable" && args.Option("ocr-review") is not null)
+            return Invalid("--ocr-review applies to the readable profile; audit and roundtrip retain all OCR records.");
         var force = args.HasFlag("force");
         var quiet = args.HasFlag("quiet");
         if (args.HasFlag("sidecar")) return Invalid("export --sidecar requires dir or zip.");
@@ -191,7 +196,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 Sheets: sheets,
                 Title: args.Option("title"),
                 EmbedImages: embedImages,
-                InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off"), token);
+                InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off",
+                OcrReview: ocrReview switch { "all" => DocRedock.Markdown.OcrReviewMode.All,
+                    "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence }), token);
             stagedOutputs.Commit();
             await output.WriteLineAsync($"Exported: {markdown}");
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
@@ -645,7 +652,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
           docredock --version
-          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
+          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
@@ -677,7 +684,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private static string VisualInferenceSummary(ExportSummary summary) =>
         $"Visual summary: diagrams={summary.DiagramsReconstructed}; vector_pages={summary.VectorPages}; " +
         $"native={summary.NativeEdges}; high={summary.HighConfidenceEdges}; medium={summary.MediumConfidenceEdges}; " +
-        $"unresolved={summary.UnresolvedRelations}; fallback={summary.FallbackPaths}; rejected={summary.Rejected}";
+        $"unresolved={summary.UnresolvedRelations}; fallback={summary.FallbackPaths}; rejected={summary.Rejected}; " +
+        $"review_pages={summary.ReviewPages}; review_image_pages={summary.ReviewImagePages}; unresolved_elements={summary.UnresolvedElements}";
 
     private static string VisualEvidence(VisualEdge edge)
     {
@@ -707,7 +715,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
         private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);

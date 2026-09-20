@@ -78,7 +78,14 @@ public static class PdfVisualOutputCompactor
             : item).ToArray();
         var removedEdges = (graph.Edges ?? []).Where(edge => !edges.Any(kept => kept.Id == edge.Id)).ToArray();
         var removedIds = pathIds.Concat(nodeIds).Concat(removedEdges.Select(e => e.Id)).ToHashSet(StringComparer.Ordinal);
-        var diagnostics = ReconcileConsumedDiagnostics(graph.Diagnostics, removedIds,
+        // Ambiguous edge labels belonging to reconstructed cells are ordinary table text.
+        // Preserve warnings for text outside those cells, even on the same page.
+        var tableTextIds = tables.SelectMany(t => t.Rows).SelectMany(r => r.Cells)
+            .SelectMany(c => c.SourceTextIds).Select(id => "region:" + id.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ToHashSet(StringComparer.Ordinal);
+        var remainingDiagnostics = graph.Diagnostics?.Where(d => d.Code != "VisualEdgeLabelUnresolved" ||
+            d.SourceObjectId is null || !tableTextIds.Contains(d.SourceObjectId)).ToArray();
+        var diagnostics = ReconcileConsumedDiagnostics(remainingDiagnostics, removedIds,
             removedEdges.Count(edge => edge.SourceId is null || edge.TargetId is null));
         var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
