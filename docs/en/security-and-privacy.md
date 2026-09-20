@@ -29,3 +29,5 @@ Every CLI command rejects an `--output` (or destination) path that refers to the
 ## Report a vulnerability
 
 Do not post confidential reports or real documents in a public issue. Follow [SECURITY.md](../../SECURITY.md) and use a minimal synthetic reproducer.
+
+Version 0.2.8 also protects the historical source during restoration. New sidecars retain the source's local absolute path in `source.original_path` (never sent over the network); consider this path metadata when sharing a sidecar. A destination matching that path/file identity or the source SHA-256 requires `--force --replace-original` and a retained backup. Older sidecars fall back to the source filename beside the Markdown and content hash. An older original moved elsewhere, renamed, and modified cannot be identified without path metadata. The current Markdown and immutable source inside the sidecar remain protected even with the dedicated replacement option.

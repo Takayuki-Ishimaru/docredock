@@ -52,6 +52,7 @@ public sealed class RoundTripWorkspace
             Source = new SourceInfo
             {
                 FileName = sourceInfo.Name,
+                OriginalPath = sourcePath,
                 Format = options.SourceFormat ?? FormatFromExtension(sourceInfo.Extension),
                 Sha256 = sourceHash,
                 SourceRevisionId = options.SourceRevisionId ?? "rev_" + sourceHash[..16],

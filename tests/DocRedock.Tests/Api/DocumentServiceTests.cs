@@ -13,6 +13,32 @@ namespace DocRedock.Tests.Api;
 
 public sealed class DocumentServiceTests
 {
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Unresolved_pdf_gets_review_image_independently_of_ocr(bool includeReview)
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "review.pdf");
+            const string content = "BT 1 0 0 1 10 10 Tm (Native text) Tj ET 50 60 m 170 180 l S";
+            await File.WriteAllTextAsync(source, $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream\n%%EOF");
+            var rasterizer = new PngPdfRasterizer(200, 200);
+            var service = new DocumentService(null, rasterizer, discoverPdfRasterizer: false);
+            var markdown = Path.Combine(root, "review.md");
+            var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown,
+                EnableOcr: false, IncludePdfFallbackImages: includeReview));
+            var text = await File.ReadAllTextAsync(markdown);
+            Assert.Contains("Native text", text);
+            Assert.Contains(result.Diagnostics, d => d.Code == "VisualConnectorUnresolved");
+            Assert.Equal(includeReview, text.Contains("review.assets/page-0001.png"));
+            Assert.Equal(includeReview, File.Exists(Path.Combine(root, "review.assets", "page-0001.png")));
+            Assert.DoesNotContain(result.Graph.Nodes, n => n.Kind == NodeKind.ImageText);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     [Fact]
     public async Task Pdf_vector_visual_graph_is_available_to_readable_markdown()
     {
@@ -213,6 +239,9 @@ public sealed class DocumentServiceTests
         Assert.Contains("<details class=\"ocr-extraction\">", text, StringComparison.Ordinal);
         Assert.Contains("<summary>OCR抽出テキスト（クリックで展開）</summary>", text, StringComparison.Ordinal);
         Assert.Contains("> recognized text", text, StringComparison.Ordinal);
+        Assert.Contains("| 認識文字 | 信頼度 | 原画像の位置 |", text);
+        Assert.Contains("92", text);
+        Assert.Contains("#xywh=pixel:0,0,10,10", text);
         Assert.True(File.Exists(Path.Combine(outputDirectory, "source.assets", "img-0001.png")));
     }
 

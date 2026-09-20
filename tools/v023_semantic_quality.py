@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble the PDF semantic portion of v0.2.7 package-smoke evidence."""
+"""Assemble the PDF semantic portion of v0.2.8 package-smoke evidence."""
 from __future__ import annotations
 
 import argparse
@@ -29,7 +29,11 @@ def run_source_suite(cli: Path, output: Path) -> int:
         # three independent exports give a median duration and deterministic bytes.
         hashes, durations = [], []
         for index in range(3):
-            target = root / f"producer-{index}.md"; begin = time.monotonic()
+            # Asset links use the output basename. Compare identical filenames
+            # in separate directories, as the packaged smoke suite does.
+            target = root / f"producer-{index}" / "producer.md"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            begin = time.monotonic()
             result = subprocess.run([str(cli), "export", str(producer), "--profile", "readable", "--output", str(target), "--ocr", "off"], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, check=False, env={**__import__('os').environ, "DOCREDOCK_ENABLE_EXPERIMENTAL": "1"})
             durations.append(round((time.monotonic() - begin) * 1000));
             if result.returncode not in (0, 1) or not target.is_file(): errors.append(f"producer export {index} failed")
@@ -75,7 +79,8 @@ def run_source_suite(cli: Path, output: Path) -> int:
         if not no_diagram_passed:
             errors.append(f"no-diagram PDF emitted visual fallback or lost native text (exit={no_diagram_result.returncode}, markdown_bytes={len(no_diagram_text.encode('utf-8'))})")
         def runner(spec, fixture, mode):
-            target = root / f"{spec.case_id}.md"; repeat = root / f"repeat-{spec.case_id}.md"
+            target = root / f"{spec.case_id}.md"; repeat = root / ".determinism" / target.name
+            repeat.parent.mkdir(parents=True, exist_ok=True)
             command = ["export", str(fixture), "--profile", "readable", "--output", str(target), "--ocr", "off", "--visual-inference", mode]
             first = subprocess.run([str(cli), *command], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120, check=False, env={**__import__('os').environ, "DOCREDOCK_ENABLE_EXPERIMENTAL": "1"})
             command[command.index(str(target))] = str(repeat)
@@ -85,7 +90,7 @@ def run_source_suite(cli: Path, output: Path) -> int:
         _, records = run_materialized_corpus(root / "jitter", generate_perturbation_corpus(), runner, parse_markdown)
         cases = list(records)
         errors.extend(f"semantic case failed: {r['case_id']}" for r in records if r["status"] != "passed")
-    document = {"schema_version": 1, "version": "0.2.7", "status": "pass" if not errors else "fail", "errors": errors,
+    document = {"schema_version": 1, "version": "0.2.8", "status": "pass" if not errors else "fail", "errors": errors,
                 "producer_pdf": str(producer), "producer_hashes": hashes, "producer_deterministic": len(set(hashes)) == 1,
                 "producer_duration_median_ms": sorted(durations)[len(durations)//2] if durations else None,
                 "table_fixture": {"rows": 3, "columns": 4, "text_cells": 12, "markdown_bytes": len(table_text.encode("utf-8")), "exit_code": table_result.returncode, "passed": table_passed, "assertions": ["all-12-cell-labels-exactly-once", "markdown-table"]},
@@ -130,7 +135,7 @@ def main() -> int:
             errors.append(f"{path}: invalid or duplicate RID {rid!r}"); continue
         seen.add(rid)
         version, commit = item.get("version"), item.get("product_source_commit")
-        if version != "0.2.7" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
+        if version != "0.2.8" or not isinstance(commit, str) or len(commit) < 7 or commit == "local":
             errors.append(f"{rid}: stale or unverifiable version/commit evidence")
         elif provenance is None:
             provenance = (version, commit)
@@ -148,7 +153,7 @@ def main() -> int:
         if missing_kinds: errors.append(f"{rid}: missing semantic evidence: " + ", ".join(sorted(missing_kinds)))
     missing = RIDS - seen
     if missing: errors.append("missing package evidence: " + ", ".join(sorted(missing)))
-    output = {"schema_version": 1, "version": "0.2.7", "cases": records, "source_suite": source_suite,
+    output = {"schema_version": 1, "version": "0.2.8", "cases": records, "source_suite": source_suite,
               "rids": sorted(seen), "status": "pass" if not errors else "fail", "errors": errors}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")

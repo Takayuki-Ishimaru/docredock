@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.8 Public Beta
+
+- [v0.2.8 release notes](RELEASE_NOTES_v0.2.8.en.md)
+- Improved PDF schedule rows, columns, and arrow direction
+- Added completion-with-warnings guidance, source review images, and OCR confidence/positions
+- Added experimental restoration preflight and historical-source overwrite protection
+
 ### v0.2.7 Public Beta
 
 - [v0.2.7 release notes](RELEASE_NOTES_v0.2.7.en.md)

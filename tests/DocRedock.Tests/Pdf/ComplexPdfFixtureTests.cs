@@ -46,7 +46,7 @@ public sealed class ComplexPdfFixtureTests
         var output = Path.Combine(Path.GetTempPath(), "docredock-pdf-embedded-" + Guid.NewGuid().ToString("N") + ".md");
         try
         {
-            var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+            var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output, IncludePdfFallbackImages: false));
             Assert.Contains(result.Diagnostics, item => item.Code == "PdfEmbeddedImageOmitted");
             var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
             Assert.Contains("[PDF page 2: 1 embedded image(s) not extracted", markdown, StringComparison.Ordinal);

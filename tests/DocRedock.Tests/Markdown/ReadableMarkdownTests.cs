@@ -9,6 +9,31 @@ namespace DocRedock.Tests.Markdown;
 public sealed class ReadableMarkdownTests
 {
     [Fact]
+    public void Ocr_review_preserves_identifiers_and_shows_missing_and_low_confidence()
+    {
+        var image = new DocumentNode("image", NodeKind.Image, null, 0, ContentLayer.Body,
+            new ReferenceNodeContent("review.assets/source.png", "原画像"));
+        var regions = new[]
+        {
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("AP|", new Geometry("image-pixels", 10, 20, 30, 12), .42),
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("2026", null, null),
+            new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("仕様書", new Geometry("vision-normalized-bottom-left", .1, .2, .3, .1), .9)
+        };
+        var ocr = new DocumentNode("ocr", NodeKind.ImageText, "image", 1, ContentLayer.Derived,
+            new TextNodeContent("AP| 2026 仕様書"), Extensions: new Dictionary<string, JsonElement>
+            { ["ocr_regions"] = JsonSerializer.SerializeToElement(regions) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-review", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [image, ocr])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("AP\\|", markdown);
+        Assert.DoesNotContain("API", markdown);
+        Assert.Contains("要照合", markdown);
+        Assert.Contains("未提供", markdown);
+        Assert.Contains("#xywh=pixel:10,20,30,12", markdown);
+        Assert.Contains("#xywh=percent:10,70,30,10", markdown);
+    }
+
+    [Fact]
     public void Workbook_sheet_filter_recomputes_hidden_content_diagnostics_for_selected_sheets()
     {
         var visible = Cell("A1", 1, 1, "selected") with { Layer = ContentLayer.Hidden };

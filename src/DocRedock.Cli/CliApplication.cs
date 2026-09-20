@@ -49,6 +49,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 "inspect" => await InspectAsync(parsed, cancellationToken),
                 "diff" => await DiffAsync(parsed, cancellationToken),
                 "verify" => await VerifyAsync(parsed, cancellationToken),
+                "preflight" => await PreflightAsync(parsed, cancellationToken),
                 "rebase" => await RebaseAsync(parsed, cancellationToken),
                 "pack" => await PackAsync(parsed, cancellationToken),
                 "unpack" => await UnpackAsync(parsed, cancellationToken),
@@ -123,8 +124,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--visual-inference native-only|safe|balanced]",
-            "restore" => "restore <file.md> [--output file] [--allow-render-fallback]",
+            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
+            "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
             "doctor" => "doctor [--json] [--strict]",
             "inspect" => "inspect <source-or-file.md>",
@@ -160,6 +162,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return Invalid("--content-policy must be visible, complete, or sanitized.");
         var languages = (args.Option("ocr-lang") ?? "jpn+eng").Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (languages.Length == 0) return Invalid("--ocr-lang must contain at least one language identifier.");
+        var pdfFallbackImages = args.Option("pdf-fallback-images") ?? "auto";
+        if (pdfFallbackImages is not ("auto" or "off")) return Invalid("--pdf-fallback-images must be auto or off.");
         var force = args.HasFlag("force");
         var quiet = args.HasFlag("quiet");
         if (args.HasFlag("sidecar")) return Invalid("export --sidecar requires dir or zip.");
@@ -187,7 +191,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 Sheets: sheets,
                 Title: args.Option("title"),
                 EmbedImages: embedImages,
-                InferenceMode: inferenceMode), token);
+                InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off"), token);
             stagedOutputs.Commit();
             await output.WriteLineAsync($"Exported: {markdown}");
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
@@ -217,7 +221,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var stagedSidecar = stagedRoundTrip.PathFor(sidecarPath);
         var result = await Service.ExportAsync(new DocumentExportOptions(source, stagedSidecar, stagedRoundTripMarkdown,
             ocrMode != "off", languages, contentPolicy, Profile: profile,
-            InferenceMode: ParseInferenceMode(visualInference)), token);
+            InferenceMode: ParseInferenceMode(visualInference), IncludePdfFallbackImages: pdfFallbackImages != "off"), token);
         if (sidecarForm == "zip")
             await SidecarContainer.PackInPlaceAsync(result.Workspace.RootPath, stagedRoundTripMarkdown, token);
         stagedRoundTrip.Commit();
@@ -273,7 +277,12 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var workspace = await RoundTripWorkspace.OpenAsync(lease.RootPath, token);
         var destination = Path.GetFullPath(args.Option("output") ?? Path.Combine(Path.GetDirectoryName(markdown)!,
             Path.GetFileNameWithoutExtension(markdown) + "-restored" + Path.GetExtension(workspace.Manifest.Source.FileName)));
-        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"), protectedInputs: [markdown, workspacePath]);
+        if (args.HasFlag("replace-original") && !args.HasFlag("force"))
+            return Invalid("--replace-original requires --force; the existing document will be backed up.");
+        var historicalOriginal = IsHistoricalOriginal(destination, workspace.Manifest.Source, markdown);
+        if (historicalOriginal && !args.HasFlag("replace-original"))
+            return Invalid("OriginalDocumentProtected: destination matches the historical source document. Use a new output path, or --force --replace-original to retain a backup and explicitly replace it.");
+        using var stagedOutput = new StagedOutputTransaction([destination], args.HasFlag("force"), protectedInputs: [markdown, workspacePath, lease.RootPath, workspace.OriginalSourcePath]);
         var stagedDestination = stagedOutput.PathFor(destination);
         var result = await Service.RestoreAsync(new DocumentRestoreOptions(lease.RootPath, stagedDestination, markdown,
             args.HasFlag("allow-render-fallback")), token);
@@ -285,9 +294,47 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (lease.Form == SidecarForm.Zip)
             await output.WriteLineAsync("INFORMATION SidecarZipFormReadOnly: サイドカーは zip 形のため、workspace 内のレポートは保存されません。`docredock unpack <base>.drmd --in-place` で展開してください。");
         if (!result.Succeeded) return (int)ExitCode.RestoreConflict;
+        if (historicalOriginal && File.Exists(destination))
+        {
+            var backup = destination + ".docredock-original-" + Guid.NewGuid().ToString("N") + ".bak";
+            File.Copy(destination, backup, overwrite: false);
+            await output.WriteLineAsync($"Original backup: {backup}");
+        }
         stagedOutput.Commit();
         await output.WriteLineAsync($"Restored: {destination}"); await output.WriteLineAsync($"Fidelity: {result.Fidelity}");
         return result.Diagnostics.Any(item => item.Severity == DocRedock.Core.Reporting.DiagnosticSeverity.Warning) ? 1 : 0;
+    }
+
+    private static bool IsHistoricalOriginal(string destination, SourceInfo source, string markdown)
+    {
+        var original = source.OriginalPath ?? Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileName(source.FileName));
+        try { OutputCollisionGuard.EnsureNoCollision([destination], [original]); }
+        catch (OutputCollidesWithInputException) { return true; }
+        if (!File.Exists(destination)) return false;
+        using var stream = File.OpenRead(destination);
+        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(stream));
+        return StringComparer.OrdinalIgnoreCase.Equals(hash, source.Sha256);
+    }
+
+    private async Task<int> PreflightAsync(Arguments args, CancellationToken token)
+    {
+        var markdown = RequireExistingFile(args);
+        var parsed = await ParseMarkdownAsync(markdown, token);
+        if (!parsed.IsComplete) { WriteMarkdownDiagnostics(parsed); return (int)ExitCode.WorkspaceInvalid; }
+        var result = await Service.PreflightAsync(ResolveWorkspace(markdown, parsed.RoundTripStore), markdown,
+            args.HasFlag("allow-render-fallback"), token);
+        if (args.HasFlag("json"))
+            await output.WriteLineAsync(JsonSerializer.Serialize(result, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+        else
+        {
+            await output.WriteLineAsync($"Edits: {(result.ProjectionChanged ? "detected (not corruption)" : "none")}");
+            await output.WriteLineAsync($"Workspace integrity: {(result.WorkspaceValid ? "valid" : "INVALID")}");
+            await output.WriteLineAsync($"Trial restore: {(result.CanRestore ? "passed" : "FAILED")} ({result.Fidelity})");
+            foreach (var diagnostic in result.Diagnostics)
+                await output.WriteLineAsync($"{diagnostic.Severity.ToString().ToUpperInvariant()} {diagnostic.Code}: {diagnostic.Message}");
+        }
+        return !result.WorkspaceValid ? (int)ExitCode.WorkspaceInvalid : !result.CanRestore ? (int)ExitCode.RestoreConflict
+            : result.Diagnostics.Any(d => d.Severity == DocRedock.Core.Reporting.DiagnosticSeverity.Warning) ? 1 : 0;
     }
 
     private async Task<int> RenderAsync(Arguments args, CancellationToken token)
@@ -552,7 +599,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (projectionChanged)
         {
             await output.WriteLineAsync("Edit applicability: NOT CHECKED (run `docredock diff <file.md>`).");
-            await output.WriteLineAsync("Restore readiness: NOT CHECKED.");
+            await output.WriteLineAsync("Restore readiness: NOT CHECKED. Run `docredock preflight <file.md>` for an integrated trial restore.");
         }
         else
         {
@@ -593,18 +640,19 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         return (int)ExitCode.Unsupported;
     }
     private static bool IsExperimentalCommand(string command) => command.ToLowerInvariant() is
-        "restore" or "render" or "diff" or "rebase" or "pack" or "unpack" or "migrate";
+        "restore" or "preflight" or "render" or "diff" or "rebase" or "pack" or "unpack" or "migrate";
     private int LicenseFailure(string message) { error.WriteLine(message); return 9; }
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
           docredock --version
-          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
+          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
                       readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
-          docredock restore <file.md> [--output file] [--allow-render-fallback]
+          docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
           docredock diff <file.md> [--json]
           docredock verify <file.md|file.drmd|file.drmdpkg>
+          docredock preflight <file.md> [--json] [--allow-render-fallback]
           docredock rebase <file.md> --source <document> [--output rebased.md]
           docredock pack <file.md> [--output file.drmdpkg]
           docredock pack <file.md> --sidecar (--in-place | --output file.drmd)
@@ -659,8 +707,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

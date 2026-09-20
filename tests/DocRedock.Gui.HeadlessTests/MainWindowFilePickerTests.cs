@@ -23,6 +23,32 @@ namespace DocRedock.Gui.HeadlessTests;
 public sealed class MainWindowFilePickerTests
 {
     [AvaloniaFact]
+    public void Completion_distinguishes_warnings_and_failure_in_primary_status()
+    {
+        var window = new MainWindow();
+        try
+        {
+            var warnings = new[] { new DocRedock.Core.Reporting.Diagnostic("VisualConnectorUnresolved",
+                "PDF page 2: unresolved arrow", DocRedock.Core.Reporting.DiagnosticSeverity.Warning, PartUri: "pdf:page:2") };
+            Invoke(window, "ShowResult", true, "完了", "保存済み", null, warnings);
+            Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("!", Get<TextBlock>(window, "ResultSymbolText").Text);
+            Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
+            Assert.Contains("page 2", Get<TextBlock>(window, "ResultReviewText").Text);
+            Invoke(window, "ShowResult", true, "完了", "保存済み", null, Array.Empty<DocRedock.Core.Reporting.Diagnostic>());
+            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.False(Get<TextBlock>(window, "ResultReviewText").IsVisible);
+            Invoke(window, "ShowResult", false, "失敗", "保存できません", null, Array.Empty<DocRedock.Core.Reporting.Diagnostic>());
+            Assert.Equal("FAILED", Get<TextBlock>(window, "ResultKickerText").Text);
+            Invoke(window, "ShowResult", true, "完了", "保存済み", null,
+                new[] { warnings[0] with { Severity = DocRedock.Core.Reporting.DiagnosticSeverity.Error } });
+            Assert.Equal("FAILED", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("変換結果にエラーがあります", Get<TextBlock>(window, "ResultTitleText").Text);
+        }
+        finally { window.Close(); }
+    }
+
+    [AvaloniaFact]
     public async Task Export_file_picker_selection_shows_file_and_defaults_export_directory()
     {
         var root = Directory.CreateTempSubdirectory("docredock-gui-picker-");
@@ -115,8 +141,9 @@ public sealed class MainWindowFilePickerTests
             var markdownFiles = Directory.GetFiles(outputRoot.FullName, "*.md");
             Assert.Single(markdownFiles);
             Assert.True(Get<Control>(window, "ResultPanel").IsVisible);
-            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
-            Assert.Equal("書き出しが完了しました", Get<TextBlock>(window, "ResultTitleText").Text);
+            Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("保存は完了しました・原本との照合が必要です", Get<TextBlock>(window, "ResultTitleText").Text);
+            Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
         }
         finally
         {

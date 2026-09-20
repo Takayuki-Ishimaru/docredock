@@ -29,7 +29,8 @@ public sealed record DocumentExportOptions(
     string ContentPolicy = "visible",
     string? DocumentId = null,
     string Profile = "roundtrip",
-    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
+    bool IncludePdfFallbackImages = true);
 public sealed record DocumentExportResult(string MarkdownPath, RoundTripWorkspace Workspace, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
 public sealed record ReadableDocumentExportOptions(
     string SourcePath,
@@ -43,8 +44,10 @@ public sealed record ReadableDocumentExportOptions(
     IReadOnlyList<string>? Sheets = null,
     string? Title = null,
     bool EmbedImages = false,
-    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+    VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
+    bool IncludePdfFallbackImages = true);
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+public sealed record DocumentPreflightResult(bool WorkspaceValid, bool ProjectionChanged, bool CanRestore, string Fidelity, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentRestoreOptions(string WorkspacePath, string OutputPath, string? MarkdownPath = null, bool AllowRenderFallback = false);
 public sealed record DocumentRestoreResult(string OutputPath, FidelityLevel Fidelity, bool Succeeded, IReadOnlyList<Diagnostic> Diagnostics);
@@ -163,9 +166,8 @@ public sealed class DocumentService
         IReadOnlyList<WorkspaceAsset> assets;
         if (format == DocumentFormatKind.Pdf)
         {
-            (assets, graph) = options.EnableOcr
-                ? await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken).ConfigureAwait(false)
-                : (Array.Empty<WorkspaceAsset>(), graph);
+            (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
+                options.EnableOcr, options.IncludePdfFallbackImages).ConfigureAwait(false);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
@@ -407,9 +409,8 @@ public sealed class DocumentService
         IReadOnlyList<WorkspaceAsset> assets;
         if (format == DocumentFormatKind.Pdf)
         {
-            (assets, graph) = options.EnableOcr
-                ? await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken).ConfigureAwait(false)
-                : (Array.Empty<WorkspaceAsset>(), graph);
+            (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
+                options.EnableOcr, options.IncludePdfFallbackImages).ConfigureAwait(false);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 })
@@ -633,6 +634,31 @@ public sealed class DocumentService
         var edit = new MarkdownGraphEditor().Apply(baseline, markdown);
         var diagnostics = AddSidecarDiagnostics(edit.Diagnostics, lease);
         return new(baseline, edit, diagnostics);
+    }
+
+    /// <summary>Runs the actual restore in a disposable sidecar copy. Input files,
+    /// including reports and integrity metadata, remain unchanged.</summary>
+    public async Task<DocumentPreflightResult> PreflightAsync(string workspacePath, string markdownPath,
+        bool allowRenderFallback = false, CancellationToken cancellationToken = default)
+    {
+        await using var lease = await SidecarContainer.OpenAsync(workspacePath, cancellationToken).ConfigureAwait(false);
+        var workspace = await RoundTripWorkspace.OpenAsync(lease.RootPath, cancellationToken).ConfigureAwait(false);
+        var verification = await workspace.VerifyAsync(markdownPath, false, cancellationToken).ConfigureAwait(false);
+        if (!verification.IsValid)
+            return new(false, verification.ProjectionChanged, false, "FX", verification.Issues.Select(issue =>
+                new Diagnostic(issue.Code, issue.Message, DiagnosticSeverity.Error)).ToArray());
+        var root = Path.Combine(Path.GetTempPath(), "docredock-preflight", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var copy = Path.Combine(root, "trial.drmd");
+            await SidecarContainer.PackToAsync(lease.RootPath, markdownPath, copy, cancellationToken).ConfigureAwait(false);
+            var destination = Path.Combine(root, "trial" + Path.GetExtension(workspace.Manifest.Source.FileName));
+            var restored = await RestoreAsync(new DocumentRestoreOptions(copy, destination, markdownPath, allowRenderFallback), cancellationToken).ConfigureAwait(false);
+            return new(true, verification.ProjectionChanged, restored.Succeeded, restored.Fidelity.ToString(),
+                restored.Diagnostics.Where(d => d.Code != "SidecarZipFormReadOnly").ToArray());
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, recursive: true); }
     }
 
     public async Task<DocumentRestoreResult> RestoreAsync(DocumentRestoreOptions options, CancellationToken cancellationToken = default)
@@ -860,13 +886,25 @@ public sealed class DocumentService
         DocumentGraph graph,
         IReadOnlyList<PdfPageText> pdfPages,
         ICollection<Diagnostic> diagnostics,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool enableOcr = true,
+        bool includeVisualFallback = true)
     {
-        var pages = graph.Partitions.Where(partition => partition.Nodes.Count == 0 ||
-                partition.Nodes.Any(IsPdfImagePlaceholder))
+        var reviewPages = graph.Partitions.Where(partition => includeVisualFallback && partition.Nodes.Any(node =>
+            node.Extensions?.TryGetValue("visual_graph", out var value) == true &&
+            value.Deserialize<VisualGraph>()?.IsPartialProjection == true)).Select(p => p.Order + 1).ToHashSet();
+        var pages = graph.Partitions.Where(partition => reviewPages.Contains(partition.Order + 1) ||
+                enableOcr && (partition.Nodes.Count == 0 || partition.Nodes.Any(IsPdfImagePlaceholder)))
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
             .ToArray();
-        if (pages.Length == 0 || pdfRasterizer is null) return ([], graph);
+        if (pages.Length == 0) return ([], graph);
+        if (pdfRasterizer is null)
+        {
+            foreach (var page in reviewPages)
+                diagnostics.Add(new Diagnostic("PdfReviewImageUnavailable", $"PDF page {page}: unresolved tables/figures need source comparison; no PDF rasterizer is configured. Run docredock doctor.",
+                    DiagnosticSeverity.Warning, PartUri: $"pdf:page:{page}"));
+            return ([], graph);
+        }
         try
         {
             var rasterized = await pdfRasterizer.RasterizeAsync(sourcePath, pages, new PdfRasterizationOptions(), cancellationToken).ConfigureAwait(false);
@@ -891,7 +929,8 @@ public sealed class DocumentService
                 if (page.PixelWidth <= 0 || page.PixelHeight <= 0 || pixels > 40_000_000 || totalPixels > 200_000_000)
                     throw new InvalidDataException("PDF rasterizer exceeded the configured pixel budget.");
                 var bytes = page.Content.ToArray();
-                var crops = CropPdfEmbeddedImages(page, bytes, plans.GetValueOrDefault(page.PageNumber), diagnostics);
+                var crops = reviewPages.Contains(page.PageNumber) ? null
+                    : CropPdfEmbeddedImages(page, bytes, plans.GetValueOrDefault(page.PageNumber), diagnostics);
                 if (crops is { Count: > 0 })
                 {
                     cropped[page.PageNumber] = crops;
@@ -902,12 +941,30 @@ public sealed class DocumentService
                 var extension = page.MediaType == "image/jpeg" ? ".jpg" : ".png";
                 result.Add(new WorkspaceAsset(id, id + extension, page.MediaType, Hash(bytes), bytes, $"pdf:page:{page.PageNumber}"));
             }
+            foreach (var missing in requestedPages.Except(returnedPages))
+                diagnostics.Add(new Diagnostic("PdfReviewImageUnavailable", $"PDF page {missing}: rasterizer returned no page image; compare with the source PDF.",
+                    DiagnosticSeverity.Warning, PartUri: $"pdf:page:{missing}"));
             foreach (var diagnostic in diagnostics.Where(item =>
                          item.Code is "PdfRasterizerUnavailable" or "PdfEmbeddedImageOmitted").ToArray())
                 if (rasterized.Any(page => diagnostic.Message.Contains($"PDF page {page.PageNumber}:", StringComparison.Ordinal) ||
                         diagnostic.Message.Contains($"PDF page {page.PageNumber} ", StringComparison.Ordinal)))
                     diagnostics.Remove(diagnostic);
-            return (result, BindPdfPageRasters(graph, result, cropped, diagnostics));
+            graph = BindPdfPageRasters(graph, result, cropped, diagnostics);
+            graph = graph with { Partitions = graph.Partitions.Select(partition =>
+            {
+                if (!reviewPages.Contains(partition.Order + 1) || !result.Any(asset => asset.Id == partition.Id)) return partition;
+                var nodes = partition.Nodes.ToList();
+                if (!nodes.Any(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent image && image.Reference == partition.Id))
+                    nodes.Add(new DocumentNode(partition.Id + "_review", NodeKind.Image, null, nodes.Count, ContentLayer.Body,
+                        new ReferenceNodeContent(partition.Id, $"PDF page {partition.Order + 1}: 原本照合用画像（未解決の表・図を確認）"),
+                        new SourceAnchor("pdf", partition.SourcePartUri ?? $"pdf:page:{partition.Order + 1}", []),
+                        Editability: NodeEditability.RenderOnly,
+                        Extensions: new Dictionary<string, JsonElement> { ["pdf_page_raster"] = JsonSerializer.SerializeToElement(true) }));
+                diagnostics.Add(new Diagnostic("PdfReviewImageAttached", $"PDF page {partition.Order + 1}: source page image attached for comparison of unresolved tables/figures.",
+                    DiagnosticSeverity.Information, PartUri: partition.SourcePartUri));
+                return partition with { Nodes = nodes };
+            }).ToArray() };
+            return (result, graph);
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -1288,7 +1345,11 @@ public sealed class DocumentService
                 parent?.Source?.PartUri ?? "asset:" + item.AssetId,
                 [new AnchorLocator("asset_id", item.AssetId)]),
             Editability: NodeEditability.AnnotationOnly,
-            Provenance: [new ProvenanceItem(EvidenceKind.Ocr, confidence, DerivedFromNodeId: parent?.Id)]);
+            Provenance: [new ProvenanceItem(EvidenceKind.Ocr, confidence, DerivedFromNodeId: parent?.Id)],
+            Extensions: new Dictionary<string, JsonElement>
+            {
+                ["ocr_regions"] = JsonSerializer.SerializeToElement(item.Result.Regions)
+            });
     }
 
     private static bool IsGeneratedUnboundAsset(DocumentNode node) =>

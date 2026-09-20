@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.7 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.8 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -106,3 +106,15 @@ PdfTableInferred means a regular ruled grid was reconstructed as a table; PdfTab
 Conversion runs locally. The app always shows its running version. At startup it checks non-draft published releases, including Public Beta builds, through the public GitHub Releases API in the background and shows current/latest versions when an update exists. **Check for updates** runs a manual check; offline and API-limit failures never block startup or conversion. Updates are not auto-installed: the user chooses a package from the trusted GitHub release page. Set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` before launch to disable automatic checks.
 
 For experimental workflows, see [Experimental features](experimental-features.md). For handling guidance, see [Security and privacy](security-and-privacy.md).
+
+## Reviewing conversion results and protecting originals
+
+The GUI distinguishes completion, completion with warnings, and failure. Warnings put the need for source comparison, affected pages, and unresolved content in the main result area.
+
+Unresolved PDF figures/tables receive source page images when a rasterizer is available, independently of OCR. Use the GUI page-image checkbox or `--pdf-fallback-images auto|off` (default `auto`). Images use `.assets/`, or inline data with `--embed-images`. Attaching an image does not resolve semantic warnings. Unavailable or failed rasterization remains explicit.
+
+OCR details include provider word/line confidence and coordinates. Values below 80% are marked for review; missing confidence is reported as unavailable. Identifiers and numbers are never automatically corrected. External-image links include `xywh` media fragments; region navigation depends on viewer support. Coordinates remain available for manual comparison. Vision's bottom-left normalized coordinates are converted to top-left percentages in links.
+
+`DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
+
+Restoring over the historical source requires `--force --replace-original`; `--force` alone is insufficient. After a successful restore trial, the destination's previous bytes are retained as `<output>.docredock-original-<ID>.bak` before replacement. Prefer a new output name for normal restoration.
