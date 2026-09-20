@@ -341,7 +341,8 @@ public partial class MainWindow : Window
                     embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true,
                     zipSidecar: ZipSidecarCheckBox.IsChecked == true,
                     contentPolicy: SelectedContentPolicy(),
-                    inferenceMode: SelectedInferenceMode()));
+                    inferenceMode: SelectedInferenceMode(),
+                    includePdfFallbackImages: PdfFallbackImagesCheckBox.IsChecked == true));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -699,6 +700,8 @@ public partial class MainWindow : Window
         ResultSymbolText.Classes.Set("on-dark", true);
         ResultSymbolText.Classes.Set("on-accent", false);
         ResultSymbolText.Text = "…";
+        ResultPanel.Classes.Set("warning", false);
+        ResultReviewText.IsVisible = false;
         ResultKickerText.Text = "PROCESSING";
         ResultTitleText.Text = "処理しています";
         ResultMessageText.Text = message;
@@ -713,16 +716,25 @@ public partial class MainWindow : Window
 
     private void ShowResult(bool success, string title, string message, string? fidelity, IReadOnlyList<Diagnostic> diagnostics)
     {
+        var hasErrors = diagnostics.Any(d => d.Severity == DiagnosticSeverity.Error);
+        if (success && hasErrors) title = "変換結果にエラーがあります";
+        success = success && !hasErrors;
+        var warning = success && diagnostics.Any(d => d.Severity == DiagnosticSeverity.Warning);
         ResultPanel.IsVisible = true;
         ResultPanel.Classes.Set("error", !success);
-        ResultSymbol.Classes.Set("error", !success);
-        ResultSymbolText.Classes.Set("on-dark", success);
-        ResultSymbolText.Classes.Set("on-accent", !success);
-        ResultSymbolText.Text = success ? "✓" : "!";
-        ResultKickerText.Text = success ? "COMPLETE" : "CHECK REQUIRED";
-        ResultTitleText.Text = title;
+        ResultPanel.Classes.Set("warning", warning);
+        ResultSymbol.Classes.Set("error", !success || warning);
+        ResultSymbolText.Classes.Set("on-dark", success && !warning);
+        ResultSymbolText.Classes.Set("on-accent", !success || warning);
+        ResultSymbolText.Text = success && !warning ? "✓" : "!";
+        ResultKickerText.Text = !success ? "FAILED" : warning ? "COMPLETED WITH WARNINGS" : "COMPLETE";
+        ResultTitleText.Text = warning ? "保存は完了しました・原本との照合が必要です" : title;
+        ResultReviewText.IsVisible = warning;
+        ResultReviewText.Text = warning ? "要確認: " + string.Join(" / ", diagnostics
+            .Where(d => d.Severity != DiagnosticSeverity.Information)
+            .Select(d => (d.PartUri is null ? "" : d.PartUri + ": ") + d.Message).Distinct().Take(3)) : "";
         ResultMessageText.Text = message;
-        AutomationProperties.SetHelpText(ResultPanel, message);
+        AutomationProperties.SetHelpText(ResultPanel, ResultTitleText.Text + " " + ResultReviewText.Text + " " + message);
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
@@ -1036,6 +1048,7 @@ public partial class MainWindow : Window
             if (settings.ShowFormulas is not null) ShowFormulasCheckBox.IsChecked = settings.ShowFormulas;
             if (settings.IncludeSvgPreviews is not null) IncludeSvgCheckBox.IsChecked = settings.IncludeSvgPreviews;
             if (settings.IncludeDiagrams is not null) IncludeDiagramsCheckBox.IsChecked = settings.IncludeDiagrams;
+            if (settings.IncludePdfFallbackImages is not null) PdfFallbackImagesCheckBox.IsChecked = settings.IncludePdfFallbackImages;
             if (settings.EmbedReadableImages is not null) EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
             if (settings.ZipSidecar is not null) ZipSidecarCheckBox.IsChecked = settings.ZipSidecar;
             ContentPolicyComboBox.SelectedIndex = settings.ContentPolicy switch { "complete" => 1, "sanitized" => 2, _ => 0 };
@@ -1061,7 +1074,7 @@ public partial class MainWindow : Window
                 ReadableExportToggle.IsChecked, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
-                (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe")));
+                (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked)));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1082,7 +1095,8 @@ public partial class MainWindow : Window
         bool? EmbedReadableImages = null,
         bool? ZipSidecar = null,
         string? ContentPolicy = null,
-        string? InferenceMode = null);
+        string? InferenceMode = null,
+        bool? IncludePdfFallbackImages = null);
 
     private static void ShowError(TextBlock control, string message)
     {

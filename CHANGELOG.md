@@ -2,6 +2,18 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.2.8]
+
+- Kept PDF schedule rows/columns stable across duration-bar widths and separate arrowhead sizes using paint, continuous-grid, and connected-triangle evidence.
+- Reconciled consumed table/overlay diagnostics while retaining warnings for unresolved objects.
+- Distinguished GUI completion with warnings and attached review images to unresolved PDF pages independently of OCR (`--pdf-fallback-images auto|off`).
+- Added OCR confidence, coordinate, and source-region links without correcting recognized identifiers.
+- Protected historical originals from ordinary `restore --force`; explicit `--replace-original` retains a backup.
+- Added `preflight` for integrity, edit detection, and actual restoration in a disposable copy.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.8.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.8.md)
+
 ## [0.2.7]
 
 - Preserved supported arrows, duration bars, and markers over schedule tables as readable Markdown cell symbols in Word, Excel, PowerPoint, and PDF.

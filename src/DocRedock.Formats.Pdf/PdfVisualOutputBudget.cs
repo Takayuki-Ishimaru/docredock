@@ -76,34 +76,35 @@ public static class PdfVisualOutputCompactor
             ? item with { Disposition = VisualDisposition.IgnoredDecorative, ProjectedNodeId = null, ProjectedEdgeId = null,
                 FallbackPathId = null, Reason = "reconstructed table grid consumed by table projection" }
             : item).ToArray();
-        var diagnostics = TrimUnresolvedConnectorDiagnostics(graph.Diagnostics,
-            (graph.Edges ?? []).Where(edge => strandedEdgeIds.Contains(edge.Id) && (edge.SourceId is null || edge.TargetId is null)).Count());
+        var removedEdges = (graph.Edges ?? []).Where(edge => !edges.Any(kept => kept.Id == edge.Id)).ToArray();
+        var removedIds = pathIds.Concat(nodeIds).Concat(removedEdges.Select(e => e.Id)).ToHashSet(StringComparer.Ordinal);
+        var diagnostics = ReconcileConsumedDiagnostics(graph.Diagnostics, removedIds,
+            removedEdges.Count(edge => edge.SourceId is null || edge.TargetId is null));
         var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
     }
 
-    // A removed edge that never resolved to two nodes still owns one "VisualConnectorUnresolved"
-    // VisualDiagnostic recorded back when BuildVisualGraph first created it.
-    // PdfDiagnosticInvariantValidator's INV-03 requires that diagnostic count to never exceed the
-    // graph's own live UnresolvedEdges count, so removing an unresolved edge without also dropping
-    // one matching diagnostic would desynchronize the two -- mirroring the same reconciliation
-    // BuildVisualGraph itself performs when SuppressTableGridEdges suppresses a ruling line. No
-    // diagnostic entry carries a reliable SourceObjectId back to its edge (BuildVisualGraph's own
-    // Diag(...) helper never sets one for this code), so this trims by COUNT, exactly as that
-    // existing reconciliation already does.
-    private static IReadOnlyList<VisualDiagnostic>? TrimUnresolvedConnectorDiagnostics(
-        IReadOnlyList<VisualDiagnostic>? diagnostics, int removedUnresolvedEdgeCount)
+    // Only diagnostics for consumed objects are resolved. Legacy graphs without
+    // object IDs retain the bounded count-based connector reconciliation.
+    private static IReadOnlyList<VisualDiagnostic>? ReconcileConsumedDiagnostics(
+        IReadOnlyList<VisualDiagnostic>? diagnostics, HashSet<string> consumedIds, int removedUnresolvedEdges)
     {
-        if (removedUnresolvedEdgeCount <= 0 || diagnostics is not { Count: > 0 }) return diagnostics;
-        var trimmed = new List<VisualDiagnostic>(diagnostics);
-        var remaining = removedUnresolvedEdgeCount;
-        for (var index = trimmed.Count - 1; index >= 0 && remaining > 0; index--)
+        if (diagnostics is null) return null;
+        var retained = new List<VisualDiagnostic>();
+        foreach (var diagnostic in diagnostics)
         {
-            if (trimmed[index].Code != "VisualConnectorUnresolved") continue;
-            trimmed.RemoveAt(index);
-            remaining--;
+            if (diagnostic.SourceObjectId is { } id && consumedIds.Contains(id) &&
+                diagnostic.Code is "VisualConnectorUnresolved" or "VisualNodeLabelMissing" or "VisualEdgeDirectionUnknown")
+            {
+                if (diagnostic.Code == "VisualConnectorUnresolved") removedUnresolvedEdges--;
+                continue;
+            }
+            retained.Add(diagnostic);
         }
-        return trimmed;
+        for (var i = retained.Count - 1; i >= 0 && removedUnresolvedEdges > 0; i--)
+            if (retained[i].Code == "VisualConnectorUnresolved" && retained[i].SourceObjectId is null)
+            { retained.RemoveAt(i); removedUnresolvedEdges--; }
+        return retained;
     }
 
     /// <summary>P-Overlay: removes a schedule-arrow/bar/marker/line shape already folded into a
@@ -178,7 +179,9 @@ public static class PdfVisualOutputCompactor
         var survivingEdgeIds = edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
         var removedUnresolvedEdgeCount = (graph.Edges ?? [])
             .Count(edge => !survivingEdgeIds.Contains(edge.Id) && (edge.SourceId is null || edge.TargetId is null));
-        var diagnostics = TrimUnresolvedConnectorDiagnostics(graph.Diagnostics, removedUnresolvedEdgeCount);
+        var removedIds = consumedPathIds.Concat(nodeIds).Concat((graph.Edges ?? [])
+            .Where(edge => !survivingEdgeIds.Contains(edge.Id)).Select(edge => edge.Id)).ToHashSet(StringComparer.Ordinal);
+        var diagnostics = ReconcileConsumedDiagnostics(graph.Diagnostics, removedIds, removedUnresolvedEdgeCount);
         var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
     }

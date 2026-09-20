@@ -7,14 +7,14 @@ Choose documentation by audience. The current release support status is defined 
 Japanese:
 
 - [30-second quick start and user guide](ja/user-guide.md)
-- [v0.2.7の対応機能](ja/supported-features.md)
+- [v0.2.8の対応機能](ja/supported-features.md)
 - [Experimental features](ja/experimental-features.md)
 - [Security and privacy](ja/security-and-privacy.md)
 
 English:
 
 - [30-second quick start and user guide](en/user-guide.md)
-- [v0.2.7 supported features](en/supported-features.md)
+- [v0.2.8 supported features](en/supported-features.md)
 - [Experimental features](en/experimental-features.md)
 - [Security and privacy](en/security-and-privacy.md)
 

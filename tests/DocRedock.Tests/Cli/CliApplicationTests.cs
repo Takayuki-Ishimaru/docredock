@@ -14,6 +14,57 @@ public sealed class CliApplicationTests : IDisposable
 
     public void Dispose() => Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previousExperimental);
 
+    [Fact]
+    public async Task Historical_original_requires_explicit_replacement_and_retains_backup()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var original = await File.ReadAllBytesAsync(fixture.SourcePath);
+        var log = new StringWriter();
+        var app = new CliApplication(log, new StringWriter());
+        Assert.Equal(0, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
+        await File.WriteAllTextAsync(fixture.MarkdownPath, (await File.ReadAllTextAsync(fixture.MarkdownPath)).Replace("Before", "After"));
+        Assert.Equal(2, await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.SourcePath, "--force"]));
+        Assert.Equal(original, await File.ReadAllBytesAsync(fixture.SourcePath));
+        var renamedCopy = Path.Combine(fixture.Root, "renamed.docx");
+        File.Copy(fixture.SourcePath, renamedCopy);
+        Assert.Equal(2, await app.RunAsync(["restore", fixture.MarkdownPath, "--output", renamedCopy, "--force"]));
+        Assert.Equal(0, await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.SourcePath, "--force", "--replace-original"]));
+        Assert.Equal(original, await File.ReadAllBytesAsync(Assert.Single(Directory.GetFiles(fixture.Root, "*.docredock-original-*.bak"))));
+        using var restored = ZipFile.OpenRead(fixture.SourcePath);
+        using var reader = new StreamReader(restored.GetEntry("word/document.xml")!.Open());
+        Assert.Contains("After", await reader.ReadToEndAsync());
+    }
+
+    [Fact]
+    public async Task Preflight_checks_edited_restore_without_mutating_workspace()
+    {
+        using var fixture = new Fixture();
+        fixture.CreateDocx();
+        var log = new StringWriter();
+        var app = new CliApplication(log, new StringWriter());
+        Assert.Equal(0, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
+        await File.WriteAllTextAsync(fixture.MarkdownPath, (await File.ReadAllTextAsync(fixture.MarkdownPath)).Replace("Before", "After"));
+        var before = Directory.GetFiles(fixture.Root, "*", SearchOption.AllDirectories)
+            .ToDictionary(path => path, File.ReadAllBytes);
+        log.GetStringBuilder().Clear();
+        Assert.Equal(0, await app.RunAsync(["preflight", fixture.MarkdownPath, "--json"]));
+        using var report = System.Text.Json.JsonDocument.Parse(log.ToString());
+        Assert.True(report.RootElement.GetProperty("workspaceValid").GetBoolean());
+        Assert.True(report.RootElement.GetProperty("projectionChanged").GetBoolean());
+        Assert.True(report.RootElement.GetProperty("canRestore").GetBoolean());
+        Assert.Equal("F1", report.RootElement.GetProperty("fidelity").GetString());
+        Assert.Equal(before.Count, Directory.GetFiles(fixture.Root, "*", SearchOption.AllDirectories).Length);
+        foreach (var (path, bytes) in before) Assert.Equal(bytes, File.ReadAllBytes(path));
+        var sourceCopy = Directory.GetFiles(Path.ChangeExtension(fixture.MarkdownPath, ".drmd"), "*", SearchOption.AllDirectories)
+            .Single(path => path.Contains(Path.DirectorySeparatorChar + "source" + Path.DirectorySeparatorChar) && path.EndsWith(".docx"));
+        await File.AppendAllTextAsync(sourceCopy, "damage");
+        log.GetStringBuilder().Clear();
+        Assert.Equal(3, await app.RunAsync(["preflight", fixture.MarkdownPath, "--json"]));
+        using var invalid = System.Text.Json.JsonDocument.Parse(log.ToString());
+        Assert.False(invalid.RootElement.GetProperty("workspaceValid").GetBoolean());
+    }
+
     [Theory]
     [InlineData("readable")]
     [InlineData("roundtrip")]

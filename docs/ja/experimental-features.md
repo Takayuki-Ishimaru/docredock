@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/experimental-features.md)
 
-> v0.2.7 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
+> v0.2.8 Public Betaでは、ここにあるCLIワークフローはサポート対象外の実験機能です。明示的に有効化しない限り実行できません。デスクトップGUIのPDF入力は既定で利用できます。
 
 CLIを起動する前に環境変数を設定します。
 
@@ -21,6 +21,12 @@ $env:DOCREDOCK_ENABLE_EXPERIMENTAL = "1"
 ## PDF入力とOCR
 
 PDF抽出はネイティブテキストをページ単位で保持します。文字のないページのOCRには、利用可能なPDF rasterizerとOCR providerが必要です。`DOCREDOCK_PDF_RASTERIZER`による明示設定、PATH上のpdftoppm／mutoolの順で探索しますが、これらのツールは同梱しません。利用可否は`docredock doctor`で確認でき、`DOCREDOCK_DISABLE_PDF_RASTERIZER=1`で探索を無効にできます。利用できない場合はOCRを実行したように見せず`PdfRasterizerUnavailable`を出します。
+
+## 復元前チェックと元文書の保護
+
+`docredock preflight edited.md` は、サイドカーの整合性と編集内容を確認し、コピー上で復元を試します。入力文書や既存レポートを変更せず、`--json` で結果を取得できます。編集したPDFの再生成を許可する場合は `--allow-render-fallback` を明示してください。成功は対応範囲での復元可能性を示し、外観の一致を保証しません。
+
+履歴上の元文書への復元は `--force` だけでは実行できません。意図的に置き換える場合は `--force --replace-original` が必要で、置換前の内容を `.bak` ファイルに保存します。通常は別名に復元してください。詳細と終了コードは[利用ガイド](user-guide.md)を参照してください。
 
 ## Markdown生成（render）
 

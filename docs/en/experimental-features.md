@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These command-line workflows are unsupported experiments in the v0.2.7 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
+> These command-line workflows are unsupported experiments in the v0.2.8 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
 
 Set the environment variable before starting the CLI:
 
@@ -21,6 +21,12 @@ The environment gate applies to experimental CLI workflows, including CLI PDF ex
 ## PDF input and OCR
 
 PDF extraction preserves native text page partitions. Textless-page OCR requires a usable PDF rasterizer and OCR provider. DocRedock checks an explicit `DOCREDOCK_PDF_RASTERIZER` path, then pdftoppm / mutool on PATH; it does not bundle either tool. Use `docredock doctor` to inspect availability and `DOCREDOCK_DISABLE_PDF_RASTERIZER=1` to disable discovery. If rasterization is unavailable, DocRedock emits `PdfRasterizerUnavailable` instead of implying that OCR ran.
+
+## Restoration preflight and original protection
+
+`docredock preflight edited.md` checks sidecar integrity and edits, then tries restoration in a disposable copy without changing inputs or existing reports. Use `--json` for structured results. Explicitly add `--allow-render-fallback` to permit regeneration of an edited PDF. Success indicates restoration readiness within the supported scope, not visual identity.
+
+Restoring over a historical source requires `--force --replace-original`; `--force` alone is insufficient. The destination's previous contents are retained in a `.bak` file before replacement. Prefer a new output name. See the [User guide](user-guide.md) for details and exit codes.
 
 ## Markdown rendering
 

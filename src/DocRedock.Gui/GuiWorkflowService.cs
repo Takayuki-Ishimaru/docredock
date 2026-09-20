@@ -69,7 +69,8 @@ public sealed class GuiWorkflowService
         bool embedReadableImages = false,
         bool zipSidecar = false,
         string contentPolicy = "visible",
-        VisualInferenceMode inferenceMode = VisualInferenceMode.Safe)
+        VisualInferenceMode inferenceMode = VisualInferenceMode.Safe,
+        bool includePdfFallbackImages = true)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -104,7 +105,7 @@ public sealed class GuiWorkflowService
                     IncludeSvgPreviews: includeSvgPreviews,
                     IncludeDiagrams: includeDiagrams,
                     EmbedImages: embedReadableImages,
-                    InferenceMode: inferenceMode), cancellationToken).ConfigureAwait(false);
+                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages), cancellationToken).ConfigureAwait(false);
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
                 var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
@@ -144,7 +145,7 @@ public sealed class GuiWorkflowService
                 enableOcr,
                 NormalizeLanguages(ocrLanguages),
                 ContentPolicy: contentPolicy,
-                InferenceMode: inferenceMode), cancellationToken).ConfigureAwait(false);
+                InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages), cancellationToken).ConfigureAwait(false);
             var sidecarForm = SidecarForm.Directory;
             if (zipSidecar)
             {

@@ -78,34 +78,15 @@ public static class PdfTableInference
         if (horizontal.Length < 3 || vertical.Length < 3 || maxCandidates <= 0) return [];
         if ((long)horizontal.Length * vertical.Length > MaxGridIntersections) return [];
 
-        // P3 fix, part two: a filled overlay bar/rectangle sitting INSIDE a single cell (not
-        // spanning the table's own extent) also decomposes into 4 short AxisLine segments whose
-        // coordinates sit at brand-new, non-boundary positions -- the per-coordinate dedup above
-        // only removes an EXACT duplicate of an existing boundary, so these survive it and would
-        // otherwise pollute Cluster's column/row detection with a spurious, irregular extra
-        // coordinate (breaking Regular() and changing -- or losing -- the very table the bar was
-        // drawn on top of). Exclude a segment here only when it is BOTH short (under half the
-        // observed table span on its own axis) AND never reaches an established boundary on the
-        // OTHER axis -- checked against a segment from a DIFFERENT source path that is either a
-        // plain line or itself long enough to be a genuine boundary. The "different path" alone is
-        // not sufficient: the SAME shape drawn twice at identical coordinates (e.g. a bar painted
-        // once filled, once stroked) decomposes into two DIFFERENT-PathId but equally short,
-        // equally spurious rectangles, which would otherwise "confirm" each other's coordinate as a
-        // boundary. A genuine full (or half-or-more) span ruling line, or any short segment that
-        // legitimately lands exactly on another (genuinely long) line's own coordinate (e.g. a
-        // densely rectangle-bordered table with no plain lines at all), is always retained.
-        var tableWidthEstimate = horizontal.Max(line => line.Maximum) - horizontal.Min(line => line.Minimum);
-        var tableHeightEstimate = vertical.Max(line => line.Maximum) - vertical.Min(line => line.Minimum);
-        bool ReachesBoundary(AxisLine line, IReadOnlyList<AxisLine> perpendicular, double perpendicularSpanEstimate) =>
-            perpendicular.Any(other => other.PathId != line.PathId &&
-                (Math.Abs(other.Fixed - line.Minimum) <= 1.5 || Math.Abs(other.Fixed - line.Maximum) <= 1.5) &&
-                (!rectangleSourcedPathIds.Contains(other.PathId) || other.Maximum - other.Minimum >= perpendicularSpanEstimate * 0.5));
-        var filteredHorizontal = horizontal.Where(line =>
-            line.Maximum - line.Minimum >= tableWidthEstimate * 0.5 || ReachesBoundary(line, vertical, tableHeightEstimate)).ToArray();
-        var filteredVertical = vertical.Where(line =>
-            line.Maximum - line.Minimum >= tableHeightEstimate * 0.5 || ReachesBoundary(line, horizontal, tableWidthEstimate)).ToArray();
-        horizontal = filteredHorizontal;
-        vertical = filteredVertical;
+        // A structural rule must cover the established component extent, possibly as
+        // adjoining cell-border segments. Length alone cannot turn an interior bar or
+        // an unresolved arrow shaft into a new row/column boundary.
+        var leftEstimate = horizontal.Min(line => line.Minimum);
+        var rightEstimate = horizontal.Max(line => line.Maximum);
+        var bottomEstimate = vertical.Min(line => line.Minimum);
+        var topEstimate = vertical.Max(line => line.Maximum);
+        horizontal = FullyCoveredLevels(horizontal, leftEstimate, rightEstimate);
+        vertical = FullyCoveredLevels(vertical, bottomEstimate, topEstimate);
         if (horizontal.Length < 3 || vertical.Length < 3) return [];
         // Propagate the exclusion back into `lines` itself: `sourceIds` below re-derives which
         // paths belong to this table from `lines`, not from `horizontal`/`vertical` alone, so a
@@ -290,70 +271,49 @@ public static class PdfTableInference
         var matches = new List<ArrowShaftMatch>();
         foreach (var marker in allPaths)
         {
-            // A degenerate (zero-width or zero-height) bbox is another straight line -- most often
-            // one of the table's own OTHER ruling lines meeting this one at a shared corner --
-            // never a plausible small triangular arrowhead marker. Requiring both dimensions
-            // strictly positive is what keeps a regular grid from matching itself.
-            if (marker.Geometry is not { Width: > 0, Height: > 0 } geometry) continue;
-            var markerSize = Math.Sqrt(geometry.Width * geometry.Width + geometry.Height * geometry.Height);
-            if (markerSize <= 0) continue;
-            var center = new VisualPathPoint(geometry.X + geometry.Width / 2, geometry.Y + geometry.Height / 2);
-            VisualPath? nearestShaft = null; var nearestDistance = double.PositiveInfinity; var nearestLength = 0d; var nearestIsEnd = false;
+            // Rectangles/diamonds/legends are not arrowheads, regardless of size.
+            var vertices = marker.Points?.Distinct().ToArray();
+            if (vertices is not { Length: 3 } || marker.Geometry is not { Width: > 0, Height: > 0 } box) continue;
+            var size = Math.Sqrt(box.Width * box.Width + box.Height * box.Height);
+            var candidates = new List<(VisualPath Shaft, bool AtEnd, double Distance)>();
             foreach (var shaft in shafts)
             {
-                if (ReferenceEquals(shaft, marker)) continue;
                 var points = shaft.Points!;
                 var length = Distance(points[0], points[1]);
-                if (length <= 0) continue;
-                var toStart = Distance(center, points[0]); var toEnd = Distance(center, points[1]);
-                var distance = Math.Min(toStart, toEnd);
-                if (distance >= nearestDistance) continue;
-                nearestShaft = shaft; nearestDistance = distance; nearestLength = length; nearestIsEnd = toEnd <= toStart;
+                if (length <= 0 || size > length * .30) continue;
+                foreach (var atEnd in new[] { false, true })
+                {
+                    var end = points[atEnd ? 1 : 0];
+                    var start = points[atEnd ? 0 : 1];
+                    var ux = (end.X - start.X) / length; var uy = (end.Y - start.Y) / length;
+                    var projected = vertices.Select(p => (Along: (p.X - end.X) * ux + (p.Y - end.Y) * uy,
+                        Across: -(p.X - end.X) * uy + (p.Y - end.Y) * ux)).OrderBy(p => p.Along).ToArray();
+                    var tolerance = Math.Max(.75, size * .10);
+                    // Two base corners straddle the shaft axis; one tip points along it.
+                    // The shaft ends on/inside the triangle, not merely near its bbox.
+                    if (Math.Abs(projected[0].Along - projected[1].Along) > tolerance ||
+                        projected[0].Across * projected[1].Across >= 0 ||
+                        Math.Abs(projected[2].Across) > tolerance ||
+                        Math.Abs((projected[0].Across + projected[1].Across) / 2) > tolerance ||
+                        projected[2].Along - projected[1].Along < size * .20 ||
+                        projected[0].Along > tolerance || projected[2].Along < -tolerance) continue;
+                    candidates.Add((shaft, atEnd, Math.Abs(projected[0].Along)));
+                }
             }
-            // P4 fix: the purely length-relative cap below (30% of the shaft's own length) alone
-            // let an ordinary, unrelated filled shape (e.g. a legend box) sitting anywhere near one
-            // end of a LONG ruling line -- a table's own full-width/height rule is easily
-            // hundreds of points long -- pass as a plausible arrowhead purely because it was small
-            // relative to that great length, wrongly excluding the line from grid candidacy
-            // (an output CHANGE for a PDF with no genuine arrow at all). A real arrowhead marker is
-            // always small in absolute terms; MaxArrowheadMarkerSize is a hard, length-independent
-            // ceiling on top of the existing relative one.
-            if (nearestShaft is null || markerSize > nearestLength * .30 || markerSize > MaxArrowheadMarkerSize) continue;
-            // Deliberately tighter than PdfTextExtractor's own `Math.Max(markerSize * 1.5,
-            // shaftLength * .08)`: that second, length-scaled term exists for a genuine diagram
-            // connector, which is typically much shorter than a table's own full-width/height
-            // ruling line, so scaling tolerance by the (here, very long) shaft length reintroduces
-            // exactly the corner false-positive this rewrite exists to avoid. An arrowhead
-            // genuinely attached to its shaft always sits within a small multiple of its own size.
-            // P4 fix: also require the marker's own center to sit close to the shaft's AXIS itself
-            // (perpendicular distance <= markerSize), not merely close to one of its two endpoints
-            // -- a shape can be near an endpoint in straight-line distance while sitting well off to
-            // the side of the line it supposedly tips (e.g. beside a table corner where several
-            // long rules converge), which is never a genuine attached arrowhead.
-            if (nearestDistance <= markerSize * 1.5 && DistanceToSegment(center, nearestShaft.Points![0], nearestShaft.Points[1]) <= markerSize)
-                matches.Add(new ArrowShaftMatch(nearestShaft.Id, marker.Id, nearestIsEnd));
+            var nearest = candidates.OrderBy(c => c.Distance).ToArray();
+            if (nearest.Length == 0 || (nearest.Length > 1 && Math.Abs(nearest[0].Distance - nearest[1].Distance) < .1)) continue;
+            matches.Add(new ArrowShaftMatch(nearest[0].Shaft.Id, marker.Id, nearest[0].AtEnd));
         }
         return matches;
     }
 
-    // P4: absolute upper bound (points) on a plausible arrowhead marker's own diagonal size,
-    // regardless of how long the shaft it might attach to is.
-    private const double MaxArrowheadMarkerSize = 15;
+    private static AxisLine[] FullyCoveredLevels(AxisLine[] lines, double minimum, double maximum) =>
+        Cluster(lines.Select(line => line.Fixed))
+            .Select(level => lines.Where(line => Math.Abs(line.Fixed - level) <= 1.5).ToArray())
+            .Where(level => CoversLevel(level, minimum, maximum)).SelectMany(level => level).ToArray();
 
     internal static double Distance(VisualPathPoint a, VisualPathPoint b) =>
         Math.Sqrt(Math.Pow(a.X - b.X, 2) + Math.Pow(a.Y - b.Y, 2));
-
-    // P4: shortest distance from `point` to the line SEGMENT a-b (not the infinite line through
-    // it), used to confirm a candidate marker sits near the shaft's own axis, not merely near one
-    // of its two endpoints in straight-line distance.
-    private static double DistanceToSegment(VisualPathPoint point, VisualPathPoint a, VisualPathPoint b)
-    {
-        var dx = b.X - a.X; var dy = b.Y - a.Y;
-        var lengthSquared = dx * dx + dy * dy;
-        if (lengthSquared <= 1e-9) return Distance(point, a);
-        var t = Math.Clamp(((point.X - a.X) * dx + (point.Y - a.Y) * dy) / lengthSquared, 0, 1);
-        return Distance(point, new VisualPathPoint(a.X + t * dx, a.Y + t * dy));
-    }
 
     // `re` (and any other closed, axis-aligned quadrilateral path) is always represented as a
     // 5-point closed subpath (first point repeated last) -- see AxisLine.CreateAll's own rectangle
@@ -468,6 +428,10 @@ public static class PdfTableInference
         public static IEnumerable<AxisLine> CreateAll(VisualPath path)
         {
             if (path.Points is not { Count: >= 2 } points) return [];
+            // A filled area has no structural border. Thin filled rules may still
+            // act as grid strokes; backgrounds and duration bars cannot add rows.
+            if (path.IsFilled == true && path.IsStroked == false &&
+                path.Geometry is { Width: > 1.5, Height: > 1.5 }) return [];
             // PdfTextExtractor marks Bezier paths as low-confidence fallback. A curve whose
             // endpoints happen to align horizontally is still not a table rule.
             if (path.Confidence is { } confidence && confidence < .8) return [];

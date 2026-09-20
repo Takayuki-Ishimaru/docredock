@@ -29,6 +29,9 @@ public sealed class GeneratorInfo
 
 public sealed class SourceInfo
 {
+    [JsonPropertyName("original_path")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OriginalPath { get; init; }
     [JsonPropertyName("file_name")] public string FileName { get; init; } = "";
     [JsonPropertyName("format")] public string Format { get; init; } = "unknown";
     [JsonPropertyName("sha256")] public string Sha256 { get; init; } = "";

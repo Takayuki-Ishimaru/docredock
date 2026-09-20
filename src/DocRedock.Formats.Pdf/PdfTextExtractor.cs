@@ -242,6 +242,18 @@ public static class PdfTextExtractor
                 if (overlayShapeIds.Length > 0)
                     readableGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(readableGraph, overlayShapeIds);
                 var outputGraph = PdfVisualOutputCompactor.ProjectGraph(readableGraph, options.OutputBudget);
+                // Reconcile early string warnings with the final graph. Only codes owned
+                // by graph diagnostics are replaced; extraction/page warnings remain intact.
+                var graphCodes = (visualGraph.Diagnostics ?? []).Select(d => d.Code).ToHashSet(StringComparer.Ordinal);
+                for (var i = diagnostics.Count - 1; i >= pageDiagnosticStart; i--)
+                    if (graphCodes.Any(code => diagnostics[i].StartsWith(code + ":", StringComparison.Ordinal)))
+                        diagnostics.RemoveAt(i);
+                // Budget omission is not semantic resolution: retain diagnostics for
+                // genuine unresolved objects even if their display graph was downgraded.
+                diagnostics.AddRange((readableGraph.Diagnostics ?? []).Select(d => $"{d.Code}: PDF page {pageNumber}: {d.Message}"));
+                if (outputGraph.IsDowngraded)
+                    diagnostics.AddRange((outputGraph.Graph.Diagnostics ?? []).Where(d => d.Code == "VisualOutputBudgetExceeded")
+                        .Select(d => $"{d.Code}: PDF page {pageNumber}: {d.Message}"));
                 visualProjections[pageNumber] = outputGraph;
                 var fallback = PdfVisualOutputCompactor.Compact(outputGraph.Graph, options.OutputBudget);
                 visualFallbacks[pageNumber] = fallback;
@@ -488,7 +500,7 @@ public static class PdfTextExtractor
                         // `re` starts a new subpath; promote prior closed rectangles only when the
                         // following paint operator confirms that the compound path is painted.
                         foreach (var subpath in pendingClosedSubpaths)
-                            AddPaintedClosedSubpath(subpath);
+                            AddPaintedClosedSubpath(subpath, token);
                         pendingClosedSubpaths.Clear();
                         // A painting operator applies to every subpath of the current path, not
                         // just the last one (PDF 32000-1 8.5.3): an earlier open subpath drawn
@@ -661,7 +673,7 @@ public static class PdfTextExtractor
                                 paths[pathIndex] = paths[pathIndex] with { IsFallback = true };
                             }
                             graphDiagnostics.Add(Diag("VisualNodeLabelMissing",
-                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2));
+                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2) with { SourceObjectId = candidate.PathId });
                             continue;
                         }
                         var embeddedLabel = embeddedLabels[0];
@@ -714,7 +726,7 @@ public static class PdfTextExtractor
                                 paths[pathIndex] = paths[pathIndex] with { IsFallback = true };
                             }
                             graphDiagnostics.Add(Diag("VisualNodeLabelMissing",
-                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2));
+                                "Text region assignment was ambiguous; triangle retained as fallback.", 0.2) with { SourceObjectId = candidate.PathId });
                             continue;
                         }
                         if (labelCandidates.Length > 0)
@@ -1711,6 +1723,7 @@ public static class PdfTextExtractor
                     $"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint", StringComparison.Ordinal));
                 if (warningIndex >= 0) diagnostics.RemoveAt(warningIndex);
                 var graphIndex = graphDiagnostics.FindIndex(item => item.Code == "VisualConnectorUnresolved" &&
+                    (item.SourceObjectId is null || suppressedEdgeIds.Contains(item.SourceObjectId)) &&
                     item.Message.Contains("endpoint", StringComparison.OrdinalIgnoreCase));
                 if (graphIndex >= 0) graphDiagnostics.RemoveAt(graphIndex);
             }
@@ -1806,7 +1819,8 @@ public static class PdfTextExtractor
             var maxX = points.Max(point => point.X); var maxY = points.Max(point => point.Y);
             var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
             paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
-                subpathCurveSeen ? 0.45 : 0.9, subpathCurveSeen || !isClosedSubpath || !paintedSubpath, SourceNodeId: null));
+                subpathCurveSeen ? 0.45 : 0.9, subpathCurveSeen || !isClosedSubpath || !paintedSubpath, SourceNodeId: null,
+                IsFilled: paintToken is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*", IsStroked: isStrokeSubpath));
             if (isClosedSubpath && paintedSubpath) AddClosedNode(points);
             else if (isStrokeSubpath)
             {
@@ -1818,7 +1832,7 @@ public static class PdfTextExtractor
                     Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: 0.2,
                     Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
                 diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
-                graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2));
+                graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2) with { SourceObjectId = edges[^1].Id, SourceObjectType = "connector" });
             }
             if (subpathCurveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
         }
@@ -1833,13 +1847,15 @@ public static class PdfTextExtractor
             graphDiagnostics.Add(Diag("VisualPathPartial", "Unpainted PDF subpath retained as fallback.", 0.35));
         }
 
-        void AddPaintedClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
+        void AddPaintedClosedSubpath(IReadOnlyList<VisualPathPoint> subpath, string paintToken)
         {
             var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
             var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
             paths.Add(new VisualPath($"pdf_p{pageNumber}_path{paths.Count + 1}", subpath,
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
-                0.9, IsFallback: false, SourceNodeId: null));
+                0.9, IsFallback: false, SourceNodeId: null,
+                IsFilled: paintToken is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*",
+                IsStroked: paintToken is "S" or "s" or "B" or "B*" or "b" or "b*"));
             AddClosedNode(subpath);
         }
 
@@ -1882,7 +1898,7 @@ public static class PdfTextExtractor
                     unresolvedPathIds.Add(paths[^1].Id);
                     paths[^1] = paths[^1] with { IsFallback = true };
                 }
-                graphDiagnostics.Add(Diag("VisualNodeLabelMissing", "Text region assignment was ambiguous; vector box retained as fallback.", 0.2));
+                graphDiagnostics.Add(Diag("VisualNodeLabelMissing", "Text region assignment was ambiguous; vector box retained as fallback.", 0.2) with { SourceObjectId = paths.LastOrDefault()?.Id });
                 return;
             }
             var hasLabel = labelCandidate.Length > 0;

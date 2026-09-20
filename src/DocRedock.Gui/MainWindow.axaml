@@ -116,6 +116,8 @@
         <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
           <TextBlock x:Name="ResultKickerText" Text="完了" Classes="primary caption" />
           <TextBlock x:Name="ResultTitleText" Text="処理が完了しました" FontSize="14" FontWeight="SemiBold" />
+          <TextBlock x:Name="ResultReviewText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
+                     AutomationProperties.Name="原本照合が必要な内容" />
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
           <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5"
                        AutomationProperties.Name="処理の進捗" />
@@ -271,6 +273,7 @@
                   <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
                              Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
                   <WrapPanel>
+                    <CheckBox x:Name="PdfFallbackImagesCheckBox" Content="PDFの未解決ページに原本照合用画像を添付" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
                     <CheckBox x:Name="IncludeDiagramsCheckBox" Content="図" IsChecked="True" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
                     <CheckBox x:Name="ShowFormulasCheckBox" Content="数式" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />
                     <CheckBox x:Name="IncludeSvgCheckBox" Content="SVGプレビュー" Margin="0,0,12,4" IsCheckedChanged="OnSettingsChanged" />

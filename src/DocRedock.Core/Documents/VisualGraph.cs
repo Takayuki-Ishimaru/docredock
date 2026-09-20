@@ -29,7 +29,8 @@ public sealed record VisualConnectionEvidence(string Method, string ConfidenceBa
 public enum VisualGraphQuality { ExactNative, HighConfidenceInferred, Partial, FallbackOnly, Invalid }
 /// <summary>A recognized vector/path which could not necessarily be promoted to a semantic edge.</summary>
 public sealed record VisualPath(string Id, IReadOnlyList<VisualPathPoint>? Points = null, Geometry? Geometry = null,
-    SourceAnchor? SourceAnchor = null, double? Confidence = null, bool IsFallback = true, string? SourceNodeId = null);
+    SourceAnchor? SourceAnchor = null, double? Confidence = null, bool IsFallback = true, string? SourceNodeId = null,
+    bool? IsFilled = null, bool? IsStroked = null);
 public sealed record VisualDiagnostic(string Code, string Message, string? SourceNodeId = null, int Count = 1,
     string? Fallback = null, string? Remedy = null, string? Format = null, string? PartUri = null,
     string? PartitionId = null, string? SourceObjectId = null, string? SourceObjectType = null, double? Confidence = null)

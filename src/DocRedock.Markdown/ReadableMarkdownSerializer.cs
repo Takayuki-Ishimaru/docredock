@@ -339,7 +339,7 @@ public sealed partial class ReadableMarkdownSerializer
                         WriteImageNode(output, node, partition, includeOcr: false);
                         break;
                     case NodeKind.ImageText:
-                        WriteOcrDetails(output, displayText);
+                        WriteOcrDetails(output, displayText, node, partition);
                         break;
                     case NodeKind.Shape when HasExtension(node, "paragraph_details"):
                         if (StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"))
@@ -618,12 +618,12 @@ public sealed partial class ReadableMarkdownSerializer
             WriteImageNode(output, imageNode, partition, includeOcr: false);
             foreach (var textNode in imageText.Where(node => StringComparer.Ordinal.Equals(node.ParentId, imageNode.Id)))
             {
-                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
+                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()), textNode, partition);
                 renderedTextIds.Add(textNode.Id);
             }
         }
         foreach (var textNode in imageText.Where(node => !renderedTextIds.Contains(node.Id)))
-            WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
+            WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()), textNode, partition);
         if (charts.Length > 0)
         {
             WriteHeading(output, 3, "グラフ");
@@ -658,7 +658,7 @@ public sealed partial class ReadableMarkdownSerializer
             foreach (var textNode in partition.Nodes.Where(node => node.Kind == NodeKind.ImageText &&
                          StringComparer.Ordinal.Equals(node.ParentId, imageNode.Id))
                          .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
-                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()));
+                WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()), textNode, partition);
     }
 
     private static string VisualDiagnosticBlockId(string fallbackBlockId, VisualDiagnostic diagnostic)
@@ -1609,7 +1609,7 @@ public sealed partial class ReadableMarkdownSerializer
         output.AppendLine();
     }
 
-    private static void WriteOcrDetails(StringBuilder output, string text)
+    private static void WriteOcrDetails(StringBuilder output, string text, DocumentNode node, DocumentPartition partition)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
         output.AppendLine("<details class=\"ocr-extraction\">")
@@ -1618,6 +1618,37 @@ public sealed partial class ReadableMarkdownSerializer
         foreach (var line in text.Trim().Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\r", "\n", StringComparison.Ordinal).Split('\n'))
             output.Append("> ").Append(line.Trim()).AppendLine("  ");
         output.AppendLine();
+        if (node.Extensions?.TryGetValue("ocr_regions", out var regions) == true && regions.ValueKind == JsonValueKind.Array)
+        {
+            var image = partition.Nodes.FirstOrDefault(n => n.Id == node.ParentId)?.Content as ReferenceNodeContent;
+            output.AppendLine("OCR照合情報：信頼度はエンジンの推定値です。識別子・品番・数値は原画像と照合してください。")
+                .AppendLine().AppendLine("| 認識文字 | 信頼度 | 原画像の位置 |")
+                .AppendLine("| --- | --- | --- |");
+            foreach (var region in regions.EnumerateArray())
+            {
+                var word = region.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
+                var confidence = region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out var score) && double.IsFinite(score)
+                    ? score : (double?)null;
+                var label = confidence is { } value ? value.ToString("P0", CultureInfo.InvariantCulture) + (value < .8 ? "（要照合）" : "") : "未提供";
+                var position = "未提供";
+                if (region.TryGetProperty("bounding_box", out var bbox) && bbox.ValueKind == JsonValueKind.Object &&
+                    bbox.Deserialize<Geometry>() is { } box)
+                {
+                    position = FormattableString.Invariant($"{box.CoordinateSpace}: x={box.X:0.##}, y={box.Y:0.##}, w={box.Width:0.##}, h={box.Height:0.##}");
+                    if (image is not null && box.CoordinateSpace is "image-pixels" or "vision-normalized-bottom-left" &&
+                        !image.Reference.StartsWith("data:", StringComparison.Ordinal))
+                    {
+                        var fragment = box.CoordinateSpace == "image-pixels"
+                            ? FormattableString.Invariant($"#xywh=pixel:{box.X:0},{box.Y:0},{box.Width:0},{box.Height:0}")
+                            : FormattableString.Invariant($"#xywh=percent:{box.X*100:0.##},{(1-box.Y-box.Height)*100:0.##},{box.Width*100:0.##},{box.Height*100:0.##}");
+                        position = "[" + EscapeLiteral(position) + "](" + MarkdownPathEncoder.Encode(image.Reference) + fragment + ")";
+                    }
+                    else position = EscapeLiteral(position);
+                }
+                output.Append("| ").Append(TableText(word)).Append(" | ").Append(label).Append(" | ").Append(position).AppendLine(" |");
+            }
+            output.AppendLine();
+        }
         output.AppendLine("</details>").AppendLine();
     }
 
