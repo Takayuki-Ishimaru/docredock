@@ -19,10 +19,24 @@ public sealed record GuiExportResult(
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
     string? VisualSummary = null,
     CapabilityStatus? PdfRasterizer = null,
-    string? ExportSummary = null)
+    string? ExportSummary = null,
+    IReadOnlyList<GuiReviewItem>? ReviewItems = null,
+    OcrReviewSummary? OcrReview = null)
 {
     public string PackagePath => SidecarPath;
 }
+
+/// <summary>One page (or slide/sheet) a person should compare with the source: a short Japanese
+/// explanation, the review image when one was attached (an absolute path, or a data URI for
+/// self-contained Markdown), and the readable Markdown of that page alone.</summary>
+public sealed record GuiReviewItem(
+    string SourceName,
+    string MarkdownPath,
+    ReviewPage Page,
+    string Location,
+    string Description,
+    string? ImagePath,
+    string PageMarkdown);
 
 public sealed record GuiRestoreResult(
     string OutputPath,
@@ -110,6 +124,7 @@ public sealed class GuiWorkflowService
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
                 var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
+                var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics);
                 return new GuiExportResult(
                     markdownPath,
                     string.Empty,
@@ -121,7 +136,11 @@ public sealed class GuiWorkflowService
                     VisualSummary: SummarizeVisualGraph(summary),
                     PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
                         string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
-                    ExportSummary: summary.ToString());
+                    ExportSummary: summary.ToString(),
+                    ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
+                        new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
+                            ContentPolicy: contentPolicy, OcrReview: ocrReview)),
+                    OcrReview: review.Ocr);
             }
             catch
             {
@@ -160,10 +179,14 @@ public sealed class GuiWorkflowService
             // Built once so the two GUI summary lines (this one and ExportSummary below) can
             // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
             var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
+            var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics);
             return new GuiExportResult(markdownPath, sidecarPath, format, fidelity, AddProjectionDiagnostics(exported.Graph, exported.Diagnostics), SidecarForm: sidecarForm, InferenceMode: exported.InferenceMode, VisualSummary: SummarizeVisualGraph(summary),
                 PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
                     string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
-                ExportSummary: summary.ToString());
+                ExportSummary: summary.ToString(),
+                ReviewItems: BuildReviewItems(sourcePath, markdownPath, sidecarForm == SidecarForm.Directory ? sidecarPath : null,
+                    exported.Graph, review, new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: contentPolicy)),
+                OcrReview: review.Ocr);
         }
         catch
         {
@@ -303,6 +326,30 @@ public sealed class GuiWorkflowService
             "EmptyProjection",
             "No extractable content was found in the document projection.",
             DiagnosticSeverity.Warning)).ToArray();
+    }
+
+    private static IReadOnlyList<GuiReviewItem> BuildReviewItems(string sourcePath, string markdownPath, string? sidecarDirectory,
+        DocumentGraph graph, ExportReview review, DocRedock.Markdown.ReadableMarkdownOptions options) =>
+        review.Pages.Select(page =>
+        {
+            var location = ExportReviewText.Location(page);
+            return new GuiReviewItem(Path.GetFileName(sourcePath), markdownPath, page, location,
+                ExportReviewText.DescribeJapanese(page),
+                ExportReviewImages.Resolve(page.ReviewImageReference, markdownPath, sidecarDirectory),
+                PageMarkdown(graph, page, options with { Title = $"{location}（{Path.GetFileName(sourcePath)}）" }));
+        }).ToArray();
+
+    // The same readable projection, limited to the page under review, so the review window can
+    // show what that page became next to its source image.
+    private static string PageMarkdown(DocumentGraph graph, ReviewPage page, DocRedock.Markdown.ReadableMarkdownOptions options)
+    {
+        var partition = graph.Partitions.FirstOrDefault(item => StringComparer.Ordinal.Equals(item.Id, page.PartitionId));
+        if (partition is null) return string.Empty;
+        try { return new DocRedock.Markdown.ReadableMarkdownSerializer(options).Serialize(graph with { Partitions = [partition] }); }
+        catch (Exception exception) when (exception is InvalidDataException or InvalidOperationException or ArgumentException)
+        {
+            return string.Empty;
+        }
     }
 
     private static DocRedock.Providers.Abstractions.Providers.IPdfRasterizer? DiscoverRasterizer() =>

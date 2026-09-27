@@ -73,7 +73,7 @@ public sealed class MainWindowStartupTests
 
         var formatted = Assert.IsType<string>(method.Invoke(null, [diagnostics]));
 
-        Assert.Contains("警告 VisualConnectorUnresolved（2件）", formatted, StringComparison.Ordinal);
+        Assert.Contains("警告 VisualConnectorUnresolved（記録2件）", formatted, StringComparison.Ordinal);
         Assert.Contains("接続先を一意に判断できませんでした", formatted, StringComparison.Ordinal);
         Assert.Contains("対処:", formatted, StringComparison.Ordinal);
         Assert.DoesNotContain("ExternalRelationshipSkipped", formatted, StringComparison.Ordinal);

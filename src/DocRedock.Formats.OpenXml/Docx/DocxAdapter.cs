@@ -1495,7 +1495,7 @@ public sealed class DocxAdapter : IFormatProbe
                 Resolution: resolution, SourceNodeId: sourceNodeId, Direction: hasArrowhead ? "directed" : "undirected",
                 Geometry: geometry, Confidence: resolved ? (resolution == VisualEdgeResolution.NativeConnection ? 1 : 0.8) : 0,
                 Path: pathPoints, SourceAnchor: edgeAnchor, EdgeDirection: hasArrowhead ? VisualEdgeDirection.Directed : VisualEdgeDirection.Undirected,
-                Evidence: resolved ? inferred.Evidence : null));
+                Evidence: resolved ? inferred.Evidence : null, LineStyle: DocxOutlineLineStyle(connector.Element)));
         }
 
         // A wps:wsp shape is always sent to the engine as a full node candidate (only DrawingML
@@ -1836,7 +1836,9 @@ public sealed class DocxAdapter : IFormatProbe
     /// (PascalCase, StartRow/StartColumn 0-based and end-inclusive).</summary>
     private sealed record DocxTableOverlay(
         string ShapeId, string Text, string Kind, string Direction, string Axis,
-        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
+        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset,
+        [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+        string? LineStyle = null);
 
     private sealed record DocxTableOverlayDetection(
         IReadOnlyList<DocxTableOverlay> Overlays,
@@ -1966,7 +1968,26 @@ public sealed class DocxAdapter : IFormatProbe
         bool IsTextBox, double RotationDegrees, bool FlipH, bool FlipV,
         double WidthTwips, double HeightTwips, string? HeadArrowType, string? TailArrowType,
         bool IsInline, string? HorizontalRelativeFrom, double HorizontalOffsetTwips,
-        string? VerticalRelativeFrom, double VerticalOffsetTwips);
+        string? VerticalRelativeFrom, double VerticalOffsetTwips, string? LineStyle = null);
+
+    // The dash style of a shape's own outline: DrawingML a:ln/a:prstDash (or custDash), or VML
+    // v:stroke@dashstyle. An outline with no fill, or a VML shape with stroked="f", draws no line.
+    private static string? DocxOutlineLineStyle(XElement owner)
+    {
+        if (owner.Name.Namespace == V)
+        {
+            if ((string?)owner.Attribute("stroked") is "f" or "false") return null;
+            var stroke = owner.Descendants(V + "stroke").FirstOrDefault();
+            if ((string?)stroke?.Attribute("on") is "f" or "false") return null;
+            return VisualLineStyles.FromOfficeDash((string?)stroke?.Attribute("dashstyle"));
+        }
+        // Only the shape's own outline counts: a:ln also appears in text-run outlines and in
+        // compatibility extensions, which say nothing about how the shape itself is stroked.
+        var line = owner.Elements().FirstOrDefault(element => element.Name.LocalName == "spPr")?.Element(A + "ln");
+        if (line is null || line.Element(A + "noFill") is not null) return null;
+        return VisualLineStyles.FromOfficeDash((string?)line.Element(A + "prstDash")?.Attribute("val"),
+            custom: line.Element(A + "custDash") is not null);
+    }
 
     // Spec: "ShapeId = wp:docPr@id or VML o:spid/id".
     private static string ResolveDocxOverlayContractShapeId(XElement owner, XElement? anchorOrInline)
@@ -2072,7 +2093,7 @@ public sealed class DocxAdapter : IFormatProbe
                 0, false, false, widthTwips, heightTwips,
                 hasStartArrow ? "triangle" : null, hasEndArrow ? "triangle" : null,
                 IsInline: false, HorizontalRelativeFrom: "column", HorizontalOffsetTwips: xOffsetTwips,
-                VerticalRelativeFrom: "paragraph", VerticalOffsetTwips: yOffsetTwips);
+                VerticalRelativeFrom: "paragraph", VerticalOffsetTwips: yOffsetTwips, LineStyle: DocxOutlineLineStyle(owner));
         }
 
         var anchorOrInline = (XElement?)owner.Ancestors(WP + "anchor").FirstOrDefault() ?? owner.Ancestors(WP + "inline").FirstOrDefault();
@@ -2104,7 +2125,7 @@ public sealed class DocxAdapter : IFormatProbe
             HorizontalRelativeFrom: isAnchor ? ((string?)positionH?.Attribute("relativeFrom"))?.ToLowerInvariant() : null,
             HorizontalOffsetTwips: EmuToTwips(horizontalOffsetEmu),
             VerticalRelativeFrom: isAnchor ? ((string?)positionV?.Attribute("relativeFrom"))?.ToLowerInvariant() : null,
-            VerticalOffsetTwips: EmuToTwips(verticalOffsetEmu));
+            VerticalOffsetTwips: EmuToTwips(verticalOffsetEmu), LineStyle: DocxOutlineLineStyle(owner));
     }
 
     // (A): every candidate shape/connector anchored directly inside this cell's own paragraphs. A
@@ -2254,7 +2275,8 @@ public sealed class DocxAdapter : IFormatProbe
         // Coverage-based axis (spec): "被覆列数 > 1 または(被覆行数 == 1)" -> horizontal; only a
         // multi-row, single-column span reads as vertical.
         axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
-        return new DocxTableOverlay(candidate.ContractShapeId, candidate.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, candidate.Preset);
+        return new DocxTableOverlay(candidate.ContractShapeId, candidate.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, candidate.Preset,
+            kind is "marker" or "label" ? null : candidate.LineStyle);
     }
 
     private static string OppositeDocxOverlayDirection(string direction) => direction switch

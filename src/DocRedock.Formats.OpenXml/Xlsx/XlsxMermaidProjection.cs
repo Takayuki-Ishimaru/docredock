@@ -127,7 +127,8 @@ internal static class XlsxMermaidProjection
         foreach (var edge in graph.Edges.Where(item => item.SourceId is not null && item.TargetId is not null)
                      .OrderBy(item => item.Id, StringComparer.Ordinal))
         {
-            var arrow = edge.IsUndirected ? " ---" : " -->";
+            var dotted = VisualLineStyles.IsKnown(edge.LineStyle);
+            var arrow = edge.IsUndirected ? dotted ? " -.-" : " ---" : dotted ? " -.->" : " -->";
             output.Append("    ").Append(edge.SourceId).Append(arrow);
             if (!string.IsNullOrWhiteSpace(edge.Label))
                 output.Append('|').Append(Label(edge.Label!)).Append('|');
@@ -882,7 +883,10 @@ internal static class XlsxMermaidProjection
         {
             var edgeKey = source.Id + "\0" + target.Id + "\0" + edgeLabel;
             if (!edges.Add(edgeKey)) return;
-            output.Append("    ").Append(source.Id).Append(" -->");
+            // Mermaid has one dotted link style; it stands for both dashed and dotted source lines.
+            var lineStyle = sourceShape is null ? null
+                : VisualLineStyles.FromOfficeDash(sourceShape.LineDash, custom: sourceShape.LineDash == "custDash");
+            output.Append("    ").Append(source.Id).Append(lineStyle is null ? " -->" : " -.->");
             if (edgeLabel.Length > 0) output.Append('|').Append(Label(edgeLabel)).Append('|');
             output.Append(' ').AppendLine(target.Id);
             var edgeId = "e_" + visualEdges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -891,7 +895,7 @@ internal static class XlsxMermaidProjection
                 sourceShape?.Id, Direction: "directed",
                 Confidence: inferredPair is not null ? inferredPair.Score : resolution == VisualEdgeResolution.NativeConnection ? 1d : 0.99d,
                 SourceAnchor: sourceShape is null ? null : ShapeAnchor(worksheet, sourceShape),
-                EdgeDirection: VisualEdgeDirection.Directed,
+                EdgeDirection: VisualEdgeDirection.Directed, LineStyle: lineStyle,
                 Evidence: inferredPair is not null
                     ? new VisualConnectionEvidence("xlsx-shared-engine", inferredPair.Confidence.ToString(), inferredPair.Score,
                         ClusterId: inferredPair.ClusterId)

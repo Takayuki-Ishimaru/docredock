@@ -28,6 +28,55 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("Review image pages: 0", stdout.ToString());
         Assert.Contains("PdfReviewImageUnavailable", stdout.ToString());
         Assert.Contains("unresolved_elements=1", stdout.ToString());
+        // v0.2.9 evaluation: written / converted / needs review are separate lines, and the review
+        // line names the element and the page instead of a diagnostic record count.
+        Assert.Contains("Output written: yes", stdout.ToString());
+        Assert.Contains("Visual elements converted: partial (1 unresolved on 1 page(s))", stdout.ToString());
+        Assert.Contains("Human review: required (visual 1 page(s))", stdout.ToString());
+        Assert.Contains("Review page 1: 1 diagonal line(s) across a table not expressible as table symbols (table text was exported); review image unavailable",
+            stdout.ToString());
+    }
+
+    [Fact]
+    public async Task Ocr_review_is_reported_separately_and_does_not_change_the_exit_code()
+    {
+        var exits = new List<int>();
+        foreach (var engine in new DocRedock.Providers.Abstractions.Providers.IOcrEngine[] { new ConfidentOcrEngine(), new ReviewOcrEngine() })
+        {
+            using var fixture = new Fixture();
+            fixture.CreateDocx(withImage: true);
+            using (var archive = ZipFile.Open(fixture.SourcePath, ZipArchiveMode.Update))
+            await using (var media = archive.CreateEntry("word/media/image1.png").Open())
+                await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+            var stdout = new StringWriter();
+            var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(engine, null, discoverPdfRasterizer: false));
+            exits.Add(await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on"]));
+            var text = stdout.ToString();
+            if (engine is ReviewOcrEngine)
+            {
+                Assert.Contains("OCR summary: images=1; regions=2; review_items=1; review_required=true", text);
+                Assert.Contains("Human review: required (OCR 1 item(s))", text);
+            }
+            else
+            {
+                Assert.Contains("OCR summary: images=1; regions=2; review_items=0; review_required=false", text);
+                Assert.Contains("Human review: not required", text);
+            }
+        }
+        Assert.Equal(exits[0], exits[1]);
+    }
+
+    private sealed class ConfidentOcrEngine : DocRedock.Providers.Abstractions.Providers.IOcrEngine
+    {
+        public DocRedock.Providers.Abstractions.Providers.ProviderDescriptor Descriptor { get; } = new(
+            "test.confident", new Version(1, 0), 1, new HashSet<string> { "ocr.text" }, "MIT", "test", true);
+        public ValueTask<DocRedock.Providers.Abstractions.Providers.OcrAttemptResult> RecognizeAsync(
+            DocRedock.Providers.Abstractions.Providers.OcrInput input,
+            DocRedock.Providers.Abstractions.Providers.OcrOptions options, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new DocRedock.Providers.Abstractions.Providers.OcrAttemptResult(
+                DocRedock.Core.Reporting.OcrProcessingStatus.Completed,
+                new DocRedock.Providers.Abstractions.Providers.OcrResult("Good AP",
+                [new("Good", null, .95, 1), new("AP", null, .9, 1)]), []));
     }
 
     [Theory]

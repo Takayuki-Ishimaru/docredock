@@ -9,11 +9,54 @@ public enum VisualEdgeDirection { Directed, Undirected }
 
 public sealed record VisualNode(string Id, string Label, VisualNodeKind Kind = VisualNodeKind.Generic, string? SourceNodeId = null,
     Geometry? Geometry = null, SourceAnchor? SourceAnchor = null, string? Group = null, string? Lane = null);
+/// <summary>Stroke styles a readable projection can distinguish. A null style means solid or not
+/// reported by the source; only a dash pattern that actually has gaps is recorded.</summary>
+public static class VisualLineStyles
+{
+    public const string Dashed = "dashed";
+    public const string Dotted = "dotted";
+
+    /// <summary>Maps a DrawingML <c>a:prstDash@val</c> (or <c>custDash</c> when <paramref name="custom"/>)
+    /// or a VML <c>v:stroke@dashstyle</c> to a line style.</summary>
+    public static string? FromOfficeDash(string? value, bool custom = false)
+    {
+        if (custom) return Dashed;
+        var normalized = value?.Trim().ToLowerInvariant();
+        // VML also accepts a custom pattern of dash/gap lengths in line widths, e.g. "1 1".
+        if (normalized is { Length: > 0 } && normalized.Split(' ', StringSplitOptions.RemoveEmptyEntries) is var parts &&
+            parts.All(part => double.TryParse(part, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out _)))
+            return FromDashArray(parts.Select(part => double.Parse(part, System.Globalization.CultureInfo.InvariantCulture)).ToArray(), 1);
+        return normalized switch
+        {
+            null or "" or "solid" => null,
+            "dot" or "sysdot" or "shortdot" or "squaredot" or "rounddot" => Dotted,
+            _ => Dashed,
+        };
+    }
+
+    /// <summary>Classifies a PDF dash array (PDF 32000-1 8.4.3.6) in user-space units. Short
+    /// dashes, no longer than about the line width, read as dots.</summary>
+    public static string? FromDashArray(IReadOnlyList<double>? dashArray, double lineWidth)
+    {
+        if (dashArray is not { Count: > 0 } || dashArray.Any(value => !double.IsFinite(value) || value < 0) ||
+            dashArray.All(value => value <= 0)) return null;
+        // An odd-length array repeats, so its elements alternate between dashes and gaps.
+        var pattern = dashArray.Count % 2 == 1 ? dashArray.Concat(dashArray).ToArray() : dashArray.ToArray();
+        var dashes = pattern.Where((_, index) => index % 2 == 0).ToArray();
+        var gaps = pattern.Where((_, index) => index % 2 == 1).ToArray();
+        if (gaps.All(value => value <= 0)) return null;
+        return dashes.Max() <= Math.Max(lineWidth, 1) * 1.5 ? Dotted : Dashed;
+    }
+
+    public static bool IsKnown(string? style) => style is Dashed or Dotted;
+}
+
 public sealed record VisualEdge(string Id, string? SourceId, string? TargetId, string? Label = null,
     VisualEdgeResolution Resolution = VisualEdgeResolution.NativeConnection, string? SourceNodeId = null,
     string? Direction = null, Geometry? Geometry = null, double? Confidence = null,
     IReadOnlyList<VisualPathPoint>? Path = null, SourceAnchor? SourceAnchor = null,
-    VisualEdgeDirection? EdgeDirection = null, VisualConnectionEvidence? Evidence = null)
+    VisualEdgeDirection? EdgeDirection = null, VisualConnectionEvidence? Evidence = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LineStyle = null)
 {
     [JsonIgnore]
     public bool IsUndirected => EdgeDirection == VisualEdgeDirection.Undirected ||
@@ -30,10 +73,15 @@ public enum VisualGraphQuality { ExactNative, HighConfidenceInferred, Partial, F
 /// <summary>A recognized vector/path which could not necessarily be promoted to a semantic edge.</summary>
 public sealed record VisualPath(string Id, IReadOnlyList<VisualPathPoint>? Points = null, Geometry? Geometry = null,
     SourceAnchor? SourceAnchor = null, double? Confidence = null, bool IsFallback = true, string? SourceNodeId = null,
-    bool? IsFilled = null, bool? IsStroked = null);
+    bool? IsFilled = null, bool? IsStroked = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? LineStyle = null);
+/// <param name="RelatedObjectIds">Other graph objects the diagnosed object was competing for, e.g. the
+/// candidate edges of an unassigned label. A consumer that removes all of them (a reconstructed table
+/// consuming its ruling lines) can re-evaluate the diagnostic instead of keeping a stale warning.</param>
 public sealed record VisualDiagnostic(string Code, string Message, string? SourceNodeId = null, int Count = 1,
     string? Fallback = null, string? Remedy = null, string? Format = null, string? PartUri = null,
-    string? PartitionId = null, string? SourceObjectId = null, string? SourceObjectType = null, double? Confidence = null)
+    string? PartitionId = null, string? SourceObjectId = null, string? SourceObjectType = null, double? Confidence = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] IReadOnlyList<string>? RelatedObjectIds = null)
 {
     /// <summary>Recognizes stable adapter warnings formatted as <c>VisualCode: message</c>.</summary>
     public static bool TryParseWarning(string warning, out string code, out string message)

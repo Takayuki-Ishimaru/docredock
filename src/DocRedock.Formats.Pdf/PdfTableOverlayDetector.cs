@@ -76,7 +76,7 @@ public static class PdfTableOverlayDetector
             markerPathIds.Add(match.MarkerPathId);
         }
 
-        var candidates = new List<(string ShapeId, string RawPathId, Geometry Geometry, IReadOnlyList<VisualPathPoint>? Points, string? ArrowheadEvidence, bool ArrowheadAtEnd)>();
+        var candidates = new List<(string ShapeId, string RawPathId, Geometry Geometry, IReadOnlyList<VisualPathPoint>? Points, string? ArrowheadEvidence, bool ArrowheadAtEnd, string? LineStyle)>();
         var consumedPathIds = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var node in graph.Nodes ?? [])
@@ -84,7 +84,7 @@ public static class PdfTableOverlayDetector
             if (node.Geometry is not { } geometry) continue;
             VisualPath? source = pathsByGeometry.GetValueOrDefault(geometry);
             if (source is not null) consumedPathIds.Add(source.Id);
-            candidates.Add((node.Id, source?.Id ?? node.Id, geometry, source?.Points, null, false));
+            candidates.Add((node.Id, source?.Id ?? node.Id, geometry, source?.Points, null, false, source?.LineStyle));
         }
         foreach (var edge in graph.Edges ?? [])
         {
@@ -105,7 +105,8 @@ public static class PdfTableOverlayDetector
                 arrowheadEvidence = geometricMatch.Start && geometricMatch.End ? "both" : geometricMatch.End ? "end" : "start";
                 arrowheadAtEnd = geometricMatch.End;
             }
-            candidates.Add((edge.Id, shaftPathId ?? edge.Id, geometry, source?.Points ?? edge.Path, arrowheadEvidence, arrowheadAtEnd));
+            candidates.Add((edge.Id, shaftPathId ?? edge.Id, geometry, source?.Points ?? edge.Path, arrowheadEvidence, arrowheadAtEnd,
+                source?.LineStyle ?? edge.LineStyle));
         }
         foreach (var path in allPaths)
         {
@@ -113,16 +114,27 @@ public static class PdfTableOverlayDetector
                 excludedPathIds.Contains(path.Id) || markerPathIds.Contains(path.Id)) continue;
             var ends = shaftMatchByShaftPathId.GetValueOrDefault(path.Id);
             var evidence = ends.Start && ends.End ? "both" : ends.End ? "end" : ends.Start ? "start" : null;
-            candidates.Add((path.Id, path.Id, geometry, path.Points, evidence, ends.End));
+            candidates.Add((path.Id, path.Id, geometry, path.Points, evidence, ends.End, path.LineStyle));
         }
 
         var overlays = new List<PdfTableOverlay>();
         var furniturePathIds = new List<string>();
-        foreach (var (shapeId, rawPathId, geometry, points, arrowheadEvidence, arrowheadAtEnd) in candidates)
+        // A closed shape painted twice at the same place ("re f" for the fill, then "re S" for a
+        // possibly dashed outline) is one shape. The repeat is folded into the table like furniture
+        // and only contributes its stroke style, instead of adding a second glyph to the same cells.
+        var closedOverlays = new List<(Geometry Geometry, int Index)>();
+        foreach (var (shapeId, rawPathId, geometry, points, arrowheadEvidence, arrowheadAtEnd, lineStyle) in candidates)
         {
             if (excludedPathIds.Contains(shapeId) || excludedPathIds.Contains(rawPathId) || markerPathIds.Contains(rawPathId)) continue;
             if (!TryScoreOverlay(geometry, tableBounds, out _)) continue;
             var isLineShaped = geometry.Width <= 0 || geometry.Height <= 0;
+            if (!isLineShaped && closedOverlays.FirstOrDefault(item => IntersectionOverUnion(item.Geometry, geometry) >= .9) is { Geometry: not null } repeat)
+            {
+                if (overlays[repeat.Index] is { LineStyle: null, Kind: not "marker" } kept && lineStyle is not null)
+                    overlays[repeat.Index] = kept with { LineStyle = lineStyle };
+                furniturePathIds.Add(rawPathId);
+                continue;
+            }
             // Open paths with extent on both axes cannot be represented by cell bar glyphs.
             // Leave them in the visual graph for warning and source-image fallback.
             if (!isLineShaped && points is { Count: >= 2 } && points[0] != points[^1]) continue;
@@ -192,7 +204,11 @@ public static class PdfTableOverlayDetector
                     }
                 }
             }
-            overlays.Add(new PdfTableOverlay(shapeId, "", kind, direction, axis, startRow, endRow, startColumn, endColumn, preset));
+            // Markers are glyphs, not strokes; every other kind keeps the source stroke style so a
+            // dashed "planned" arrow never reads the same as a solid one.
+            if (!isLineShaped) closedOverlays.Add((geometry, overlays.Count));
+            overlays.Add(new PdfTableOverlay(shapeId, "", kind, direction, axis, startRow, endRow, startColumn, endColumn, preset,
+                kind == "marker" ? null : lineStyle));
         }
 
         return new Detection(
@@ -320,6 +336,14 @@ public static class PdfTableOverlayDetector
         if (intersectionArea >= tableArea * 0.9) return false;
         score = inside;
         return true;
+    }
+
+    private static double IntersectionOverUnion(Geometry left, Geometry right)
+    {
+        var intersection = Math.Max(0, Math.Min(left.X + left.Width, right.X + right.Width) - Math.Max(left.X, right.X)) *
+            Math.Max(0, Math.Min(left.Y + left.Height, right.Y + right.Height) - Math.Max(left.Y, right.Y));
+        var union = left.Width * left.Height + right.Width * right.Height - intersection;
+        return union <= 0 ? 0 : intersection / union;
     }
 
     private static bool CoincidesWithGridBoundary(Geometry geometry, IReadOnlyList<double> xs, IReadOnlyList<double> ysTopDown)

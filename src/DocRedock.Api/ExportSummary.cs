@@ -23,9 +23,37 @@ public sealed record ExportSummary(
     int Rejected,
     int ReviewPages = 0,
     int ReviewImagePages = 0,
-    int UnresolvedElements = 0)
+    int UnresolvedElements = 0,
+    int OcrImages = 0,
+    int OcrReviewItems = 0)
 {
-    public override string ToString() => $"Export completed\nOutput: Markdown\nWarnings: {Warnings}\nTables reconstructed: {Tables}\nDiagrams reconstructed: {DiagramsReconstructed}\nFallback pages: {FallbackPages}\nPages requiring review: {ReviewPages}\nReview image pages: {ReviewImagePages}\nUnresolved visual elements: {UnresolvedElements}";
+    /// <summary>OCR text that should be compared with its source image. This is a review hint,
+    /// not a warning: it never changes the export status or exit code.</summary>
+    public bool OcrReviewRequired => OcrReviewItems > 0;
+
+    /// <summary>False when a recognized visual element was kept only as fallback, a diagnostic, or
+    /// an unresolved relation instead of being expressed in the Markdown. It says nothing about
+    /// attributes DocRedock does not model (for example colors).</summary>
+    public bool AllVisualElementsConverted => ReviewPages == 0 && UnresolvedElements == 0;
+
+    // "Written", "every visual element converted", and "needs a person" are different facts; each gets
+    // its own line so a successful export with review items is never read as either a failure
+    // or a complete conversion.
+    public override string ToString() =>
+        $"Export completed\nOutput: Markdown\n" +
+        $"Output written: yes\n" +
+        $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {ReviewPages} page(s))")}\n" +
+        $"Human review: {HumanReviewText()}\n" +
+        $"Warnings: {Warnings}\nTables reconstructed: {Tables}\nDiagrams reconstructed: {DiagramsReconstructed}\nFallback pages: {FallbackPages}\nPages requiring review: {ReviewPages}\nReview image pages: {ReviewImagePages}\nUnresolved visual elements: {UnresolvedElements}" +
+        (OcrImages > 0 ? $"\nOCR review items: {OcrReviewItems} (confidence below 80% or not reported, in {OcrImages} image(s))" : string.Empty);
+
+    private string HumanReviewText()
+    {
+        var reasons = new List<string>();
+        if (ReviewPages > 0) reasons.Add($"visual {ReviewPages} page(s)");
+        if (OcrReviewRequired) reasons.Add($"OCR {OcrReviewItems} item(s)");
+        return reasons.Count == 0 ? "not required" : "required (" + string.Join(", ", reasons) + ")";
+    }
 }
 
 public static class ExportSummaryBuilder
@@ -41,6 +69,7 @@ public static class ExportSummaryBuilder
             partition.Nodes.Select(ReadVisualGraph).OfType<VisualGraph>().Any());
         var fallbackPages = graph.Partitions.Count(partition => partition.Nodes.Select(ReadVisualGraph)
             .OfType<VisualGraph>().Any(item => item.FallbackPathCount > 0));
+        var ocr = ExportReviewBuilder.BuildOcr(graph);
         return new ExportSummary(
             Warnings: diagnostics.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Warning),
             Tables: graph.Nodes.Count(node => node.Kind == NodeKind.Table),
@@ -58,7 +87,9 @@ public static class ExportSummaryBuilder
             ReviewPages: graph.Partitions.Count(p => p.Nodes.Any(ReadableMarkdownSerializer.RequiresSourceReview)),
             ReviewImagePages: diagnostics.Where(d => d.Code == "PdfReviewImageAttached")
                 .Select(d => d.PartUri).Distinct(StringComparer.Ordinal).Count(),
-            UnresolvedElements: graphs.Sum(CountUnresolvedElements));
+            UnresolvedElements: graphs.Sum(CountUnresolvedElements),
+            OcrImages: ocr.Images,
+            OcrReviewItems: ocr.ReviewItems);
     }
 
     // Count objects, not warnings; a raw shaft and the unresolved edge backed by it

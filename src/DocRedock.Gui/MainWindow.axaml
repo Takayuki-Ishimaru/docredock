@@ -116,17 +116,27 @@
         <StackPanel Grid.Column="2" Spacing="3" VerticalAlignment="Center">
           <TextBlock x:Name="ResultKickerText" Text="完了" Classes="primary caption" />
           <TextBlock x:Name="ResultTitleText" Text="処理が完了しました" FontSize="14" FontWeight="SemiBold" />
-          <TextBlock x:Name="ResultReviewText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
+          <TextBlock x:Name="ResultCountsText" Classes="caption" FontWeight="SemiBold" TextWrapping="Wrap" IsVisible="False"
+                     AutomationProperties.Name="確認が必要な件数" />
+          <TextBlock x:Name="ResultReviewText" Classes="caption" TextWrapping="Wrap" IsVisible="False" MaxLines="8"
                      AutomationProperties.Name="原本照合が必要な内容" />
+          <TextBlock x:Name="ResultOcrText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
+                     AutomationProperties.Name="OCR結果の確認" />
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
           <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5"
                        AutomationProperties.Name="処理の進捗" />
           <TextBlock x:Name="ResultFidelityText" Classes="fidelity" IsVisible="False" />
-          <TextBox x:Name="DiagnosticsTextBox" Classes="diagnostics" IsReadOnly="True" TextWrapping="Wrap"
-                   AcceptsReturn="True" IsVisible="False" MinHeight="64" MaxHeight="120"
-                   AutomationProperties.Name="診断情報" />
+          <Expander x:Name="DiagnosticsExpander" Classes="details" Header="詳細（診断コードと対処）" IsVisible="False"
+                    AutomationProperties.Name="詳細な診断情報を表示">
+            <TextBox x:Name="DiagnosticsTextBox" Classes="diagnostics" IsReadOnly="True" TextWrapping="Wrap"
+                     AcceptsReturn="True" IsVisible="False" MinHeight="64" MaxHeight="160"
+                     AutomationProperties.Name="診断情報" />
+          </Expander>
         </StackPanel>
         <StackPanel Grid.Column="3" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+          <Button x:Name="OpenReviewButton" Classes="accent compact" Click="OnOpenReview" IsVisible="False"
+                  ToolTip.Tip="要確認ページの原本画像と、そのページのMarkdownを並べて表示します"
+                  AutomationProperties.Name="該当ページを確認">該当ページを確認</Button>
           <Button x:Name="OpenOutputFolderButton" Classes="secondary compact" Click="OnOpenOutputFolder" IsVisible="False"
                   AutomationProperties.Name="出力フォルダーを開く">フォルダーを開く</Button>
           <Button x:Name="OpenMarkdownButton" Classes="secondary compact" Click="OnOpenMarkdown" IsVisible="False"

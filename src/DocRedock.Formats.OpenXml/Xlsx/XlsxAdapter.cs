@@ -109,7 +109,9 @@ public sealed record XlsxSheetOverlay(
     string Axis,
     int StartRow, int EndRow,
     int StartColumn, int EndColumn,
-    string? ShapePreset);
+    string? ShapePreset,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? LineStyle = null);
 
 public sealed record XlsxDrawingBounds(long XEmu, long YEmu, long WidthEmu, long HeightEmu)
 {
@@ -913,7 +915,8 @@ public sealed class XlsxAdapter
         // multi-row, single-column span reads as vertical.
         axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
         return new XlsxSheetOverlay(shape.Id, shape.Text ?? string.Empty, kind, direction, axis,
-            startRow, endRow, startColumn, endColumn, shape.Geometry == "unknown" ? null : shape.Geometry);
+            startRow, endRow, startColumn, endColumn, shape.Geometry == "unknown" ? null : shape.Geometry,
+            kind is "marker" or "label" ? null : VisualLineStyles.FromOfficeDash(shape.LineDash, custom: shape.LineDash == "custDash"));
     }
 
     private static (string Kind, string Direction, string Axis) ClassifySheetOverlayConnector(XlsxDrawingShapeRecord shape)
@@ -2417,6 +2420,10 @@ public sealed class XlsxAdapter
                     var lineProperties = DirectChild(shape, "spPr") is { } shapeProperties ? DirectChild(shapeProperties, "ln") : null;
                     var headArrow = lineProperties is null ? null : DirectChild(lineProperties, "headEnd")?.GetAttribute("type");
                     var tailArrow = lineProperties is null ? null : DirectChild(lineProperties, "tailEnd")?.GetAttribute("type");
+                    // The same outline carries the dash style; an outline without a fill is not drawn.
+                    var lineDash = lineProperties is null || DirectChild(lineProperties, "noFill") is not null ? null
+                        : DirectChild(lineProperties, "custDash") is not null ? "custDash"
+                        : DirectChild(lineProperties, "prstDash")?.GetAttribute("val");
                     var isTextBox = IsHiddenFlag(Descendant(shape, "cNvSpPr")?.GetAttribute("txBox"));
                     var isHiddenShape = IsHiddenFlag(properties?.GetAttribute("hidden"));
                     var groupTransform = group is null ? null : Descendant(group, "xfrm");
@@ -2463,7 +2470,7 @@ public sealed class XlsxAdapter
                         StringComparer.Ordinal.Equals(transform?.GetAttribute("flipH"), "1"),
                         StringComparer.Ordinal.Equals(transform?.GetAttribute("flipV"), "1"),
                         string.IsNullOrWhiteSpace(text) ? null : text,
-                        Descendant(shape, "prstDash")?.GetAttribute("val"),
+                        lineDash,
                         isConnector,
                         string.IsNullOrWhiteSpace(startConnection) ? null : startConnection,
                         string.IsNullOrWhiteSpace(endConnection) ? null : endConnection,

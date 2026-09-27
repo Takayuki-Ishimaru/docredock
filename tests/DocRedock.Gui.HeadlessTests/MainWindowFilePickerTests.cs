@@ -34,7 +34,15 @@ public sealed class MainWindowFilePickerTests
             Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("!", Get<TextBlock>(window, "ResultSymbolText").Text);
             Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
-            Assert.Contains("page 2", Get<TextBlock>(window, "ResultReviewText").Text);
+            // v0.2.9 evaluation: the primary explanation is short Japanese with the page, never the
+            // English message, diagnostic code, or internal object IDs (those stay in the details).
+            var review = Get<TextBlock>(window, "ResultReviewText").Text!;
+            Assert.Contains("2ページ目：PDFの線や矢印の接続先・意味を自動で確定できませんでした。", review);
+            Assert.DoesNotContain("VisualConnectorUnresolved", review);
+            Assert.DoesNotContain("unresolved arrow", review);
+            Assert.DoesNotContain("コネクタ端点を図形へ接続", Get<TextBox>(window, "DiagnosticsTextBox").Text);
+            Assert.True(Get<Expander>(window, "DiagnosticsExpander").IsVisible);
+            Assert.False(Get<Expander>(window, "DiagnosticsExpander").IsExpanded);
             Invoke(window, "ShowResult", true, "完了", "保存済み", null, Array.Empty<DocRedock.Core.Reporting.Diagnostic>());
             Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.False(Get<TextBlock>(window, "ResultReviewText").IsVisible);

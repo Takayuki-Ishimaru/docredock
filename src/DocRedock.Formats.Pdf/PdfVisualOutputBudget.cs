@@ -85,10 +85,26 @@ public static class PdfVisualOutputCompactor
             .ToHashSet(StringComparer.Ordinal);
         var remainingDiagnostics = graph.Diagnostics?.Where(d => d.Code != "VisualEdgeLabelUnresolved" ||
             d.SourceObjectId is null || !tableTextIds.Contains(d.SourceObjectId)).ToArray();
+        remainingDiagnostics = ResolveLabelsOfConsumedEdges(remainingDiagnostics,
+            removedEdges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal));
         var diagnostics = ReconcileConsumedDiagnostics(remainingDiagnostics, removedIds,
             removedEdges.Count(edge => edge.SourceId is null || edge.TargetId is null));
         var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
+    }
+
+    // A label that could not be assigned is re-evaluated against the edges it actually competed
+    // for. When every one of them was consumed (for example the ruling lines of a table drawn
+    // with a rectangular frame), nothing in the readable graph is left for it to label and the
+    // text stays ordinary page text. Labels without recorded candidates, or with a candidate
+    // that survives, keep their warning.
+    private static VisualDiagnostic[]? ResolveLabelsOfConsumedEdges(
+        IReadOnlyList<VisualDiagnostic>? diagnostics, HashSet<string> removedEdgeIds)
+    {
+        if (diagnostics is null) return null;
+        return diagnostics.Where(diagnostic => diagnostic.Code != "VisualEdgeLabelUnresolved" ||
+            diagnostic.RelatedObjectIds is not { Count: > 0 } candidates ||
+            !candidates.All(removedEdgeIds.Contains)).ToArray();
     }
 
     // Only diagnostics for consumed objects are resolved. Legacy graphs without
@@ -186,9 +202,11 @@ public static class PdfVisualOutputCompactor
         var survivingEdgeIds = edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
         var removedUnresolvedEdgeCount = (graph.Edges ?? [])
             .Count(edge => !survivingEdgeIds.Contains(edge.Id) && (edge.SourceId is null || edge.TargetId is null));
-        var removedIds = consumedPathIds.Concat(nodeIds).Concat((graph.Edges ?? [])
-            .Where(edge => !survivingEdgeIds.Contains(edge.Id)).Select(edge => edge.Id)).ToHashSet(StringComparer.Ordinal);
-        var diagnostics = ReconcileConsumedDiagnostics(graph.Diagnostics, removedIds, removedUnresolvedEdgeCount);
+        var removedEdgeIds = (graph.Edges ?? []).Where(edge => !survivingEdgeIds.Contains(edge.Id))
+            .Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+        var removedIds = consumedPathIds.Concat(nodeIds).Concat(removedEdgeIds).ToHashSet(StringComparer.Ordinal);
+        var diagnostics = ReconcileConsumedDiagnostics(ResolveLabelsOfConsumedEdges(graph.Diagnostics, removedEdgeIds),
+            removedIds, removedUnresolvedEdgeCount);
         var projection = new VisualGraph(graph.Id, nodes, edges, diagnostics, graph.Direction, graph.Groups, paths, items);
         return projection with { Quality = VisualGraphValidator.ComputeQuality(projection) };
     }

@@ -192,6 +192,39 @@ public sealed class VisualSemanticProjectionTests
         Assert.DoesNotContain("P2->>P4", markdown, StringComparison.Ordinal);
     }
 
+    // Dashed lifelines are common and stay structural; a dashed message (a UML reply) keeps its
+    // line style as Mermaid's dotted message arrow, with a note naming the source style.
+    [Fact]
+    public void Dashed_sequence_reply_uses_the_dotted_message_arrow()
+    {
+        VisualEdge Lifeline(string id, double x) => new(id, null, null, Resolution: VisualEdgeResolution.Unresolved,
+            Direction: "undirected", Geometry: new Geometry("test", x, 20, 0, 180), EdgeDirection: VisualEdgeDirection.Undirected, LineStyle: "dashed");
+        var visual = new VisualGraph("sequence",
+        [
+            new VisualNode("client", "Client", Geometry: new Geometry("test", 0, 0, 40, 20)),
+            new VisualNode("server", "Server", Geometry: new Geometry("test", 100, 0, 40, 20)),
+        ],
+        [
+            Lifeline("life1", 20), Lifeline("life2", 120),
+            new VisualEdge("request", "client", "server", "1. Request", VisualEdgeResolution.GeometryInferred,
+                Direction: "directed", Geometry: new Geometry("test", 20, 60, 100, 0), EdgeDirection: VisualEdgeDirection.Directed),
+            new VisualEdge("reply", "server", "client", "2. Reply", VisualEdgeResolution.GeometryInferred,
+                Direction: "directed", Geometry: new Geometry("test", 20, 100, 100, 0), EdgeDirection: VisualEdgeDirection.Directed, LineStyle: "dashed"),
+        ]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived,
+            new TextNodeContent("derived visual"), Extensions: new Dictionary<string, JsonElement>
+            {
+                ["visual_graph"] = JsonSerializer.SerializeToElement(visual)
+            });
+        var markdown = new ReadableMarkdownSerializer().Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sequence",
+            DocumentFormatKind.Pdf, [new DocumentPartition("part", 0, [diagram])]));
+
+        Assert.Contains("```mermaid\nsequenceDiagram", markdown, StringComparison.Ordinal);
+        Assert.Contains("P1->>P2: 1. Request", markdown, StringComparison.Ordinal);
+        Assert.Contains("P2-->>P1: 2. Reply", markdown, StringComparison.Ordinal);
+        Assert.Contains("> 線種の注記: 点線の矢印（-->>）は原本で破線で描かれた線です。", markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Workflow_without_lifelines_is_not_misclassified_as_sequence()
     {
