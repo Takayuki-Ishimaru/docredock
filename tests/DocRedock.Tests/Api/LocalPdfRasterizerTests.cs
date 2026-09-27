@@ -77,6 +77,23 @@ public sealed class LocalPdfRasterizerTests
         Assert.Equal("unavailable", PdfRasterizerFactory.Describe(Path.Combine(Path.GetTempPath(), Guid.NewGuid() + ".missing")).Status);
     }
 
+    [Fact]
+    public void Call_log_can_be_read_while_writer_is_open_and_only_returns_complete_records()
+    {
+        using var fixture = new FakeRasterizer("valid");
+        using var stream = new FileStream(fixture.CallLogPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+        using var writer = new StreamWriter(stream) { AutoFlush = true };
+
+        writer.Write("{\"pid\":42}");
+        Assert.Empty(fixture.Calls());
+
+        writer.Write("\n{\"pid\":43");
+        Assert.Equal(42, Assert.Single(fixture.Calls()).GetProperty("pid").GetInt32());
+
+        writer.Write("}\n");
+        Assert.Equal([42, 43], fixture.Calls().Select(call => call.GetProperty("pid").GetInt32()));
+    }
+
     private static bool IsRunning(int pid)
     {
         try { using var process = Process.GetProcessById(pid); return !process.HasExited; }
@@ -87,6 +104,7 @@ public sealed class LocalPdfRasterizerTests
     {
         private readonly string root = Path.Combine(Path.GetTempPath(), "docredock-process-test-" + Guid.NewGuid().ToString("N"));
         private readonly string log;
+        public string CallLogPath => log;
         public string Input { get; }
         public PdftoppmPdfRasterizer Provider { get; }
 
@@ -124,8 +142,16 @@ public sealed class LocalPdfRasterizerTests
             Provider = new PythonRasterizer(FindPython(), script, log, mode);
         }
 
-        public JsonElement[] Calls() => File.Exists(log) ? File.ReadAllLines(log).Where(line => line.Length > 0)
-            .Select(line => JsonDocument.Parse(line).RootElement.Clone()).ToArray() : [];
+        public JsonElement[] Calls()
+        {
+            if (!File.Exists(log)) return [];
+            // The child may still hold its append handle on Windows or be midway through a
+            // record. Share with the writer and wait for a newline before parsing that record.
+            using var stream = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = new StreamReader(stream);
+            return reader.ReadToEnd().Split('\n').SkipLast(1).Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => JsonDocument.Parse(line).RootElement.Clone()).ToArray();
+        }
 
         public async Task WaitForCall()
         {
