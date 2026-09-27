@@ -14,6 +14,28 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
     /// table membership must be recorded by these ids and never by a list index.</summary>
     public IReadOnlyList<int> SourceTextIds => SourceIds is { Count: > 0 } ids ? ids : [ReadingOrder];
 }
+
+/// <summary>Why a Form XObject that a page really draws could not be analyzed.</summary>
+public enum PdfFormXObjectUnparsedReason
+{
+    /// <summary>The form's stream could not be decoded (an unsupported filter, or no stream data
+    /// could be located for the object).</summary>
+    UnreadableStream,
+    /// <summary>Forms nested deeper than the extractor follows.</summary>
+    NestingLimit,
+    /// <summary>The page or document ran out of its allowance for inlined form content.</summary>
+    SizeLimit,
+    /// <summary>The drawn name could not be resolved to an XObject, and the document declares Form
+    /// XObjects but no image XObjects, so the draw is presumably a form.</summary>
+    UnresolvedResource,
+}
+
+/// <summary>One <c>Do</c> of a Form XObject whose content did not reach text and vector analysis.
+/// Viewers still paint it, so whatever text or drawing it holds is missing from the extraction.
+/// <see cref="Bounds"/> is the form's <c>/BBox</c> mapped into page user space, or null when the
+/// box or the transform could not be resolved.</summary>
+public sealed record PdfUnparsedFormXObject(string Name, PdfFormXObjectUnparsedReason Reason, Geometry? Bounds);
+
 public sealed record PdfPageText(
     int PageNumber,
     IReadOnlyList<PdfTextRegion> Regions,
@@ -49,7 +71,11 @@ public sealed record PdfPageText(
     /// <summary>The page's <c>/Rotate</c>, normalized to 0, 90, 180 or 270 clockwise degrees. A
     /// non-zero value means user space and the rasterized image do not share an axis orientation,
     /// so a consumer must not map rectangles between them without applying the rotation.</summary>
-    int Rotation = 0)
+    int Rotation = 0,
+    /// <summary>Form XObject draws on a page that also carries native text whose content could
+    /// not be analyzed (see <see cref="PdfUnparsedFormXObject"/>). Every form the extractor could
+    /// read has already been analyzed in place as part of the page content. Null when none.</summary>
+    IReadOnlyList<PdfUnparsedFormXObject>? UnparsedFormXObjects = null)
 {
     // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
     // final order - including any column-major unrolling - so sorting by ReadingOrder here (rather
@@ -116,7 +142,12 @@ public static class PdfTextExtractor
         options ??= new PdfExtractionOptions();
         cancellationToken.ThrowIfCancellationRequested();
         if (bytes.Length > options.MaxInputBytes) throw new PdfExtractionException($"PDF input exceeds the {options.MaxInputBytes}-byte limit.");
-        var raw = bytes.ToArray();
+        // The file is only read, never written, so a whole array (as Extract(path) passes) is used
+        // as-is instead of being copied a second time.
+        var raw = System.Runtime.InteropServices.MemoryMarshal.TryGetArray(bytes, out var segment) &&
+            segment.Array is { } whole && segment.Offset == 0 && segment.Count == whole.Length
+                ? whole
+                : bytes.ToArray();
         if (raw.Length < 5 || !raw.AsSpan(0, 5).SequenceEqual("%PDF-"u8)) throw new PdfExtractionException("Input does not have a PDF header.");
         var latin = Encoding.Latin1.GetString(raw);
         if (!latin.Contains("%%EOF", StringComparison.Ordinal)) throw new PdfExtractionException("PDF end marker is missing.");
@@ -160,6 +191,11 @@ public static class PdfTextExtractor
         }
         catch (RegexMatchTimeoutException exception) { throw new PdfExtractionException("PDF image resource matching exceeded its time limit.", exception); }
         var formScanBudget = new PdfFormScanBudget(Math.Min(options.MaxExpandedStreamBytes, MaxFormScanBytes));
+        var formExpansionBudget = new PdfFormScanBudget(options.MaxExpandedStreamBytes);
+        var formExpansionPageAllowance = Math.Min(options.MaxExpandedStreamBytes, MaxFormExpansionBytesPerPage);
+        // A draw whose name cannot be resolved is presumed to be an image when the document has
+        // image XObjects (the image scan then counts it); only otherwise can it be a form.
+        var reportUnresolvedForms = formXObjects.Count > 0 && !documentHasImageXObject;
         var pages = new List<PdfPageText>();
         var diagnostics = new List<string>();
         var visualGraphs = new Dictionary<int, VisualGraph>();
@@ -172,17 +208,25 @@ public static class PdfTextExtractor
             var pageDiagnosticStart = diagnostics.Count;
             IReadOnlyList<PdfTable> pageTables = [];
             var stream = string.Join("\n", pageGroup.Select(item => item.Payload));
-            var regions = ParseOperators(stream, options, fontMaps);
-            var vector = ContainsVectorOperators(stream);
-            var image = ContainsImageOperator(stream);
             var pageNumber = Math.Min(pageGroup.Key, pageCount);
-            var imageOnly = image && regions.Count == 0;
             var attributes = pageAttributes.GetValueOrDefault(pageNumber);
+            // Text and paths a Form XObject draws used to vanish without a warning: only the page's
+            // own content stream reached the parsers below, and a form was followed for images
+            // alone. Inline every drawn form first, so the parsers see what a viewer paints.
+            var unparsedForms = new List<PdfUnparsedFormXObject>();
+            var content = ExpandFormXObjects(stream, attributes?.Resources, formXObjects, formExpansionBudget,
+                formExpansionPageAllowance, reportUnresolvedForms, unparsedForms);
+            var regions = ParseOperators(content, options, fontMaps);
+            var vector = ContainsVectorOperators(content);
+            // A Do that survives inlining draws an image or a form that could not be inlined.
+            var image = ContainsImageOperator(content);
+            var imageOnly = image && regions.Count == 0;
             // An image that shares a page with native text used to disappear without a trace: the
             // `Do` operator only ever fed the image-only decision above. Resolve every image draw
             // (and its CTM) here so a mixed page can carry a placeholder plus a diagnostic, and so
-            // the OCR path knows which pages are worth rasterizing.
-            var embeddedImages = image || stream.Contains("BI", StringComparison.Ordinal)
+            // the OCR path knows which pages are worth rasterizing. The scan reads the page's own
+            // stream: it follows forms itself, resolving each name in the scope of its own form.
+            var embeddedImages = image || content.Contains("BI", StringComparison.Ordinal)
                 ? ResolveEmbeddedImages(stream, attributes?.Resources, documentHasImageXObject || imageOnly,
                     formXObjects, formScanBudget)
                 : [];
@@ -203,10 +247,14 @@ public static class PdfTextExtractor
             // needs its own warning.
             if (!imageOnly && embeddedImages.Count > 0)
                 diagnostics.Add($"PdfEmbeddedImageOmitted: PDF page {pageNumber}: {embeddedImages.Count} embedded image(s) were not extracted; native text was retained. Run with --ocr on and a configured rasterizer to recover image text.");
+            // The same rule for a form that could not be inlined: the page's other text makes it
+            // look complete, so the form needs its own warning (and, downstream, a review image).
+            if (!imageOnly && unparsedForms.Count > 0)
+                diagnostics.Add($"PdfFormXObjectUnparsed: {DescribeUnparsedForms(pageNumber, unparsedForms)}");
             cancellationToken.ThrowIfCancellationRequested();
             IReadOnlyDictionary<int, string> visualLabelNodeIds = new Dictionary<int, string>();
             VisualGraph? visualGraph = vector
-                ? BuildVisualGraph(pageNumber, stream, regions, diagnostics, options.EffectiveVisualInferenceTimeout,
+                ? BuildVisualGraph(pageNumber, content, regions, diagnostics, options.EffectiveVisualInferenceTimeout,
                     cancellationToken, out visualLabelNodeIds)
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
@@ -215,7 +263,7 @@ public static class PdfTextExtractor
                 visualGraphs[pageNumber] = visualGraph;
                 var inferredTables = PdfTableInference.Infer(pageNumber, regions, visualGraph,
                     (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxTableCandidatesPerPage,
-                    PdfTableInference.HasNativeTableMarkedContent(stream));
+                    PdfTableInference.HasNativeTableMarkedContent(content));
                 if (inferredTables.Count > 0)
                 {
                     // P-Overlay: detect schedule-arrow/bar/marker/line overlays against the full,
@@ -284,7 +332,8 @@ public static class PdfTextExtractor
             pages.Add(new PdfPageText(pageNumber, flow, vector, imageOnly, columnCount,
                 visualLabelNodeIds.Count == 0 ? null : visualLabelNodeIds,
                 embeddedImages.Count, embeddedBounds.Length == 0 ? null : embeddedBounds,
-                attributes?.MediaBox, attributes?.CropBox, attributes?.Rotation ?? 0));
+                attributes?.MediaBox, attributes?.CropBox, attributes?.Rotation ?? 0,
+                imageOnly || unparsedForms.Count == 0 ? null : unparsedForms));
         }
         if (pages.Count == 0)
         {
@@ -322,6 +371,22 @@ public static class PdfTextExtractor
             ? string.Join(" and ", clauses)
             : $"{accounting.Diagnostics} vector diagnostic{(accounting.Diagnostics == 1 ? "" : "s")} recorded during reconstruction";
         return $"PDF page {pageNumber}: {detail}; compare with page {pageNumber} of the original.";
+    }
+
+    /// <summary>States how many drawn forms were left unanalyzed and why, e.g. "PDF page 2: 1 Form
+    /// XObject draw(s) could not be analyzed (nested deeper than 8 levels); any text or drawing
+    /// inside is missing from the extracted content. Compare with page 2 of the original."</summary>
+    private static string DescribeUnparsedForms(int pageNumber, IReadOnlyList<PdfUnparsedFormXObject> forms)
+    {
+        var reasons = forms.Select(form => form.Reason).Distinct().Order().Select(reason => reason switch
+        {
+            PdfFormXObjectUnparsedReason.UnreadableStream => "stream could not be decoded",
+            PdfFormXObjectUnparsedReason.NestingLimit => $"nested deeper than {MaxFormDepth} levels",
+            PdfFormXObjectUnparsedReason.SizeLimit => "inlined form content limit reached",
+            _ => "resource name could not be resolved",
+        });
+        return $"PDF page {pageNumber}: {forms.Count} Form XObject draw(s) could not be analyzed ({string.Join("; ", reasons)}); " +
+            $"any text or drawing inside is missing from the extracted content. Compare with page {pageNumber} of the original.";
     }
 
     /// <summary>Merges parsed fragments into readable flow lines without letting a reconstructed
@@ -2120,18 +2185,24 @@ public static class PdfTextExtractor
             // Decide before copying: this scan runs once for page content and again for Form
             // XObjects, and copying every multi-megabyte font and image stream only to discard it
             // would make the second pass cost as much as the first.
-            if (contentObjectIds.Count > 0 && (objectId is null || !contentObjectIds.Contains(objectId.Value)))
+            if (contentObjectIds.Count > 0 && (objectId is null || !contentObjectIds.Contains(objectId.Value)) ||
+                // With no /Contents reference to go by, every stream is read as page content. An
+                // image or an embedded font program never is one: inflating it only to parse its
+                // binary samples as operators costs memory and can invent text.
+                contentObjectIds.Count == 0 && IsNeverPageContent(header, options.EffectiveRegexTimeout))
             {
                 offset = end + endMarker.Length;
                 continue;
             }
-            var payload = bytes[start..end];
-            while (payload.Length > 0 && (payload[^1] == '\r' || payload[^1] == '\n')) payload = payload[..^1];
-            payload = DecodeFilteredStream(payload, header, options.MaxExpandedStreamBytes);
+            var payload = DecodeFilteredStream(bytes[start..TrimLineEnds(bytes, start, end)], header, options.MaxExpandedStreamBytes);
             yield return (objectId, Encoding.Latin1.GetString(payload));
             offset = end + endMarker.Length;
         }
     }
+
+    private static bool IsNeverPageContent(string header, TimeSpan timeout) => Regex.IsMatch(header,
+        @"/Subtype\s*/(?:Image|Type1C|CIDFontType0C|OpenType)\b|/Length[123]\b|/Type\s*/(?:XRef|Metadata|EmbeddedFile)\b",
+        RegexOptions.None, timeout);
 
     private static bool TryReadContainingObjectId(string header, TimeSpan timeout, out int objectId)
     {
@@ -2157,9 +2228,13 @@ public static class PdfTextExtractor
         IReadOnlyDictionary<string, int> ObjectIds);
 
     /// <summary>A Form XObject a page can invoke: its own resource dictionary (null when it
-    /// inherits the caller's), its <c>/Matrix</c>, and its decoded content stream (null when the
-    /// stream could not be read, in which case its images stay invisible).</summary>
-    private sealed record PdfFormXObject(PdfResourceScope? Resources, PdfMatrix Matrix, string? Content);
+    /// inherits the caller's), its <c>/Matrix</c>, its decoded content stream (null when the
+    /// stream could not be read, in which case its images stay invisible), and its <c>/BBox</c>.
+    /// <see cref="Unreadable"/> separates a stream that exists but could not be decoded - a viewer
+    /// paints something the extractor cannot see - from an object with no stream at all, which
+    /// paints nothing.</summary>
+    private sealed record PdfFormXObject(PdfResourceScope? Resources, PdfMatrix Matrix, string? Content,
+        Geometry? BBox = null, bool Unreadable = false);
 
     /// <summary>Everything a page inherits from its <c>/Pages</c> ancestors plus what it declares
     /// itself. Null members mean the document declares nothing resolvable for that key.</summary>
@@ -2172,9 +2247,17 @@ public static class PdfTextExtractor
     private const int MaxFormDepth = 8;
     private const int MaxPageInheritanceDepth = 32;
 
+    /// <summary>How many characters of Form XObject content one page may inline into its own
+    /// content stream. A form drawn many times is inlined once per draw, so this - not the size of
+    /// any single form - bounds what the page's text and vector analysis can be handed. The whole
+    /// document is further held to <see cref="PdfExtractionOptions.MaxExpandedStreamBytes"/>.</summary>
+    private const long MaxFormExpansionBytesPerPage = 4L * 1024 * 1024;
+
     /// <summary>A single shared allowance for a document's Form XObject scan.</summary>
     private sealed class PdfFormScanBudget(long remaining)
     {
+        public long Remaining => remaining;
+
         public bool TryConsume(long amount)
         {
             if (amount > remaining) return false;
@@ -2182,6 +2265,192 @@ public static class PdfTextExtractor
             return true;
         }
     }
+
+    /// <summary>Returns the page content with every drawn Form XObject inlined where it is drawn:
+    /// <c>/Name Do</c> becomes <c>q &lt;Matrix&gt; cm &lt;form content&gt; Q</c>, recursively, with
+    /// each nested name resolved in the scope of the form that draws it. The text and vector parsers
+    /// then meet a form's text and paths exactly as if the page had painted them itself, which is
+    /// how a viewer renders it. A drawn form that cannot be inlined keeps its <c>Do</c> and is
+    /// recorded in <paramref name="unparsed"/> rather than disappearing without a trace. Forms the
+    /// page never draws are not touched, and a form that reaches itself again is not inlined a
+    /// second time: a renderer does not paint that recursion either.</summary>
+    private static string ExpandFormXObjects(string content, PdfResourceScope? resources,
+        IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget documentBudget, long pageAllowance,
+        bool reportUnresolved, List<PdfUnparsedFormXObject> unparsed)
+    {
+        if (forms.Count == 0 || !ContainsImageOperator(content)) return content;
+        var output = new StringBuilder(content.Length);
+        var expansion = new PdfFormExpansion(forms, documentBudget, new PdfFormScanBudget(pageAllowance),
+            reportUnresolved, unparsed, output, []);
+        AppendExpandedContent(content, resources, PdfMatrix.Identity, 0, expansion);
+        return output.ToString();
+    }
+
+    /// <summary>What one page's form inlining shares across its recursion.</summary>
+    private sealed record PdfFormExpansion(IReadOnlyDictionary<int, PdfFormXObject> Forms,
+        PdfFormScanBudget DocumentBudget, PdfFormScanBudget PageBudget, bool ReportUnresolved,
+        List<PdfUnparsedFormXObject> Unparsed, StringBuilder Output, HashSet<int> Active);
+
+    /// <summary>Copies one content stream - the page's, or a form's at <paramref name="depth"/> &gt;
+    /// 0 - into the expansion output, replacing each inlinable form draw. Tokens are skipped exactly
+    /// as <see cref="ScanImageInvocations"/> skips them (strings, names, comments, inline image
+    /// data), and q/Q/cm are tracked so an unparsed form can be located on the page. A form's own
+    /// graphics states are balanced at its boundary, as the <c>Do</c> operator does: an unmatched
+    /// <c>Q</c> is dropped and an unclosed <c>q</c> is closed, so an inlined form can never restore
+    /// or leak the state of the content that drew it.</summary>
+    private static void AppendExpandedContent(string content, PdfResourceScope? resources, PdfMatrix initial,
+        int depth, PdfFormExpansion expansion)
+    {
+        var output = expansion.Output;
+        var stack = new Stack<PdfMatrix>();
+        var ctm = initial;
+        var operands = new List<double>();
+        string? pendingName = null;
+        var pendingNameAt = -1;
+        var copied = 0;
+        for (var index = 0; index < content.Length;)
+        {
+            var character = content[index];
+            if (character == '%')
+            {
+                while (index < content.Length && content[index] is not '\r' and not '\n') index++;
+                continue;
+            }
+            if (character == '(')
+            {
+                var nesting = 1;
+                index++;
+                while (index < content.Length && nesting > 0)
+                {
+                    if (content[index] == '\\') index += Math.Min(2, content.Length - index);
+                    else if (content[index++] == '(') nesting++;
+                    else if (content[index - 1] == ')') nesting--;
+                }
+                continue;
+            }
+            if (character == '<')
+            {
+                index++;
+                if (index < content.Length && content[index] == '<') { index++; continue; }
+                while (index < content.Length && content[index++] != '>') { }
+                continue;
+            }
+            if (character == '/')
+            {
+                pendingNameAt = index;
+                var nameStart = ++index;
+                while (index < content.Length && !char.IsWhiteSpace(content[index]) && !"()<>[]{}/%".Contains(content[index])) index++;
+                pendingName = content[nameStart..index];
+                continue;
+            }
+            if (char.IsWhiteSpace(character) || character is '>' or '[' or ']' or '{' or '}') { index++; continue; }
+            var start = index++;
+            while (index < content.Length && !char.IsWhiteSpace(content[index]) && !"()<>[]{}/%".Contains(content[index])) index++;
+            var token = content[start..index];
+            if (double.TryParse(token, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var number))
+            {
+                operands.Add(number);
+                continue;
+            }
+            var name = pendingName;
+            var nameAt = pendingNameAt;
+            pendingName = null;
+            switch (token)
+            {
+                case "q": stack.Push(ctm); break;
+                case "Q":
+                    if (stack.TryPop(out var restored)) ctm = restored;
+                    else if (depth > 0)
+                    {
+                        output.Append(content, copied, start - copied);
+                        copied = index;
+                    }
+                    break;
+                case "cm":
+                    if (operands.Count >= 6)
+                        ctm = ctm.Concat(new PdfMatrix(operands[^6], operands[^5], operands[^4], operands[^3], operands[^2], operands[^1]));
+                    break;
+                case "BI":
+                    index = SkipInlineImageData(content, index);
+                    break;
+                case "Do" when name is not null && nameAt >= copied:
+                    if (TryInlineForm(content, copied, nameAt, name, resources, ctm, depth, expansion))
+                        copied = index;
+                    break;
+            }
+            operands.Clear();
+        }
+        output.Append(content, copied, content.Length - copied);
+        if (depth > 0)
+            for (var open = stack.Count; open > 0; open--) output.Append("\nQ");
+    }
+
+    /// <summary>Inlines the form <paramref name="name"/> names in <paramref name="resources"/> when
+    /// it can, first flushing the caller's content up to the name. Returns false - leaving the
+    /// <c>Do</c> in place - for an image, a recursive draw, or a form that cannot be inlined, which
+    /// is recorded with its reason.</summary>
+    private static bool TryInlineForm(string content, int copied, int nameAt, string name,
+        PdfResourceScope? resources, PdfMatrix ctm, int depth, PdfFormExpansion expansion)
+    {
+        if (resources is null || !resources.Kinds.TryGetValue(name, out var kind))
+        {
+            if (expansion.ReportUnresolved)
+                expansion.Unparsed.Add(new PdfUnparsedFormXObject(name, PdfFormXObjectUnparsedReason.UnresolvedResource, null));
+            return false;
+        }
+        // An image, or a declared entry that cannot be followed: the image scan accounts for those.
+        if (kind != PdfXObjectKind.Form || !resources.ObjectIds.TryGetValue(name, out var objectId) ||
+            !expansion.Forms.TryGetValue(objectId, out var form))
+            return false;
+        var placement = ctm.Concat(form.Matrix);
+        Geometry? Bounds() => form.BBox is { } box ? TransformBounds(placement, box) : null;
+        if (form.Content is null)
+        {
+            if (form.Unreadable)
+                expansion.Unparsed.Add(new PdfUnparsedFormXObject(name, PdfFormXObjectUnparsedReason.UnreadableStream, Bounds()));
+            return false;
+        }
+        if (expansion.Active.Contains(objectId)) return false;
+        if (depth >= MaxFormDepth)
+        {
+            expansion.Unparsed.Add(new PdfUnparsedFormXObject(name, PdfFormXObjectUnparsedReason.NestingLimit, Bounds()));
+            return false;
+        }
+        long size = form.Content.Length;
+        if (size > expansion.PageBudget.Remaining || size > expansion.DocumentBudget.Remaining)
+        {
+            expansion.Unparsed.Add(new PdfUnparsedFormXObject(name, PdfFormXObjectUnparsedReason.SizeLimit, Bounds()));
+            return false;
+        }
+        expansion.PageBudget.TryConsume(size);
+        expansion.DocumentBudget.TryConsume(size);
+        var output = expansion.Output;
+        output.Append(content, copied, nameAt - copied);
+        output.Append("\nq\n");
+        if (form.Matrix != PdfMatrix.Identity)
+            output.Append(FormatOperand(form.Matrix.A)).Append(' ').Append(FormatOperand(form.Matrix.B)).Append(' ')
+                .Append(FormatOperand(form.Matrix.C)).Append(' ').Append(FormatOperand(form.Matrix.D)).Append(' ')
+                .Append(FormatOperand(form.Matrix.E)).Append(' ').Append(FormatOperand(form.Matrix.F)).Append(" cm\n");
+        expansion.Active.Add(objectId);
+        try
+        {
+            // A form without its own resources draws with its caller's, as the specification
+            // still allows for PDF 1.1 producers.
+            AppendExpandedContent(form.Content, form.Resources ?? resources, placement, depth + 1, expansion);
+        }
+        finally
+        {
+            expansion.Active.Remove(objectId);
+        }
+        output.Append("\nQ\n");
+        return true;
+    }
+
+    /// <summary>A content-stream number every parser here reads back exactly: plain decimal
+    /// notation, because the text parser's operand patterns do not accept an exponent.</summary>
+    private static string FormatOperand(double value) =>
+        value.ToString("0.############", System.Globalization.CultureInfo.InvariantCulture);
 
     /// <summary>Keeps only the draws that really are raster images, descending into Form XObjects
     /// so an image nested inside one is found at its page-space rectangle. A resolved Form is never
@@ -2344,9 +2613,15 @@ public static class PdfTextExtractor
 
     /// <summary>Maps the image space unit square through the CTM: that rectangle is exactly where
     /// a <c>Do</c> paints its image. Returns null for a degenerate or non-finite transform.</summary>
-    private static Geometry? UnitSquareBounds(PdfMatrix ctm)
+    private static Geometry? UnitSquareBounds(PdfMatrix ctm) => TransformBounds(ctm, new Geometry("pdf-user-space", 0, 0, 1, 1));
+
+    /// <summary>The axis-aligned rectangle that <paramref name="box"/> covers once mapped through
+    /// <paramref name="matrix"/>, or null for a degenerate or non-finite result.</summary>
+    private static Geometry? TransformBounds(PdfMatrix matrix, Geometry box)
     {
-        var corners = new[] { ctm.Apply(0, 0), ctm.Apply(1, 0), ctm.Apply(1, 1), ctm.Apply(0, 1) };
+        var right = box.X + box.Width;
+        var top = box.Y + box.Height;
+        var corners = new[] { matrix.Apply(box.X, box.Y), matrix.Apply(right, box.Y), matrix.Apply(right, top), matrix.Apply(box.X, top) };
         var minimumX = corners.Min(corner => corner.X);
         var maximumX = corners.Max(corner => corner.X);
         var minimumY = corners.Min(corner => corner.Y);
@@ -2461,13 +2736,41 @@ public static class PdfTextExtractor
             if (objectId is { } id && !contents.ContainsKey(id)) contents[id] = payload;
         var result = new Dictionary<int, PdfFormXObject>();
         foreach (var (id, body) in bodies)
+        {
+            // The object index is built with stream payloads stripped but keeps the keyword, so a
+            // form that really carries a stream can be told from an empty dictionary.
+            var declaresStream = Regex.IsMatch(body, @"\bstream\b", RegexOptions.None, timeout);
+            var decodable = HasOnlyDecodableFilters(body, timeout);
+            var content = decodable ? contents.GetValueOrDefault(id) : null;
             result[id] = new PdfFormXObject(
                 ResolveDictionaryValue(body, "Resources", index.ById, timeout) is { } resources
                     ? ReadResourceScope(resources, index.ById, timeout)
                     : null,
                 ReadMatrix(body, timeout),
-                contents.GetValueOrDefault(id));
+                content,
+                ReadRectangle(ReadArrayValue(body, "BBox", timeout), timeout),
+                Unreadable: declaresStream && content is null);
+        }
         return result;
+    }
+
+    /// <summary>Whether every <c>/Filter</c> a stream dictionary declares is one that
+    /// <see cref="DecodeFilteredStream"/> decodes. Any other filter leaves the payload encoded, and
+    /// parsing encoded bytes as operators would only invent text and paths.</summary>
+    private static bool HasOnlyDecodableFilters(string body, TimeSpan timeout)
+    {
+        var filter = Regex.Match(body, @"/Filter\s*(?:\[(?<names>[^\]]*)\]|(?<name>/[^\s/<>\[\]{}()%]+))", RegexOptions.None, timeout);
+        if (!filter.Success) return true;
+        var names = filter.Groups["names"].Success ? filter.Groups["names"].Value : filter.Groups["name"].Value;
+        return Regex.Matches(names, @"/(?<filter>[^\s/<>\[\]{}()%]+)", RegexOptions.None, timeout)
+            .All(match => match.Groups["filter"].Value is "FlateDecode" or "ASCII85Decode");
+    }
+
+    /// <summary>The <c>[ ... ]</c> text of an array-valued key written inline, or null.</summary>
+    private static string? ReadArrayValue(string body, string key, TimeSpan timeout)
+    {
+        var match = Regex.Match(body, @"/" + key + @"(?![A-Za-z0-9])\s*(?<value>\[[^\]]*\])", RegexOptions.None, timeout);
+        return match.Success ? match.Groups["value"].Value : null;
     }
 
     /// <summary>A Form XObject's <c>/Matrix</c>, or the identity when it declares none or the
@@ -2638,7 +2941,12 @@ public static class PdfTextExtractor
         var graphicsStack = new Stack<PdfMatrix>();
         string? currentFont = null;
         Regex textString;
-        try { textString = new Regex(TextStringPattern, RegexOptions.Compiled | RegexOptions.NonBacktracking, options.EffectiveRegexTimeout); }
+        Regex showOperator;
+        try
+        {
+            textString = new Regex(TextStringPattern, RegexOptions.Compiled | RegexOptions.NonBacktracking, options.EffectiveRegexTimeout);
+            showOperator = new Regex(@"\G\s*(?<op>Tj|TJ)\b", RegexOptions.None, options.EffectiveRegexTimeout);
+        }
         catch (ArgumentOutOfRangeException exception) { throw new PdfExtractionException("Invalid PDF regex timeout.", exception); }
         try
         {
@@ -2655,8 +2963,9 @@ public static class PdfTextExtractor
                     if (double.TryParse(td.Groups[1].Value, out var dx) && double.TryParse(td.Groups[2].Value, out var dy)) (x, y) = (x + dx, y + dy);
                 foreach (Match tm in Regex.Matches(operatorContext, $@"({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+Tm", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout))
                     if (double.TryParse(tm.Groups[5].Value, out var tx) && double.TryParse(tm.Groups[6].Value, out var ty)) (x, y) = (tx, ty);
-                var after = content[(match.Index + match.Length)..];
-                var operatorMatch = Regex.Match(after, @"^\s*(?<op>Tj|TJ)\b", RegexOptions.None, options.EffectiveRegexTimeout);
+                // Anchored where the string ends instead of run over a copy of the rest of the
+                // stream: that copy made this loop quadratic in the length of the content.
+                var operatorMatch = showOperator.Match(content, match.Index + match.Length);
                 // Dictionary strings (notably /ActualText) may occur between two
                 // shown strings. Keep them in the context for the next Tj/TJ.
                 if (!operatorMatch.Success) continue;
@@ -3087,26 +3396,48 @@ public static class PdfTextExtractor
         }
         if (objectBodies.Count == 0) return maps;
 
+        // Only a stream some font names as its /ToUnicode can be a CMap it uses. Decoding every
+        // stream to look for CMaps inflated each image and font program in the file - a copy, a
+        // Latin-1 string twice its size, and a regex pass over it - only to discard it.
+        var toUnicodeByFont = new Dictionary<int, int>();
+        foreach (var font in objectBodies)
+        {
+            var toUnicode = Regex.Match(font.Value, @"/ToUnicode\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, options.EffectiveRegexTimeout);
+            if (toUnicode.Success && int.TryParse(toUnicode.Groups["id"].Value, out var cmapObject)) toUnicodeByFont[font.Key] = cmapObject;
+        }
+        if (toUnicodeByFont.Count == 0) return maps;
         var cmapByObject = new Dictionary<int, PdfToUnicodeMap>();
-        foreach (var stream in ReadObjectStreams(bytes, latin, options))
+        foreach (var stream in ReadObjectStreams(bytes, latin, options, toUnicodeByFont.Values.ToHashSet()))
         {
             if (stream.ObjectId is not { } objectId) continue;
             var cmap = PdfToUnicodeMap.Parse(stream.Payload, options.EffectiveRegexTimeout);
             if (cmap.Count > 0) cmapByObject[objectId] = cmap;
         }
+        // Every "/Alias <font> 0 R" in one pass, rather than one pass over the whole structure per
+        // font. Aliases are applied in the same order as before - fonts in file order, each font's
+        // aliases in file order - so a later font still wins an alias two fonts share.
+        var mappedFonts = toUnicodeByFont.Where(entry => cmapByObject.ContainsKey(entry.Value)).Select(entry => entry.Key).ToHashSet();
+        var aliasesByFont = new Dictionary<int, List<string>>();
+        foreach (Match alias in Regex.Matches(structure, @"(?<alias>/[A-Za-z][A-Za-z0-9_.+-]*)\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, options.EffectiveRegexTimeout))
+        {
+            if (!int.TryParse(alias.Groups["id"].Value, out var fontId) || !mappedFonts.Contains(fontId)) continue;
+            if (!aliasesByFont.TryGetValue(fontId, out var names)) aliasesByFont[fontId] = names = [];
+            names.Add(alias.Groups["alias"].Value[1..]);
+        }
         foreach (var font in objectBodies)
         {
-            var toUnicode = Regex.Match(font.Value, @"/ToUnicode\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, options.EffectiveRegexTimeout);
-            if (!toUnicode.Success || !int.TryParse(toUnicode.Groups["id"].Value, out var cmapObject) || !cmapByObject.TryGetValue(cmapObject, out var map)) continue;
-            foreach (Match alias in Regex.Matches(structure, $@"(?<alias>/[A-Za-z][A-Za-z0-9_.+-]*)\s+{font.Key}\s+\d+\s+R\b", RegexOptions.None, options.EffectiveRegexTimeout))
-                maps[alias.Groups["alias"].Value[1..]] = map;
+            if (!toUnicodeByFont.TryGetValue(font.Key, out var cmapObject) || !cmapByObject.TryGetValue(cmapObject, out var map)) continue;
+            foreach (var alias in aliasesByFont.GetValueOrDefault(font.Key) ?? []) maps[alias] = map;
             var fontName = Regex.Match(font.Value, @"/Name\s+/(?<alias>[A-Za-z][A-Za-z0-9_.+-]*)", RegexOptions.None, options.EffectiveRegexTimeout);
             if (fontName.Success) maps[fontName.Groups["alias"].Value] = map;
         }
         return maps;
     }
 
-    private static IEnumerable<PdfObjectStream> ReadObjectStreams(byte[] bytes, string latin, PdfExtractionOptions options)
+    /// <summary>Decodes the streams of the objects in <paramref name="objectIds"/>. Everything else
+    /// is skipped before it is copied or inflated.</summary>
+    private static IEnumerable<PdfObjectStream> ReadObjectStreams(byte[] bytes, string latin, PdfExtractionOptions options,
+        IReadOnlySet<int> objectIds)
     {
         var marker = Encoding.ASCII.GetBytes("stream");
         var endMarker = Encoding.ASCII.GetBytes("endstream");
@@ -3118,14 +3449,24 @@ public static class PdfTextExtractor
             if (start < bytes.Length && bytes[start] == '\n') start++;
             var end = IndexOf(bytes, endMarker, start);
             if (end < 0) throw new PdfExtractionException("PDF stream is missing endstream.");
-            var payload = bytes[start..end];
-            while (payload.Length > 0 && (payload[^1] == '\r' || payload[^1] == '\n')) payload = payload[..^1];
             var header = ReadContainingObjectHeader(latin, offset, 4096);
-            var objectId = TryReadContainingObjectId(header, options.EffectiveRegexTimeout, out var id) ? id : (int?)null;
-            payload = DecodeFilteredStream(payload, header, options.MaxExpandedStreamBytes);
+            if (!TryReadContainingObjectId(header, options.EffectiveRegexTimeout, out var objectId) || !objectIds.Contains(objectId))
+            {
+                offset = end + endMarker.Length;
+                continue;
+            }
+            var payload = DecodeFilteredStream(bytes[start..TrimLineEnds(bytes, start, end)], header, options.MaxExpandedStreamBytes);
             yield return new PdfObjectStream(objectId, header, Encoding.Latin1.GetString(payload));
             offset = end + endMarker.Length;
         }
+    }
+
+    /// <summary>The end of a stream's data once the end-of-line markers before <c>endstream</c> are
+    /// dropped. Found by index so the payload is copied once, not once per trailing byte.</summary>
+    private static int TrimLineEnds(byte[] bytes, int start, int end)
+    {
+        while (end > start && bytes[end - 1] is (byte)'\r' or (byte)'\n') end--;
+        return end;
     }
 
     private sealed record PdfObjectStream(int? ObjectId, string Header, string Payload);

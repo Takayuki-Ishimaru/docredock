@@ -2,6 +2,7 @@ using System.Text.Json;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.Pdf;
+using DocRedock.Markdown;
 
 namespace DocRedock.Api;
 
@@ -97,17 +98,28 @@ internal static class PdfDocumentGraphProjection
                         ["pdf_embedded_image_placeholder"] = JsonSerializer.SerializeToElement(true),
                         ["pdf_embedded_image_count"] = JsonSerializer.SerializeToElement(page.EmbeddedImageCount)
                     });
-                // PDF user space grows upward and the page's nodes are already in reading order, so
-                // the image belongs after every node whose top edge is at or above the image's top.
-                // Without a resolved rectangle there is nothing to place it by: it goes to the end.
-                var insertAt = bounds is null
-                    ? nodes.Count
-                    : nodes.FindLastIndex(node => node.Geometry is not { } geometry ||
-                        geometry.Y + geometry.Height >= bounds.Y + bounds.Height) + 1;
-                nodes.Insert(insertAt, placeholder);
-                // Order must stay a total order over the page: the inserted node shifts every later
-                // node, and a duplicated Order would make downstream ordering non-deterministic.
-                nodes = nodes.Select((node, order) => node with { Order = order }).ToList();
+                nodes = InsertAtReadingPosition(nodes, placeholder, bounds);
+            }
+            // A drawn Form XObject the extractor could not inline painted text or drawings that are
+            // missing here. The rest of the page's text made such a page look complete - no warning,
+            // no review - so the spot is marked, and the node asks for source comparison itself.
+            if (!page.IsImageOnly && page.UnparsedFormXObjects is { Count: > 0 } unparsed)
+            {
+                var bounds = MergeBounds(unparsed.Select(form => form.Bounds).OfType<Geometry>().ToArray());
+                var marker = new DocumentNode(
+                    $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_unparsed_forms", NodeKind.Annotation, null, nodes.Count,
+                    ContentLayer.Body,
+                    new TextNodeContent($"[PDF page {page.PageNumber}: {unparsed.Count} drawing component(s) (Form XObject) could not be analyzed; their text and graphics are missing here - compare with the source page]"),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("unparsed_form_xobjects", page.PageNumber.ToString())]),
+                    Geometry: bounds, Editability: NodeEditability.RenderOnly,
+                    Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
+                    Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        [ReadableMarkdownSerializer.SourceReviewRequiredExtension] = JsonSerializer.SerializeToElement(true),
+                        [UnparsedFormXObjectsExtension] = JsonSerializer.SerializeToElement(unparsed.Select(form =>
+                            new PdfUnparsedFormRecord(form.Name, ReasonCode(form.Reason), form.Bounds)).ToArray(), RecordJson)
+                    });
+                nodes = InsertAtReadingPosition(nodes, marker, bounds);
             }
             if (visualGraph is not null)
             {
@@ -126,6 +138,44 @@ internal static class PdfDocumentGraphProjection
         }).ToArray();
         return new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_" + hashPrefix, DocumentFormatKind.Pdf, partitions);
     }
+
+    /// <summary>Extension carrying one <see cref="PdfUnparsedFormRecord"/> per Form XObject draw the
+    /// extractor could not analyze, on the page's review marker node.</summary>
+    internal const string UnparsedFormXObjectsExtension = "pdf_unparsed_form_xobjects";
+
+    /// <summary>One unanalyzed form draw as stored on the graph: its resource name, a stable reason
+    /// code, and where it paints in PDF user space when that is known.</summary>
+    internal sealed record PdfUnparsedFormRecord(string Name, string Reason, Geometry? Bounds);
+
+    private static readonly JsonSerializerOptions RecordJson = new();
+
+    private static string ReasonCode(PdfFormXObjectUnparsedReason reason) => reason switch
+    {
+        PdfFormXObjectUnparsedReason.UnreadableStream => "unreadable-stream",
+        PdfFormXObjectUnparsedReason.NestingLimit => "nesting-limit",
+        PdfFormXObjectUnparsedReason.SizeLimit => "size-limit",
+        _ => "unresolved-resource",
+    };
+
+    /// <summary>Inserts a marker where its content sits in reading order. PDF user space grows
+    /// upward and the page's nodes are already in reading order, so the marker belongs after every
+    /// node whose top edge is at or above its own top; without a resolved rectangle there is
+    /// nothing to place it by and it goes to the end. Order is then renumbered so it stays a total
+    /// order over the page - a duplicated Order would make downstream ordering non-deterministic.</summary>
+    private static List<DocumentNode> InsertAtReadingPosition(List<DocumentNode> nodes, DocumentNode marker, Geometry? bounds)
+    {
+        // Another marker is not content to read past: one without a position sits at the end, and
+        // must not drag this one there with it.
+        var insertAt = bounds is null
+            ? nodes.Count
+            : nodes.FindLastIndex(node => !IsMarker(node) && (node.Geometry is not { } geometry ||
+                geometry.Y + geometry.Height >= bounds.Y + bounds.Height)) + 1;
+        nodes.Insert(insertAt, marker);
+        return nodes.Select((node, order) => node with { Order = order }).ToList();
+    }
+
+    private static bool IsMarker(DocumentNode node) => node.Extensions is { } extensions &&
+        (extensions.ContainsKey("pdf_embedded_image_placeholder") || extensions.ContainsKey(UnparsedFormXObjectsExtension));
 
     /// <summary>Union of the placement rectangles the extractor could resolve, or null when it
     /// resolved none - the page then carries a count but no position.</summary>

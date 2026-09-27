@@ -25,7 +25,10 @@ public sealed record ExportSummary(
     int ReviewImagePages = 0,
     int UnresolvedElements = 0,
     int OcrImages = 0,
-    int OcrReviewItems = 0)
+    int OcrReviewItems = 0,
+    int VisualReviewPages = 0,
+    int UnanalyzedContent = 0,
+    int UnanalyzedContentPages = 0)
 {
     /// <summary>OCR text that should be compared with its source image. This is a review hint,
     /// not a warning: it never changes the export status or exit code.</summary>
@@ -33,8 +36,9 @@ public sealed record ExportSummary(
 
     /// <summary>False when a recognized visual element was kept only as fallback, a diagnostic, or
     /// an unresolved relation instead of being expressed in the Markdown. It says nothing about
-    /// attributes DocRedock does not model (for example colors).</summary>
-    public bool AllVisualElementsConverted => ReviewPages == 0 && UnresolvedElements == 0;
+    /// attributes DocRedock does not model (for example colors), nor about content that was never
+    /// analyzed at all - <see cref="UnanalyzedContent"/> reports that separately.</summary>
+    public bool AllVisualElementsConverted => VisualReviewPages == 0 && UnresolvedElements == 0;
 
     // "Written", "every visual element converted", and "needs a person" are different facts; each gets
     // its own line so a successful export with review items is never read as either a failure
@@ -42,7 +46,8 @@ public sealed record ExportSummary(
     public override string ToString() =>
         $"Export completed\nOutput: Markdown\n" +
         $"Output written: yes\n" +
-        $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {ReviewPages} page(s))")}\n" +
+        $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {VisualReviewPages} page(s))")}\n" +
+        $"Unanalyzed content: {(UnanalyzedContent == 0 ? "none" : $"{UnanalyzedContent} item(s) on {UnanalyzedContentPages} page(s)")}\n" +
         $"Human review: {HumanReviewText()}\n" +
         $"Warnings: {Warnings}\nTables reconstructed: {Tables}\nDiagrams reconstructed: {DiagramsReconstructed}\nFallback pages: {FallbackPages}\nPages requiring review: {ReviewPages}\nReview image pages: {ReviewImagePages}\nUnresolved visual elements: {UnresolvedElements}" +
         (OcrImages > 0 ? $"\nOCR review items: {OcrReviewItems} (confidence below 80% or not reported, in {OcrImages} image(s))" : string.Empty);
@@ -50,7 +55,8 @@ public sealed record ExportSummary(
     private string HumanReviewText()
     {
         var reasons = new List<string>();
-        if (ReviewPages > 0) reasons.Add($"visual {ReviewPages} page(s)");
+        if (VisualReviewPages > 0) reasons.Add($"visual {VisualReviewPages} page(s)");
+        if (UnanalyzedContentPages > 0) reasons.Add($"unanalyzed content {UnanalyzedContentPages} page(s)");
         if (OcrReviewRequired) reasons.Add($"OCR {OcrReviewItems} item(s)");
         return reasons.Count == 0 ? "not required" : "required (" + string.Join(", ", reasons) + ")";
     }
@@ -85,6 +91,12 @@ public static class ExportSummaryBuilder
             FallbackPages: fallbackPages,
             Rejected: graphs.Sum(item => VisualGraphValidator.Validate(item).Errors.Count),
             ReviewPages: graph.Partitions.Count(p => p.Nodes.Any(ReadableMarkdownSerializer.RequiresSourceReview)),
+            // A diagram node carries the visual graph (even when its metadata cannot be read, which
+            // itself needs review); every other node that needs review stands for unanalyzed content.
+            VisualReviewPages: graph.Partitions.Count(p => p.Nodes.Any(node => node.Kind == NodeKind.Diagram &&
+                node.Extensions?.ContainsKey("visual_graph") == true && ReadableMarkdownSerializer.RequiresSourceReview(node))),
+            UnanalyzedContent: graph.Nodes.Sum(ExportReviewBuilder.CountUnanalyzedContent),
+            UnanalyzedContentPages: graph.Partitions.Count(p => p.Nodes.Any(node => ExportReviewBuilder.CountUnanalyzedContent(node) > 0)),
             ReviewImagePages: diagnostics.Where(d => d.Code == "PdfReviewImageAttached")
                 .Select(d => d.PartUri).Distinct(StringComparer.Ordinal).Count(),
             UnresolvedElements: graphs.Sum(CountUnresolvedElements),

@@ -16,8 +16,11 @@ namespace DocRedock.Gui.HeadlessTests;
 
 public static class GuiTestAppBuilder
 {
+    // Skia drawing decodes real bitmaps: the review window sizes and zooms its page image from
+    // the image's pixel size, which the stub renderer reports as 1x1.
     public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
-        .UseHeadless(new AvaloniaHeadlessPlatformOptions());
+        .UseSkia()
+        .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
 }
 
 public sealed class MainWindowStartupTests

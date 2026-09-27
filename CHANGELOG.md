@@ -2,6 +2,16 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.2.11]
+
+- Preserved text and graphics inside PDF Form XObjects drawn on a page that also carries its own text; previously they could disappear without a warning.
+- Reported a drawn Form XObject that cannot be analyzed with a warning and a review page (with a source page image when a rasterizer is available, and whole-page OCR when OCR is enabled), and counted unanalyzed content separately from the conversion status of recognized visual elements.
+- Added zoom to each area to review and a rendered or source view of the page Markdown to the GUI review window.
+- Reduced memory use when converting PDFs with large images, and fixed early closing of long code fences in experimental rendering.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.11.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.11.md)
+
 ## [0.2.10]
 
 - Fixed unnecessary warnings for headings outside PDF tables and duplicate symbols for shapes whose fill and outline are drawn separately.

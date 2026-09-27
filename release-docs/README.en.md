@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.11 Public Beta
+
+- [v0.2.11 release notes](RELEASE_NOTES_v0.2.11.en.md)
+- Preserved text and graphics inside PDF Form XObjects, with a warning and review image when one cannot be analyzed
+- Added zoom to review areas and a rendered or source Markdown view to the review window
+- Reduced memory use when converting PDFs with large images
+
 ### v0.2.10 Public Beta
 
 - [v0.2.10 release notes](RELEASE_NOTES_v0.2.10.en.md)
