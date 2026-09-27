@@ -4,10 +4,10 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [0.2.10]
 
-- Removed the false `VisualEdgeLabelUnresolved` warning for a heading outside a table whose frame is one rectangle path. Unassigned labels now record their candidate lines and are re-evaluated after table consumption, so genuinely ambiguous diagram labels on the same page still warn.
-- Preserved solid, dashed, and dotted line styles for shapes over tables in PDF, PowerPoint, Excel, and Word: dashed and dotted strokes use distinct cell symbols with a note after the table, Mermaid connections use dotted links (dotted message arrows in sequence diagrams), and unresolved fallback paths name their line style. A filled shape whose outline is painted separately now yields one table symbol instead of two. Documented which visual attributes are and are not preserved.
-- Separated "output written", "all visual elements converted", and "human review required" in export summaries, added one review line per page naming what to check and where the review image is, and reported OCR review items separately from warnings without changing the exit code.
-- Reworked the GUI result panel around page and element counts and short Japanese explanations, moved diagnostic codes and internal IDs into a collapsed details section with related diagnostics grouped, used PDF-specific guidance, and added a "該当ページを確認" review window that shows the source page image with unresolved elements marked next to that page's Markdown.
+- Fixed unnecessary warnings for headings outside PDF tables and duplicate symbols for shapes whose fill and outline are drawn separately.
+- Preserved solid, dashed, and dotted line styles for supported shapes over tables in PDF, PowerPoint, Excel, and Word, using distinct symbols and explanatory notes. Documented the limits of visual attribute preservation.
+- Separated the Markdown save result, conversion status of recognized visual elements, and human review guidance. The CLI identifies what to check on each page and reports OCR review items separately from warnings without changing the exit code.
+- Simplified the GUI result panel and added a "該当ページを確認" (review page) window to compare an attached PDF page image with its Markdown. Unconverted elements are marked when their positions are known; detailed diagnostics are available in a collapsible section.
 
 - [English release notes](release-docs/RELEASE_NOTES_v0.2.10.en.md)
 - [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.10.md)
