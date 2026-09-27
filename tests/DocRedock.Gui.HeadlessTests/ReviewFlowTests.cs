@@ -55,17 +55,20 @@ public sealed class ReviewFlowTests
             {
                 Assert.Same(items[0], CurrentItem(window));
                 Assert.Equal(2, (int)Property(window, "HighlightCount")!);
-                Assert.True(Get<Viewbox>(window, "ImageViewbox").IsVisible);
+                Assert.True(Get<ScrollViewer>(window, "ImageScrollViewer").IsVisible);
                 Assert.False(Get<TextBlock>(window, "NoImageText").IsVisible);
                 Assert.Equal(items[0].Description, Get<TextBlock>(window, "PageDescriptionText").Text);
                 Assert.Contains("| DESIGN |", Get<TextBox>(window, "PageMarkdownTextBox").Text);
+                // The rendered view is shown first; the source is one toggle away.
+                Assert.True(Get<ScrollViewer>(window, "MarkdownPreviewScroll").IsVisible);
+                Assert.False(Get<TextBox>(window, "PageMarkdownTextBox").IsVisible);
                 Assert.Contains("赤い線と枠", Get<TextBlock>(window, "LegendText").Text);
                 Assert.True(Get<Button>(window, "OpenImageButton").IsVisible);
                 Assert.Equal(new[] { "1ページ目", "3ページ目", "スライド2" }, Get<ComboBox>(window, "PageSelector").ItemsSource!.Cast<string>());
 
                 Get<ComboBox>(window, "PageSelector").SelectedIndex = 1;
                 Assert.Same(items[1], CurrentItem(window));
-                Assert.False(Get<Viewbox>(window, "ImageViewbox").IsVisible);
+                Assert.False(Get<ScrollViewer>(window, "ImageScrollViewer").IsVisible);
                 Assert.Contains("原本PDFの3ページ目を開いて確認してください", Get<TextBlock>(window, "NoImageText").Text);
                 Assert.False(Get<Button>(window, "OpenImageButton").IsVisible);
 
@@ -87,7 +90,7 @@ public sealed class ReviewFlowTests
             var window = new ReviewWindow([Item(root, 1, dataUri, regions: [new ReviewRegion(0, 0, .5, .5)])]);
             try
             {
-                Assert.True(Get<Viewbox>(window, "ImageViewbox").IsVisible);
+                Assert.True(Get<ScrollViewer>(window, "ImageScrollViewer").IsVisible);
                 Assert.Equal(1, (int)Property(window, "HighlightCount")!);
                 Assert.False(Get<Button>(window, "OpenImageButton").IsVisible);
             }

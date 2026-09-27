@@ -790,8 +790,10 @@ public partial class MainWindow : Window
         {
             parts.Add($"要確認 {review.Count}ページ");
             parts.Add($"照合画像 {review.Count(item => item.Page.ReviewImageReference is not null)}ページ添付");
-            var elements = review.Sum(item => item.Page.Elements.Count);
+            var unanalyzed = review.Sum(item => item.Page.CountOf(ReviewElementKind.UnanalyzedContent));
+            var elements = review.Sum(item => item.Page.Elements.Count) - unanalyzed;
             if (elements > 0) parts.Add($"未解決の図形 {elements}件");
+            if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
         }
         if (ocrReviewItems > 0) parts.Add($"OCR確認 {ocrReviewItems}件");
         return string.Join("／", parts);
@@ -815,8 +817,10 @@ public partial class MainWindow : Window
         return string.Join(Environment.NewLine, lines);
     }
 
+    // Codes the per-page review description already explains in its own words.
     private static bool IsVisualReviewCode(string code) =>
-        code.StartsWith("Visual", StringComparison.Ordinal) || code.StartsWith("PdfReviewImage", StringComparison.Ordinal);
+        code.StartsWith("Visual", StringComparison.Ordinal) || code.StartsWith("PdfReviewImage", StringComparison.Ordinal) ||
+        code == "PdfFormXObjectUnparsed";
 
     private static string? DiagnosticLocation(Diagnostic diagnostic)
     {
@@ -890,6 +894,7 @@ public partial class MainWindow : Window
         "PdfRasterizerUnavailable" => ("画像PDFの読み取りに必要なrasterizerを利用できません。", "ネイティブテキストを使うか、対応rasterizerを構成してください。"),
         "PdfRasterizationFailed" => ("PDF rasterizerの実行に失敗しました。", "pdftoppmまたはmutoolの実行ファイルと入力PDFを確認してください。"),
         "PdfReviewImageUnavailable" => ("原本照合用のページ画像を作成できませんでした。", "原本PDFの該当ページを開いて確認してください。画像を添付するにはpdftoppmまたはmutoolを構成してください。"),
+        "PdfFormXObjectUnparsed" => ("PDFの描画部品（Form XObject）の中身を解析できず、その文字・図はMarkdownに含まれていません。", "「該当ページを確認」または照合画像で、原本の該当箇所を確認してください。"),
         "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
         "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
         _ => ("変換時の注意事項があります。", $"原文: {originalMessage}{Environment.NewLine}元文書と生成結果を確認し、必要なら診断コードを添えて報告してください。"),

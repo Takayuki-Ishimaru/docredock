@@ -899,10 +899,23 @@ public sealed class DocumentService
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
             .ToArray();
         if (pages.Length == 0) return ([], graph);
+        // What each review page asks a person to compare, in the words its diagnostics and its
+        // review image use: unresolved tables/figures, content that could not be analyzed, or both.
+        var unanalyzedPages = graph.Partitions.Where(partition => partition.Nodes.Any(node => ExportReviewBuilder.CountUnanalyzedContent(node) > 0))
+            .Select(partition => partition.Order + 1).ToHashSet();
+        var visualReviewPages = graph.Partitions.Where(partition => partition.Nodes.Any(node =>
+                ExportReviewBuilder.CountUnanalyzedContent(node) == 0 && ReadableMarkdownSerializer.RequiresSourceReview(node)))
+            .Select(partition => partition.Order + 1).ToHashSet();
+        (string Subject, string Verb, string Alt) ReviewReason(int page) => (unanalyzedPages.Contains(page), visualReviewPages.Contains(page)) switch
+        {
+            (true, true) => ("unresolved tables/figures and content that could not be analyzed", "need", "未解決の表・図と解析できなかった描画部品を確認"),
+            (true, false) => ("content that could not be analyzed", "needs", "解析できなかった描画部品を確認"),
+            _ => ("unresolved tables/figures", "need", "未解決の表・図を確認"),
+        };
         if (pdfRasterizer is null)
         {
             foreach (var page in reviewPages)
-                diagnostics.Add(new Diagnostic("PdfReviewImageUnavailable", $"PDF page {page}: unresolved tables/figures need source comparison; no PDF rasterizer is configured. Run docredock doctor.",
+                diagnostics.Add(new Diagnostic("PdfReviewImageUnavailable", $"PDF page {page}: {ReviewReason(page).Subject} {ReviewReason(page).Verb} source comparison; no PDF rasterizer is configured. Run docredock doctor.",
                     DiagnosticSeverity.Warning, PartUri: $"pdf:page:{page}"));
             return ([], graph);
         }
@@ -979,11 +992,11 @@ public sealed class DocumentService
                     };
                 else
                     nodes.Add(new DocumentNode(partition.Id + "_review", NodeKind.Image, null, nodes.Count, ContentLayer.Body,
-                        new ReferenceNodeContent(partition.Id, $"PDF page {partition.Order + 1}: 原本照合用画像（未解決の表・図を確認）"),
+                        new ReferenceNodeContent(partition.Id, $"PDF page {pageNumber}: 原本照合用画像（{ReviewReason(pageNumber).Alt}）"),
                         new SourceAnchor("pdf", partition.SourcePartUri ?? $"pdf:page:{partition.Order + 1}", []),
                         Editability: NodeEditability.RenderOnly,
                         Extensions: reviewExtensions));
-                diagnostics.Add(new Diagnostic("PdfReviewImageAttached", $"PDF page {partition.Order + 1}: source page image attached for comparison of unresolved tables/figures.",
+                diagnostics.Add(new Diagnostic("PdfReviewImageAttached", $"PDF page {pageNumber}: source page image attached for comparison of {ReviewReason(pageNumber).Subject}.",
                     DiagnosticSeverity.Information, PartUri: partition.SourcePartUri));
                 return partition with { Nodes = nodes };
             }).ToArray() };
@@ -1111,9 +1124,13 @@ public sealed class DocumentService
         return null;
     }
 
+    // A page that draws a Form XObject the extractor could not analyze is treated like a page with
+    // an unextracted image: with OCR on, the page is rasterized and recognized as a whole, and OCR
+    // text that repeats the page's native text is dropped, so the form's text can still come back.
     private static bool IsPdfImagePlaceholder(DocumentNode node) =>
         HasTrueExtension(node, "pdf_textless_placeholder") ||
         HasTrueExtension(node, "pdf_embedded_image_placeholder") ||
+        ExportReviewBuilder.CountUnanalyzedContent(node) > 0 ||
         node.Content is TextNodeContent text && text.Text.StartsWith("[PDF page ", StringComparison.Ordinal);
 
     private static bool HasTrueExtension(DocumentNode node, string key) =>

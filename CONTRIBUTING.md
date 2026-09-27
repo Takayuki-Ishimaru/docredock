@@ -16,6 +16,15 @@ The required .NET SDK version is pinned in global.json. Restore dependencies in 
 
 The license audit checks locked packages against licenses/allowlist.json and writes the CycloneDX SBOM under artifacts/.
 
+### Keeping local verification light
+
+Directory.Build.rsp turns off MSBuild node reuse, so builds and test runs in this repository no longer leave one worker process per core resident (about 1 GB on a 10-core machine) for the following quarter hour. Two more habits keep a verification session light:
+
+- Add `-m:4` to `dotnet build` on a many-core machine. On a 10-core Mac this kept a full solution build near 1 GB instead of about 2 GB, and it was no slower. (`dotnet build` passes its own `-maxcpucount`, so this cannot live in Directory.Build.rsp.)
+- Run `dotnet build-server shutdown` when you are done. The C# compiler server stays resident between builds to make them faster; it used about 250 MB after one build here and about 900 MB after a long session.
+
+`tools/conversion-qa/run.py` builds the CLI once with these settings and then runs the built DLL for every export, instead of calling `dotnet run` for each one.
+
 ## Run locally
 
 Desktop GUI:

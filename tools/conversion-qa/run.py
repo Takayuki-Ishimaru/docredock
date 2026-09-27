@@ -172,11 +172,41 @@ def classify_export_status(returncode: Optional[int]) -> str:
         return "success_with_warnings"
     return "failed"
 
+# CLI の起動方法 (初回の cli_command 呼び出しで 1 回だけ決める)。
+_CLI_COMMAND: Optional[list] = None
+
+def cli_command(dotnet_path: str) -> list:
+    """CLI を 1 回だけビルドし、以後は DLL を直接起動するコマンド接頭辞を返す。
+
+    書き出しごとに `dotnet run` すると、そのたびに MSBuild がプロジェクト全体を評価して
+    最新性を確認し、ワーカーノード (1 個約 100MB、コア数ぶん) を常駐させる。3 対象で 15 回前後
+    書き出すこのハーネスでは、それがメモリと時間の大半だった。ビルドは MSBuild ノードの再利用と
+    コンパイラサーバーを切って行い、終了後に常駐プロセスを残さない。ビルドできなかった場合だけ
+    従来どおり `dotnet run` に戻す。並列度 4 はビルドのピークを約 2GB から約 1GB に抑える
+    (この規模のソリューションでは遅くならない)。"""
+    global _CLI_COMMAND
+    if _CLI_COMMAND is not None:
+        return _CLI_COMMAND
+    build = run_cmd(
+        [dotnet_path, "build", "src/DocRedock.Cli", "-c", "Release", "--nologo", "-v", "q",
+         "-m:4", "-nodeReuse:false", "-p:UseSharedCompilation=false"],
+        cwd=REPO_ROOT, timeout=900,
+    )
+    built = sorted((REPO_ROOT / "src" / "DocRedock.Cli" / "bin" / "Release").glob("*/DocRedock.Cli.dll"),
+                   key=lambda path: path.stat().st_mtime, reverse=True)
+    if build["returncode"] == 0 and built:
+        _CLI_COMMAND = [dotnet_path, str(built[0])]
+        print(f"[conversion-qa] CLI built once; exports run {built[0]}")
+    else:
+        _CLI_COMMAND = [dotnet_path, "run", "--project", "src/DocRedock.Cli", "-c", "Release", "--"]
+        print("[conversion-qa] CLI build failed; falling back to `dotnet run` for every export", file=sys.stderr)
+    return _CLI_COMMAND
+
 def run_export(dotnet_path: str, source: Path, profile: str, output: Path,
                 timeout: int = EXPORT_TIMEOUT_SEC, ocr_mode: str = "off") -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        dotnet_path, "run", "--project", "src/DocRedock.Cli", "-c", "Release", "--",
+        *cli_command(dotnet_path),
         "export", str(source), "--profile", profile, "--output", str(output), "--force", "--quiet",
         # 変換ロジックの検証を OCR エンジン差 (Vision/Tesseract の有無) から切り離す。
         # 画像内限定文字列の not_contains guard も OCR off が前提。

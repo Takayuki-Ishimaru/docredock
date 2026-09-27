@@ -30,7 +30,7 @@ python3 tools/conversion-qa/run.py --all --render
 
 ## 1 target あたりの処理内容
 
-1. **readable export** — `dotnet run --project src/DocRedock.Cli -c Release -- export <src> --profile readable --output <out>/export.md --force --quiet` を実行し、成果ディレクトリに `.md`(と埋め込み画像があれば `export.assets/`)を残す。この `.md` が expectations 評価の対象になる。
+1. **readable export** — 最初の書き出しの前に CLI を 1 回だけビルドし(`dotnet build src/DocRedock.Cli -c Release -m:4 -nodeReuse:false -p:UseSharedCompilation=false`)、以後は `dotnet src/DocRedock.Cli/bin/Release/<tfm>/DocRedock.Cli.dll export <src> --profile readable --output <out>/export.md --force --quiet` を直接実行して、成果ディレクトリに `.md`(と埋め込み画像があれば `export.assets/`)を残す。この `.md` が expectations 評価の対象になる。書き出しごとに `dotnet run` するとそのたびに MSBuild がプロジェクト全体を評価し、ワーカーノードを常駐させていた(3 対象の実行でピーク約 1.7GB、終了後も約 1GB 常駐)。ビルドに失敗した場合だけ従来の `dotnet run` に戻る。
 2. **roundtrip export のスモーク** — 同様に `--profile roundtrip` で実行し、`<out>/roundtrip/export.md`(+ `.drmd` サイドカー)に出力する。終了コードのみ記録し、export と同じ「exit≥2 なら失敗」判定に使う。
 3. **expectations 評価** — `expectations.json` があれば `items[]` を 1 件ずつ判定し、`checks[]` と `guard`/`goal` 別の pass/fail 集計を `report.json`/`report.md` に残す。無ければ「参考エントリ (reference)」として export とレンダリングだけ行う。
 4. **レンダリング (`--render` 指定時のみ)** — 原本を `soffice --headless --convert-to pdf` で PDF 化し、`pdftoppm -png -r 150` で全ページ PNG 化して `<out>/render/original-page-NN.png` に保存する。ページ数に応じて桁数は自動調整 (最小 2 桁)。道具が見つからない場合は **失敗にせず警告してスキップ** する。soffice はあるが pdftoppm が無い場合や、soffice 自体が無い場合は `qlmanage`(QuickLook のサムネイル生成)で 1 ページ目だけのサムネイルにフォールバックする(全ページにはならない旨を warning に明記)。

@@ -22,6 +22,9 @@ public enum ReviewElementKind
     Label,
     /// <summary>A shape or path kept only as vector fallback.</summary>
     Shape,
+    /// <summary>A drawing component whose text and graphics could not be analyzed at all (a PDF
+    /// Form XObject the extractor could not read); it is missing from the Markdown.</summary>
+    UnanalyzedContent,
 }
 
 /// <summary>A rectangle on the review image, normalized to 0..1 with the origin at the top left.</summary>
@@ -90,7 +93,9 @@ public static class ExportReviewBuilder
 {
     /// <summary>Builds the review list from the finalized export graph. Pages are exactly those
     /// counted by <see cref="ExportSummary.ReviewPages"/>; elements are exactly those counted by
-    /// <see cref="ExportSummary.UnresolvedElements"/>, classified by what they look like.</summary>
+    /// <see cref="ExportSummary.UnresolvedElements"/>, classified by what they look like, plus one
+    /// <see cref="ReviewElementKind.UnanalyzedContent"/> per item counted by
+    /// <see cref="ExportSummary.UnanalyzedContent"/>.</summary>
     public static ExportReview Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics)
     {
         ArgumentNullException.ThrowIfNull(graph); ArgumentNullException.ThrowIfNull(diagnostics);
@@ -105,7 +110,8 @@ public static class ExportReviewBuilder
                 .OrderByDescending(node => ExtensionBool(node, "pdf_review_image")).FirstOrDefault();
             var mapping = reviewImage is null ? null : ReviewImageMapping.From(reviewImage);
             var elements = partition.Nodes.Select(ReadVisualGraph).OfType<VisualGraph>()
-                .SelectMany(visual => Classify(visual, tables, mapping)).ToArray();
+                .SelectMany(visual => Classify(visual, tables, mapping))
+                .Concat(partition.Nodes.SelectMany(node => UnanalyzedContent(node, mapping))).ToArray();
             var number = partition.Order + 1;
             var reference = (reviewImage?.Content as ReferenceNodeContent)?.Reference;
             pages.Add(new ReviewPage(number, partition.Id, graph.Format, elements, reference,
@@ -196,6 +202,36 @@ public static class ExportReviewBuilder
         return result.Values;
     }
 
+    /// <summary>One element per content item the adapter recorded as not analyzed, framed where it
+    /// paints when that is known. Any other node that asks for source review without being a
+    /// visual graph stands for one such item, so the review list, the summary counts, and
+    /// <see cref="ReadableMarkdownSerializer.RequiresSourceReview"/> can never disagree.</summary>
+    internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping)
+    {
+        if (node.Extensions?.TryGetValue(PdfDocumentGraphProjection.UnparsedFormXObjectsExtension, out var raw) == true &&
+            raw.ValueKind == JsonValueKind.Array && raw.GetArrayLength() > 0)
+        {
+            var index = 0;
+            foreach (var item in raw.EnumerateArray())
+            {
+                PdfDocumentGraphProjection.PdfUnparsedFormRecord? record;
+                try { record = item.Deserialize<PdfDocumentGraphProjection.PdfUnparsedFormRecord>(); }
+                catch (JsonException) { record = null; }
+                var sourceId = $"{node.Id}#{index++}";
+                yield return new ReviewElement(ReviewElementKind.UnanalyzedContent, record?.Name is { Length: > 0 } name ? $"{sourceId}:{name}" : sourceId,
+                    record?.Bounds is { } bounds ? mapping?.Map(bounds) : null);
+            }
+            yield break;
+        }
+        if (ExtensionBool(node, ReadableMarkdownSerializer.SourceReviewRequiredExtension) && ReadVisualGraph(node) is null &&
+            node.Extensions?.ContainsKey("visual_graph") != true)
+            yield return new ReviewElement(ReviewElementKind.UnanalyzedContent, node.Id,
+                node.Geometry is { } geometry ? mapping?.Map(geometry) : null);
+    }
+
+    /// <summary>How many unanalyzed content items a node stands for; see <see cref="UnanalyzedContent"/>.</summary>
+    internal static int CountUnanalyzedContent(DocumentNode node) => UnanalyzedContent(node, null).Count();
+
     private const int MaxOutlinePoints = 256;
 
     private static bool Intersects(Geometry table, Geometry item) =>
@@ -215,7 +251,7 @@ public static class ExportReviewBuilder
 
     /// <summary>Maps PDF user space onto the rendered page image recorded with a review image.
     /// Only unrotated pages are mapped, matching the embedded-image crop rules.</summary>
-    private sealed record ReviewImageMapping(Geometry Box)
+    internal sealed record ReviewImageMapping(Geometry Box)
     {
         public static ReviewImageMapping? From(DocumentNode image)
         {

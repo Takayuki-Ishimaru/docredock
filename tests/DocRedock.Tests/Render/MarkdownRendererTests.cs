@@ -769,6 +769,27 @@ public sealed class MarkdownRendererTests
     }
 
     [Fact]
+    public void Parser_closes_a_long_fence_only_with_a_fence_at_least_as_long()
+    {
+        // The readable serializer writes content that contains ``` inside a four-backtick fence.
+        var document = MarkdownAstParser.Parse("````\n```mermaid\n# not a heading\n```\n````\n\nAfter");
+
+        var code = Assert.IsType<MarkdownCodeBlock>(document.Blocks[0]);
+        Assert.Equal(string.Empty, code.Language);
+        Assert.Equal("```mermaid\n# not a heading\n```", code.Text);
+        Assert.Equal("After", Assert.IsType<MarkdownParagraph>(Assert.Single(document.Blocks.Skip(1))).Text);
+    }
+
+    [Fact]
+    public void Parser_keeps_the_numbers_ordered_items_were_written_with()
+    {
+        var list = Assert.IsType<MarkdownList>(Assert.Single(MarkdownAstParser.Parse("4. four\n5) five\n- bullet").Blocks));
+
+        Assert.Equal(new int?[] { 4, 5, null }, list.Numbers);
+        Assert.Equal(new[] { true, true, false }, list.Ordered);
+    }
+
+    [Fact]
     public void Parser_preserves_backslash_escapes_in_table_cells_for_the_inline_renderer_to_resolve()
     {
         var document = MarkdownAstParser.Parse("""

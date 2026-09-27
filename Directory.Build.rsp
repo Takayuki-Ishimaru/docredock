@@ -1,0 +1,8 @@
+# MSBuild switches for every dotnet build/test/run under this repository.
+#
+# Worker nodes normally stay resident for about 15 minutes after a build (roughly 100 MB each,
+# one per core: about 1 GB on a 10-core Mac). Not reusing them costs this solution no build time,
+# and nothing but the compiler server is left running afterwards; `dotnet build-server shutdown`
+# stops that too. (The degree of parallelism cannot be set here: dotnet build passes its own
+# -maxcpucount. Add -m:4 to a build to keep its peak near 1 GB instead of about 2 GB.)
+-nodeReuse:false

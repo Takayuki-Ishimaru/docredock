@@ -34,6 +34,7 @@ public static class ExportReviewText
                 ReviewElementKind.Line => $"線{style}{count}件の接続先や意味を確定できませんでした",
                 ReviewElementKind.Arrow => $"矢印{style}{count}件の接続先や意味を確定できませんでした",
                 ReviewElementKind.Label => $"文字{count}件を、どの線や図形の説明か確定できませんでした",
+                ReviewElementKind.UnanalyzedContent => $"解析できなかった描画部品{count}件の文字・図はMarkdownに含まれていません",
                 _ => $"図形{style}{count}件を図として再構成できませんでした",
             });
         }
@@ -41,7 +42,7 @@ public static class ExportReviewText
         var text = Location(page) + "：" + string.Join("。", parts) + "。";
         if (page.HasTables && page.Elements.Any(element => element.Kind is ReviewElementKind.TableDiagonalLine or ReviewElementKind.TableDiagonalArrow))
             text += "表の文字は書き出されています。";
-        var subject = page.Elements.Count > 0 && page.Elements.All(element => element.Kind is not (ReviewElementKind.Label or ReviewElementKind.Shape))
+        var subject = page.Elements.Count > 0 && page.Elements.All(element => IsLine(element.Kind))
             ? "線の意味" : "内容";
         text += page.ReviewImageReference is not null
             ? $"照合画像で{subject}を確認してください。"
@@ -61,7 +62,9 @@ public static class ExportReviewText
         {
             parts.Add($"要確認 {review.Pages.Count}ページ");
             parts.Add($"照合画像 {review.ReviewImagePages}ページ添付");
-            if (review.Elements > 0) parts.Add($"未解決の図形 {review.Elements}件");
+            var unanalyzed = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UnanalyzedContent));
+            if (review.Elements > unanalyzed) parts.Add($"未解決の図形 {review.Elements - unanalyzed}件");
+            if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
         }
         if (review.Ocr.Required) parts.Add($"OCR確認 {review.Ocr.ReviewItems}件");
         return string.Join("／", parts);
@@ -86,6 +89,7 @@ public static class ExportReviewText
                 ReviewElementKind.Line => $"{count} line(s){style} with undetermined endpoints or meaning",
                 ReviewElementKind.Arrow => $"{count} arrow(s){style} with undetermined endpoints or meaning",
                 ReviewElementKind.Label => $"{count} label(s) not assignable to one line or shape",
+                ReviewElementKind.UnanalyzedContent => $"{count} drawing component(s) not analyzed; their text and graphics are missing from the Markdown",
                 _ => $"{count} shape(s){style} kept as vector fallback",
             });
         }
@@ -101,6 +105,9 @@ public static class ExportReviewText
             ? " (table text was exported)" : string.Empty;
         return $"{location}: {string.Join("; ", parts)}{tableNote}";
     }
+
+    private static bool IsLine(ReviewElementKind kind) => kind is ReviewElementKind.TableDiagonalLine or
+        ReviewElementKind.TableDiagonalArrow or ReviewElementKind.Line or ReviewElementKind.Arrow;
 
     // Only a style shared by every element of the kind is named; a mix stays unqualified.
     private static string StyleSuffixJapanese(IReadOnlyList<ReviewElement> elements) =>

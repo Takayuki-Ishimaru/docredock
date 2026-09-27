@@ -8,7 +8,9 @@ public sealed record MarkdownParagraph(string Text) : MarkdownBlock;
 public sealed record MarkdownList(
     IReadOnlyList<string> Items,
     IReadOnlyList<int>? Levels = null,
-    IReadOnlyList<bool>? Ordered = null) : MarkdownBlock;
+    IReadOnlyList<bool>? Ordered = null,
+    /// <summary>The number an ordered item was written with ("4." is 4), or null for a bullet.</summary>
+    IReadOnlyList<int?>? Numbers = null) : MarkdownBlock;
 public sealed record MarkdownCodeBlock(string Language, string Text) : MarkdownBlock;
 public sealed record MarkdownTable(IReadOnlyList<string> Headers, IReadOnlyList<IReadOnlyList<string>> Rows) : MarkdownBlock;
 public sealed record MarkdownDocument(IReadOnlyList<MarkdownBlock> Blocks);
@@ -31,9 +33,13 @@ public static class MarkdownAstParser
             if (heading.Success) { blocks.Add(new MarkdownHeading(heading.Groups["marks"].Length, heading.Groups["text"].Value.Trim())); i++; continue; }
             if (lines[i].StartsWith("```", StringComparison.Ordinal))
             {
-                var language = lines[i][3..].Trim();
+                // A fence is as long as its run of backticks, and only a line of at least that many
+                // backticks (and nothing else) closes it: content that itself contains ``` is
+                // written inside a longer fence, and a shorter inner fence must stay content.
+                var length = lines[i].TakeWhile(character => character == '`').Count();
+                var language = lines[i][length..].Trim();
                 var start = ++i;
-                while (i < lines.Length && !lines[i].StartsWith("```", StringComparison.Ordinal)) i++;
+                while (i < lines.Length && !ClosesFence(lines[i], length)) i++;
                 blocks.Add(new MarkdownCodeBlock(language, string.Join("\n", lines[start..i])));
                 if (i < lines.Length) i++;
                 continue;
@@ -43,16 +49,20 @@ public static class MarkdownAstParser
                 var items = new List<string>();
                 var levels = new List<int>();
                 var ordered = new List<bool>();
+                var numbers = new List<int?>();
                 while (i < lines.Length && ListItem.IsMatch(lines[i]))
                 {
                     var match = ListItem.Match(lines[i]);
                     items.Add(match.Groups["text"].Value.Trim());
                     var indent = match.Groups["indent"].Value.Replace("\t", "  ", StringComparison.Ordinal).Length;
                     levels.Add(indent / 2);
-                    ordered.Add(char.IsDigit(match.Groups["marker"].Value[0]));
+                    var marker = match.Groups["marker"].Value;
+                    ordered.Add(char.IsDigit(marker[0]));
+                    numbers.Add(char.IsDigit(marker[0]) && int.TryParse(marker[..^1], System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : null);
                     i++;
                 }
-                blocks.Add(new MarkdownList(items, levels, ordered));
+                blocks.Add(new MarkdownList(items, levels, ordered, numbers));
                 continue;
             }
             if (IsTableHeader(lines, i))
@@ -69,6 +79,12 @@ public static class MarkdownAstParser
             blocks.Add(new MarkdownParagraph(string.Join("\n", paragraph).Trim()));
         }
         return new MarkdownDocument(blocks);
+    }
+
+    private static bool ClosesFence(string line, int length)
+    {
+        var run = line.TakeWhile(character => character == '`').Count();
+        return run >= length && string.IsNullOrWhiteSpace(line[run..]);
     }
 
     private static bool IsTableHeader(string[] lines, int index) => index + 1 < lines.Length && lines[index].Contains('|', StringComparison.Ordinal) && Regex.IsMatch(lines[index + 1], @"^\s*\|?\s*:?-{3,}");

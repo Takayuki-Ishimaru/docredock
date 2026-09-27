@@ -1903,10 +1903,18 @@ public sealed partial class ReadableMarkdownSerializer
         output.AppendLine();
     }
 
+    /// <summary>Marks a node that stands for source content an adapter could not analyze at all
+    /// (for example a PDF Form XObject it could not read). Such content is no visual graph, but it
+    /// is just as missing from the Markdown and needs the same comparison with the source.</summary>
+    public const string SourceReviewRequiredExtension = "source_review_required";
+
     /// <summary>Uses the actual Markdown projection to decide whether source comparison is
     /// needed, including raw-path-only fallback that graph accounting considers resolved.</summary>
     public static bool RequiresSourceReview(DocumentNode node)
     {
+        if (node.Extensions?.TryGetValue(SourceReviewRequiredExtension, out var required) == true &&
+            required.ValueKind == JsonValueKind.True)
+            return true;
         if (!TryGetVisualGraph(node, out var graph)) return false;
         if (graph is null || graph.IsPartialProjection) return true;
         var probe = new ReadableMarkdownSerializer();
