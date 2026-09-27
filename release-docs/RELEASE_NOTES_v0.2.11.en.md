@@ -9,7 +9,7 @@ v0.2.11 fixes text and graphics inside PDF drawing components (Form XObjects) di
 - **Unanalyzed content reported separately**: Export results count content that could not be analyzed separately from the conversion status of recognized visual elements: the CLI shows an `Unanalyzed content` line, and the GUI shows "未解析の描画部品" (drawing components not analyzed).
 - **Zoom to review areas**: "要確認箇所へ拡大" (zoom to review area) in the review window enlarges each marked area in turn and centers it. "＋" and "－", or Ctrl (or Command on macOS) with the mouse wheel, change the zoom, and "全体" (whole page) returns to the full page.
 - **Rendered Markdown in the review window**: The page's Markdown can be shown rendered, with tables as tables and Mermaid diagrams as lists of connections such as "START → END (label)", or as source.
-- **Lighter conversion of PDFs with large images**: Reading the character mapping tables no longer inflates every image and font program in the file. For a test PDF with large images, peak memory during conversion dropped from about 317 MB to about 72 MB, with identical output.
+- **Lighter conversion of PDFs with large images**: Reduced unnecessary processing when reading character mapping tables, lowering memory use when converting PDFs with large images.
 - **Experimental rendering fix**: A code block fenced with four or more backticks that contains a line of three backticks is no longer closed early at that inner line.
 
 ## How to update
