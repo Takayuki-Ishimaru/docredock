@@ -34,7 +34,11 @@ public sealed record PdfTableOverlay(
     string Axis,
     int StartRow, int EndRow,
     int StartColumn, int EndColumn,
-    string? ShapePreset);
+    string? ShapePreset,
+    /// <summary>"dashed" or "dotted" when the source stroke used a dash pattern; null for a solid
+    /// or unstroked shape. Omitted from JSON when null so existing overlay contracts are unchanged.</summary>
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? LineStyle = null);
 
 public sealed record PdfTableRow(IReadOnlyList<PdfTableCell> Cells);
 

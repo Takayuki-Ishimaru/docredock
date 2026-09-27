@@ -210,6 +210,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             var visualSummary = ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics);
             await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
             await output.WriteLineAsync(visualSummary.ToString());
+            await WriteReviewAsync(ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics), markdown, sidecarPath: null);
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
@@ -239,6 +240,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             ? "Fidelity: F0 baseline; edited PDF requires explicit F3 render fallback"
             : "Fidelity: F0 baseline; supported Office edits use F1");
         await output.WriteLineAsync(ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString());
+        await WriteReviewAsync(ExportReviewBuilder.Build(result.Graph, result.Diagnostics), markdown,
+            sidecarForm == "dir" ? sidecarPath : null);
         await WriteDiagnosticsAsync(result.Diagnostics, quiet, args.HasFlag("verbose"));
         if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return 1; }
         return result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
@@ -250,6 +253,31 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         "balanced" => VisualInferenceMode.Balanced,
         _ => VisualInferenceMode.Safe,
     };
+
+    // One line per page a person should compare with the source, naming what to look at and where
+    // the review image is. OCR review is reported separately and never changes the exit code.
+    private async Task WriteReviewAsync(ExportReview review, string markdownPath, string? sidecarPath)
+    {
+        foreach (var page in review.Pages)
+        {
+            var image = ReviewImageLocation(page, markdownPath, sidecarPath);
+            await output.WriteLineAsync($"Review {ExportReviewText.DescribeEnglish(page)}{(image is null ? string.Empty : "; " + image)}");
+        }
+        if (review.Ocr.Images > 0)
+            await output.WriteLineAsync($"OCR summary: images={review.Ocr.Images}; regions={review.Ocr.Regions}; " +
+                $"review_items={review.Ocr.ReviewItems}; review_required={(review.Ocr.Required ? "true" : "false")}");
+    }
+
+    private static string? ReviewImageLocation(ReviewPage page, string markdownPath, string? sidecarPath)
+    {
+        if (page.ReviewImageReference is not { } reference)
+            return page.Format != DocumentFormatKind.Pdf ? null
+                : page.ReviewImageUnavailable ? "review image unavailable" : "review image not attached";
+        if (reference.StartsWith("data:", StringComparison.Ordinal)) return "review image embedded in the Markdown";
+        return ExportReviewImages.Resolve(reference, markdownPath, sidecarPath) is { } path
+            ? "review image: " + path
+            : "review image stored in the sidecar";
+    }
 
     private async Task WriteDiagnosticsAsync(
         IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> diagnostics,

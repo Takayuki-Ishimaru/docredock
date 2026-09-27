@@ -117,6 +117,7 @@ public sealed partial class ReadableMarkdownSerializer
             }
             RenderWorkbookRows(output, rows[index..]
                 .Where(row => !IsRedundantTitle(row, title, partition.Id)).ToArray(), ref hasSectionHeading);
+            WriteSheetOverlayLineStyleNotes(output, partition);
             RenderPartitionMedia(output, partition);
         }
 
@@ -336,7 +337,9 @@ public sealed partial class ReadableMarkdownSerializer
                             .Append(marker).AppendLine(listText);
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
-                        WriteArbitraryTable(output, ApplyTableOverlays(node, FoldNestedTableRows(node.Id, table.Rows, nestedTableFolds)));
+                        var overlayHostRows = FoldNestedTableRows(node.Id, table.Rows, nestedTableFolds);
+                        WriteArbitraryTable(output, ApplyTableOverlays(node, overlayHostRows));
+                        WriteOverlayLineStyleNotes(output, node, overlayHostRows);
                         break;
                     case NodeKind.Image when node.Content is ReferenceNodeContent:
                         WriteImageNode(output, node, partition, includeOcr: false);
@@ -943,7 +946,8 @@ public sealed partial class ReadableMarkdownSerializer
             JsonString(raw, "Axis", "axis") ?? "horizontal",
             startRow, JsonInt(raw, "EndRow", "endRow") ?? startRow,
             startColumn, JsonInt(raw, "EndColumn", "endColumn") ?? startColumn,
-            JsonString(raw, "ShapePreset", "shapePreset"));
+            JsonString(raw, "ShapePreset", "shapePreset"),
+            OverlayLineStyle(raw));
     }
 
     private static List<ReadableDiagram> ReadDiagrams(DocumentPartition partition) => partition.Nodes
@@ -1446,7 +1450,20 @@ public sealed partial class ReadableMarkdownSerializer
     /// OverlayFragment). Horizontal axis varies the glyph by column position (c1/c2 ends);
     /// vertical axis varies it by row position (r1/r2 ends) and repeats per column for the unusual
     /// case of a vertical overlay spanning more than one column.</summary>
-    private static string OverlayGlyph(TableOverlay overlay, int row, int column)
+    private static string OverlayGlyph(TableOverlay overlay, int row, int column) =>
+        ApplyOverlayLineStyle(SolidOverlayGlyph(overlay, row, column), overlay.LineStyle);
+
+    // A dashed or dotted source stroke keeps its direction and arrowheads but swaps the stroke
+    // characters, so the difference survives in every covered cell (see WriteOverlayLineStyleNotes
+    // for the legend written after the table).
+    private static string ApplyOverlayLineStyle(string glyph, string? lineStyle) => lineStyle switch
+    {
+        VisualLineStyles.Dashed => glyph.Replace('━', '┅').Replace('─', '┄').Replace('│', '┆'),
+        VisualLineStyles.Dotted => glyph.Replace('━', '⋯').Replace('─', '⋯').Replace('│', '⋮'),
+        _ => glyph,
+    };
+
+    private static string SolidOverlayGlyph(TableOverlay overlay, int row, int column)
     {
         if (StringComparer.Ordinal.Equals(overlay.Kind, "label")) return string.Empty;
         if (StringComparer.Ordinal.Equals(overlay.Axis, "vertical"))
@@ -1509,7 +1526,7 @@ public sealed partial class ReadableMarkdownSerializer
 
     private sealed record TableOverlay(
         string ShapeId, string Text, string Kind, string Direction, string Axis,
-        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
+        int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset, string? LineStyle = null);
 
     private static List<TableOverlay> ReadTableOverlays(DocumentNode node)
     {
@@ -1531,10 +1548,100 @@ public sealed partial class ReadableMarkdownSerializer
                 JsonString(item, "Axis", "axis") ?? "horizontal",
                 startRow, JsonInt(item, "EndRow", "endRow") ?? startRow,
                 startColumn, JsonInt(item, "EndColumn", "endColumn") ?? startColumn,
-                JsonString(item, "ShapePreset", "shapePreset")));
+                JsonString(item, "ShapePreset", "shapePreset"),
+                OverlayLineStyle(item)));
         }
         return overlays;
     }
+
+    private static string? OverlayLineStyle(JsonElement item) =>
+        JsonString(item, "LineStyle", "lineStyle") is { } style && VisualLineStyles.IsKnown(style) ? style : null;
+
+    // The legend that turns stroke glyphs back into words. Cell glyphs alone keep the dashed and
+    // dotted shapes distinct; this note names what each styled shape is and where it lies, so a
+    // reader (or an AI) can relate it to the document's own legend (for example planned vs. fixed).
+    private static void WriteOverlayLineStyleNotes(StringBuilder output, DocumentNode node, IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    {
+        if (!HasExtension(node, "table_overlays")) return;
+        var styled = ReadTableOverlays(node).Where(IsStyledStroke).ToArray();
+        if (styled.Length == 0) return;
+        TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _);
+        string Label(int row, int column)
+        {
+            if (grid is null || row < 0 || column < 0 || row >= grid.RowCount || column >= grid.ColumnCount) return string.Empty;
+            var text = grid.Rows[row][column].Origin.Text.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')[0].Trim();
+            return text.Length > 24 ? text[..24] + "…" : text;
+        }
+        string RowName(int row) => Label(row, 0) is { Length: > 0 } text ? $"「{text}」" : $"{row + 1}行目";
+        string ColumnName(int column) => Label(0, column) is { Length: > 0 } text ? $"「{text}」" : $"{column + 1}列目";
+        string Span(Func<int, string> name, int start, int end) => start == end ? name(start) : name(start) + "〜" + name(end);
+        WriteLineStyleNotes(output, styled, overlay => StringComparer.Ordinal.Equals(overlay.Axis, "vertical")
+            ? $"列{Span(ColumnName, overlay.StartColumn, overlay.StartColumn)}、行{Span(RowName, overlay.StartRow, overlay.EndRow)}"
+            : $"行{Span(RowName, overlay.StartRow, overlay.EndRow)}、列{Span(ColumnName, overlay.StartColumn, overlay.EndColumn)}");
+    }
+
+    // XLSX overlays are positioned by worksheet cell, so the note names cells in A1 notation.
+    private static void WriteSheetOverlayLineStyleNotes(StringBuilder output, DocumentPartition partition)
+    {
+        var styled = partition.Nodes.Where(node => node.Kind == NodeKind.Shape && HasExtension(node, "sheet_overlay"))
+            .Select(ReadSheetOverlay).OfType<TableOverlay>().Where(IsStyledStroke).ToArray();
+        if (styled.Length == 0) return;
+        static string CellName(int row, int column)
+        {
+            var letters = string.Empty;
+            for (var value = Math.Max(1, column); value > 0; value = (value - 1) / 26)
+                letters = (char)('A' + (value - 1) % 26) + letters;
+            return letters + Math.Max(1, row).ToString(CultureInfo.InvariantCulture);
+        }
+        WriteLineStyleNotes(output, styled, overlay =>
+        {
+            var start = CellName(overlay.StartRow, overlay.StartColumn);
+            var end = CellName(overlay.EndRow, overlay.EndColumn);
+            return start == end ? $"セル {start}" : $"セル {start}〜{end}";
+        });
+    }
+
+    private static bool IsStyledStroke(TableOverlay overlay) =>
+        overlay.LineStyle is not null && overlay.Kind is not ("label" or "marker");
+
+    private static void WriteLineStyleNotes(StringBuilder output, IReadOnlyList<TableOverlay> styled, Func<TableOverlay, string> location)
+    {
+        const int maxListed = 20;
+        var legend = new List<string>();
+        if (styled.Any(overlay => overlay.LineStyle == VisualLineStyles.Dashed)) legend.Add("┅ ┄ ┆ は破線");
+        if (styled.Any(overlay => overlay.LineStyle == VisualLineStyles.Dotted)) legend.Add("⋯ ⋮ は点線");
+        output.Append("> 線種の注記: 表中の ").Append(string.Join("、", legend))
+            .AppendLine("で描かれた図形です（原本の線種を記号で区別しています）。");
+        foreach (var overlay in styled.Take(maxListed))
+            output.Append("> - ").Append(LineStyleName(overlay.LineStyle)).Append("の").Append(OverlayKindName(overlay))
+                .Append(": ").AppendLine(EscapeLiteral(location(overlay)));
+        if (styled.Count > maxListed)
+            output.Append("> - ほか ").Append((styled.Count - maxListed).ToString(CultureInfo.InvariantCulture)).AppendLine(" 件");
+        output.AppendLine();
+    }
+
+    internal static string LineStyleName(string? lineStyle) => lineStyle switch
+    {
+        VisualLineStyles.Dashed => "破線",
+        VisualLineStyles.Dotted => "点線",
+        _ => "実線",
+    };
+
+    private static string OverlayKindName(TableOverlay overlay) => overlay.Kind switch
+    {
+        "arrow" => overlay.Direction switch
+        {
+            "right" => "右向き矢印",
+            "left" => "左向き矢印",
+            "up" => "上向き矢印",
+            "down" => "下向き矢印",
+            "both" => "両矢印",
+            _ => "矢印",
+        },
+        "bar" => "バー",
+        "line" => "線",
+        _ => "図形",
+    };
 
     private static (List<IReadOnlyList<TableCell>> TableRows, List<TableCell> NoteRows) SplitFullWidthNoteRows(IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
@@ -1612,6 +1719,12 @@ public sealed partial class ReadableMarkdownSerializer
         output.AppendLine();
     }
 
+    /// <summary>The single OCR review rule shared by the readable detail table and export
+    /// summaries: confidence below 80% or not reported by the engine.</summary>
+    public static bool OcrRegionNeedsReview(JsonElement region) =>
+        !(region.ValueKind == JsonValueKind.Object && region.TryGetProperty("confidence", out var c) &&
+          c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out var score) && double.IsFinite(score) && score >= .8);
+
     private void WriteOcrDetails(StringBuilder output, string text, DocumentNode node, DocumentPartition partition)
     {
         if (string.IsNullOrWhiteSpace(text)) return;
@@ -1625,10 +1738,7 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var image = partition.Nodes.FirstOrDefault(n => n.Id == node.ParentId)?.Content as ReferenceNodeContent;
             var allRegions = regions.EnumerateArray().ToArray();
-            static double? Confidence(JsonElement region) =>
-                region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number &&
-                c.TryGetDouble(out var score) && double.IsFinite(score) ? score : null;
-            var needsReview = allRegions.Where(r => Confidence(r) is not { } value || value < .8).ToArray();
+            var needsReview = allRegions.Where(OcrRegionNeedsReview).ToArray();
             var shown = options.OcrReview switch
             {
                 OcrReviewMode.All => allRegions,
@@ -1895,6 +2005,7 @@ public sealed partial class ReadableMarkdownSerializer
         }
 
         WriteMermaid(output, mermaid);
+        WriteStyledEdgeNote(output, graph, mermaid);
         var hasUnresolvedEdges = (graph.Edges ?? []).Any(edge => edge.SourceId is null || edge.TargetId is null);
         if (quality is VisualGraphQuality.Partial or VisualGraphQuality.FallbackOnly || hasUnresolvedEdges)
             WritePartialVisualDetails(output, graph, node);
@@ -1987,12 +2098,27 @@ public sealed partial class ReadableMarkdownSerializer
         foreach (var edge in edges.Where(item => item.SourceId is not null && item.TargetId is not null)
                      .OrderBy(item => item.Geometry?.Y ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal))
         {
-            var arrow = edge.IsUndirected
-                ? string.IsNullOrWhiteSpace(edge.Label) ? " --- " : " ---|" + MermaidText(edge.Label!) + "| "
-                : string.IsNullOrWhiteSpace(edge.Label) ? " --> " : " -->|" + MermaidText(edge.Label!) + "| ";
+            // Mermaid has a single dotted link style; it stands for both dashed and dotted lines,
+            // and WriteVisualGraph adds a note naming the source style.
+            var link = VisualLineStyles.IsKnown(edge.LineStyle)
+                ? edge.IsUndirected ? "-.-" : "-.->"
+                : edge.IsUndirected ? "---" : "-->";
+            var arrow = string.IsNullOrWhiteSpace(edge.Label) ? $" {link} " : $" {link}|" + MermaidText(edge.Label!) + "| ";
             output.Append("    ").Append(edge.SourceId).Append(arrow).Append(edge.TargetId).AppendLine();
         }
         return output.ToString().TrimEnd();
+    }
+
+    private static void WriteStyledEdgeNote(StringBuilder output, VisualGraph graph, string mermaid)
+    {
+        var sequence = mermaid.StartsWith("sequenceDiagram", StringComparison.Ordinal);
+        if (!mermaid.Contains(sequence ? "-->>" : " -.-", StringComparison.Ordinal)) return;
+        var styles = (graph.Edges ?? []).Where(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null &&
+                VisualLineStyles.IsKnown(edge.LineStyle))
+            .Select(edge => edge.LineStyle!).Distinct(StringComparer.Ordinal).OrderBy(style => style, StringComparer.Ordinal).ToArray();
+        if (styles.Length == 0) return;
+        output.Append("> 線種の注記: ").Append(sequence ? "点線の矢印（-->>）" : "点線の接続（-.-）").Append("は原本で")
+            .Append(string.Join("・", styles.Select(LineStyleName))).AppendLine("で描かれた線です。").AppendLine();
     }
 
     private static bool TryProjectSequenceGraph(
@@ -2090,7 +2216,7 @@ public sealed partial class ReadableMarkdownSerializer
                 aliases.TryGetValue(knownSource, out var sourceAlias) &&
                 aliases.TryGetValue(knownTarget, out var targetAlias) && !edge.IsUndirected)
             {
-                output.Append("    ").Append(sourceAlias).Append("->>").Append(targetAlias)
+                output.Append("    ").Append(sourceAlias).Append(SequenceArrow(edge)).Append(targetAlias)
                     .Append(": ").AppendLine(MermaidText(label));
                 continue;
             }
@@ -2114,13 +2240,17 @@ public sealed partial class ReadableMarkdownSerializer
                     .Append(message.Covered[^1].Alias).Append(": ").AppendLine(MermaidText(label));
                 continue;
             }
-            output.Append("    ").Append(from.Alias).Append("->>").Append(to.Alias)
+            output.Append("    ").Append(from.Alias).Append(SequenceArrow(edge)).Append(to.Alias)
                 .Append(": ").AppendLine(MermaidText(label));
         }
 
         mermaid = output.ToString().TrimEnd();
         return true;
     }
+
+    // A dashed or dotted message (commonly a reply in UML) keeps its line style as Mermaid's
+    // dotted message arrow.
+    private static string SequenceArrow(VisualEdge edge) => VisualLineStyles.IsKnown(edge.LineStyle) ? "-->>" : "->>";
 
     private static bool TrySequenceSegment(VisualEdge edge, out SequenceSegment segment)
     {

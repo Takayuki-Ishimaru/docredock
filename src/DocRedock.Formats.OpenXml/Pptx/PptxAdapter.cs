@@ -43,7 +43,9 @@ public sealed record PptxShapeRecord(
     IReadOnlyList<double>? TableRowHeights = null,
     bool IsTextBox = false,
     bool FlipH = false,
-    bool FlipV = false);
+    bool FlipV = false,
+    // p:spPr/a:ln dash style ("dashed"/"dotted"), null when solid, absent, or the outline has no fill.
+    string? LineStyle = null);
 
 /// <summary>
 /// A shape (arrow/bar/marker/line/label) detected as visually overlaying a table's row/column
@@ -58,7 +60,9 @@ public sealed record PptxTableOverlay(
     string Axis,
     int StartRow, int EndRow,
     int StartColumn, int EndColumn,
-    string? ShapePreset);
+    string? ShapePreset,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    string? LineStyle = null);
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
@@ -576,6 +580,9 @@ public sealed class PptxAdapter
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
             using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null; string? shapePreset = null;
             string? connectorHeadArrow = null; string? connectorTailArrow = null;
+            // Only the shape's own outline (p:spPr/a:ln) carries its dash style; a:ln elsewhere
+            // (text outlines, table borders) must not change how the shape itself is drawn.
+            var inShapeProperties = false; var inShapeOutline = false; string? lineStyle = null; var lineNoFill = false;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
             var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
@@ -597,6 +604,15 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "endCxn") connectorEndId = subtree.GetAttribute("id");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "headEnd") connectorHeadArrow = subtree.GetAttribute("type");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tailEnd") connectorTailArrow = subtree.GetAttribute("type");
+                else if (subtree.LocalName == "spPr" && subtree.Depth == 1)
+                    inShapeProperties = subtree.NodeType == XmlNodeType.Element && !subtree.IsEmptyElement;
+                else if (subtree.LocalName == "ln" && subtree.Depth == 2 && inShapeProperties)
+                    inShapeOutline = subtree.NodeType == XmlNodeType.Element && !subtree.IsEmptyElement;
+                else if (subtree.NodeType == XmlNodeType.Element && inShapeOutline && subtree.Depth == 3 && subtree.LocalName is "prstDash" or "custDash" or "noFill")
+                {
+                    if (subtree.LocalName == "noFill") lineNoFill = true;
+                    else lineStyle = VisualLineStyles.FromOfficeDash(subtree.GetAttribute("val"), custom: subtree.LocalName == "custDash");
+                }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "prstGeom") shapePreset = subtree.GetAttribute("prst");
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "gridCol") tableColumnWidths.Add(ParseDouble(subtree.GetAttribute("w")));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
@@ -737,7 +753,7 @@ public sealed class PptxAdapter
                 connectorHeadArrow, connectorTailArrow, connectorPathPoints, placeholderType is not null, groupHidden,
                 TableColumnWidths: tableColumnWidths.Count > 0 ? tableColumnWidths : null,
                 TableRowHeights: tableRowHeights.Count > 0 ? tableRowHeights : null,
-                IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV));
+                IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV, LineStyle: lineNoFill ? null : lineStyle));
         }
         if (inferTitle && !result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
@@ -1108,7 +1124,8 @@ public sealed class PptxAdapter
         // Coverage-based axis (spec): "被覆列数 > 1 または(被覆行数 == 1)" -> horizontal; only a
         // multi-row, single-column span reads as vertical.
         axis ??= endRow > startRow && startColumn == endColumn ? "vertical" : "horizontal";
-        return new PptxTableOverlay(shape.ShapeId, shape.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, shape.ShapePreset);
+        return new PptxTableOverlay(shape.ShapeId, shape.Text, kind, direction, axis, startRow, endRow, startColumn, endColumn, shape.ShapePreset,
+            kind is "marker" or "label" ? null : shape.LineStyle);
     }
 
     private static (string Kind, string Direction, string Axis) ClassifyOverlayConnector(PptxShapeRecord shape)
@@ -2045,7 +2062,7 @@ public sealed class PptxAdapter
                     VisualEdgeResolution.Unresolved, connector.ShapeId, Direction: "directed",
                     Geometry: connector.Geometry, Confidence: 0,
                     SourceAnchor: new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", connector.ShapeId)]),
-                    EdgeDirection: VisualEdgeDirection.Directed));
+                    EdgeDirection: VisualEdgeDirection.Directed, LineStyle: connector.LineStyle));
                 continue;
             }
             string? start = projected.Start;
@@ -2095,7 +2112,7 @@ public sealed class PptxAdapter
                 {
                     ArrowheadEvidence = connectorDirection switch { ConnectionDirection.Reverse => "start", ConnectionDirection.Bidirectional => "both", ConnectionDirection.Unknown => "none", _ => "end" },
                     EvidenceCodes = evidenceCodes
-                }));
+                }, LineStyle: connector.LineStyle));
         }
         if (edges.Any(edge => edge.SourceId is null || edge.TargetId is null))
             diagnostics.Add(new VisualDiagnostic("VisualSemanticProjectionPartial", "Recognized connector relationships could not be projected as a flowchart.",

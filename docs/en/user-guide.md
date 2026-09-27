@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.9 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.10 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -118,6 +118,12 @@ OCR details include provider word/line confidence and coordinates. Values below 
 OCR review rows follow the body's line and within-line order and include line numbers. Readable output defaults to details only for confidence below 80% or missing confidence. Use the GUI OCR review detail selector or `--ocr-review low-confidence|all|summary`: `all` includes every record; `summary` includes counts only. All modes retain the OCR body and original image. Audit/roundtrip sidecars retain all records. Confidence is an engine estimate, not a measured accuracy rate.
 
 `Fallback pages` counts pages with vector path fallback. Separate counters show `Pages requiring review`, `Review image pages`, and `Unresolved visual elements` (shapes, connections, and labels). Attaching a review image does not reduce unresolved counts. A path and the unresolved connection backed by it count as one element.
+
+The export summary starts with three separate results. `Output written` says the Markdown was saved; `Visual elements converted` says whether every recognized shape, line, and label was expressed in the Markdown (`all`) or some remain unresolved (`partial`); `Human review` names why a person should check the result (pages with figures to review, OCR items). `all` does not mean attributes DocRedock does not model, such as color or line width, were kept. Each page to review then gets one line such as `Review page 1: 1 diagonal line(s) across a table …; review image: …`, naming what to look at (diagonal lines or arrows, lines with undetermined endpoints, text not assignable to one line or shape, shapes kept as fallback) and where the review image is. Counts are elements and pages to check, not diagnostic records.
+
+OCR results with confidence below 80% or no confidence are counted separately from warnings as `OCR summary: images=…; regions=…; review_items=…; review_required=true|false`. OCR review alone is not a warning and does not change the exit code. The GUI also shows "OCR確認 N件" on its own line.
+
+The GUI result panel leads with counts such as "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件" and a short explanation such as "1ページ目：表の上の斜めの線1件を表の記号に変換できませんでした。表の文字は書き出されています。照合画像で線の意味を確認してください。". Diagnostic codes, internal IDs, and confidences are in the collapsed "詳細（診断コードと対処）" section, where diagnostics that follow from the same unresolved element are grouped into one entry. "該当ページを確認" opens a review window with the source page image (unresolved lines and shapes marked in red) next to that page's Markdown. When no review image exists (no rasterizer, attachment turned off, or an Office source), the window tells you which page of the source to open.
 
 `DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
 

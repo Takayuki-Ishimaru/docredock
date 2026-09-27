@@ -1145,6 +1145,31 @@ public sealed class PptxAdapterTests
         "</a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
 
     [Fact]
+    public void Overlay_line_style_comes_only_from_the_shape_outline_dash()
+    {
+        const string shapes =
+            // Dashed outline on a block arrow (row 0, columns 1-3).
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Planned\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1200000\" y=\"0\" /><a:ext cx=\"3600000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rightArrow\"><a:avLst /></a:prstGeom><a:ln><a:prstDash val=\"dash\" /></a:ln></p:spPr></p:sp>" +
+            // Dotted connector with a tail arrowhead (row 1, columns 1-3).
+            "<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"11\" name=\"Dotted\" /></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"1200000\" y=\"600000\" /><a:ext cx=\"3600000\" cy=\"0\" /></a:xfrm><a:ln><a:prstDash val=\"sysDot\" /><a:tailEnd type=\"triangle\" /></a:ln></p:spPr></p:cxnSp>" +
+            // A dash on an outline that is not drawn (noFill) is not a visible line style.
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"12\" name=\"Hidden outline\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"1200000\" y=\"800000\" /><a:ext cx=\"2400000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom><a:ln><a:noFill /><a:prstDash val=\"dash\" /></a:ln></p:spPr></p:sp>" +
+            // A dashed text outline in the shape's own text does not describe the shape itself.
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"13\" name=\"Text outline\" /></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"4800000\" y=\"800000\" /><a:ext cx=\"2400000\" cy=\"400000\" /></a:xfrm><a:prstGeom prst=\"leftArrow\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr /><a:p><a:r><a:rPr><a:ln><a:prstDash val=\"dash\" /></a:ln></a:rPr><a:t>x</a:t></a:r></a:p></p:txBody></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(SixByThreeScheduleTableXml() + shapes)));
+
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var overlays = tableNode.Extensions!["table_overlays"].Deserialize<PptxTableOverlay[]>()!;
+        Assert.Equal("dashed", overlays.Single(o => o.ShapeId == "10").LineStyle);
+        Assert.Equal(("arrow", "dotted"), (overlays.Single(o => o.ShapeId == "11").Kind, overlays.Single(o => o.ShapeId == "11").LineStyle));
+        Assert.Null(overlays.Single(o => o.ShapeId == "12").LineStyle);
+        Assert.Null(overlays.Single(o => o.ShapeId == "13").LineStyle);
+        // Solid overlays keep the existing JSON contract: no LineStyle property at all.
+        Assert.DoesNotContain("LineStyle", tableNode.Extensions!["table_overlays"].EnumerateArray()
+            .Single(item => item.GetProperty("ShapeId").GetString() == "12").GetRawText(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DetectsScheduleOverlaysAndExcludesNonOverlappingHiddenAndBackgroundShapes()
     {
         const string shapes =

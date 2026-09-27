@@ -46,6 +46,11 @@ public partial class MainWindow : Window
     private string? _restoreDirectory;
     private string? _latestOutputDirectory;
     private string? _latestMarkdownPath;
+    // What the latest successful export still needs a person to check. Kept apart from the
+    // diagnostics so the result panel can say "saved" and "please compare" separately.
+    private IReadOnlyList<GuiReviewItem> _latestReviewItems = [];
+    private int _latestOcrReviewItems;
+    private ReviewWindow? _reviewWindow;
     private CancellationTokenSource? _exportCancellation;
     private CancellationTokenSource? _restoreCancellation;
     private bool _exportBusy;
@@ -318,6 +323,7 @@ public partial class MainWindow : Window
         }
 
         var readable = ReadableExportToggle.IsChecked == true;
+        ClearLatestReview();
         SetExportBusy(true, readable ? "読みやすいMarkdownを作成しています…" : "MarkdownとDocRedockサイドカーを作成しています…");
         _exportCancellation = new CancellationTokenSource();
         try
@@ -349,6 +355,8 @@ public partial class MainWindow : Window
 
             _latestOutputDirectory = _exportDirectory;
             _latestMarkdownPath = results[^1].MarkdownPath;
+            _latestReviewItems = results.SelectMany(result => result.ReviewItems ?? []).ToArray();
+            _latestOcrReviewItems = results.Sum(result => result.OcrReview?.ReviewItems ?? 0);
             SaveSettings();
             ShowResult(
                 success: true,
@@ -388,6 +396,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        ClearLatestReview();
         SetRestoreBusy(true, "DocRedock復元情報を検証して文書を復元しています…");
         _restoreCancellation = new CancellationTokenSource();
         try
@@ -703,7 +712,9 @@ public partial class MainWindow : Window
         ResultSymbolText.Classes.Set("on-accent", false);
         ResultSymbolText.Text = "…";
         ResultPanel.Classes.Set("warning", false);
+        ResultCountsText.IsVisible = false;
         ResultReviewText.IsVisible = false;
+        ResultOcrText.IsVisible = false;
         ResultKickerText.Text = "PROCESSING";
         ResultTitleText.Text = "処理しています";
         ResultMessageText.Text = message;
@@ -711,9 +722,20 @@ public partial class MainWindow : Window
         OperationProgressBar.IsVisible = true;
         ResultFidelityText.IsVisible = false;
         DiagnosticsTextBox.IsVisible = false;
+        DiagnosticsExpander.IsVisible = false;
+        OpenReviewButton.IsVisible = false;
         OpenOutputFolderButton.IsVisible = false;
         OpenMarkdownButton.IsVisible = false;
         CancelOperationButton.IsVisible = true;
+    }
+
+    private void ClearLatestReview()
+    {
+        _latestReviewItems = [];
+        _latestOcrReviewItems = 0;
+        // A review window always describes the latest export; a new run closes the previous one.
+        _reviewWindow?.Close();
+        _reviewWindow = null;
     }
 
     private void ShowResult(bool success, string title, string message, string? fidelity, IReadOnlyList<Diagnostic> diagnostics)
@@ -731,27 +753,96 @@ public partial class MainWindow : Window
         ResultSymbolText.Text = success && !warning ? "✓" : "!";
         ResultKickerText.Text = !success ? "FAILED" : warning ? "COMPLETED WITH WARNINGS" : "COMPLETE";
         ResultTitleText.Text = warning ? "保存は完了しました・原本との照合が必要です" : title;
+        // The primary explanation names what to check and where, in the reader's terms. Codes,
+        // object IDs, and confidences stay in the collapsed details below.
+        var review = success ? _latestReviewItems : [];
+        var ocrReviewItems = success ? _latestOcrReviewItems : 0;
+        var counts = ReviewCountsText(review, ocrReviewItems);
+        ResultCountsText.Text = counts;
+        ResultCountsText.IsVisible = counts.Length > 0;
         ResultReviewText.IsVisible = warning;
-        ResultReviewText.Text = warning ? "要確認: " + string.Join(" / ", diagnostics
-            .Where(d => d.Severity != DiagnosticSeverity.Information)
-            .Select(d => (d.PartUri is null ? "" : d.PartUri + ": ") + d.Message).Distinct().Take(3)) : "";
+        ResultReviewText.Text = warning ? ReviewSummaryText(review, diagnostics) : "";
+        ResultOcrText.IsVisible = ocrReviewItems > 0;
+        ResultOcrText.Text = ocrReviewItems > 0 ? ExportReviewText.OcrJapanese(new OcrReviewSummary(0, 0, ocrReviewItems)) : "";
         ResultMessageText.Text = message;
-        AutomationProperties.SetHelpText(ResultPanel, ResultTitleText.Text + " " + ResultReviewText.Text + " " + message);
+        AutomationProperties.SetHelpText(ResultPanel, string.Join(" ", new[]
+            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
         var formattedDiagnostics = FormatDiagnosticsForDisplay(diagnostics);
         DiagnosticsTextBox.Text = formattedDiagnostics;
         DiagnosticsTextBox.IsVisible = formattedDiagnostics.Length > 0;
+        DiagnosticsExpander.IsVisible = formattedDiagnostics.Length > 0;
+        DiagnosticsExpander.IsExpanded = !success;
+        OpenReviewButton.IsVisible = review.Count > 0;
         OpenOutputFolderButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestOutputDirectory);
         OpenMarkdownButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestMarkdownPath);
         CancelOperationButton.IsVisible = false;
     }
 
+    // "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件／OCR確認 3件": pages, images, and
+    // elements a person acts on, never the number of diagnostic records.
+    private static string ReviewCountsText(IReadOnlyList<GuiReviewItem> review, int ocrReviewItems)
+    {
+        var parts = new List<string>();
+        if (review.Count > 0)
+        {
+            parts.Add($"要確認 {review.Count}ページ");
+            parts.Add($"照合画像 {review.Count(item => item.Page.ReviewImageReference is not null)}ページ添付");
+            var elements = review.Sum(item => item.Page.Elements.Count);
+            if (elements > 0) parts.Add($"未解決の図形 {elements}件");
+        }
+        if (ocrReviewItems > 0) parts.Add($"OCR確認 {ocrReviewItems}件");
+        return string.Join("／", parts);
+    }
+
+    private static string ReviewSummaryText(IReadOnlyList<GuiReviewItem> review, IReadOnlyList<Diagnostic> diagnostics)
+    {
+        const int maxPages = 3;
+        var multipleSources = review.Select(item => item.MarkdownPath).Distinct(StringComparer.Ordinal).Count() > 1;
+        var lines = review.Take(maxPages).Select(item => (multipleSources ? item.SourceName + " " : string.Empty) + item.Description).ToList();
+        if (review.Count > maxPages) lines.Add($"ほか{review.Count - maxPages}ページ（「該当ページを確認」で一覧できます）");
+        // Warnings that the page review does not already explain (hidden content, formulas, ...)
+        // are named once per kind and place.
+        var explained = review.Count > 0;
+        var others = diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information &&
+                !(explained && IsVisualReviewCode(diagnostic.Code)))
+            .Select(diagnostic => (Location: DiagnosticLocation(diagnostic), DiagnosticGuidance(diagnostic.Code, diagnostic.Message, diagnostic.PartUri).Summary))
+            .Distinct().ToArray();
+        lines.AddRange(others.Take(maxPages).Select(item => item.Location is null ? item.Summary : $"{item.Location}：{item.Summary}"));
+        if (others.Length > maxPages) lines.Add($"ほか{others.Length - maxPages}件の注意事項（詳細を参照）");
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private static bool IsVisualReviewCode(string code) =>
+        code.StartsWith("Visual", StringComparison.Ordinal) || code.StartsWith("PdfReviewImage", StringComparison.Ordinal);
+
+    private static string? DiagnosticLocation(Diagnostic diagnostic)
+    {
+        var partUri = diagnostic.PartUri ?? string.Empty;
+        if (partUri.StartsWith("pdf:page:", StringComparison.Ordinal)) return partUri["pdf:page:".Length..] + "ページ目";
+        var message = System.Text.RegularExpressions.Regex.Match(diagnostic.Message, @"PDF page (\d+)");
+        return message.Success ? message.Groups[1].Value + "ページ目" : null;
+    }
+
+    private static bool IsPdfDiagnostic(string? partUri, string message) =>
+        partUri?.StartsWith("pdf:", StringComparison.Ordinal) == true || message.Contains("PDF page", StringComparison.Ordinal);
+
+    // Consequences of one unresolved element (the projection is partial, fallback was used) are
+    // reported together, so one diagonal line does not read as four separate problems.
+    private static readonly HashSet<string> VisualConsequenceCodes = new(StringComparer.Ordinal)
+    {
+        "VisualSemanticProjectionUnavailable", "VisualSemanticProjectionPartial", "VisualSemanticProjectionFallback", "VisualFallbackUsed",
+    };
+
     private static string FormatDiagnosticsForDisplay(IReadOnlyList<Diagnostic> diagnostics)
     {
-        return string.Join(Environment.NewLine + Environment.NewLine, diagnostics
-            .Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information)
+        var visible = diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information).ToArray();
+        var consequences = visible.Where(diagnostic => VisualConsequenceCodes.Contains(diagnostic.Code)).ToArray();
+        var hasCause = visible.Any(diagnostic => !VisualConsequenceCodes.Contains(diagnostic.Code) &&
+            diagnostic.Code.StartsWith("Visual", StringComparison.Ordinal));
+        var entries = visible.Where(diagnostic => !(hasCause && VisualConsequenceCodes.Contains(diagnostic.Code)))
             .GroupBy(diagnostic => diagnostic.Code, StringComparer.Ordinal)
             .OrderByDescending(group => group.Max(diagnostic => (int)diagnostic.Severity))
             .ThenBy(group => group.Key, StringComparer.Ordinal)
@@ -759,11 +850,19 @@ public partial class MainWindow : Window
             {
                 var severity = (DiagnosticSeverity)group.Max(diagnostic => (int)diagnostic.Severity);
                 var count = group.Count();
-                var guidance = DiagnosticGuidance(group.Key, group.First().Message);
-                var countLabel = count > 1 ? $"（{count}件）" : string.Empty;
+                var first = group.First();
+                var guidance = DiagnosticGuidance(group.Key, first.Message, first.PartUri);
+                // Records, not elements: one unresolved line can be reported by the extractor, the
+                // Markdown projection, and the validator.
+                var countLabel = count > 1 ? $"（記録{count}件）" : string.Empty;
                 return $"{DiagnosticSeverityLabel(severity)} {group.Key}{countLabel}: {guidance.Summary}" +
                     Environment.NewLine + $"対処: {guidance.Action}";
-            }));
+            }).ToList();
+        if (hasCause && consequences.Length > 0)
+            entries.Add($"関連 {string.Join("／", consequences.Select(diagnostic => diagnostic.Code).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))}" +
+                $"（記録{consequences.Length}件）: 上記の未解決要素によって図の一部を変換できなかったことを示す診断です。" +
+                Environment.NewLine + "対処: 上記の項目を確認すれば足ります。");
+        return string.Join(Environment.NewLine + Environment.NewLine, entries);
     }
 
     private static string DiagnosticSeverityLabel(DiagnosticSeverity severity) => severity switch
@@ -773,19 +872,36 @@ public partial class MainWindow : Window
         _ => "情報",
     };
 
-    private static (string Summary, string Action) DiagnosticGuidance(string code, string originalMessage) => code switch
+    // PDF has no editable connectors, so its guidance points at the review image or the source
+    // page instead of asking the user to reconnect shapes.
+    private static (string Summary, string Action) DiagnosticGuidance(string code, string originalMessage, string? partUri = null) =>
+        IsPdfDiagnostic(partUri, originalMessage) && PdfDiagnosticGuidance(code) is { } pdf ? pdf : code switch
     {
         "VisualConnectorUnresolved" => ("図のコネクタの接続先を一意に判断できませんでした。", "元文書を確認し、必要ならコネクタ端点を図形へ接続してください。"),
         "VisualEdgeLabelUnresolved" => ("図のラベルを一つの接続線へ一意に対応付けできませんでした。", "ラベルを対象の接続線へ近づけ、周囲の線から離してください。"),
+        "VisualNodeLabelMissing" => ("図形の文字を一つの図形へ一意に対応付けできませんでした。", "元文書で図形と文字の対応を確認してください。"),
         "VisualSemanticProjectionPartial" => ("図の一部だけを意味構造として変換しました。", "Markdownの図、代替表示、元文書を見比べてください。"),
+        "VisualSemanticProjectionFallback" => ("図を意味構造として変換できず、代替表示にしました。", "Markdownの代替表示と元文書を見比べてください。"),
+        "VisualSemanticProjectionUnavailable" => ("図の一部を意味構造として変換できませんでした。", "元文書の該当箇所を確認してください。"),
+        "VisualFallbackUsed" => ("図の一部を代替表示として保持しました。", "Markdownの代替表示と元文書を見比べてください。"),
         "VisualEdgeDirectionUnknown" => ("接続線の向きを確定できないため、無向線として保持しました。", "元文書の矢印方向を確認してください。"),
         "XlsxFormulaCachedValueMissing" => ("保存済みの計算結果がない数式セルがあります。", "Excel等で再計算して保存してから、もう一度変換してください。"),
         "XlsxLegacyCommentsUnsupported" => ("旧形式のXLSXコメントは本文へ展開されません。", "必要なコメントは元ブックで確認してください。"),
         "PdfRasterizerUnavailable" => ("画像PDFの読み取りに必要なrasterizerを利用できません。", "ネイティブテキストを使うか、対応rasterizerを構成してください。"),
         "PdfRasterizationFailed" => ("PDF rasterizerの実行に失敗しました。", "pdftoppmまたはmutoolの実行ファイルと入力PDFを確認してください。"),
+        "PdfReviewImageUnavailable" => ("原本照合用のページ画像を作成できませんでした。", "原本PDFの該当ページを開いて確認してください。画像を添付するにはpdftoppmまたはmutoolを構成してください。"),
         "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
         "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
-        _ => ($"詳細: {originalMessage}", "元文書と生成結果を確認し、診断コードを添えて報告してください。"),
+        _ => ("変換時の注意事項があります。", $"原文: {originalMessage}{Environment.NewLine}元文書と生成結果を確認し、必要なら診断コードを添えて報告してください。"),
+    };
+
+    private static (string Summary, string Action)? PdfDiagnosticGuidance(string code) => code switch
+    {
+        "VisualConnectorUnresolved" => ("PDFの線や矢印の接続先・意味を自動で確定できませんでした。", "「該当ページを確認」または照合画像で、線の意味を原本と照合してください。"),
+        "VisualEdgeLabelUnresolved" => ("PDFの文字を、どの線の説明か確定できませんでした。", "照合画像または原本PDFで、文字と線の対応を確認してください。"),
+        "VisualNodeLabelMissing" => ("PDFの図形の文字を一つの図形へ対応付けできませんでした。", "照合画像または原本PDFで、図形と文字の対応を確認してください。"),
+        "VisualEdgeDirectionUnknown" => ("PDFの線の向きを確定できないため、向きのない線として保持しました。", "照合画像または原本PDFで矢印の向きを確認してください。"),
+        _ => null,
     };
 
     private void OnOpenOutputFolder(object? sender, RoutedEventArgs e)
@@ -807,6 +923,24 @@ public partial class MainWindow : Window
         try { Process.Start(new ProcessStartInfo { FileName = _latestMarkdownPath, UseShellExecute = true }); }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         { ShowResult(false, "Markdownを開けませんでした", exception.Message, null, []); }
+    }
+
+    // Test seam: headless tests observe the review window instead of showing it.
+    internal Action<ReviewWindow>? ReviewWindowPresenter { get; set; }
+
+    private void OnOpenReview(object? sender, RoutedEventArgs e)
+    {
+        if (_latestReviewItems.Count == 0) return;
+        if (_reviewWindow is not null)
+        {
+            _reviewWindow.Activate();
+            return;
+        }
+        var reviewWindow = new ReviewWindow(_latestReviewItems);
+        reviewWindow.Closed += (_, _) => { if (ReferenceEquals(_reviewWindow, reviewWindow)) _reviewWindow = null; };
+        _reviewWindow = reviewWindow;
+        if (ReviewWindowPresenter is not null) ReviewWindowPresenter(reviewWindow);
+        else reviewWindow.Show(this);
     }
 
     private void OnCancelOperation(object? sender, RoutedEventArgs e)

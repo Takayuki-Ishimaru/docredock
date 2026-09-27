@@ -408,6 +408,13 @@ public static class PdfTextExtractor
         var unresolvedPathIds = new HashSet<string>(StringComparer.Ordinal);
         var closed = false;
         var curveSeen = false;
+        // Stroke style in effect when a path is painted. The dash pattern and line width live in
+        // the graphics state, so q/Q save and restore them together with the CTM.
+        IReadOnlyList<double>? dashArray = null;
+        var lineWidth = 1d;
+        var strokeState = new Stack<(IReadOnlyList<double>? Dash, double LineWidth)>();
+        List<double>? collectingArray = null;
+        IReadOnlyList<double>? closedArray = null;
         var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString())]);
         using var visualInferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (inferenceTimeout is { } visualInferenceTimeout)
@@ -450,12 +457,49 @@ public static class PdfTextExtractor
             if (double.TryParse(token, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number))
             {
                 operands.Add(number);
+                collectingArray?.Add(number);
                 continue;
             }
+            // Array delimiters are not operators. They clear numeric operands exactly as before,
+            // and only the dash operator `d` consumes the array they close (a TJ array is
+            // discarded by the next operator).
+            if (token.StartsWith('['))
+            {
+                collectingArray = [];
+                closedArray = null;
+                if (token.Length > 1 && double.TryParse(token[1..], System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var first))
+                    collectingArray.Add(first);
+                operands.Clear();
+                continue;
+            }
+            if (token == "]")
+            {
+                closedArray = collectingArray;
+                collectingArray = null;
+                operands.Clear();
+                continue;
+            }
+            var pendingDashArray = closedArray;
+            closedArray = null;
+            // An operator can never occur inside an array; an unclosed "[" in malformed content
+            // must not keep collecting every later number.
+            collectingArray = null;
             switch (token)
             {
-                case "q": state.Push(ctm); operands.Clear(); break;
-                case "Q": if (state.Count > 0) ctm = state.Pop(); operands.Clear(); break;
+                case "q": state.Push(ctm); strokeState.Push((dashArray, lineWidth)); operands.Clear(); break;
+                case "Q":
+                    if (state.Count > 0) ctm = state.Pop();
+                    if (strokeState.Count > 0) (dashArray, lineWidth) = strokeState.Pop();
+                    operands.Clear(); break;
+                case "d":
+                    // The phase operand is required, but a producer that omits it still meant
+                    // this array (for example "[] d" to return to solid lines).
+                    if (pendingDashArray is not null) dashArray = pendingDashArray;
+                    operands.Clear(); break;
+                case "w":
+                    if (operands.Count >= 1 && double.IsFinite(operands[^1]) && operands[^1] >= 0) lineWidth = operands[^1];
+                    operands.Clear(); break;
                 case "cm":
                     if (operands.Count >= 6)
                     {
@@ -832,8 +876,14 @@ public static class PdfTextExtractor
             foreach (var labelId in labelRegions.Keys.Where(labelId => !deferredLabels.ContainsKey(labelId)))
             {
                 diagnostics.Add($"VisualEdgeLabelUnresolved: PDF page {pageNumber} text remained independent.");
+                // Keep the edges this label competed for. A table can later consume exactly those
+                // edges as its ruling lines; the text is then ordinary page text, not an
+                // unassigned diagram label.
+                var candidateEdgeIds = edgeLabelChoices.Where(choice => choice.LabelId == labelId)
+                    .Select(choice => choice.EdgeId).Distinct(StringComparer.Ordinal).ToArray();
                 graphDiagnostics.Add(Diag("VisualEdgeLabelUnresolved", "Text could not be uniquely assigned to an edge.", 0.2)
-                    with { SourceObjectId = "region:" + regions[labelRegions[labelId]].SourceTextIds[0].ToString(System.Globalization.CultureInfo.InvariantCulture), SourceObjectType = "text-region" });
+                    with { SourceObjectId = "region:" + regions[labelRegions[labelId]].SourceTextIds[0].ToString(System.Globalization.CultureInfo.InvariantCulture), SourceObjectType = "text-region",
+                        RelatedObjectIds = candidateEdgeIds.Length == 0 ? null : candidateEdgeIds });
             }
         }
 
@@ -1819,9 +1869,11 @@ public static class PdfTextExtractor
             var minX = points.Min(point => point.X); var minY = points.Min(point => point.Y);
             var maxX = points.Max(point => point.X); var maxY = points.Max(point => point.Y);
             var pathId = $"pdf_p{pageNumber}_path{paths.Count + 1}";
+            var lineStyle = isStrokeSubpath ? VisualLineStyles.FromDashArray(dashArray, lineWidth) : null;
             paths.Add(new VisualPath(pathId, points, new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                 subpathCurveSeen ? 0.45 : 0.9, subpathCurveSeen || !isClosedSubpath || !paintedSubpath, SourceNodeId: null,
-                IsFilled: paintToken is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*", IsStroked: isStrokeSubpath));
+                IsFilled: paintToken is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*", IsStroked: isStrokeSubpath,
+                LineStyle: lineStyle));
             if (isClosedSubpath && paintedSubpath) AddClosedNode(points);
             else if (isStrokeSubpath)
             {
@@ -1831,7 +1883,7 @@ public static class PdfTextExtractor
                 edges.Add(new VisualEdge($"pdf_p{pageNumber}_e{edges.Count + 1}", null, null,
                     null, VisualEdgeResolution.Unresolved, Direction: "undirected",
                     Geometry: new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), Confidence: 0.2,
-                    Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected));
+                    Path: points, SourceAnchor: anchor, EdgeDirection: VisualEdgeDirection.Undirected, LineStyle: lineStyle));
                 diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
                 graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2) with { SourceObjectId = edges[^1].Id, SourceObjectType = "connector" });
             }
@@ -1852,11 +1904,12 @@ public static class PdfTextExtractor
         {
             var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
             var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
+            var isStroked = paintToken is "S" or "s" or "B" or "B*" or "b" or "b*";
             paths.Add(new VisualPath($"pdf_p{pageNumber}_path{paths.Count + 1}", subpath,
                 new Geometry("pdf-user-space", minX, minY, maxX - minX, maxY - minY), anchor,
                 0.9, IsFallback: false, SourceNodeId: null,
                 IsFilled: paintToken is "f" or "F" or "f*" or "B" or "B*" or "b" or "b*",
-                IsStroked: paintToken is "S" or "s" or "B" or "B*" or "b" or "b*"));
+                IsStroked: isStroked, LineStyle: isStroked ? VisualLineStyles.FromDashArray(dashArray, lineWidth) : null));
             AddClosedNode(subpath);
         }
 

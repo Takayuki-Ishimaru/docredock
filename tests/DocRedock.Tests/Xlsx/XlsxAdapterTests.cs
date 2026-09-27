@@ -989,6 +989,27 @@ public sealed class XlsxAdapterTests
         Assert.Equal("2", node.Extensions!["shape_id"].GetString());
     }
 
+    [Theory]
+    [InlineData("<a:ln><a:prstDash val=\"dash\"/></a:ln>", "dashed")]
+    [InlineData("<a:ln><a:prstDash val=\"sysDot\"/></a:ln>", "dotted")]
+    [InlineData("<a:ln><a:custDash><a:ds d=\"300000\" sp=\"100000\"/></a:custDash></a:ln>", "dashed")]
+    [InlineData("<a:ln><a:noFill/><a:prstDash val=\"dash\"/></a:ln>", null)]
+    [InlineData("<a:ln><a:prstDash val=\"solid\"/></a:ln>", null)]
+    [InlineData("", null)]
+    public void Arrow_overlay_keeps_the_outline_dash_style(string outline, string? expected)
+    {
+        var drawing = $"""
+            <xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+              <xdr:twoCellAnchor><xdr:from><xdr:col>3</xdr:col><xdr:colOff>45720</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>45720</xdr:rowOff></xdr:from><xdr:to><xdr:col>4</xdr:col><xdr:colOff>487680</xdr:colOff><xdr:row>2</xdr:row><xdr:rowOff>259080</xdr:rowOff></xdr:to><xdr:sp><xdr:nvSpPr><xdr:cNvPr id="2" name="予定"/><xdr:cNvSpPr/></xdr:nvSpPr><xdr:spPr><a:prstGeom prst="rightArrow"/>{outline}</xdr:spPr></xdr:sp><xdr:clientData/></xdr:twoCellAnchor>
+            </xdr:wsDr>
+            """;
+        var extraction = new XlsxAdapter().Extract(new MemoryStream(CreateDiagramPackage("Sheet1", ScheduleOverlayWorksheetXml, drawing)));
+
+        var (_, overlay) = SingleSheetOverlay(extraction);
+        Assert.Equal(("arrow", "right", 3, 4, 5), (overlay.Kind, overlay.Direction, overlay.StartRow, overlay.StartColumn, overlay.EndColumn));
+        Assert.Equal(expected, overlay.LineStyle);
+    }
+
     [Fact]
     public void Textless_rectangle_becomes_a_bar_overlay_with_no_direction()
     {

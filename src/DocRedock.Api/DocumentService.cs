@@ -951,16 +951,38 @@ public sealed class DocumentService
                         diagnostic.Message.Contains($"PDF page {page.PageNumber} ", StringComparison.Ordinal)))
                     diagnostics.Remove(diagnostic);
             graph = BindPdfPageRasters(graph, result, cropped, diagnostics);
+            var preferCropBox = pdfRasterizer.Descriptor.ProviderId.EndsWith(".mutool", StringComparison.Ordinal);
             graph = graph with { Partitions = graph.Partitions.Select(partition =>
             {
                 if (!reviewPages.Contains(partition.Order + 1) || !result.Any(asset => asset.Id == partition.Id)) return partition;
                 var nodes = partition.Nodes.ToList();
-                if (!nodes.Any(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent image && image.Reference == partition.Id))
+                // The drawn page box and rotation let a viewer map unresolved vector geometry onto
+                // the review image (ExportReviewBuilder) without re-reading the PDF.
+                var pageNumber = partition.Order + 1;
+                var page = pdfPages.FirstOrDefault(item => item.PageNumber == pageNumber);
+                var pageBox = page is null ? null : preferCropBox ? page.CropBox ?? page.MediaBox : page.MediaBox ?? page.CropBox;
+                var reviewExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                {
+                    ["pdf_page_raster"] = JsonSerializer.SerializeToElement(true),
+                    ["pdf_review_image"] = JsonSerializer.SerializeToElement(true),
+                    ["pdf_page_rotation"] = JsonSerializer.SerializeToElement(page?.Rotation ?? 0),
+                };
+                if (pageBox is not null) reviewExtensions["pdf_page_box"] = JsonSerializer.SerializeToElement(pageBox);
+                var existing = nodes.FindIndex(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent image && image.Reference == partition.Id);
+                if (existing >= 0)
+                    nodes[existing] = nodes[existing] with
+                    {
+                        Extensions = new Dictionary<string, JsonElement>(
+                            (nodes[existing].Extensions ?? new Dictionary<string, JsonElement>()).Concat(reviewExtensions)
+                                .GroupBy(entry => entry.Key, StringComparer.Ordinal).Select(group => group.Last()),
+                            StringComparer.Ordinal)
+                    };
+                else
                     nodes.Add(new DocumentNode(partition.Id + "_review", NodeKind.Image, null, nodes.Count, ContentLayer.Body,
                         new ReferenceNodeContent(partition.Id, $"PDF page {partition.Order + 1}: 原本照合用画像（未解決の表・図を確認）"),
                         new SourceAnchor("pdf", partition.SourcePartUri ?? $"pdf:page:{partition.Order + 1}", []),
                         Editability: NodeEditability.RenderOnly,
-                        Extensions: new Dictionary<string, JsonElement> { ["pdf_page_raster"] = JsonSerializer.SerializeToElement(true) }));
+                        Extensions: reviewExtensions));
                 diagnostics.Add(new Diagnostic("PdfReviewImageAttached", $"PDF page {partition.Order + 1}: source page image attached for comparison of unresolved tables/figures.",
                     DiagnosticSeverity.Information, PartUri: partition.SourcePartUri));
                 return partition with { Nodes = nodes };

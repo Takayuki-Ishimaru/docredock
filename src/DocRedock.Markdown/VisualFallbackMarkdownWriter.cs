@@ -66,7 +66,7 @@ internal static class VisualFallbackMarkdownWriter
                          .OrderBy(item => item.Id, StringComparer.Ordinal))
                 yield return ["ソース項目: ", item.Id, "（", item.Disposition.ToString(), "）"];
             foreach (var path in (graph.Paths ?? []).Where(item => item is not null && item.IsFallback))
-                yield return ["パス: ", path.Id];
+                yield return ["パス: ", path.Id, LineStyleSuffix(path.LineStyle)];
         }
         foreach (var group in (graph.Diagnostics ?? []).Where(item => item is not null)
                      .GroupBy(item => item.Code, StringComparer.Ordinal))
@@ -83,6 +83,12 @@ internal static class VisualFallbackMarkdownWriter
         if (partial)
             foreach (var edge in (graph.Edges ?? []).Where(edge => edge is not null &&
                          (edge.SourceId is null || edge.TargetId is null)).OrderBy(edge => edge.Id, StringComparer.Ordinal))
-                yield return ["接続先未確定: ", string.IsNullOrWhiteSpace(edge.Label) ? "接続先を一意に判定できないコネクター" : edge.Label];
+                yield return ["接続先未確定: ", string.IsNullOrWhiteSpace(edge.Label) ? "接続先を一意に判定できないコネクター" : edge.Label,
+                    LineStyleSuffix(edge.LineStyle)];
     }
+
+    // Unresolved strokes keep their source line style, so a dashed line under review is not
+    // described as an ordinary one.
+    private static string? LineStyleSuffix(string? lineStyle) =>
+        VisualLineStyles.IsKnown(lineStyle) ? "（" + ReadableMarkdownSerializer.LineStyleName(lineStyle) + "）" : null;
 }

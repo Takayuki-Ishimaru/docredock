@@ -1,0 +1,59 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="DocRedock.Gui.ReviewWindow"
+        Title="原本照合 — DocRedock"
+        Icon="/Assets/DocRedock.ico"
+        Width="1180"
+        Height="780"
+        MinWidth="720"
+        MinHeight="480">
+  <DockPanel LastChildFill="True">
+    <!-- What to check on the selected page, in the same short words as the result panel. -->
+    <Border DockPanel.Dock="Top" Classes="titlebar" Padding="20,12">
+      <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto" ColumnSpacing="14" RowSpacing="6">
+        <ComboBox x:Name="PageSelector" MinWidth="260" VerticalAlignment="Center" SelectionChanged="OnPageChanged"
+                  AutomationProperties.Name="確認するページ" />
+        <TextBlock x:Name="PageDescriptionText" Grid.Column="1" TextWrapping="Wrap" VerticalAlignment="Center"
+                   FontWeight="SemiBold" AutomationProperties.Name="確認する内容" />
+        <TextBlock x:Name="LegendText" Grid.Row="1" Grid.ColumnSpan="2" Classes="muted caption" TextWrapping="Wrap" />
+      </Grid>
+    </Border>
+
+    <Border DockPanel.Dock="Bottom" Classes="actionbar">
+      <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8" Margin="20,0" VerticalAlignment="Center">
+        <Button x:Name="OpenImageButton" Classes="secondary compact" Click="OnOpenImage"
+                AutomationProperties.Name="照合画像を別のアプリで開く">画像を別のアプリで開く</Button>
+        <Button x:Name="OpenMarkdownButton" Classes="secondary compact" Click="OnOpenMarkdown"
+                AutomationProperties.Name="Markdown全体を開く">Markdown全体を開く</Button>
+        <Button Classes="accent compact" Click="OnClose" AutomationProperties.Name="閉じる">閉じる</Button>
+      </StackPanel>
+    </Border>
+
+    <!-- Source page image (with the unresolved elements framed) beside the Markdown of that page. -->
+    <Grid x:Name="ReviewColumns" ColumnDefinitions="3*,2*" ColumnSpacing="14" Margin="20,14,20,14">
+      <Border Classes="workspace-card" Padding="8">
+        <Grid RowDefinitions="Auto,*" RowSpacing="6">
+          <TextBlock Text="原本のページ画像" Classes="section-label" />
+          <Panel Grid.Row="1">
+            <Viewbox x:Name="ImageViewbox" Stretch="Uniform" IsVisible="False">
+              <Panel x:Name="ImageSurface">
+                <Image x:Name="PageImage" Stretch="Fill" AutomationProperties.Name="原本照合用のページ画像" />
+                <Canvas x:Name="HighlightCanvas" />
+              </Panel>
+            </Viewbox>
+            <TextBlock x:Name="NoImageText" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center"
+                       TextAlignment="Center" MaxWidth="420" IsVisible="False" />
+          </Panel>
+        </Grid>
+      </Border>
+      <Border Grid.Column="1" Classes="workspace-card" Padding="8">
+        <Grid RowDefinitions="Auto,*" RowSpacing="6">
+          <TextBlock Text="このページのMarkdown" Classes="section-label" />
+          <TextBox x:Name="PageMarkdownTextBox" Grid.Row="1" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap"
+                   FontFamily="Menlo, Consolas, monospace" FontSize="12"
+                   AutomationProperties.Name="このページのMarkdown" />
+        </Grid>
+      </Border>
+    </Grid>
+  </DockPanel>
+</Window>

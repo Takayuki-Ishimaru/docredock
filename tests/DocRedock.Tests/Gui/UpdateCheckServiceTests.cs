@@ -7,6 +7,16 @@ namespace DocRedock.Tests.Gui;
 [Collection("Environment variables")]
 public sealed class UpdateCheckServiceTests
 {
+    // v0.2.10 is the first two-digit patch release; release tags must compare numerically.
+    [Fact]
+    public void Two_digit_patch_release_is_newer_than_single_digit_patch()
+    {
+        Assert.True(UpdateCheckService.TryParseReleaseVersion("v0.2.10", out var twoDigit));
+        Assert.True(UpdateCheckService.TryParseReleaseVersion("v0.2.9", out var singleDigit));
+        Assert.True(twoDigit.CompareTo(singleDigit) > 0);
+        Assert.Equal("0.2.10", UpdateCheckService.FormatVersion(twoDigit));
+    }
+
     [Fact]
     public async Task CheckAsync_DoesNotSendWhenDisabledByEnvironment()
     {

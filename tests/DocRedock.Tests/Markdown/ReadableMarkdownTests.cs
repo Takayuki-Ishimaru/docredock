@@ -1014,6 +1014,87 @@ public sealed class ReadableMarkdownTests
             markdown, StringComparison.Ordinal);
     }
 
+    // v0.2.9 evaluation, priority 2: dashed and dotted overlays keep their direction and span but
+    // use different stroke characters, and a note after the table names each styled shape.
+    [Fact]
+    public void Table_overlay_line_styles_change_stroke_glyphs_and_add_a_legend()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("Task"), new TableCell("Jan"), new TableCell("Feb"), new TableCell("Mar")],
+            [new TableCell("DESIGN"), new TableCell(""), new TableCell(""), new TableCell("")],
+            [new TableCell("BUILD"), new TableCell(""), new TableCell(""), new TableCell("")],
+            [new TableCell("TEST"), new TableCell(""), new TableCell(""), new TableCell("")],
+        ],
+            new OverlaySpec("1", "arrow", "both", "horizontal", 1, 1, 1, 3, LineStyle: "dashed"),
+            new OverlaySpec("2", "bar", "none", "horizontal", 2, 2, 1, 2, LineStyle: "dotted"),
+            new OverlaySpec("3", "arrow", "down", "vertical", 1, 3, 3, 3, LineStyle: "dashed"),
+            new OverlaySpec("4", "line", "none", "horizontal", 3, 3, 1, 2, LineStyle: "dashed"),
+            new OverlaySpec("5", "marker", "none", "horizontal", 3, 3, 3, 3, ShapePreset: "diamond", LineStyle: "dashed"));
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-line-styles", DocumentFormatKind.Pdf,
+            [new DocumentPartition("page-0001", 0, [table])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains(
+            "| DESIGN | ◀┅┅ | ┅┅ | ┅┅▶<br>┆ |\n" +
+            "| BUILD | ⋯⋯ | ⋯⋯ | ┆ |\n" +
+            "| TEST | ┄┄ | ┄┄ | ▼<br>◆ |\n",
+            markdown, StringComparison.Ordinal);
+        Assert.Contains("> 線種の注記: 表中の ┅ ┄ ┆ は破線、⋯ ⋮ は点線で描かれた図形です", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 破線の両矢印: 行「DESIGN」、列「Jan」〜「Mar」\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 点線のバー: 行「BUILD」、列「Jan」〜「Feb」\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 破線の下向き矢印: 列「Mar」、行「DESIGN」〜「TEST」\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 破線の線: 行「TEST」、列「Jan」〜「Feb」\n", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("マーカー", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Solid_or_unknown_overlay_line_styles_keep_the_solid_glyphs_without_a_legend()
+    {
+        var rows = new IReadOnlyList<TableCell>[]
+        {
+            [new TableCell("Task"), new TableCell("Jan"), new TableCell("Feb")],
+            [new TableCell("DESIGN"), new TableCell(""), new TableCell("")],
+        };
+        foreach (var style in new string?[] { null, "wavy" })
+        {
+            var table = TableOverlayNode("table", 0, rows, new OverlaySpec("1", "arrow", "right", "horizontal", 1, 1, 1, 2, LineStyle: style));
+            var markdown = new ReadableMarkdownSerializer().Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion,
+                "doc-overlay-solid", DocumentFormatKind.Pdf, [new DocumentPartition("page-0001", 0, [table])]));
+            Assert.Contains("| DESIGN | ━━ | ━━▶ |", markdown, StringComparison.Ordinal);
+            Assert.DoesNotContain("線種の注記", markdown, StringComparison.Ordinal);
+        }
+    }
+
+    [Fact]
+    public void Dashed_diagram_edges_use_mermaid_dotted_links_and_fallback_keeps_the_style()
+    {
+        var visual = new VisualGraph("styled-flow", [new VisualNode("a", "Start"), new VisualNode("b", "Plan"), new VisualNode("c", "Done")],
+        [
+            new VisualEdge("e1", "a", "b", Label: "予定", LineStyle: "dashed"),
+            new VisualEdge("e2", "b", "c", Direction: "undirected", EdgeDirection: VisualEdgeDirection.Undirected, LineStyle: "dotted"),
+            new VisualEdge("e3", "a", "c"),
+        ]);
+        var diagram = new DocumentNode("diagram", NodeKind.Diagram, null, 0, ContentLayer.Derived, new TextNodeContent("visual"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["visual_graph"] = JsonSerializer.SerializeToElement(visual) });
+        var markdown = new ReadableMarkdownSerializer().Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "styled-flow",
+            DocumentFormatKind.Pptx, [new DocumentPartition("slide-1", 0, [diagram])]));
+
+        Assert.Contains("a -.->|予定| b", markdown, StringComparison.Ordinal);
+        Assert.Contains("b -.- c", markdown, StringComparison.Ordinal);
+        Assert.Contains("a --> c", markdown, StringComparison.Ordinal);
+        Assert.Contains("> 線種の注記: 点線の接続（-.-）は原本で破線・点線で描かれた線です。", markdown, StringComparison.Ordinal);
+
+        var fallback = new VisualGraph("raw", [], [], Paths: [new VisualPath("raw-path", LineStyle: "dashed")],
+            SourceItems: [new VisualSourceItem("raw-path", VisualSourceItemKind.VectorPath, VisualDisposition.VisualFallback, FallbackPathId: "raw-path")]);
+        var fallbackNode = diagram with { Extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+            { ["visual_graph"] = JsonSerializer.SerializeToElement(fallback) } };
+        var fallbackMarkdown = new ReadableMarkdownSerializer().Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "raw",
+            DocumentFormatKind.Pdf, [new DocumentPartition("page-0001", 0, [fallbackNode])]));
+        Assert.Contains("- パス: raw-path（破線）", fallbackMarkdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Table_overlay_appends_marker_after_existing_cell_text()
     {
@@ -1600,7 +1681,7 @@ public sealed class ReadableMarkdownTests
     private sealed record OverlaySpec(
         string ShapeId, string Kind, string Direction, string Axis,
         int StartRow, int EndRow, int StartColumn, int EndColumn,
-        string Text = "", string? ShapePreset = null);
+        string Text = "", string? ShapePreset = null, string? LineStyle = null);
 
     private static DocumentNode TableOverlayNode(string id, int order, IReadOnlyList<IReadOnlyList<TableCell>> rows, params OverlaySpec[] overlays) => new(
         id, NodeKind.Table, null, order, ContentLayer.Body, new TableNodeContent(rows),
@@ -1625,7 +1706,8 @@ public sealed class ReadableMarkdownTests
     // without going through the real XlsxAdapter -- see XlsxScheduleOverlayFixtureTests for the
     // real-fixture E2E and XlsxAdapterTests for extraction-side coverage.
     private static DocumentNode SheetOverlay(string id, int order, string shapeId, string text, string kind, string direction, string axis,
-        int startRow, int endRow, int startColumn, int endColumn, string? shapePreset = null, string? sheetState = null) => new(
+        int startRow, int endRow, int startColumn, int endColumn, string? shapePreset = null, string? sheetState = null,
+        string? lineStyle = null) => new(
         id, NodeKind.Shape, null, order, ContentLayer.Hidden, new TextNodeContent(text),
         Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
         {
@@ -1636,9 +1718,31 @@ public sealed class ReadableMarkdownTests
             {
                 ShapeId = shapeId, Text = text, Kind = kind, Direction = direction, Axis = axis,
                 StartRow = startRow, EndRow = endRow, StartColumn = startColumn, EndColumn = endColumn, ShapePreset = shapePreset,
+                LineStyle = lineStyle,
             }),
         }.Concat(sheetState is null ? [] : new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["sheet_state"] = JsonSerializer.SerializeToElement(sheetState) })
             .ToDictionary(entry => entry.Key, entry => entry.Value, StringComparer.Ordinal));
+
+    [Fact]
+    public void Sheet_overlay_line_style_changes_glyphs_and_names_cells_in_a1_notation()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-sheet-overlay-style", DocumentFormatKind.Xlsx,
+        [
+            new DocumentPartition("sheet-スケジュール", 0,
+            [
+                Cell("B1", 1, 1, "工程"), Cell("C1", 1, 2, "担当"), Cell("D1", 1, 3, "9/1"), Cell("E1", 1, 4, "9/2"),
+                Cell("F1", 1, 5, "9/3"), Cell("B2", 2, 1, "設計"), Cell("C2", 2, 2, "佐藤"),
+                SheetOverlay("overlay-1", 10, "3", "", "arrow", "right", "horizontal", 2, 2, 4, 5, lineStyle: "dashed"),
+            ]),
+        ]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("┅┅", markdown, StringComparison.Ordinal);
+        Assert.Contains("┅┅▶", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("━━", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 破線の右向き矢印: セル D2〜E2\n", markdown, StringComparison.Ordinal);
+    }
 
     [Fact]
     public void Sheet_overlay_shape_folds_into_covered_cells_and_synthesizes_blank_columns()

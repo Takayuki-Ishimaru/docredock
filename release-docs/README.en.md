@@ -6,6 +6,13 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.2.10 Public Beta
+
+- [v0.2.10 release notes](RELEASE_NOTES_v0.2.10.en.md)
+- Distinguished solid, dashed, and dotted shapes over tables in Readable Markdown
+- Removed an unnecessary warning for headings outside tables and double symbols for separately painted fill and outline
+- Reported saving, visual conversion, and review needs separately, and added a GUI review window with the source page next to its Markdown
+
 ### v0.2.9 Public Beta
 
 - [v0.2.9 release notes](RELEASE_NOTES_v0.2.9.en.md)

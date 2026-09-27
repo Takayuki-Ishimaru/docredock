@@ -130,6 +130,61 @@ public sealed class DocumentServiceTests
         finally { Directory.Delete(root, true); }
     }
 
+    // v0.2.9 evaluation acceptance criteria. Priority 2: solid and dashed arrows with the same
+    // direction and span must differ machine-readably. Priority 1: a heading above a framed table
+    // is not a review item, so nothing is attached and the export is warning-free.
+    [Fact]
+    public async Task Solid_and_dashed_pdf_arrows_differ_while_direction_and_span_match()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var texts = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (name, stroke) in new[] { ("solid", ""), ("dashed", "[4 3] 0 d\n"), ("dotted", "[1 2] 0 d\n") })
+            {
+                var source = Path.Combine(root, name + ".pdf");
+                var output = Path.Combine(root, name + ".md");
+                await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule(stroke + Pdf.PdfEvaluationRegressionTests.BothArrow));
+                var result = await new DocumentService(null, new PngPdfRasterizer(500, 250), discoverPdfRasterizer: false)
+                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+                Assert.DoesNotContain(result.Diagnostics, d => d.Severity != DiagnosticSeverity.Information);
+                Assert.Equal(0, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ReviewPages);
+                texts[name] = await File.ReadAllTextAsync(output);
+            }
+            Assert.Contains("| DESIGN | ◀━━ | ━━ | ━━▶ |", texts["solid"]);
+            Assert.DoesNotContain("線種の注記", texts["solid"]);
+            Assert.Contains("| DESIGN | ◀┅┅ | ┅┅ | ┅┅▶ |", texts["dashed"]);
+            Assert.Contains("破線の両矢印: 行「DESIGN」、列「Jan」〜「Mar」", texts["dashed"]);
+            Assert.Contains("| DESIGN | ◀⋯⋯ | ⋯⋯ | ⋯⋯▶ |", texts["dotted"]);
+            Assert.Contains("点線の両矢印: 行「DESIGN」、列「Jan」〜「Mar」", texts["dotted"]);
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Heading_above_a_framed_table_needs_no_review_image(bool headerFill)
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "framed.pdf");
+            var output = Path.Combine(root, "framed.md");
+            await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule("", frame: true, title: true, headerFill: headerFill));
+            var result = await new DocumentService(null, new PngPdfRasterizer(500, 250), discoverPdfRasterizer: false)
+                .ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+            var text = await File.ReadAllTextAsync(output);
+            Assert.Contains("Project Schedule 2026", text);
+            Assert.Contains("| DESIGN |  |  |  |", text);
+            Assert.DoesNotContain("framed.assets", text);
+            Assert.DoesNotContain(result.Diagnostics, d => d.Severity != DiagnosticSeverity.Information);
+            var summary = ExportSummaryBuilder.Build(result.Graph, result.Diagnostics);
+            Assert.Equal((0, 0, 0, 0), (summary.Warnings, summary.ReviewPages, summary.ReviewImagePages, summary.UnresolvedElements));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     [Theory]
     [InlineData("auto")]
     [InlineData("off")]

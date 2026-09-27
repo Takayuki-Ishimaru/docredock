@@ -2613,6 +2613,34 @@ public sealed class DocxAdapterTests
         Assert.Equal(1, overlay.StartColumn);
     }
 
+    // v0.2.9 evaluation, priority 2: DrawingML a:prstDash and VML v:stroke@dashstyle survive as the
+    // overlay's LineStyle; an outline that is not drawn has no line style.
+    [Theory]
+    [InlineData("<a:ln><a:prstDash val=\"dash\"/></a:ln>", null, "dashed")]
+    [InlineData("<a:ln><a:noFill/><a:prstDash val=\"dash\"/></a:ln>", null, null)]
+    [InlineData("<a:extLst><a:ext uri=\"x\"><a:ln><a:prstDash val=\"dash\"/></a:ln></a:ext></a:extLst>", null, null)]
+    [InlineData(null, "<v:stroke dashstyle=\"dot\"/>", "dotted")]
+    [InlineData(null, "<v:stroke dashstyle=\"longDash\"/>", "dashed")]
+    [InlineData(null, "", null)]
+    public async Task Overlay_line_style_is_read_from_drawingml_and_vml_outlines(string? drawingMlOutline, string? vmlStroke, string? expected)
+    {
+        var shape = drawingMlOutline is not null
+            ? OverlayInline("1501", "rect", 635_000, 190_500).Replace("</a:prstGeom></wps:spPr>", "</a:prstGeom>" + drawingMlOutline + "</wps:spPr>", StringComparison.Ordinal)
+            : $"<w:r><w:pict><v:rect id=\"1502\" style=\"position:absolute;margin-left:0;margin-top:0;width:50pt;height:15pt\">{vmlStroke}</v:rect></w:pict></w:r>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>工程</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [OverlayCell(""), OverlayCell(shape), OverlayCell("")]),
+        ]);
+        var source = await WriteOverlayDocxAsync($"overlay-line-style-{Guid.NewGuid():N}.docx", table);
+
+        var export = await new DocxAdapter().ExtractAsync(source);
+        var tableNode = Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        Assert.Equal("bar", Assert.Single(TableOverlaysOf(tableNode)).Kind);
+        var raw = Assert.Single(tableNode.Extensions!["table_overlays"].EnumerateArray());
+        Assert.Equal(expected, raw.TryGetProperty("LineStyle", out var style) ? style.GetString() : null);
+    }
+
     [Fact]
     public async Task VmlRect_bar_in_a_cell_is_detected()
     {
