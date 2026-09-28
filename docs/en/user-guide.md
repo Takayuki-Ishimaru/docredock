@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.2.11 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
+This guide covers the v0.2.12 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**.
 
 ## 1. Get DocRedock
 
@@ -47,7 +47,7 @@ Mermaid is emitted only when connections are clear and consistent. Recognized vi
 
 ## 4. Choose a content policy
 
-- **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revisions out of the Markdown projection.
+- **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revisions, as well as PDF text entirely outside the visible area or on a layer that is off, out of the Markdown projection.
 - **complete**: includes hidden/metadata content and emits a warning.
 - **sanitized**: also filters metadata, derived/OCR content, and furniture such as headers and footers.
 
@@ -123,7 +123,7 @@ The export summary starts with three separate results. `Output written` says the
 
 OCR results with confidence below 80% or no confidence are counted separately from warnings as `OCR summary: images=…; regions=…; review_items=…; review_required=true|false`. OCR review alone is not a warning and does not change the exit code. The GUI also shows "OCR確認 N件" on its own line.
 
-The GUI result panel leads with counts such as "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件" and a short explanation such as "1ページ目：表の上の斜めの線1件を表の記号に変換できませんでした。表の文字は書き出されています。照合画像で線の意味を確認してください。". Diagnostic codes, internal IDs, and confidences are in the collapsed "詳細（診断コードと対処）" section, where diagnostics that follow from the same unresolved element are grouped into one entry. "該当ページを確認" opens a review window with the source page image (unresolved lines and shapes marked in red; a drawing component that could not be analyzed is outlined in dashed red over the area it may paint) next to that page's Markdown. "要確認箇所へ拡大" zooms to each marked element in turn and centers it; "＋" and "－" (or Ctrl + mouse wheel) change the zoom, and "全体" returns to the whole page. The Markdown pane switches between "表示", which shows tables as ruled tables and each Mermaid diagram as its list of connections such as "START → END（label）", and "ソース", the Markdown itself (a Mermaid diagram the preview cannot read is shown as source). When no review image exists (no rasterizer, attachment turned off, or an Office source), the window tells you which page of the source to open.
+The GUI result panel leads with counts such as "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件" and a short explanation such as "1ページ目：表の上の斜めの線1件を表の記号に変換できませんでした。表の文字は書き出されています。照合画像で線の意味を確認してください。". Diagnostic codes, internal IDs, and confidences are in the collapsed "詳細（診断コードと対処）" section, where diagnostics that follow from the same unresolved element are grouped into one entry. "該当ページを確認" opens a review window with the source page image (unresolved lines and shapes marked in red; a drawing component that could not be analyzed is outlined in dashed red over the area it may paint, and text whose characters or visibility could not be determined over where it sits) next to that page's Markdown. "要確認箇所へ拡大" zooms to each marked element in turn and centers it; "＋" and "－" (or Ctrl + mouse wheel) change the zoom, and "全体" returns to the whole page. The red marks keep their on-screen width at any zoom, and clearing "強調表示" hides them so the original detail can be inspected once its position is known (the setting holds across pages). The Markdown pane switches between "表示", which shows tables as ruled tables and each Mermaid diagram as its list of connections such as "START → END（label）", and "ソース", the Markdown itself (a Mermaid diagram the preview cannot read is shown as source). When no review image exists (no rasterizer, attachment turned off, or an Office source), the window tells you which page of the source to open. When the content policy left hidden content out of the Markdown (hidden Word text, PDF text outside the visible area, and so on), the result panel names each kind and its count.
 
 `DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
 

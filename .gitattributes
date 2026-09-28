@@ -1,2 +1,6 @@
 # Legacy sidecars contain hashes of their exact bytes. Never convert their line endings.
 tests/DocRedock.Tests/Fixtures/Legacy/** -text
+
+# PDFs are binary even when every stream is uncompressed text: line-ending conversion would
+# change the bytes the fixtures and their hashes depend on.
+*.pdf binary

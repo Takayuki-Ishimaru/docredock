@@ -122,6 +122,8 @@
                      AutomationProperties.Name="原本照合が必要な内容" />
           <TextBlock x:Name="ResultOcrText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="OCR結果の確認" />
+          <TextBlock x:Name="ResultHiddenText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False"
+                     AutomationProperties.Name="除外した非表示の内容" />
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
           <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5"
                        AutomationProperties.Name="処理の進捗" />
@@ -281,7 +283,7 @@
                     <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
                   </ComboBox>
                   <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
-                             Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+                             Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
                   <TextBlock Text="OCR照合情報の詳細" Classes="muted caption" />
                   <ComboBox x:Name="OcrReviewModeComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
                             AutomationProperties.Name="OCR照合情報の詳細">

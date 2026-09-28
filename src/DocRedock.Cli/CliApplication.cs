@@ -743,7 +743,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
         private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);

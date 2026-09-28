@@ -753,6 +753,29 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Fact]
+    public async Task Render_accepts_the_documented_font_options()
+    {
+        // render read --font-path and --font-face-index and the help and user guide documented them,
+        // but the option parser did not know them: every use failed with "Unknown option".
+        using var fixture = new Fixture();
+        await File.WriteAllTextAsync(fixture.MarkdownPath, "# Title\n\nBody text.\n");
+        var stderr = new StringWriter();
+        var app = new CliApplication(new StringWriter(), stderr);
+
+        var invalid = await app.RunAsync(["render", fixture.MarkdownPath, "--format", "pdf", "--output", Path.Combine(fixture.Root, "a.pdf"),
+            "--font-face-index", "x"]);
+        // ASCII-only output uses Base14 Helvetica, so the font options are accepted and not needed.
+        var accepted = await app.RunAsync(["render", fixture.MarkdownPath, "--format", "pdf", "--output", Path.Combine(fixture.Root, "b.pdf"),
+            "--font-path", Path.Combine(fixture.Root, "unused.ttf"), "--font-face-index", "0"]);
+
+        Assert.Equal((int)ExitCode.InvalidInput, invalid);
+        Assert.Contains("--font-face-index must be a non-negative integer.", stderr.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("Unknown option", stderr.ToString(), StringComparison.Ordinal);
+        Assert.Equal((int)ExitCode.Success, accepted);
+        Assert.True(File.Exists(Path.Combine(fixture.Root, "b.pdf")));
+    }
+
+    [Fact]
     public async Task Render_refuses_to_write_output_over_the_input_markdown_even_with_force()
     {
         using var fixture = new Fixture();

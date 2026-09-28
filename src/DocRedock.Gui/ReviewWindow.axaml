@@ -39,6 +39,10 @@
                  element to check, or step the zoom by hand (Ctrl + mouse wheel also zooms). -->
             <StackPanel x:Name="ZoomBar" Grid.Column="1" Orientation="Horizontal" Spacing="4" VerticalAlignment="Center">
               <TextBlock x:Name="FocusText" Classes="muted caption" VerticalAlignment="Center" Margin="0,0,4,0" />
+              <!-- Once an element is found, the red marks can be hidden to see the original under them. -->
+              <CheckBox x:Name="HighlightCheckBox" IsChecked="True" VerticalAlignment="Center" Margin="0,0,6,0"
+                        IsCheckedChanged="OnHighlightToggled"
+                        AutomationProperties.Name="要確認箇所の強調表示">強調表示</CheckBox>
               <Button x:Name="ZoomToElementButton" Classes="secondary compact" Click="OnZoomToElement"
                       AutomationProperties.Name="要確認箇所へ拡大">要確認箇所へ拡大</Button>
               <Button x:Name="ZoomOutButton" Classes="secondary compact" Click="OnZoomOut" MinWidth="34"

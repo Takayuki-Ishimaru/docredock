@@ -10,9 +10,9 @@ The GUI may send a short HTTPS request to the public GitHub Releases API for upd
 
 ## Hidden content and sharing
 
-Readable export defaults to `visible`, which filters recognized Office-hidden text, hidden/very-hidden sheets, hidden rows/columns, hidden slides/objects, notes, comments, and revisions out of the Markdown projection. `sanitized` additionally filters metadata, derived/OCR content, and document furniture. External `.assets/` output contains only images referenced by nodes included under the selected policy.
+Readable export defaults to `visible`, which filters recognized Office-hidden text, hidden/very-hidden sheets, hidden rows/columns, hidden slides/objects, notes, comments, and revisions out of the Markdown projection, together with PDF text entirely outside the visible area (a Form XObject's `/BBox`, a clipping path, or the crop box) and PDF text on layers that are off when the document opens. `sanitized` additionally filters metadata, derived/OCR content, and document furniture. External `.assets/` output contains only images referenced by nodes included under the selected policy.
 
-`complete` intentionally includes hidden and metadata content and emits `HiddenContentIncluded`. Treat its output as sensitive and review it before sharing. Visibility metadata can vary between Office producers, so no policy replaces human review.
+`complete` intentionally includes hidden and metadata content and emits `HiddenContentIncluded`. Treat its output as sensitive and review it before sharing. Visibility metadata can vary between Office producers, and in PDFs text covered by shapes, text in the background color, text made invisible by its rendering mode, and the overflowing part of partly clipped text are not detected, so no policy replaces human review.
 
 Review both the `.md` and `.assets/`, as well as embedded data URIs, cached calculation results, and OCR output. Experimental `.drmd` and `.drmdpkg` files may include source binaries or restoration data and must be handled like the source document.
 

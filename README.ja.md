@@ -16,7 +16,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.2.11 Public Betaの対応状況
+## v0.2.12 Public Betaの対応状況
 
 | 機能 | 扱い |
 | --- | --- |
@@ -25,7 +25,7 @@ Office文書をローカルで、AIが読みやすいMarkdownへ。往復編集�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.11リリースノート](release-docs/RELEASE_NOTES_v0.2.11.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.2.12リリースノート](release-docs/RELEASE_NOTES_v0.2.12.md)へ集約します。
 
 ## 30秒で使う
 
@@ -64,7 +64,7 @@ GUIとCLIの閲覧用出力には3種類のポリシーがあります。外部�
 
 | ポリシー | 動作 |
 | --- | --- |
-| `visible` | 既定値。認識できるOfficeの非表示テキスト、シート、行・列、スライド・オブジェクト、ノート、コメント、変更履歴を除外します。 |
+| `visible` | 既定値。認識できるOfficeの非表示テキスト、シート、行・列、スライド・オブジェクト、ノート、コメント、変更履歴と、PDFで表示範囲の完全に外側にある文字や非表示レイヤーの文字を除外します。 |
 | `complete` | 非表示情報とメタデータを含め、警告を出します。 |
 | `sanitized` | `visible`に加え、メタデータ、派生・OCR情報、ヘッダー等をさらに除外します。 |
 
@@ -72,7 +72,7 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.2.11はPublic Betaであり、本番向けの安定版ではありません。
+- v0.2.12はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -84,9 +84,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.2.11の対応状況](docs/ja/supported-features.md)
+- [v0.2.12の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.2.11リリースノート](release-docs/RELEASE_NOTES_v0.2.11.md)
+- [v0.2.12リリースノート](release-docs/RELEASE_NOTES_v0.2.12.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

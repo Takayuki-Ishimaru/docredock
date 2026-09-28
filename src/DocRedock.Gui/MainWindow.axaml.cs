@@ -715,6 +715,7 @@ public partial class MainWindow : Window
         ResultCountsText.IsVisible = false;
         ResultReviewText.IsVisible = false;
         ResultOcrText.IsVisible = false;
+        ResultHiddenText.IsVisible = false;
         ResultKickerText.Text = "PROCESSING";
         ResultTitleText.Text = "処理しています";
         ResultMessageText.Text = message;
@@ -764,9 +765,12 @@ public partial class MainWindow : Window
         ResultReviewText.Text = warning ? ReviewSummaryText(review, diagnostics) : "";
         ResultOcrText.IsVisible = ocrReviewItems > 0;
         ResultOcrText.Text = ocrReviewItems > 0 ? ExportReviewText.OcrJapanese(new OcrReviewSummary(0, 0, ocrReviewItems)) : "";
+        var hidden = success ? HiddenContentText(diagnostics) : "";
+        ResultHiddenText.IsVisible = hidden.Length > 0;
+        ResultHiddenText.Text = hidden;
         ResultMessageText.Text = message;
         AutomationProperties.SetHelpText(ResultPanel, string.Join(" ", new[]
-            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
+            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, hidden, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
@@ -791,13 +795,49 @@ public partial class MainWindow : Window
             parts.Add($"要確認 {review.Count}ページ");
             parts.Add($"照合画像 {review.Count(item => item.Page.ReviewImageReference is not null)}ページ添付");
             var unanalyzed = review.Sum(item => item.Page.CountOf(ReviewElementKind.UnanalyzedContent));
-            var elements = review.Sum(item => item.Page.Elements.Count) - unanalyzed;
+            var uncertain = review.Sum(item => item.Page.CountOf(ReviewElementKind.UncertainText));
+            var elements = review.Sum(item => item.Page.Elements.Count) - unanalyzed - uncertain;
             if (elements > 0) parts.Add($"未解決の図形 {elements}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
+            if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
         }
         if (ocrReviewItems > 0) parts.Add($"OCR確認 {ocrReviewItems}件");
         return string.Join("／", parts);
     }
+
+    // What the selected content policy left out of the Markdown, so a clean result is never read as
+    // "everything in the file": hidden Office content, and PDF text no viewer shows. The counts are
+    // those of the policy's information diagnostics, which are otherwise not shown here.
+    internal static string HiddenContentText(IReadOnlyList<Diagnostic> diagnostics)
+    {
+        var parts = diagnostics.Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Information)
+            .Select(diagnostic => (Label: HiddenContentLabel(diagnostic.Code), Count: TrailingCount(diagnostic.Message)))
+            .Where(item => item.Label is not null)
+            .GroupBy(item => item.Label!, StringComparer.Ordinal)
+            .Select(group => $"{group.Key} {group.Sum(item => item.Count)}件")
+            .ToArray();
+        return parts.Length == 0 ? string.Empty
+            : $"表示されない内容を除外しました（{string.Join("、", parts)}）。含めるには「内容の公開範囲」で「非表示内容も含める」を選んでください。";
+    }
+
+    private static string? HiddenContentLabel(string code) => code switch
+    {
+        "DocxHiddenTextExcluded" => "Wordの非表示・削除済みの文字",
+        "XlsxHiddenSheetExcluded" => "Excelの非表示シートのセル",
+        "XlsxHiddenRowExcluded" => "Excelの非表示行のセル",
+        "XlsxHiddenColumnExcluded" => "Excelの非表示列のセル",
+        "PptxHiddenSlideExcluded" => "PowerPointの非表示スライドの内容",
+        "PptxHiddenObjectExcluded" => "PowerPointの非表示オブジェクト",
+        "PptxNotesExcluded" => "PowerPointのノート",
+        "PdfClippedTextExcluded" => "PDFの表示範囲外の文字",
+        "PdfHiddenLayerTextExcluded" => "PDFの非表示レイヤーの文字",
+        _ => null,
+    };
+
+    // The policy diagnostics end with their count: "... was excluded (3).".
+    private static int TrailingCount(string message) =>
+        System.Text.RegularExpressions.Regex.Match(message, @"\((\d+)\)\.?$") is { Success: true } match &&
+        int.TryParse(match.Groups[1].Value, out var count) ? count : 1;
 
     private static string ReviewSummaryText(IReadOnlyList<GuiReviewItem> review, IReadOnlyList<Diagnostic> diagnostics)
     {
@@ -820,7 +860,7 @@ public partial class MainWindow : Window
     // Codes the per-page review description already explains in its own words.
     private static bool IsVisualReviewCode(string code) =>
         code.StartsWith("Visual", StringComparison.Ordinal) || code.StartsWith("PdfReviewImage", StringComparison.Ordinal) ||
-        code == "PdfFormXObjectUnparsed";
+        code is "PdfFormXObjectUnparsed" or "PdfFontResourceAmbiguous" or "PdfLayerVisibilityUnknown";
 
     private static string? DiagnosticLocation(Diagnostic diagnostic)
     {
@@ -895,6 +935,8 @@ public partial class MainWindow : Window
         "PdfRasterizationFailed" => ("PDF rasterizerの実行に失敗しました。", "pdftoppmまたはmutoolの実行ファイルと入力PDFを確認してください。"),
         "PdfReviewImageUnavailable" => ("原本照合用のページ画像を作成できませんでした。", "原本PDFの該当ページを開いて確認してください。画像を添付するにはpdftoppmまたはmutoolを構成してください。"),
         "PdfFormXObjectUnparsed" => ("PDFの描画部品（Form XObject）の中身を解析できず、その文字・図はMarkdownに含まれていません。", "「該当ページを確認」または照合画像で、原本の該当箇所を確認してください。"),
+        "PdfFontResourceAmbiguous" => ("PDFの文字が使うフォントを特定できず、文字が正しく変換されていない可能性があります（Markdownには含めています）。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
+        "PdfLayerVisibilityUnknown" => ("PDFのレイヤー（Optional Content）の表示状態を判定できなかった文字を、Markdownに含めました。", "原本PDFで、その文字が画面に表示されているかを確認してください。"),
         "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
         "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
         _ => ("変換時の注意事項があります。", $"原文: {originalMessage}{Environment.NewLine}元文書と生成結果を確認し、必要なら診断コードを添えて報告してください。"),
