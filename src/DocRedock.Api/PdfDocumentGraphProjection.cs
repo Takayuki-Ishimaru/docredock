@@ -121,6 +121,51 @@ internal static class PdfDocumentGraphProjection
                     });
                 nodes = InsertAtReadingPosition(nodes, marker, bounds);
             }
+            // Text the page kept but may not match the original: a font resource that could not be
+            // resolved, or a layer whose visibility could not be evaluated. The text stays; the
+            // marker asks for source comparison where it sits.
+            if (page.UncertainText is { Count: > 0 } uncertain)
+            {
+                var bounds = MergeBounds(uncertain.Select(item => item.Bounds).OfType<Geometry>().ToArray());
+                var fragments = uncertain.Sum(item => item.Fragments);
+                var marker = new DocumentNode(
+                    $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_uncertain_text", NodeKind.Annotation, null, nodes.Count,
+                    ContentLayer.Body,
+                    new TextNodeContent($"[PDF page {page.PageNumber}: the characters or visibility of {fragments} text fragment(s) above could not be determined - compare with the source page]"),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("uncertain_text", page.PageNumber.ToString())]),
+                    Geometry: bounds, Editability: NodeEditability.RenderOnly,
+                    Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
+                    Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        [ReadableMarkdownSerializer.SourceReviewRequiredExtension] = JsonSerializer.SerializeToElement(true),
+                        [UncertainTextExtension] = JsonSerializer.SerializeToElement(uncertain.Select(item =>
+                            new PdfUncertainTextRecord(UncertainReasonCode(item.Reason), item.ResourceName, item.Fragments, item.Bounds)).ToArray(), RecordJson)
+                    });
+                nodes = InsertAtReadingPosition(nodes, marker, bounds, after: true);
+            }
+            // Text the page draws where no viewer shows it is hidden content, exactly like hidden
+            // Word text: the visible and sanitized content policies leave it out, complete keeps it.
+            if (page.HiddenRegions is { Count: > 0 } hidden)
+            {
+                var index = 0;
+                foreach (var hiddenRegion in hidden)
+                {
+                    var region = hiddenRegion.Region;
+                    var hiddenNode = new DocumentNode(
+                        $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_hidden_{index}", NodeKind.Paragraph, null, nodes.Count,
+                        ContentLayer.Hidden, new TextNodeContent(region.Text),
+                        new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("hidden_text", index.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
+                        Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
+                        Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)],
+                        Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                        {
+                            ["hidden_content_type"] = JsonSerializer.SerializeToElement(hiddenRegion.Reason == PdfHiddenTextReason.HiddenLayer
+                                ? HiddenLayerTextType : ClippedTextType)
+                        });
+                    nodes = InsertAtReadingPosition(nodes, hiddenNode, region.BoundingBox);
+                    index++;
+                }
+            }
             if (visualGraph is not null)
             {
                 var visualAnchor = new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("visual_graph", page.PageNumber.ToString())]);
@@ -143,6 +188,27 @@ internal static class PdfDocumentGraphProjection
     /// extractor could not analyze, on the page's review marker node.</summary>
     internal const string UnparsedFormXObjectsExtension = "pdf_unparsed_form_xobjects";
 
+    /// <summary>Extension carrying one <see cref="PdfUncertainTextRecord"/> per kind of doubt about
+    /// text the page kept, on the page's review marker node.</summary>
+    internal const string UncertainTextExtension = "pdf_uncertain_text";
+
+    /// <summary><c>hidden_content_type</c> of text entirely outside a form's /BBox, a clipping path,
+    /// or the page's crop box.</summary>
+    internal const string ClippedTextType = "pdf-clipped-text";
+
+    /// <summary><c>hidden_content_type</c> of text on a layer that is off when the document opens.</summary>
+    internal const string HiddenLayerTextType = "pdf-hidden-layer-text";
+
+    /// <summary>One kind of doubt about kept text as stored on the graph: a stable reason code, the
+    /// font resource concerned (for an unresolved font), how many fragments, and where they are.</summary>
+    internal sealed record PdfUncertainTextRecord(string Reason, string? ResourceName, int Fragments, Geometry? Bounds);
+
+    private static string UncertainReasonCode(PdfUncertainTextReason reason) => reason switch
+    {
+        PdfUncertainTextReason.FontResourceAmbiguous => "font-resource-ambiguous",
+        _ => "layer-visibility-unknown",
+    };
+
     /// <summary>One unanalyzed form draw as stored on the graph: its resource name, a stable reason
     /// code, and where it paints in PDF user space when that is known.</summary>
     internal sealed record PdfUnparsedFormRecord(string Name, string Reason, Geometry? Bounds);
@@ -162,20 +228,23 @@ internal static class PdfDocumentGraphProjection
     /// node whose top edge is at or above its own top; without a resolved rectangle there is
     /// nothing to place it by and it goes to the end. Order is then renumbered so it stays a total
     /// order over the page - a duplicated Order would make downstream ordering non-deterministic.</summary>
-    private static List<DocumentNode> InsertAtReadingPosition(List<DocumentNode> nodes, DocumentNode marker, Geometry? bounds)
+    private static List<DocumentNode> InsertAtReadingPosition(List<DocumentNode> nodes, DocumentNode marker, Geometry? bounds, bool after = false)
     {
         // Another marker is not content to read past: one without a position sits at the end, and
-        // must not drag this one there with it.
+        // must not drag this one there with it. With after, the marker follows the content it
+        // speaks about - everything that starts at or above its bottom edge.
+        var edge = bounds is null ? 0 : after ? bounds.Y : bounds.Y + bounds.Height;
         var insertAt = bounds is null
             ? nodes.Count
             : nodes.FindLastIndex(node => !IsMarker(node) && (node.Geometry is not { } geometry ||
-                geometry.Y + geometry.Height >= bounds.Y + bounds.Height)) + 1;
+                geometry.Y + geometry.Height >= edge)) + 1;
         nodes.Insert(insertAt, marker);
         return nodes.Select((node, order) => node with { Order = order }).ToList();
     }
 
     private static bool IsMarker(DocumentNode node) => node.Extensions is { } extensions &&
-        (extensions.ContainsKey("pdf_embedded_image_placeholder") || extensions.ContainsKey(UnparsedFormXObjectsExtension));
+        (extensions.ContainsKey("pdf_embedded_image_placeholder") || extensions.ContainsKey(UnparsedFormXObjectsExtension) ||
+         extensions.ContainsKey(UncertainTextExtension));
 
     /// <summary>Union of the placement rectangles the extractor could resolve, or null when it
     /// resolved none - the page then carries a count but no position.</summary>

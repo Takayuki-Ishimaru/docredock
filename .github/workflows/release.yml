@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.2.11
+        default: v0.2.12
 
 permissions:
   contents: read

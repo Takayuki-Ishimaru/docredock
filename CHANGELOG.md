@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.2.12]
+
+- Decoded each PDF font through the resource dictionary of the page or Form XObject that uses it. A page and its forms that each call a different font `/F1` no longer all come out in the characters of whichever font came last, and fonts written inline in a resource dictionary are decoded with their own ToUnicode map. A font name that is not defined where it is used and that the document gives to differently decoding fonts is not guessed: the page gets a `PdfFontResourceAmbiguous` warning and a review page.
+- Treated PDF text that no viewer shows as hidden content: text entirely outside a Form XObject's `/BBox`, a clipping path, or the page's crop box, and text on optional-content layers that are off when the document opens. The `visible` and `sanitized` policies leave it out (`PdfClippedTextExcluded` / `PdfHiddenLayerTextExcluded` information), and `complete` includes it with `HiddenContentIncluded`. Text on a layer whose visibility cannot be evaluated is kept with a `PdfLayerVisibilityUnknown` warning and a review page.
+- Kept the red marks in the GUI review window at a constant on-screen width when zoomed and added a 「強調表示」 switch to hide them; the GUI result panel now names hidden content that the content policy left out of the Markdown.
+- Fixed PDF export failing with an internal error (exit code 10) when a font maps one glyph to several characters, as LibreOffice does for ligatures such as "ttp" in URLs, and when a ToUnicode range maps to supplementary-plane characters or is malformed.
+- Fixed `render --font-path` and `--font-face-index` being rejected as unknown options.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.2.12.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.2.12.md)
+
 ## [0.2.11]
 
 - Preserved text and graphics inside PDF Form XObjects drawn on a page that also carries its own text; previously they could disappear without a warning.

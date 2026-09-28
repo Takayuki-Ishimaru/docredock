@@ -35,6 +35,7 @@ public static class ExportReviewText
                 ReviewElementKind.Arrow => $"矢印{style}{count}件の接続先や意味を確定できませんでした",
                 ReviewElementKind.Label => $"文字{count}件を、どの線や図形の説明か確定できませんでした",
                 ReviewElementKind.UnanalyzedContent => $"解析できなかった描画部品{count}件の文字・図はMarkdownに含まれていません",
+                ReviewElementKind.UncertainText => $"文字{count}件は、文字の対応または表示の有無を確定できませんでした（Markdownには含めています）",
                 _ => $"図形{style}{count}件を図として再構成できませんでした",
             });
         }
@@ -63,8 +64,10 @@ public static class ExportReviewText
             parts.Add($"要確認 {review.Pages.Count}ページ");
             parts.Add($"照合画像 {review.ReviewImagePages}ページ添付");
             var unanalyzed = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UnanalyzedContent));
-            if (review.Elements > unanalyzed) parts.Add($"未解決の図形 {review.Elements - unanalyzed}件");
+            var uncertain = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UncertainText));
+            if (review.Elements > unanalyzed + uncertain) parts.Add($"未解決の図形 {review.Elements - unanalyzed - uncertain}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
+            if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
         }
         if (review.Ocr.Required) parts.Add($"OCR確認 {review.Ocr.ReviewItems}件");
         return string.Join("／", parts);
@@ -90,6 +93,7 @@ public static class ExportReviewText
                 ReviewElementKind.Arrow => $"{count} arrow(s){style} with undetermined endpoints or meaning",
                 ReviewElementKind.Label => $"{count} label(s) not assignable to one line or shape",
                 ReviewElementKind.UnanalyzedContent => $"{count} drawing component(s) not analyzed; their text and graphics are missing from the Markdown",
+                ReviewElementKind.UncertainText => $"{count} text item(s) whose characters or visibility could not be determined; kept in the Markdown",
                 _ => $"{count} shape(s){style} kept as vector fallback",
             });
         }

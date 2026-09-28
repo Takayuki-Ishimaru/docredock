@@ -25,6 +25,10 @@ public enum ReviewElementKind
     /// <summary>A drawing component whose text and graphics could not be analyzed at all (a PDF
     /// Form XObject the extractor could not read); it is missing from the Markdown.</summary>
     UnanalyzedContent,
+    /// <summary>Text that is in the Markdown but whose characters or visibility could not be
+    /// determined (a PDF font resource that could not be resolved, or a layer whose visibility could
+    /// not be evaluated). Counted with unanalyzed content: its analysis is not complete either.</summary>
+    UncertainText,
 }
 
 /// <summary>A rectangle on the review image, normalized to 0..1 with the origin at the top left.</summary>
@@ -208,6 +212,22 @@ public static class ExportReviewBuilder
     /// <see cref="ReadableMarkdownSerializer.RequiresSourceReview"/> can never disagree.</summary>
     internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping)
     {
+        if (node.Extensions?.TryGetValue(PdfDocumentGraphProjection.UncertainTextExtension, out var doubts) == true &&
+            doubts.ValueKind == JsonValueKind.Array && doubts.GetArrayLength() > 0)
+        {
+            var index = 0;
+            foreach (var item in doubts.EnumerateArray())
+            {
+                PdfDocumentGraphProjection.PdfUncertainTextRecord? record;
+                try { record = item.Deserialize<PdfDocumentGraphProjection.PdfUncertainTextRecord>(); }
+                catch (JsonException) { record = null; }
+                var sourceId = $"{node.Id}#{index++}";
+                yield return new ReviewElement(ReviewElementKind.UncertainText,
+                    record?.ResourceName is { Length: > 0 } name ? $"{sourceId}:{name}" : sourceId,
+                    record?.Bounds is { } bounds ? mapping?.Map(bounds) : null);
+            }
+            yield break;
+        }
         if (node.Extensions?.TryGetValue(PdfDocumentGraphProjection.UnparsedFormXObjectsExtension, out var raw) == true &&
             raw.ValueKind == JsonValueKind.Array && raw.GetArrayLength() > 0)
         {

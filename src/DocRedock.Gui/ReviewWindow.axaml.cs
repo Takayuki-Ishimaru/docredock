@@ -19,11 +19,17 @@ public partial class ReviewWindow : Window
 {
     private static readonly IBrush HighlightStroke = new SolidColorBrush(Color.Parse("#E5484D"));
     private static readonly IBrush HighlightFill = new SolidColorBrush(Color.Parse("#26E5484D"));
+    // Stroke widths in screen pixels. The marks sit inside the zoomed image, so each is divided by
+    // the zoom: at 256% a mark drawn in image pixels grew thick enough to cover the very line it
+    // points at.
+    private const double FrameScreenThickness = 1.5;
+    private const double TraceScreenThickness = 3.5;
     private const double MaxZoom = 8;
     private const double ZoomStep = 1.25;
     private readonly IReadOnlyList<GuiReviewItem> _items;
     private Bitmap? _bitmap;
     private IReadOnlyList<Rect> _focusTargets = [];
+    private readonly List<(Shape Shape, double ScreenThickness)> _highlightShapes = [];
     private int _focusIndex = -1;
     private double _zoom = 1;
     private bool _fitMode = true;
@@ -67,6 +73,12 @@ public partial class ReviewWindow : Window
     /// <summary>The framed elements in image pixels, in the order the zoom button visits them.</summary>
     internal IReadOnlyList<Rect> FocusTargets => _focusTargets;
 
+    /// <summary>Whether the red marks are shown; the choice holds across the pages of the window.</summary>
+    internal bool HighlightsVisible => HighlightCanvas.IsVisible;
+
+    /// <summary>Each mark's stroke width as it appears on screen (its width times the zoom).</summary>
+    internal IReadOnlyList<double> HighlightScreenThicknesses => _highlightShapes.Select(item => item.Shape.StrokeThickness * _zoom).ToArray();
+
     private void OnPageChanged(object? sender, SelectionChangedEventArgs e) =>
         ShowItem(PageSelector.SelectedIndex >= 0 && PageSelector.SelectedIndex < _items.Count ? _items[PageSelector.SelectedIndex] : null);
 
@@ -74,6 +86,7 @@ public partial class ReviewWindow : Window
     {
         CurrentItem = item;
         HighlightCanvas.Children.Clear();
+        _highlightShapes.Clear();
         HighlightCount = 0;
         PageImage.Source = null;
         _bitmap?.Dispose();
@@ -114,6 +127,7 @@ public partial class ReviewWindow : Window
             surface.Width = width;
             surface.Height = height;
         }
+        // Sizes a tiny element's frame so it can still be seen with the whole page in view.
         var thickness = Math.Max(2, width / 400.0);
         var targets = new List<Rect>();
         foreach (var element in item.Page.Elements.Where(element => element.Region is not null || element.Outline is { Count: >= 2 }))
@@ -123,42 +137,60 @@ public partial class ReviewWindow : Window
             if (element.Region is { } region)
             {
                 // Unanalyzed content is framed by the area it may paint in (often the whole page),
-                // not by what it painted, so it gets a dashed outline without a tint over the page.
-                var bounded = element.Kind == ReviewElementKind.UnanalyzedContent;
+                // not by what it painted, and text kept with a doubt by where the text sits; both
+                // get a dashed outline without a tint over the page. A traced element needs no tint
+                // either: its trace already points at it, and a tint would cover the zoomed detail.
+                var bounded = element.Kind is ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText;
                 var frame = new Rectangle
                 {
                     Width = Math.Max(thickness * 3, region.Width * width),
                     Height = Math.Max(thickness * 3, region.Height * height),
                     Stroke = HighlightStroke,
-                    StrokeThickness = element.Outline is null ? thickness : thickness / 2,
                     StrokeDashArray = element.Outline is null && !bounded ? null : [4, 3],
-                    Fill = bounded ? null : HighlightFill,
+                    Fill = bounded || element.Outline is not null ? null : HighlightFill,
                 };
                 Canvas.SetLeft(frame, region.X * width);
                 Canvas.SetTop(frame, region.Y * height);
                 HighlightCanvas.Children.Add(frame);
+                _highlightShapes.Add((frame, element.Outline is null ? FrameScreenThickness : FrameScreenThickness * .6));
             }
             if (element.Outline is { Count: >= 2 } outline)
-                HighlightCanvas.Children.Add(new Polyline
+            {
+                var trace = new Polyline
                 {
                     Points = outline.Select(point => new Point(point.X * width, point.Y * height)).ToList(),
                     Stroke = HighlightStroke,
-                    StrokeThickness = thickness * 2.5,
-                    Opacity = .75,
-                });
+                    Opacity = .6,
+                };
+                HighlightCanvas.Children.Add(trace);
+                _highlightShapes.Add((trace, TraceScreenThickness));
+            }
             targets.Add(FocusRect(element, width, height));
             HighlightCount++;
         }
         _focusTargets = targets;
         LegendText.Text = HighlightCount > 0
-            ? item.Page.Elements.Any(element => element.Kind == ReviewElementKind.UnanalyzedContent)
-                ? "赤い線と枠は、変換できなかった線や図形、または解析できなかった描画部品が描かれる範囲です。「要確認箇所へ拡大」で順に拡大できます。左の原本と右のMarkdownを見比べてください。"
-                : "赤い線と枠は、変換できなかった線や図形の位置です。「要確認箇所へ拡大」で順に拡大できます。左の原本と右のMarkdownを見比べてください。"
+            ? $"赤い線と枠は、{LegendSubject(item.Page)}です。「要確認箇所へ拡大」で順に拡大でき、「強調表示」で赤い表示を消すと原本の細部を確認できます。左の原本と右のMarkdownを見比べてください。"
             : "左の原本と右のMarkdownを見比べてください（この画像では位置を枠で示せません）。";
         ImageScrollViewer.IsVisible = true;
         NoImageText.IsVisible = false;
         ApplyZoom(FitZoom());
     }
+
+    private static string LegendSubject(ReviewPage page)
+    {
+        var subjects = new List<string>();
+        if (page.Elements.Any(element => element.Kind is not (ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText)))
+            subjects.Add("変換できなかった線や図形の位置");
+        if (page.Elements.Any(element => element.Kind == ReviewElementKind.UnanalyzedContent))
+            subjects.Add("解析できなかった描画部品が描かれる範囲");
+        if (page.Elements.Any(element => element.Kind == ReviewElementKind.UncertainText))
+            subjects.Add("文字の対応や表示の有無を確定できなかった文字の位置");
+        return string.Join("、または", subjects);
+    }
+
+    private void OnHighlightToggled(object? sender, RoutedEventArgs e) =>
+        HighlightCanvas.IsVisible = HighlightCheckBox.IsChecked == true;
 
     /// <summary>The pixel rectangle one element occupies: its frame, or its traced stroke's extent.</summary>
     private static Rect FocusRect(ReviewElement element, double width, double height)
@@ -252,6 +284,7 @@ public partial class ReviewWindow : Window
         if (!_fitMode && Math.Abs(_zoom - fit) < 1e-9) _fitMode = true;
         if (ImageZoom.LayoutTransform is not ScaleTransform current || current.ScaleX != _zoom || current.ScaleY != _zoom)
             ImageZoom.LayoutTransform = new ScaleTransform(_zoom, _zoom);
+        foreach (var (shape, screenThickness) in _highlightShapes) shape.StrokeThickness = screenThickness / _zoom;
         if (contentPoint is { } content && viewportPoint is { } anchor)
         {
             // The extent only changes after a layout pass; scroll against the new one.

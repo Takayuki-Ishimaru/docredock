@@ -596,6 +596,10 @@ public sealed class DocumentService
         AddIf("PptxHiddenSlideExcluded", "Content on hidden PPTX slides was excluded", node => ExtensionFlag(node, "hidden_slide"));
         AddIf("PptxHiddenObjectExcluded", "Hidden PPTX objects were excluded", node => ExtensionFlag(node, "hidden_object"));
         AddIf("PptxNotesExcluded", "PPTX speaker notes were excluded", node => node.Kind == NodeKind.SpeakerNotes);
+        AddIf("PdfClippedTextExcluded", "PDF text entirely outside the visible area (a Form XObject /BBox, a clipping path, or the page's crop box) was excluded", node =>
+            StringComparer.Ordinal.Equals(ExtensionText(node, "hidden_content_type"), PdfDocumentGraphProjection.ClippedTextType));
+        AddIf("PdfHiddenLayerTextExcluded", "PDF text on layers (optional content) that are off when the document opens was excluded", node =>
+            StringComparer.Ordinal.Equals(ExtensionText(node, "hidden_content_type"), PdfDocumentGraphProjection.HiddenLayerTextType));
     }
 
     private static string? ExtensionText(DocumentNode node, string key) =>
@@ -900,18 +904,27 @@ public sealed class DocumentService
             .ToArray();
         if (pages.Length == 0) return ([], graph);
         // What each review page asks a person to compare, in the words its diagnostics and its
-        // review image use: unresolved tables/figures, content that could not be analyzed, or both.
-        var unanalyzedPages = graph.Partitions.Where(partition => partition.Nodes.Any(node => ExportReviewBuilder.CountUnanalyzedContent(node) > 0))
+        // review image use: unresolved tables/figures, content that could not be analyzed, text
+        // whose characters or visibility could not be determined, or several of these.
+        HashSet<int> PagesWith(ReviewElementKind kind) => graph.Partitions.Where(partition => partition.Nodes.Any(node =>
+                ExportReviewBuilder.UnanalyzedContent(node, null).Any(element => element.Kind == kind)))
             .Select(partition => partition.Order + 1).ToHashSet();
+        var unanalyzedPages = PagesWith(ReviewElementKind.UnanalyzedContent);
+        var uncertainTextPages = PagesWith(ReviewElementKind.UncertainText);
         var visualReviewPages = graph.Partitions.Where(partition => partition.Nodes.Any(node =>
                 ExportReviewBuilder.CountUnanalyzedContent(node) == 0 && ReadableMarkdownSerializer.RequiresSourceReview(node)))
             .Select(partition => partition.Order + 1).ToHashSet();
-        (string Subject, string Verb, string Alt) ReviewReason(int page) => (unanalyzedPages.Contains(page), visualReviewPages.Contains(page)) switch
+        (string Subject, string Verb, string Alt) ReviewReason(int page)
         {
-            (true, true) => ("unresolved tables/figures and content that could not be analyzed", "need", "未解決の表・図と解析できなかった描画部品を確認"),
-            (true, false) => ("content that could not be analyzed", "needs", "解析できなかった描画部品を確認"),
-            _ => ("unresolved tables/figures", "need", "未解決の表・図を確認"),
-        };
+            var subjects = new List<(string English, string Japanese)>();
+            if (visualReviewPages.Contains(page) || !unanalyzedPages.Contains(page) && !uncertainTextPages.Contains(page))
+                subjects.Add(("unresolved tables/figures", "未解決の表・図"));
+            if (unanalyzedPages.Contains(page)) subjects.Add(("content that could not be analyzed", "解析できなかった描画部品"));
+            if (uncertainTextPages.Contains(page)) subjects.Add(("text whose characters or visibility could not be determined", "確定できなかった文字"));
+            return (string.Join(" and ", subjects.Select(subject => subject.English)),
+                subjects.Count == 1 && subjects[0].English != "unresolved tables/figures" ? "needs" : "need",
+                string.Join("と", subjects.Select(subject => subject.Japanese)) + "を確認");
+        }
         if (pdfRasterizer is null)
         {
             foreach (var page in reviewPages)
