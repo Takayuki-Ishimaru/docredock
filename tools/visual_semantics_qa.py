@@ -509,7 +509,13 @@ def _pdf_fixture(spec: PerturbationSpec) -> bytes:
     a,b,c,d = math.cos(angle),math.sin(angle),-math.sin(angle),math.cos(angle)
     if spec.operation == "flip-horizontal": a,b=-a,-b
     if spec.operation == "flip-vertical": c,d=-c,-d
-    lines = ["q",f"{a:.6f} {b:.6f} {c:.6f} {d:.6f} {spec.translation_x:.2f} {spec.translation_y:.2f} cm"]
+    # Rotate/reflect around the diagram's center, not the page origin. Otherwise
+    # negative coordinates put labels outside MediaBox and visible export rightly
+    # excludes them, so the fixture no longer tests the intended relation.
+    center_x, center_y = 340, 330
+    tx = center_x - a * center_x - c * center_y + spec.translation_x
+    ty = center_y - b * center_x - d * center_y + spec.translation_y
+    lines = ["q",f"{a:.6f} {b:.6f} {c:.6f} {d:.6f} {tx:.2f} {ty:.2f} cm"]
     if spec.operation == "grouped":
         lines.append("/DiagramGroup BMC")
     if spec.operation != "textless":

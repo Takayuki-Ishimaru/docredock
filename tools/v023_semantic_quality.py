@@ -100,6 +100,8 @@ def run_source_suite(cli: Path, output: Path) -> int:
                 "duration_ms": round((time.monotonic() - started) * 1000)}
     if not document["producer_deterministic"]: document["errors"].append("producer output was non-deterministic"); document["status"] = "fail"
     output.parent.mkdir(parents=True, exist_ok=True); output.write_text(json.dumps(document, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    for error in document["errors"]:
+        print(error)
     return 0 if document["status"] == "pass" else 1
 
 
