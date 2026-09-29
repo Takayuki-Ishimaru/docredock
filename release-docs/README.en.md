@@ -10,7 +10,7 @@ Versioned release notes and version-independent publication procedures. The user
 
 - [v0.2.12 release notes](RELEASE_NOTES_v0.2.12.en.md)
 - Fixed PDF text converted to the wrong characters when a page and its drawing components use one font name for different fonts
-- Left text that is not visible on screen (outside the visible area, or on a hidden layer) out of the default output
+- Excluded text entirely outside the visible area and text on layers identified as hidden from the default output
 - Added a highlight switch to the review window and fixed a conversion error on PDFs made by LibreOffice and others
 
 ### v0.2.11 Public Beta
