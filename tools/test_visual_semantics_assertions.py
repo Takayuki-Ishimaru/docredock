@@ -1,3 +1,4 @@
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -106,6 +107,31 @@ flowchart LR
             self.assertIn(b"stream\n", pdf)
             self.assertIn(b"xref\n", pdf)
             self.assertNotIn(b"VISUAL_SEMANTICS_JSON", pdf)
+
+    def test_pdf_perturbations_keep_diagram_boxes_and_labels_inside_the_page(self):
+        corpus = generate_perturbation_corpus(("pdf",))
+        with tempfile.TemporaryDirectory() as directory:
+            paths = materialize_perturbation_corpus(Path(directory), corpus)
+            for spec, path in zip(corpus, paths):
+                with self.subTest(case=spec.case_id, parameter=spec.parameter):
+                    pdf = path.read_bytes().decode("latin-1")
+                    left, bottom, right, top = map(float, re.search(r"/MediaBox \[([^]]+)\]", pdf)[1].split())
+                    stream = pdf.split("stream\n", 1)[1].split("endstream", 1)[0]
+                    a, b, c, d, tx, ty = map(float, stream.splitlines()[1].split()[:6])
+                    points = []
+                    for x, y, width, height in re.findall(r"([\d.-]+) ([\d.-]+) ([\d.-]+) ([\d.-]+) re", stream):
+                        x, y, width, height = map(float, (x, y, width, height))
+                        points.extend((px, py) for px in (x, x + width) for py in (y, y + height))
+                    for size, x, y, label in re.findall(r"/F1 ([\d.]+) Tf ([\d.-]+) ([\d.-]+) Td \(([^)]+)\) Tj", stream):
+                        size, x, y = map(float, (size, x, y))
+                        # A conservative box includes the glyphs, not only the baseline.
+                        points.extend((px, py) for px in (x, x + len(label) * size)
+                                      for py in (y - size / 2, y + size * 1.25))
+                    self.assertTrue(points)
+                    for x, y in points:
+                        px, py = a * x + c * y + tx, b * x + d * y + ty
+                        self.assertTrue(left <= px <= right and bottom <= py <= top,
+                                        f"painted point {(px, py)} is outside the page")
 
     def test_only_office_baselines_keep_native_connector_ids(self):
         corpus = generate_perturbation_corpus(("docx", "pptx", "xlsx"))
