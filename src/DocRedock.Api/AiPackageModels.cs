@@ -17,7 +17,8 @@ public sealed record AiPackageSourceLocation(
     int? PageNumber = null,
     int? SlideNumber = null,
     string? SheetName = null,
-    IReadOnlyList<string>? HeadingPath = null);
+    IReadOnlyList<string>? HeadingPath = null,
+    string? CellAddress = null);
 
 public sealed record AiPackagePart(
     string Id,

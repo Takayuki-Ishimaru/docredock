@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.0 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.1 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 ## 1. Get DocRedock
 
@@ -35,7 +35,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-v0.3.0 adds **AI packages**. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.1. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -48,15 +48,18 @@ The default name is `<source>.ai-package` or `<source>.ai-package.zip`. The pack
 | File | Purpose |
 | --- | --- |
 | `document.md` | The full Readable Markdown |
-| `parts/0001.md`, … | Independently readable semantic parts with the source file name |
+| `parts/0001.md`, … | Independently readable semantic parts with the source file name and Word section breadcrumbs |
 | `assets/` | Referenced images, when present; part links use `../assets/` |
 | `review.md` | Conversion limitations, OCR review counts, hidden-content notice, and links to affected parts |
 | `manifest.json` | Source file name/hash, settings, each part's source locations, and output file hashes |
+| `source-index.json` | Detailed node IDs and original Excel cell addresses; load when needed |
 | `report.json` | Structured conversion summary/review and diagnostic codes/counts |
 
 Word splits at headings and between intact semantic groups, with a soft size target of 12,000 characters. Tables (including nested tables), diagram members, and list sequences remain together. Each PDF page, PowerPoint slide, or Excel sheet remains one part. Large units can exceed the target; `exceeds_target` marks them and `review.md` lists them. This is a character target, not a model token limit. The CLI uses `--chunk-chars` and the API uses `TargetCharacters`, accepting 128–1,000,000; the GUI uses the default.
 
-The manifest records actual PDF page numbers, slide numbers, sheet names, or Word heading paths and node IDs. Word exports do not invent page numbers. Blank or entirely excluded units create no part. `visible`, `sanitized`, `complete`, and selected sheets apply to the Markdown, parts, source map, and copied images. `complete` can include hidden content and adds a sharing-review notice. The original Office/PDF file and absolute source path are not included.
+The compact manifest records actual PDF page numbers, slide numbers, sheet names, or Word heading paths in shared locations. The separate source index retains node IDs and Excel cell addresses. Word exports do not invent page numbers. Blank or entirely excluded units create no part. `visible`, `sanitized`, `complete`, and selected sheets apply to the Markdown, parts, source map, and copied images. `complete` can include hidden content and adds a sharing-review notice. The original Office/PDF file and absolute source path are not included.
+
+The current manifest uses schema `2.0`; consumers of the released v0.3.0 schema `1.0` must use the new shared locations/source index as described in the format contract. Conversion results also show how many tables were rendered in Markdown, including those assembled from Excel cells. Counts do not certify correct content or reading order.
 
 Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-package`. Existing conversion switches, including `--no-diagrams`, `--show-formulas`, `--ocr-review`, and PDF fallback settings, still apply. CLI PDF conversion retains its experimental flag requirement. A successful export with conversion warnings returns 1; failed/cancelled conversion leaves no partial package. Existing targets require `--force` in the CLI; the GUI selects a numbered name for repeated exports. Packages are one-way inputs and are not restoration sidecars. See the [format contract](../reference/ai-package.md) for the API and JSON details.
 

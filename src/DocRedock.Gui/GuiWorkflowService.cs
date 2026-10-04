@@ -174,7 +174,7 @@ public sealed class GuiWorkflowService
                     InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview), cancellationToken).ConfigureAwait(false);
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
-                var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
+                var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics, exported.RenderedTables);
                 var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics);
                 return new GuiExportResult(
                     markdownPath,

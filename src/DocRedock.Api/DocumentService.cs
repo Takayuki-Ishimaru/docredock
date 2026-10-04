@@ -47,7 +47,10 @@ public sealed record ReadableDocumentExportOptions(
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
     bool IncludePdfFallbackImages = true,
     OcrReviewMode OcrReview = OcrReviewMode.LowConfidence);
-public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
+public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
+{
+    public int RenderedTables { get; init; }
+}
 public sealed record DocumentPreflightResult(bool WorkspaceValid, bool ProjectionChanged, bool CanRestore, string Fidelity, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentRestoreOptions(string WorkspacePath, string OutputPath, string? MarkdownPath = null, bool AllowRenderFallback = false);
@@ -340,7 +343,8 @@ public sealed partial class DocumentService
                 }, NodeId: item.BlockId));
             diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
             await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
-            return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode);
+            return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode)
+                { RenderedTables = serializer.RenderedTables };
         }
         catch
         {
