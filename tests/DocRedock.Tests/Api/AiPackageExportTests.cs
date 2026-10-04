@@ -54,7 +54,7 @@ public sealed class AiPackageExportTests : IDisposable
         Assert.DoesNotContain(root, allText, StringComparison.Ordinal);
         Assert.Equal(policy == "complete", result.Summary.HiddenContentIncluded);
         using var manifest = JsonDocument.Parse(files["manifest.json"]);
-        Assert.Equal("1.0", manifest.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal("2.0", manifest.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal(policy, manifest.RootElement.GetProperty("content_policy").GetString());
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(before)),
             manifest.RootElement.GetProperty("source").GetProperty("sha256").GetString());

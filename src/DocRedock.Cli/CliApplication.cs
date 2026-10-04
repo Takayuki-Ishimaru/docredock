@@ -236,7 +236,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             // Both lines render from the same finalized summary so the figures a user sees
             // (Visual summary's diagrams=/fallback= and the export block below) can never
             // disagree with each other (F-05).
-            var visualSummary = ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics);
+            var visualSummary = ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics, readable.RenderedTables);
             await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
             await output.WriteLineAsync(visualSummary.ToString());
             await WriteReviewAsync(ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics), markdown, sidecarPath: null);
