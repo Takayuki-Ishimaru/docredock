@@ -344,6 +344,16 @@ public static partial class PdfTextExtractor
                     cancellationToken, out visualLabelNodeIds)
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
+            if (visualGraph is { Nodes.Count: 0, Edges.Count: 0 } &&
+                (visualGraph.Paths?.Count ?? 0) == 0 && !visualGraph.IsPartialProjection)
+            {
+                // Path operators can belong only to a clip. An empty, fully analyzed graph is
+                // not a diagram: projecting it would invent a fallback and request a review image.
+                vector = false;
+                visualGraph = null;
+                if (vectorPlaceholder)
+                    regions.RemoveAll(region => region.Text.StartsWith("[PDF visual content:", StringComparison.Ordinal));
+            }
             if (vector && visualGraph is not null)
             {
                 visualGraphs[pageNumber] = visualGraph;
@@ -596,6 +606,7 @@ public static partial class PdfTextExtractor
         var unresolvedPathIds = new HashSet<string>(StringComparer.Ordinal);
         var closed = false;
         var curveSeen = false;
+        var clipPending = false;
         // Stroke style in effect when a path is painted. The dash pattern and line width live in
         // the graphics state, so q/Q save and restore them together with the CTM.
         IReadOnlyList<double>? dashArray = null;
@@ -724,6 +735,12 @@ public static partial class PdfTextExtractor
                     current.Clear(); current.Add(Transform(x, y)); current.Add(Transform(x + w, y));
                     current.Add(Transform(x + w, y + h)); current.Add(Transform(x, y + h)); current.Add(Transform(x, y)); closed = true; break;
                 case "h": if (current.Count > 1) { current.Add(current[0]); closed = true; } break;
+                case "W" or "W*": clipPending = true; operands.Clear(); break;
+                case "n" when clipPending:
+                    // A clipping-only path draws nothing. Keep its effect in the separate text
+                    // visibility parser, but do not turn any of its subpaths into visual fallback.
+                    current.Clear(); pendingOpenSubpaths.Clear(); pendingClosedSubpaths.Clear();
+                    operands.Clear(); closed = false; curveSeen = false; clipPending = false; break;
                 case "S" or "s" or "f" or "F" or "f*" or "B" or "B*" or "b" or "b*" or "n":
                     // A final move-only subpath must not prevent earlier subpaths from
                     // receiving this paint operation or being cleared by a no-paint operation.
@@ -767,7 +784,7 @@ public static partial class PdfTextExtractor
                         if (current.Count > 1)
                             EmitPaintedPath(current.ToArray(), curveSeen, token);
                     }
-                    current.Clear(); operands.Clear(); closed = false; curveSeen = false; break;
+                    current.Clear(); operands.Clear(); closed = false; curveSeen = false; clipPending = false; break;
                 default: operands.Clear(); break;
             }
         }

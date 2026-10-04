@@ -12,6 +12,64 @@ namespace DocRedock.Tests.Pptx;
 
 public sealed class PptxAdapterTests
 {
+    [Theory]
+    [InlineData("leaders", 3)]
+    [InlineData("arrow", 0)]
+    [InlineData("attached", 0)]
+    [InlineData("solid", 0)]
+    [InlineData("no-contents", 0)]
+    [InlineData("no-pages", 0)]
+    [InlineData("numbered-text", 0)]
+    [InlineData("single", 0)]
+    public void Contents_leaders_are_layout_but_real_connections_remain(string mode, int expectedDecorative)
+    {
+        string Shape(string id, string text, int x, int y, int width, int height) =>
+            $"<p:sp><p:nvSpPr><p:cNvPr id=\"{id}\" name=\"text\"/></p:nvSpPr><p:spPr><a:xfrm><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{width}\" cy=\"{height}\"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/>" +
+            string.Join("", text.Split('|').Select(t => $"<a:p><a:r><a:t>{t}</a:t></a:r></a:p>")) + "</p:txBody></p:sp>";
+        var shapes = Shape("1", mode == "no-contents" ? "Flow" : "Contents", 0, 0, 1000, 100) +
+            Shape("2", "Introduction|Method|Results", 0, 200, 800, 400) +
+            Shape("3", mode == "no-pages" ? "Alpha|Beta|Gamma" : mode == "numbered-text" ? "1. Start|2. Process|3. End" : "P04-05|P06-08|P09-11", 1000, 200, 100, 400);
+        for (var i = 0; i < (mode == "single" ? 1 : 3); i++)
+            shapes += $"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=\"{10 + i}\" name=\"line\"/><p:cNvCxnSpPr>" +
+                (mode == "attached" ? "<a:stCxn id=\"2\" idx=\"1\"/><a:endCxn id=\"3\" idx=\"3\"/>" : "") +
+                $"</p:cNvCxnSpPr></p:nvCxnSpPr><p:spPr><a:xfrm><a:off x=\"400\" y=\"{250 + i * 100}\"/><a:ext cx=\"600\" cy=\"0\"/></a:xfrm><a:ln>" +
+                (mode == "solid" ? "" : "<a:prstDash val=\"dot\"/>") +
+                (mode == "arrow" ? "<a:tailEnd type=\"triangle\"/>" : "") + "</a:ln></p:spPr></p:cxnSp>";
+        var bytes = CreateTableOverlayPackage(shapes);
+        var adapter = new PptxAdapter(); var extraction = adapter.Extract(new MemoryStream(bytes));
+        Assert.Equal(expectedDecorative, extraction.Graph.Nodes.Count(n => n.Extensions?.ContainsKey("decorative_toc_leader") == true));
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+        Assert.Contains("Introduction", markdown, StringComparison.Ordinal);
+        Assert.Contains("Results", markdown, StringComparison.Ordinal);
+        if (expectedDecorative > 0)
+        {
+            Assert.DoesNotContain("```mermaid", markdown, StringComparison.Ordinal);
+            Assert.DoesNotContain(extraction.Warnings, w => w.StartsWith("VisualConnectorUnresolved", StringComparison.Ordinal));
+            var restored = adapter.Restore(new MemoryStream(bytes), adapter.CreatePatchPlan(extraction.Graph, extraction.Graph));
+            Assert.True(restored.IsByteIdentical);
+            Assert.Equal(bytes, restored.Bytes);
+        }
+        else Assert.Contains(extraction.Graph.Nodes, n => n.Kind == DocRedock.Core.Documents.NodeKind.Diagram);
+    }
+
+    [Theory]
+    [InlineData("START", "START DETAIL", true)]
+    [InlineData("YES", "SECOND LABEL", false)]
+    public void Visual_projection_retains_all_paragraphs_of_nodes_and_edge_labels(string first, string second, bool endpoint)
+    {
+        var entries = Entries(CreateGeometryConnectorPackage(includeLabel: true));
+        var xml = Encoding.UTF8.GetString(entries["ppt/slides/slide1.xml"]);
+        xml = xml.Replace($"<a:t>{first}</a:t></a:r></a:p>",
+            $"<a:t>{first}</a:t></a:r></a:p><a:p><a:r><a:t>{second}</a:t></a:r></a:p>", StringComparison.Ordinal);
+        entries["ppt/slides/slide1.xml"] = Encoding.UTF8.GetBytes(xml);
+        var extraction = new PptxAdapter().Extract(new MemoryStream(Repack(entries)));
+        var graph = VisualGraphOf(extraction);
+        if (endpoint) Assert.Contains(graph.Nodes, node => node.Label.Contains(second, StringComparison.Ordinal));
+        else Assert.Contains(graph.Edges, edge => edge.Label?.Contains(second, StringComparison.Ordinal) == true);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+        Assert.Contains(second, markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void ExtractsShapeTableImageAndNotes()
     {

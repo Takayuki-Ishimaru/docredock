@@ -124,10 +124,10 @@
     },
     {
       "id": "P08-3",
-      "desc": "コネクタの論理接続（stCxn/endCxn）がDRAFTからSUBMITTEDへのMermaid遷移として復元される",
+      "desc": "コネクタの論理接続がDRAFT 下書きからSUBMITTED 提出済へのMermaid遷移として復元され、両ノードの第2段落も保持される",
       "severity": "guard",
       "type": "regex",
-      "value": "(?s)(v_[A-Za-z0-9_]+)\\(\\[DRAFT\\]\\).*?(v_[A-Za-z0-9_]+)\\(\\[SUBMITTED\\]\\).*?\\1\\s*-->[^\\n]*\\2"
+      "value": "(?s)(v_[A-Za-z0-9_]+)\\(\\[DRAFT 下書き\\]\\).*?(v_[A-Za-z0-9_]+)\\(\\[SUBMITTED 提出済\\]\\).*?\\1\\s*-->[^\\n]*\\2"
     },
     {
       "id": "P09-1",

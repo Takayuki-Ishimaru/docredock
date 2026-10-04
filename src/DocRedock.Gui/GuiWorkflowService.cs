@@ -21,7 +21,8 @@ public sealed record GuiExportResult(
     CapabilityStatus? PdfRasterizer = null,
     string? ExportSummary = null,
     IReadOnlyList<GuiReviewItem>? ReviewItems = null,
-    OcrReviewSummary? OcrReview = null)
+    OcrReviewSummary? OcrReview = null,
+    string? AiPackagePath = null)
 {
     public string PackagePath => SidecarPath;
 }
@@ -85,7 +86,9 @@ public sealed class GuiWorkflowService
         string contentPolicy = "visible",
         VisualInferenceMode inferenceMode = VisualInferenceMode.Safe,
         bool includePdfFallbackImages = true,
-        DocRedock.Markdown.OcrReviewMode ocrReview = DocRedock.Markdown.OcrReviewMode.LowConfidence)
+        DocRedock.Markdown.OcrReviewMode ocrReview = DocRedock.Markdown.OcrReviewMode.LowConfidence,
+        bool aiPackage = false,
+        bool zipAiPackage = false)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -100,6 +103,54 @@ public sealed class GuiWorkflowService
 
         Directory.CreateDirectory(outputDirectory);
         var baseName = SafeBaseName(Path.GetFileNameWithoutExtension(sourcePath));
+        if (aiPackage)
+        {
+            if (!readable) throw new ArgumentException("AI packages use readable export.", nameof(aiPackage));
+            var suffix = zipAiPackage ? ".ai-package.zip" : ".ai-package";
+            if (useUniqueName)
+            {
+                var originalName = baseName;
+                for (var index = 1; ; index++)
+                {
+                    baseName = originalName + (index == 1 ? "" : $" ({index})");
+                    var candidate = Path.Combine(outputDirectory, baseName + suffix);
+                    if (!File.Exists(candidate) && !Directory.Exists(candidate)) break;
+                }
+            }
+            var aiOutput = Path.Combine(outputDirectory, baseName + suffix);
+            var aiService = new DocumentService(OcrEngineFactory.CreateDefault(), DiscoverRasterizer());
+            var exported = await aiService.ExportAiPackageAsync(new AiPackageExportOptions(
+                new ReadableDocumentExportOptions(sourcePath, "document.md", enableOcr, NormalizeLanguages(ocrLanguages),
+                    contentPolicy, showFormulas, includeSvgPreviews, includeDiagrams,
+                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview),
+                aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory), cancellationToken).ConfigureAwait(false);
+            var aiMarkdown = zipAiPackage ? aiOutput : Path.Combine(aiOutput, "document.md");
+            var reviewItems = BuildReviewItems(sourcePath, aiMarkdown, null, exported.Graph, exported.Review,
+                new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
+                    ContentPolicy: contentPolicy, OcrReview: ocrReview));
+            if (zipAiPackage)
+            {
+                // Review images can be displayed directly from the ZIP; no temporary extraction
+                // directory needs to outlive this workflow or leak into output references.
+                using var zip = System.IO.Compression.ZipFile.OpenRead(aiOutput);
+                reviewItems = reviewItems.Select(item =>
+                {
+                    var reference = item.Page.ReviewImageReference;
+                    var entry = reference is not null && reference.StartsWith("assets/", StringComparison.Ordinal)
+                        ? zip.GetEntry(reference) : null;
+                    if (entry is null || entry.Length > 10 * 1024 * 1024) return item;
+                    using var input = entry.Open();
+                    using var bytes = new MemoryStream();
+                    input.CopyTo(bytes);
+                    return item with { ImagePath = "data:image/png;base64," + Convert.ToBase64String(bytes.ToArray()) };
+                }).ToArray();
+            }
+            return new GuiExportResult(aiMarkdown, string.Empty, exported.Graph.Format.ToString().ToLowerInvariant(),
+                "AI package (one-way)", exported.Diagnostics, IsReadable: true, InferenceMode: inferenceMode,
+                VisualSummary: SummarizeVisualGraph(exported.Summary),
+                ExportSummary: $"AIパッケージ: {aiOutput}（{exported.Parts.Count}分割）\n{exported.Summary}",
+                ReviewItems: reviewItems, OcrReview: exported.Review.Ocr, AiPackagePath: aiOutput);
+        }
         if (useUniqueName) baseName = NextAvailableBaseName(outputDirectory, baseName, readable);
         var markdownPath = Path.Combine(outputDirectory, baseName + ".md");
         var sidecarPath = Path.Combine(outputDirectory, baseName + ".drmd");

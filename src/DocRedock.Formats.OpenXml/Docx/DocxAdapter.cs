@@ -25,6 +25,7 @@ public sealed class DocxAdapter : IFormatProbe
     private static readonly XNamespace R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private static readonly XNamespace WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
     private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
+    private static readonly XNamespace C = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     private static readonly XNamespace V = "urn:schemas-microsoft-com:vml";
     private static readonly XNamespace W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
     private static readonly XNamespace WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
@@ -176,6 +177,9 @@ public sealed class DocxAdapter : IFormatProbe
             alternateMirrors.Clear();
         }
         var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
+        var readabilityStyles = archive.GetEntry("word/styles.xml") is { } readabilityStylesEntry
+            ? SafeXml.LoadDocument(await ReadEntryAsync(readabilityStylesEntry, cancellationToken).ConfigureAwait(false)) : null;
+        var readability = new DocxReadability(readabilityStyles, bodyElements, element => IsHiddenContentElement(element, hiddenStyles));
         var landscapeSectionStarts = FindLandscapeSectionStarts(doc, bodyElements);
         // P-Overlay: every shape any table's DetectDocxTableOverlays folded into a cell -- (A)
         // cell-anchored, or (B) preceding-paragraph-anchored -- collected across the whole document
@@ -196,12 +200,15 @@ public sealed class DocxAdapter : IFormatProbe
             // preventing duplicate DrawingML/VML textbox and image projections.
             var entry = bodyEntries[elementIndex];
             var element = entry.Element;
+            var blockOrder = ordinal;
+            var firstBlockNode = nodes.Count;
             if (element.Name == W + "p")
             {
                 var paragraphOrder = ordinal++;
                 lastParagraphOrder = paragraphOrder;
                 var textBoxes = BindHostTextBoxes(entry.Original, entry.Slice, textBoxLedger, alternateMirrors, hiddenStyles);
                 AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes);
+                nodes[firstBlockNode] = readability.ApplyHeading(element, nodes[firstBlockNode]);
             }
             else if (element.Name == W + "tbl")
             {
@@ -247,6 +254,8 @@ public sealed class DocxAdapter : IFormatProbe
                 // Paragraph node rather than folding it into an unrelated neighbouring block.
                 AddMathParagraph(element, "/word/document.xml", entry.Slice, ordinal++, nodes, sliceMap, entry.Control);
             }
+            await AddChartsAsync(archive, element, relationships, nodes, diagnostics,
+                blockOrder, nodes.Skip(firstBlockNode).FirstOrDefault()?.Id, hiddenStyles, cancellationToken).ConfigureAwait(false);
         }
         // Word stores floating nodes and connectors in separate paragraphs surprisingly often.
         // Build one document-level visual canvas so a flow is reconstructed across paragraph
@@ -289,6 +298,50 @@ public sealed class DocxAdapter : IFormatProbe
             [new DocumentPartition("part-0001", 0, nodes, "/word/document.xml")], Capabilities: new(new HashSet<string>(StringComparer.Ordinal)
             { "extract.text", "extract.images", "restore.byte_identical", "restore.text_in_place", "restore.insert_node", "restore.delete_node", "preserve.raw_xml_slice", "preserve.unknown_parts" }));
         return new(graph, index, diagnostics);
+    }
+
+    private static async Task AddChartsAsync(ZipArchive archive, XElement block,
+        IReadOnlyDictionary<string, string> relationships, ICollection<DocumentNode> nodes,
+        ICollection<Diagnostic> diagnostics, int order, string? parentId,
+        DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
+    {
+        foreach (var (chart, index) in block.Descendants(C + "chart").Select((chart, index) => (chart, index)))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var relationshipId = (string?)chart.Attribute(R + "id");
+            var anchor = new SourceAnchor("docx", "/word/document.xml",
+                [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                 new("chart_index", index.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
+            var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
+            OpenXmlChartData? data = null;
+            string? target = null;
+            if (relationshipId is not null && relationships.TryGetValue(relationshipId, out target) &&
+                !Uri.TryCreate(target, UriKind.Absolute, out _) && archive.GetEntry(target.TrimStart('/')) is { } entry)
+            {
+                try
+                {
+                    data = OpenXmlChartReader.Read(await ReadEntryAsync(entry, cancellationToken).ConfigureAwait(false));
+                }
+                catch (System.Xml.XmlException) { }
+            }
+            var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            if (data is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(data.Title)) extensions["chart_title"] = JsonSerializer.SerializeToElement(data.Title);
+                if (!string.IsNullOrWhiteSpace(data.Type)) extensions["chart_type"] = JsonSerializer.SerializeToElement(data.Type);
+                if (data.Series.Count > 0) extensions["chart_series"] = JsonSerializer.SerializeToElement(data.Series);
+            }
+            if (target is not null) extensions["chart_part"] = JsonSerializer.SerializeToElement(target);
+            var layer = IsHiddenContentElement(chart, hiddenStyles) ? ContentLayer.Hidden : ContentLayer.Body;
+            var hasData = data?.Series.Any(series => series.Categories.Count > 0 || series.Values.Count > 0) == true;
+            if (!hasData)
+                diagnostics.Add(new("DocxChartDataUnavailable",
+                    "A DOCX chart has no readable cached data; consult the original chart. External data was not loaded.",
+                    DiagnosticSeverity.Warning, id, "/word/document.xml"));
+            nodes.Add(new(id, NodeKind.Chart, parentId, order, layer,
+                new TextNodeContent(hasData ? data?.Title ?? "グラフ" : "グラフ（キャッシュデータを取得できません。原本を確認してください。）"),
+                anchor, Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
+        }
     }
 
     public async ValueTask<DocxRestoreResult> RestoreAsync(
@@ -527,7 +580,7 @@ public sealed class DocxAdapter : IFormatProbe
             var description = FirstNonEmptyAttribute(docPr, "descr", "title", "name");
             var imageLayer = IsHiddenContentElement(blip, hiddenStyles) ? ContentLayer.Hidden : layer;
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer, new ReferenceNodeContent(target, description), imageAnchor,
-                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: DocxReadability.ImageDimensions(blip)));
         }
         foreach (var (imageData, visualIndex) in paragraph.Descendants(V + "imagedata").Select((item, index) => (item, index)))
         {
@@ -538,12 +591,8 @@ public sealed class DocxAdapter : IFormatProbe
             var shape = imageData.Ancestors(V + "shape").FirstOrDefault();
             var description = FirstNonEmptyAttribute(shape, "alt", "title", "id");
             var imageLayer = IsHiddenContentElement(imageData, hiddenStyles) ? ContentLayer.Hidden : layer;
-            var imageExtensions = imageLayer == ContentLayer.Hidden
-                ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
-                {
-                    ["hidden_content_type"] = JsonSerializer.SerializeToElement("docx-hidden-vml-image"),
-                }
-                : null;
+            var imageExtensions = DocxReadability.ImageDimensions(imageData) ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+            if (imageLayer == ContentLayer.Hidden) imageExtensions["hidden_content_type"] = JsonSerializer.SerializeToElement("docx-hidden-vml-image");
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer,
                 new ReferenceNodeContent(target, description), imageAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
@@ -1586,7 +1635,7 @@ public sealed class DocxAdapter : IFormatProbe
         var off = xfrm?.Element(A + "off");
         var ext = xfrm?.Element(A + "ext");
         var style = (string?)element.Attribute("style");
-        double Parse(string? value) => double.TryParse(value?.TrimEnd('p','t','x','m'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) ? n : 0;
+        double Parse(string? value) => double.TryParse(value?.TrimEnd('p','t','x','m'), System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var n) && double.IsFinite(n) ? n : 0;
         var x = Parse((string?)off?.Attribute("x"));
         var y = Parse((string?)off?.Attribute("y"));
         var width = Parse((string?)ext?.Attribute("cx"));

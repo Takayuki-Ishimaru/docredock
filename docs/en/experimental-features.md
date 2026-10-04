@@ -2,7 +2,7 @@
 
 [日本語](../ja/experimental-features.md) | English
 
-> These command-line workflows are unsupported experiments in the v0.2.12 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
+> These command-line workflows are unsupported experiments in the v0.3.0 Public Beta. They are disabled unless you explicitly opt in; the desktop GUI accepts PDF input by default.
 
 Set the environment variable before starting the CLI:
 

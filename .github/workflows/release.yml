@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.2.12
+        default: v0.3.0
 
 permissions:
   contents: read
@@ -201,6 +201,8 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$staging/docs", "$staging/release-docs" | Out-Null
           Copy-Item -Recurse "docs/ja", "docs/en" "$staging/docs/"
           Copy-Item "docs/FORMAT_CAPABILITY_MATRIX.md" "$staging/docs/FORMAT_CAPABILITY_MATRIX.md"
+          New-Item -ItemType Directory -Force -Path "$staging/docs/reference" | Out-Null
+          Copy-Item "docs/reference/ai-package.md" "$staging/docs/reference/ai-package.md"
           Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
           Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
           New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
@@ -255,6 +257,8 @@ jobs:
           mkdir -p "$staging/docs" "$staging/release-docs"
           cp -R docs/ja docs/en "$staging/docs/"
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
+          mkdir -p "$staging/docs/reference"
+          cp docs/reference/ai-package.md "$staging/docs/reference/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
@@ -351,6 +355,8 @@ jobs:
           mkdir -p "$staging/docs" "$staging/release-docs"
           cp -R docs/ja docs/en "$staging/docs/"
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
+          mkdir -p "$staging/docs/reference"
+          cp docs/reference/ai-package.md "$staging/docs/reference/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
@@ -504,6 +510,7 @@ jobs:
           if actual != expected:
               raise SystemExit("Release assets do not match the public distribution allowlist")
           body = body.replace("](../docs/", f"]({base}/docs/")
+          body = body.replace("](RELEASE_NOTES_", f"]({base}/release-docs/RELEASE_NOTES_")
           body = body.replace("](ERRATA_", f"]({base}/release-docs/ERRATA_")
           path.write_text(body, encoding="utf-8")
           PY

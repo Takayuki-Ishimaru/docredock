@@ -216,17 +216,17 @@
     },
     {
       "id": "D13-1",
-      "desc": "インライン画像(IMG-01)がMarkdown画像参照で残る",
+      "desc": "インライン画像(IMG-01)の参照と原本表示サイズがHTML画像で残る",
       "severity": "guard",
       "type": "contains",
-      "value": "![Picture 1](complex-design-doc.assets/img-0001.png)"
+      "value": "<img src=\"complex-design-doc.assets/img-0001.png\" alt=\"Picture 1\" width=\"336\" height=\"196\">"
     },
     {
       "id": "D13-2",
-      "desc": "浮動配置(anchor)画像(IMG-02)もMarkdown画像参照として抽出される",
+      "desc": "浮動配置(anchor)画像(IMG-02)の参照と原本表示サイズがHTML画像で残る",
       "severity": "guard",
       "type": "contains",
-      "value": "![Picture 2](complex-design-doc.assets/img-0002.png)"
+      "value": "<img src=\"complex-design-doc.assets/img-0002.png\" alt=\"Picture 2\" width=\"288\" height=\"168\">"
     },
     {
       "id": "D13-3",
@@ -241,7 +241,7 @@
       "severity": "guard",
       "ocr": true,
       "type": "regex",
-      "value": "!\\[Picture 2\\]\\([^)]*\\)\n\n(?:[^\n]{0,160}\n\n)?<details class=\"ocr-extraction\">"
+      "value": "<img src=\"complex-design-doc\\.assets/img-0002\\.png\" alt=\"Picture 2\" width=\"288\" height=\"168\">\\n\\n(?:[^\\n]{0,160}\\n\\n)?<details class=\"ocr-extraction\">"
     },
     {
       "id": "D14-1",

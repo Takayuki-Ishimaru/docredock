@@ -707,27 +707,62 @@ public sealed class PdfTextExtractorTests
         Assert.DoesNotContain(compoundGraph.Diagnostics!, diagnostic => diagnostic.Message.Contains("Unpainted PDF subpath", StringComparison.Ordinal));
     }
 
-    [Fact]
-    public void Compound_path_ended_by_no_paint_creates_no_edges_or_nodes()
+    [Theory]
+    [InlineData("W")]
+    [InlineData("W*")]
+    public void Compound_clipping_only_paths_create_no_visual_elements(string clip)
     {
-        // `W n` (clip, no paint): a compound path with several open subpaths must not be painted
-        // -- not partially via the earlier subpaths and not via the last one. This exercises the
-        // `n` branch of the pending-open-subpath deferral, which must reproduce the old
-        // RetainSubpath fallback behaviour exactly for every subpath, just deferred until the
-        // paint operator is known.
-        var pdf = Encoding.Latin1.GetBytes(
-            "%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length 70 >> stream\n" +
-            "0 0 m 100 0 l 200 0 m 300 0 l 400 0 m 500 0 l W n\nendstream\n%%EOF");
+        var result = ExtractReviewContent($"0 0 m 100 0 l 200 0 m 300 0 l 400 0 m 500 0 l {clip} n");
 
-        var graph = PdfTextExtractor.Extract(pdf).VisualGraphs![1];
+        Assert.Empty(result.VisualGraphs!);
+        Assert.False(Assert.Single(result.Pages).HasVectorContent);
+        Assert.Empty(result.Diagnostics!);
+    }
 
+    [Theory]
+    [InlineData("0 0 100 100 re 200 0 100 100 re")]
+    [InlineData("0 0 m 0 50 50 50 50 0 c 200 0 m 220 0 l")]
+    [InlineData("0 0 100 100 re 200 0 m")]
+    public void Clipping_only_closed_curved_and_move_only_subpaths_do_not_leak_into_a_later_stroke(string path)
+    {
+        var graph = ExtractReviewContent($"{path} W n 300 0 m 400 0 l S").VisualGraphs![1];
+
+        var painted = Assert.Single(graph.Paths!);
+        Assert.Equal(new[] { new VisualPathPoint(300, 0), new VisualPathPoint(400, 0) }, painted.Points);
+        Assert.Single(graph.Edges);
         Assert.Empty(graph.Nodes);
-        Assert.Empty(graph.Edges);
-        Assert.Equal(3, graph.Paths!.Count);
-        Assert.All(graph.Paths!, path => Assert.True(path.IsFallback));
-        Assert.Equal(2, graph.Diagnostics!.Count(diagnostic =>
-            diagnostic.Code == "VisualPathPartial" && diagnostic.Message.Contains("Unpainted PDF subpath", StringComparison.Ordinal)));
-        Assert.DoesNotContain(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+        Assert.DoesNotContain(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualPathPartial");
+    }
+
+    [Theory]
+    [InlineData("S")]
+    [InlineData("s")]
+    [InlineData("f")]
+    [InlineData("F")]
+    [InlineData("f*")]
+    [InlineData("B")]
+    [InlineData("B*")]
+    [InlineData("b")]
+    [InlineData("b*")]
+    public void Clipping_paths_that_are_also_painted_keep_the_painted_control_geometry(string paint)
+    {
+        const string path = "0 0 100 100 re 200 0 100 100 re";
+        var control = ExtractReviewContent($"{path} {paint}").VisualGraphs![1];
+        var clipped = ExtractReviewContent($"{path} W* {paint}").VisualGraphs![1];
+
+        Assert.Equal(2, clipped.Paths!.Count);
+        Assert.Equal(control.Paths!.Select(p => (p.Geometry, p.IsFilled, p.IsStroked, p.IsFallback)),
+            clipped.Paths.Select(p => (p.Geometry, p.IsFilled, p.IsStroked, p.IsFallback)));
+    }
+
+    [Fact]
+    public void A_painted_clip_does_not_mark_the_next_unpainted_path_as_clipping_only()
+    {
+        var graph = ExtractReviewContent("0 0 100 100 re W S 200 0 m 300 0 l n").VisualGraphs![1];
+
+        Assert.Equal(2, graph.Paths!.Count);
+        Assert.True(graph.Paths[0].IsStroked);
+        Assert.False(graph.Paths[1].IsStroked);
     }
 
     [Fact]

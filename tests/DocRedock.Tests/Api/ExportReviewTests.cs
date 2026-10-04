@@ -159,6 +159,36 @@ public sealed class ExportReviewTests
         Assert.False(ExportReviewBuilder.Build(graph, []).Required);
     }
 
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void Hidden_content_sharing_review_is_separate_from_source_review(bool sourceReview, bool hiddenContent)
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sharing", DocumentFormatKind.Docx, []);
+        var diagnostics = new[] { new Diagnostic(hiddenContent ? "HiddenContentIncluded" : "OtherWarning",
+            "Review output.", DiagnosticSeverity.Warning) };
+        var summary = ExportSummaryBuilder.Build(graph, diagnostics);
+        if (sourceReview) summary = summary with { VisualReviewPages = 1, ReviewPages = 1, UnresolvedElements = 1 };
+
+        Assert.Equal(hiddenContent, summary.HiddenContentIncluded);
+        Assert.Equal(1, summary.Warnings);
+        Assert.Equal(sourceReview ? 1 : 0, summary.ReviewPages);
+        Assert.Equal(0, summary.ReviewImagePages);
+        var text = summary.ToString();
+        if (!hiddenContent)
+        {
+            Assert.Contains("Human review: not required", text);
+            Assert.DoesNotContain("review before sharing", text);
+        }
+        else
+        {
+            Assert.Contains(sourceReview
+                ? "Human review: required (visual 1 page(s)); hidden content included - review before sharing"
+                : "Human review: source comparison not required; hidden content included - review before sharing", text);
+        }
+    }
+
     private sealed class SolidPngRasterizer(int width, int height) : IPdfRasterizer
     {
         public ProviderDescriptor Descriptor { get; } = new("test.pdf.rasterizer", new Version(1, 0), 1,
