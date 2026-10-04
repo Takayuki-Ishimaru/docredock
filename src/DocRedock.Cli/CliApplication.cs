@@ -708,7 +708,11 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         {
             path = Path.GetFullPath(path);
             if (!protectedPaths.Add(path)) continue;
-            if (Path.GetDirectoryName(path) is { } parent) pending.Enqueue(parent);
+            // Drive/share roots are already protected above. Windows cannot query
+            // a drive root with ResolveLinkTarget, and a root has no parent link
+            // to follow; doing so would reject every otherwise valid AI export.
+            if (Path.GetDirectoryName(path) is not { } parent) continue;
+            pending.Enqueue(parent);
             // A source reached through a directory/file link also needs protection for
             // the target's ancestors, which need not be ancestors of the lexical path.
             FileSystemInfo item = File.Exists(path) ? new FileInfo(path) : new DirectoryInfo(path);
