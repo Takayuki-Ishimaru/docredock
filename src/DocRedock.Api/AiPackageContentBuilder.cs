@@ -69,7 +69,9 @@ public static class AiPackageContentBuilder
 
                 var markdown = serializer.Serialize(BuildGroupGraph(graph, ordered, partitionIndex, partition, group));
                 if (IsHeaderOnly(markdown)) continue;
-                markdown = InsertSourceLine(markdown, sourceFileName);
+                var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format,
+                    partitionIndex + 1, headingPaths)).ToArray();
+                markdown = InsertSourceLine(markdown, sourceFileName, sources);
 
                 partNumber++;
                 var number = partNumber.ToString("D4", CultureInfo.InvariantCulture);
@@ -78,8 +80,7 @@ public static class AiPackageContentBuilder
                     "parts/" + number + ".md",
                     markdown,
                     groupNodes.Select(node => node.Id).ToArray(),
-                    [.. groupNodes.Select(node => DescribeLocation(node, partition, graph.Format,
-                        partitionIndex + 1, headingPaths))],
+                    sources,
                     markdown.Replace("\r\n", "\n", StringComparison.Ordinal).Trim().Length > targetCharacters));
             }
         }
@@ -244,9 +245,13 @@ public static class AiPackageContentBuilder
         return body.Trim().Length == 0;
     }
 
-    private static string InsertSourceLine(string markdown, string sourceFileName)
+    private static string InsertSourceLine(string markdown, string sourceFileName,
+        IReadOnlyList<AiPackageSourceLocation> sources)
     {
         var line = "ソース: " + EscapeLiteral(sourceFileName.Trim());
+        var paths = sources.Where(source => source.HeadingPath is { Count: > 0 })
+            .Select(source => string.Join(" > ", source.HeadingPath!)).Distinct(StringComparer.Ordinal);
+        foreach (var path in paths) line += "\nsection_path: " + EscapeLiteral(path);
         var text = markdown.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\n');
         var firstBreak = text.IndexOf('\n');
         return firstBreak < 0
@@ -313,7 +318,10 @@ public static class AiPackageContentBuilder
             PageNumber: format == DocumentFormatKind.Pdf ? originalNumber : null,
             SlideNumber: format == DocumentFormatKind.Pptx ? originalNumber : null,
             SheetName: format == DocumentFormatKind.Xlsx ? SheetName(partition.Id) : null,
-            HeadingPath: headings.Count > 0 ? headings : null);
+            HeadingPath: headings.Count > 0 ? headings : null,
+            CellAddress: format == DocumentFormatKind.Xlsx && node.Kind == NodeKind.Cell
+                ? node.Source?.Locators.FirstOrDefault(locator => locator.Kind == "cell_address")?.Value
+                : null);
     }
 
     private static Dictionary<string, IReadOnlyList<string>> WordHeadingPaths(DocumentPartition partition)

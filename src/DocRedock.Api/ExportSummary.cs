@@ -29,8 +29,12 @@ public sealed record ExportSummary(
     int VisualReviewPages = 0,
     int UnanalyzedContent = 0,
     int UnanalyzedContentPages = 0,
-    bool HiddenContentIncluded = false)
+    bool HiddenContentIncluded = false,
+    int? RenderedTables = null)
 {
+    /// <summary>Legacy Tables counts canonical graph Table nodes (including inferred PDF tables).
+    /// Worksheet cells rendered as a table are counted separately by RenderedTables.</summary>
+    public int NativeTables => Tables;
     /// <summary>OCR text that should be compared with its source image. This is a review hint,
     /// not a warning: it never changes the export status or exit code.</summary>
     public bool OcrReviewRequired => OcrReviewItems > 0;
@@ -50,7 +54,7 @@ public sealed record ExportSummary(
         $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {VisualReviewPages} page(s))")}\n" +
         $"Unanalyzed content: {(UnanalyzedContent == 0 ? "none" : $"{UnanalyzedContent} item(s) on {UnanalyzedContentPages} page(s)")}\n" +
         $"Human review: {HumanReviewText()}\n" +
-        $"Warnings: {Warnings}\nTables reconstructed: {Tables}\nDiagrams reconstructed: {DiagramsReconstructed}\nFallback pages: {FallbackPages}\nPages requiring review: {ReviewPages}\nReview image pages: {ReviewImagePages}\nUnresolved visual elements: {UnresolvedElements}" +
+        $"Warnings: {Warnings}\nTables reconstructed: {Tables} (graph nodes)\nMarkdown tables rendered: {RenderedTables?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "not measured"}\nDiagrams reconstructed: {DiagramsReconstructed}\nFallback pages: {FallbackPages}\nPages requiring review: {ReviewPages}\nReview image pages: {ReviewImagePages}\nUnresolved visual elements: {UnresolvedElements}" +
         (OcrImages > 0 ? $"\nOCR review items: {OcrReviewItems} (confidence below 80% or not reported, in {OcrImages} image(s))" : string.Empty);
 
     private string HumanReviewText()
@@ -68,7 +72,7 @@ public sealed record ExportSummary(
 
 public static class ExportSummaryBuilder
 {
-    public static ExportSummary Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics)
+    public static ExportSummary Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, int? renderedTables = null)
     {
         var graphs = graph.Nodes.Select(ReadVisualGraph).OfType<VisualGraph>().ToArray();
         var edges = graphs.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
@@ -106,7 +110,8 @@ public static class ExportSummaryBuilder
             UnresolvedElements: graphs.Sum(CountUnresolvedElements),
             OcrImages: ocr.Images,
             OcrReviewItems: ocr.ReviewItems,
-            HiddenContentIncluded: diagnostics.Any(diagnostic => diagnostic.Code == "HiddenContentIncluded"));
+            HiddenContentIncluded: diagnostics.Any(diagnostic => diagnostic.Code == "HiddenContentIncluded"),
+            RenderedTables: renderedTables);
     }
 
     // Count objects, not warnings; a raw shaft and the unresolved edge backed by it

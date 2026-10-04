@@ -402,7 +402,9 @@ public sealed class MarkdownGraphEditor
 
     private static string DecodeBlockText(TypedMarkdownBlock block)
     {
-        var text = block.Text.TrimEnd();
+        // Only remove projection line separators. Spaces/tabs belong to the source text,
+        // including the space before a separately projected inline drawing.
+        var text = block.Text.TrimEnd('\r', '\n');
         return block.Kind.ToLowerInvariant() switch
         {
             "heading" or "title" => Unescape(text.TrimStart().TrimStart('#').TrimStart()),

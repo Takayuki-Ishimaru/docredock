@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.0 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.1 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -35,7 +35,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.0では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.1では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -48,15 +48,18 @@ docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.
 | ファイル | 内容 |
 | --- | --- |
 | `document.md` | 文書全体の閲覧用Markdown |
-| `parts/0001.md`など | 元ファイル名を添えた、意味のまとまりごとのMarkdown |
+| `parts/0001.md`など | 元ファイル名とWordの見出し階層を添えた、意味のまとまりごとのMarkdown |
 | `assets/` | 文書が参照する画像。分割Markdownからは`../assets/`を参照 |
 | `review.md` | 変換の制約、OCR確認件数、非表示内容の注意、該当する分割へのリンク |
 | `manifest.json` | 元ファイル名・ハッシュ、変換設定、分割ごとの出典、生成ファイルのハッシュ |
+| `source-index.json` | 全ノードIDとExcelの元セル座標。詳細が必要なときに読み込む索引 |
 | `report.json` | 変換結果と確認事項、診断コード・件数のJSON |
 
 Wordは見出しと意味のまとまりで分割し、既定のサイズ目安は12,000文字です。表・入れ子の表、図と構成要素、連続するリストはまとめて保持します。PDFはページ、PowerPointはスライド、Excelはシートごとに保持します。大きい単位は目安を超える場合があり、`exceeds_target`と`review.md`に記録されます。文字数の目安であり、AIモデルのトークン上限ではありません。CLIでは`--chunk-chars`、APIでは`TargetCharacters`で128～1,000,000文字を指定でき、GUIでは既定値を使います。
 
-出典には実際のPDFページ番号、スライド番号、シート名、Wordの見出し階層とノードIDを記録します。Wordのページ番号は推測しません。空の単位や設定で全て除外された単位は分割を作りません。`visible`／`sanitized`／`complete`とシート指定は、全文、分割、出典、画像に共通して適用されます。`complete`には非表示内容が含まれる場合があり、共有前の確認を表示します。元のOffice/PDFファイルと元ファイルの絶対パスは同梱しません。
+簡潔なmanifestでは、実際のPDFページ番号、スライド番号、シート名、Wordの見出し階層を共有の出典情報として記録します。全ノードIDとExcelの元セル座標は別の詳細索引に保持します。Wordのページ番号は推測しません。空の単位や設定で全て除外された単位は分割を作りません。`visible`／`sanitized`／`complete`とシート指定は、全文、分割、出典、画像に共通して適用されます。`complete`には非表示内容が含まれる場合があり、共有前の確認を表示します。元のOffice/PDFファイルと元ファイルの絶対パスは同梱しません。
+
+現在のmanifestはschema `2.0`です。公開済みv0.3.0のschema `1.0`を読むツールは、形式仕様に記載した共有出典・詳細索引への対応が必要です。変換結果では、Excelセルから組み立てた表を含め、Markdownに出力した表の件数も確認できます。件数は本文の意味や読み順の正しさを保証するものではありません。
 
 画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換には引き続き実験機能の環境変数が必要です。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
 

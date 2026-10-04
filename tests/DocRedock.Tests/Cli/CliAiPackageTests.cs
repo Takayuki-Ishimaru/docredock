@@ -34,8 +34,11 @@ public sealed class CliAiPackageTests : IDisposable
             using var manifest = JsonDocument.Parse(files["manifest.json"]);
             Assert.Equal(128, manifest.RootElement.GetProperty("target_characters").GetInt32());
             Assert.Equal("sanitized", manifest.RootElement.GetProperty("content_policy").GetString());
+            var locations = manifest.RootElement.GetProperty("locations").EnumerateArray()
+                .ToDictionary(location => location.GetProperty("id").GetString()!);
             Assert.All(manifest.RootElement.GetProperty("parts").EnumerateArray(), part =>
-                Assert.All(part.GetProperty("sources").EnumerateArray(), s => Assert.Equal("Visible", s.GetProperty("sheet_name").GetString())));
+                Assert.All(part.GetProperty("source_ids").EnumerateArray(), id =>
+                    Assert.Equal("Visible", locations[id.GetString()!].GetProperty("sheet_name").GetString())));
         }
         finally { Environment.SetEnvironmentVariable("DOCREDOCK_ENABLE_EXPERIMENTAL", previous); }
     }
