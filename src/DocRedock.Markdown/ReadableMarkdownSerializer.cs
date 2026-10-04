@@ -128,7 +128,8 @@ public sealed partial class ReadableMarkdownSerializer
     {
         if (rows.Count == 0) return;
         var metadataRows = rows.TakeWhile(row => row.Cells.Count == 2 && LooksLikeLabel(row.Cells[0])).ToArray();
-        if (metadataRows.Length > 0 && metadataRows.Length < rows.Count && rows[metadataRows.Length].Cells.Count >= 3)
+        if (metadataRows.Length > 0 && metadataRows.Length < rows.Count && rows[metadataRows.Length].Cells.Count >= 3 &&
+            !metadataRows.Any(row => row.Cells.All(cell => cell.IsBold || cell.HasFill || cell.IsCentered)))
         {
             WriteKeyValueRows(output, metadataRows);
             RenderWorkbookRows(output, rows.Skip(metadataRows.Length).ToArray(), ref hasSectionHeading);
@@ -264,6 +265,7 @@ public sealed partial class ReadableMarkdownSerializer
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
                 if (!TryPrepareNode(node, out var text, out var displayText)) continue;
+                if (ExtensionBool(node, "decorative_toc_leader")) continue;
                 // P-Overlay suppression: no heading, no paragraph, and no rotation annotation -- the
                 // host table already rendered this shape's text/marker in its own cells. DOCX tags a
                 // (B) preceding-paragraph overlay shape's NodeKind.TextBox node (it has no
@@ -658,6 +660,17 @@ public sealed partial class ReadableMarkdownSerializer
             AddDiagnostic(new MarkdownDiagnostic("ImageFormatNotDisplayable",
                 $"Image '{image.Reference}' uses a format that Markdown cannot display.", MarkdownDiagnosticSeverity.Warning, imageNode.Id));
         }
+        else if (ExtensionDouble(imageNode, "display_width_px") is { } width &&
+            ExtensionDouble(imageNode, "display_height_px") is { } height &&
+            double.IsFinite(width) && double.IsFinite(height) && width is >= 1 and <= 8192 && height is >= 1 and <= 8192)
+        {
+            var scale = Math.Min(1, 960 / width);
+            output.Append("<img src=\"").Append(System.Net.WebUtility.HtmlEncode(MarkdownPathEncoder.Encode(image.Reference)))
+                .Append("\" alt=\"").Append(System.Net.WebUtility.HtmlEncode(image.AltText ?? "図"))
+                .Append("\" width=\"").Append(Math.Max(1, (int)Math.Round(width * scale)).ToString(CultureInfo.InvariantCulture))
+                .Append("\" height=\"").Append(Math.Max(1, (int)Math.Round(height * scale)).ToString(CultureInfo.InvariantCulture))
+                .AppendLine("\">").AppendLine();
+        }
         else WriteImage(output, image);
 
         if (includeOcr)
@@ -996,7 +1009,9 @@ public sealed partial class ReadableMarkdownSerializer
             ExtensionBool(node, "is_numeric") || StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "n"),
             ExtensionBool(node, "is_bold"), ExtensionBool(node, "has_fill"), ExtensionBool(node, "has_border"),
             ExtensionBool(node, "is_centered"), ExtensionDouble(node, "font_size"),
-            ExtensionInt(node, "merged_to_column") ?? column.Value);
+            Math.Max(ExtensionInt(node, "merged_to_column") ?? column.Value, ExtensionInt(node, "center_across_to_column") ?? column.Value),
+            MaxRow: ExtensionInt(node, "merged_to_row") ?? row.Value,
+            IsCenterAcross: ExtensionInt(node, "center_across_to_column") > column.Value);
     }
 
     private static void RenderRowGroup(StringBuilder output, IReadOnlyList<SheetRow> rows)
@@ -1019,6 +1034,8 @@ public sealed partial class ReadableMarkdownSerializer
             }
             return;
         }
+
+        if (TryWriteMultiRowHeaderTables(output, rows)) return;
 
         if (rows.Count >= 2 && IsHeaderRow(rows[0]))
         {
@@ -1044,6 +1061,59 @@ public sealed partial class ReadableMarkdownSerializer
 
         foreach (var row in rows) RenderStandaloneRow(output, row);
     }
+
+    private static bool TryWriteMultiRowHeaderTables(StringBuilder output, IReadOnlyList<SheetRow> rows)
+    {
+        var start = -1;
+        for (var index = 2; index < Math.Min(rows.Count - 1, 17); index++)
+            if (IsNumericDataRow(rows[index]) && IsNumericDataRow(rows[index + 1]) &&
+                rows[index + 1].Number == rows[index].Number + 1) { start = index; break; }
+        if (start < 0) return false;
+        var headerRows = rows.Take(start).ToArray();
+        if (headerRows.Any(row => IsNumericDataRow(row) || row.Cells.Any(cell => cell.IsOverlay || LooksLikeCode(cell.Text) || cell.MaxRow >= rows[start].Number))) return false;
+        var hierarchy = headerRows.SelectMany(row => row.Cells).Any(cell =>
+            !string.IsNullOrWhiteSpace(cell.Text) && (cell.MaxColumn > cell.Column || cell.MaxRow > cell.Row));
+        if (!hierarchy && headerRows.Count(row => row.Cells.Count(cell => !string.IsNullOrWhiteSpace(cell.Text) &&
+            (cell.IsBold || cell.HasFill || cell.IsCentered)) >= 2) < 2) return false;
+
+        // Banner titles and unit declarations describe the whole table, rather than
+        // only the first column. Keep them outside the flattened header.
+        var banners = headerRows.TakeWhile(row =>
+        {
+            var cells = row.Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+            return cells.Length == 1 && cells[0].MaxRow <= cells[0].Row && cells[0].Column == row.Cells[0].Column &&
+                (cells[0].MaxColumn == cells[0].Column || cells[0].MaxColumn >= row.Cells[^1].Column) ||
+                cells.Length > 0 && cells.All(cell => System.Text.RegularExpressions.Regex.IsMatch(PlainText(cell.Text),
+                    @"(?:単位|\bunit\b|^\(?In thousands|^\(?In millions)", System.Text.RegularExpressions.RegexOptions.IgnoreCase));
+        }).ToArray();
+        headerRows = headerRows.Skip(banners.Length).ToArray();
+        if (headerRows.Length < 2) return false;
+        var dataEnd = start;
+        while (dataEnd < rows.Count && IsNumericDataRow(rows[dataEnd])) dataEnd++;
+        if (dataEnd - start < 2) return false;
+        foreach (var banner in banners)
+            WriteParagraph(output, EscapeLiteral(string.Join(" — ", banner.Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).Select(cell => cell.Text))));
+
+        var columns = rows[0].Cells.Select(cell => cell.Column).ToArray();
+        var sourceHeaders = headerRows.SelectMany(row => row.Cells).Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        var headers = columns.Select(column =>
+        {
+            // Fill only a merge's declared span. Arbitrary empty cells never inherit
+            // the label to their left. Vertical merges appear once in each path.
+            var path = sourceHeaders.Where(cell => cell.Column <= column && cell.MaxColumn >= column)
+                .OrderBy(cell => cell.Row).Select(cell => cell.Text).Distinct(StringComparer.Ordinal).ToArray();
+            return path.Length > 0 ? string.Join(" / ", path) : $"列 {column}";
+        }).ToArray();
+        WriteTable(output, headers, rows.Skip(start).Take(dataEnd - start).Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+        if (dataEnd < rows.Count) RenderRowGroup(output, rows.Skip(dataEnd).ToArray());
+        return true;
+    }
+
+    private static bool IsNumericDataRow(SheetRow row) =>
+        row.Cells.Count(cell => !string.IsNullOrWhiteSpace(cell.Text) && (cell.IsNumeric || cell.IsFormula) &&
+            !(cell.IsNumeric && (cell.IsBold || cell.HasFill || cell.IsCentered) &&
+                int.TryParse(PlainText(cell.Text), out var year) && year is >= 1900 and <= 2100)) >=
+        Math.Max(2, (int)Math.Ceiling(row.Cells.Count * .35));
 
     private static void WriteKeyValueRows(StringBuilder output, IReadOnlyList<SheetRow> rows)
     {
@@ -1076,7 +1146,8 @@ public sealed partial class ReadableMarkdownSerializer
     private static IReadOnlyList<SheetRegion> BuildRegions(IReadOnlyList<SheetRow> rows)
     {
         var regions = new List<MutableRegion>();
-        foreach (var fragment in rows.SelectMany(SplitRow).OrderBy(fragment => fragment.Row.Number).ThenBy(fragment => fragment.MinColumn))
+        var boundaries = SheetRegionBoundaries(rows);
+        foreach (var fragment in rows.SelectMany(row => SplitRow(row, boundaries)).OrderBy(fragment => fragment.Row.Number).ThenBy(fragment => fragment.MinColumn))
         {
             var metadataFragment = IsMetadataFragment(fragment.Cells);
             var startsSection = fragment.Cells.Count == 1 && !fragment.Cells[0].IsNumeric &&
@@ -1084,7 +1155,10 @@ public sealed partial class ReadableMarkdownSerializer
             var matching = startsSection || metadataFragment ? null : regions
                     .Where(region => (region.HasSectionHeading
                                          ? region.MaxColumn - region.MinColumn >= 3
-                                         : fragment.Cells.Count > 1) &&
+                                         : fragment.Cells.Count > 1 || region.MaxColumn == region.MinColumn ||
+                                           fragment.Cells[0].IsHeaderStyled && fragment.Cells[0].Text.Length <= 80 &&
+                                           (fragment.Cells[0].MaxColumn == fragment.Cells[0].Column || fragment.Cells[0].IsCenterAcross && fragment.MaxColumn <= region.MaxColumn) && !LooksLikeCode(fragment.Cells[0].Text) &&
+                                           fragment.MinColumn >= region.MinColumn && fragment.MaxColumn <= region.MaxColumn) &&
                                      fragment.Row.Number - region.MaxRow <= (region.HasSectionHeading ? 12 : 4) &&
                                      fragment.Row.Number >= region.MinRow &&
                                      !region.ContainsRow(fragment.Row.Number) &&
@@ -1113,20 +1187,41 @@ public sealed partial class ReadableMarkdownSerializer
                label.Equals("Public Beta", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static IEnumerable<RowFragment> SplitRow(SheetRow row)
+    private static IReadOnlyList<int> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
+    {
+        // A single blank column is often indentation between bilingual row labels and data.
+        // Split only at wider bands that remain empty across the section. Ignore standalone
+        // merged titles so they do not reconnect two otherwise independent tables below them.
+        var cells = rows.Where(row => row.Cells.Count > 1 || row.Cells[0].MaxColumn == row.Cells[0].Column)
+            .SelectMany(row => row.Cells).OrderBy(cell => cell.Column).ToArray();
+        if (cells.Length == 0) return [];
+        var boundaries = new List<int>();
+        var end = cells[0].MaxColumn;
+        foreach (var cell in cells.Skip(1))
+        {
+            if (cell.Column - end >= 3) boundaries.Add(cell.Column);
+            end = Math.Max(end, cell.MaxColumn);
+        }
+        return boundaries;
+    }
+
+    private static IEnumerable<RowFragment> SplitRow(SheetRow row, IReadOnlyList<int> boundaries)
     {
         // Preserve compact rows as one logical table row. This keeps a four-column
         // header aligned with its following data row even when the source uses wide
         // visual spacing between cells (a common revision-history layout).
         // P-Overlay (XLSX): see the ReadableCell.IsOverlay comment -- a row an overlay touched
         // must never split into an orphaned label fragment and an orphaned marker fragment.
-        if (row.Cells.Count <= 4 || row.Cells.Any(cell => cell.IsOverlay))
+        if (boundaries.Count == 0 || row.Cells.Any(cell => cell.IsOverlay) ||
+            row.Cells.Count == 1 && row.Cells[0].MaxColumn > row.Cells[0].Column ||
+            row.Cells.Count <= 4 && !Enumerable.Range(1, row.Cells.Count - 1)
+                .Any(index => row.Cells[index].Column - row.Cells[index - 1].MaxColumn <= 2))
         {
             yield return new(row, row.Cells);
             yield break;
         }
         var splits = Enumerable.Range(1, row.Cells.Count - 1)
-            .Where(index => row.Cells[index].Column - row.Cells[index - 1].MaxColumn >= 2)
+            .Where(index => boundaries.Any(boundary => row.Cells[index - 1].MaxColumn < boundary && row.Cells[index].Column >= boundary))
             .ToArray();
         if (splits.Length == 0)
         {
@@ -2572,7 +2667,7 @@ public sealed partial class ReadableMarkdownSerializer
     // that a region can then never join back together (BuildRegions accepts at most one fragment
     // per row per region). A row genuinely made of two independent tables never carries an overlay
     // marker, so this stays narrowly scoped to the case this feature introduces.
-    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false)
+    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false, int MaxRow = 0, bool IsCenterAcross = false)
     {
         public bool IsHeaderStyled => IsBold || HasFill || HasBorder || IsCentered || FontSize is >= 12;
     }

@@ -124,7 +124,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md] [--profile readable|roundtrip|audit] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -151,7 +151,19 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (profile is not ("roundtrip" or "readable" or "audit")) return Unsupported("Built-in export supports roundtrip, readable, and audit profiles.");
         if (!ExperimentalFeatures.IsEnabled && (profile != "readable" || await DocumentService.DetectFormatAsync(source, token) == DocumentFormatKind.Pdf))
             return ExperimentalDisabled(profile == "readable" ? "PDF export" : profile + " export");
-        var markdown = Path.GetFullPath(args.Option("output") ?? Path.ChangeExtension(source, ".md"));
+        var aiPackage = args.Option("ai-package");
+        if (aiPackage is not null && (profile != "readable" || aiPackage is not ("dir" or "zip")))
+            return Invalid("--ai-package requires dir or zip and the readable profile.");
+        if (aiPackage is null && args.Option("chunk-chars") is not null)
+            return Invalid("--chunk-chars requires --ai-package dir or zip.");
+        var targetCharacters = 12_000;
+        if (args.Option("chunk-chars") is { } size && (!int.TryParse(size, out targetCharacters) || targetCharacters is < 128 or > 1_000_000))
+            return Invalid("--chunk-chars must be between 128 and 1000000.");
+        if (aiPackage is not null && args.HasFlag("embed-images"))
+            return Invalid("AI packages store images in assets/; omit --embed-images.");
+        var defaultOutput = aiPackage is null ? Path.ChangeExtension(source, ".md")
+            : Path.Combine(Path.GetDirectoryName(source)!, Path.GetFileNameWithoutExtension(source) + ".ai-package" + (aiPackage == "zip" ? ".zip" : ""));
+        var markdown = Path.GetFullPath(args.Option("output") ?? defaultOutput);
         var ocrMode = (args.Option("ocr") ?? "auto").ToLowerInvariant();
         if (ocrMode is not ("auto" or "on" or "off")) return Invalid("--ocr must be auto, on, or off.");
         var visualInference = (args.Option("visual-inference") ?? "safe").ToLowerInvariant();
@@ -178,18 +190,13 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         {
             var inferenceMode = ParseInferenceMode(visualInference);
             var embedImages = args.HasFlag("embed-images");
-            var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
-            using var stagedOutputs = embedImages
-                ? new StagedOutputTransaction([markdown], force, protectedInputs: [source])
-                : new StagedOutputTransaction([markdown], force, [readableAssets], protectedInputs: [source]);
-            var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var sheets = args.Option("sheets")?.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             // An explicit --sheets that resolves to nothing ("", ",", " , ") is a user
             // error, not "all sheets": that meaning is reserved for omitting --sheets
             // entirely (sheets stays null above).
             if (sheets is { Length: 0 }) return Invalid("--sheets requires at least one sheet name.");
-            var readable = await Service.ExportReadableAsync(new ReadableDocumentExportOptions(
-                source, stagedMarkdown, ocrMode != "off", languages, contentPolicy,
+            ReadableDocumentExportOptions ReadableOptions(string path) => new(
+                source, path, ocrMode != "off", languages, contentPolicy,
                 ShowFormulas: args.HasFlag("show-formulas"),
                 IncludeSvgPreviews: args.HasFlag("svg-previews"),
                 IncludeDiagrams: !args.HasFlag("no-diagrams"),
@@ -198,7 +205,29 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 EmbedImages: embedImages,
                 InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off",
                 OcrReview: ocrReview switch { "all" => DocRedock.Markdown.OcrReviewMode.All,
-                    "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence }), token);
+                    "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence });
+            if (aiPackage is not null)
+            {
+                // Replacing a package directory must not remove an input anywhere below it.
+                var protectedPaths = AiPackageProtectedInputs(source);
+                using var packageTransaction = new StagedOutputTransaction([markdown], force, protectedInputs: protectedPaths);
+                var packageResult = await Service.ExportAiPackageAsync(new AiPackageExportOptions(
+                    ReadableOptions(markdown), packageTransaction.PathFor(markdown),
+                    aiPackage == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters), token);
+                token.ThrowIfCancellationRequested();
+                packageTransaction.Commit();
+                await output.WriteLineAsync($"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))");
+                await output.WriteLineAsync(packageResult.Summary.ToString());
+                await output.WriteLineAsync("Review: review.md; report.json; source locations: manifest.json");
+                await WriteDiagnosticsAsync(packageResult.Diagnostics, quiet, args.HasFlag("verbose"));
+                return packageResult.Parts.Count == 0 || packageResult.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
+            }
+            var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
+            using var stagedOutputs = embedImages
+                ? new StagedOutputTransaction([markdown], force, protectedInputs: [source])
+                : new StagedOutputTransaction([markdown], force, [readableAssets], protectedInputs: [source]);
+            var stagedMarkdown = stagedOutputs.PathFor(markdown);
+            var readable = await Service.ExportReadableAsync(ReadableOptions(stagedMarkdown), token);
             stagedOutputs.Commit();
             await output.WriteLineAsync($"Exported: {markdown}");
             await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
@@ -669,6 +698,25 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteMarkdownDiagnostics(TypedMarkdownDocument document) { foreach (var item in document.Diagnostics) { var writer = item.Severity == MarkdownDiagnosticSeverity.Error ? error : output; writer.WriteLine($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}"); } }
     private int Invalid(string message) { error.WriteLine(message); return 2; }
     private int Unsupported(string message) { error.WriteLine(message); return 4; }
+    private static IReadOnlyList<string> AiPackageProtectedInputs(string source)
+    {
+        var protectedPaths = new HashSet<string>(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+            ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var pending = new Queue<string>();
+        pending.Enqueue(source);
+        while (pending.TryDequeue(out var path))
+        {
+            path = Path.GetFullPath(path);
+            if (!protectedPaths.Add(path)) continue;
+            if (Path.GetDirectoryName(path) is { } parent) pending.Enqueue(parent);
+            // A source reached through a directory/file link also needs protection for
+            // the target's ancestors, which need not be ancestors of the lexical path.
+            FileSystemInfo item = File.Exists(path) ? new FileInfo(path) : new DirectoryInfo(path);
+            if (item.ResolveLinkTarget(returnFinalTarget: true) is { } target) pending.Enqueue(target.FullName);
+        }
+        return protectedPaths.ToArray();
+    }
+
     private int ExperimentalDisabled(string feature)
     {
         error.WriteLine($"{feature} is experimental and disabled. Set {ExperimentalFeatures.EnvironmentVariable}=1 to enable it explicitly.");
@@ -681,7 +729,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         DocRedock {Version} Public Beta
           docredock --version
           docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
-                      readable: [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
+                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
@@ -743,7 +791,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
         private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);

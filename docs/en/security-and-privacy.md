@@ -16,6 +16,8 @@ Readable export defaults to `visible`, which filters recognized Office-hidden te
 
 Review both the `.md` and `.assets/`, as well as embedded data URIs, cached calculation results, and OCR output. Experimental `.drmd` and `.drmdpkg` files may include source binaries or restoration data and must be handled like the source document.
 
+AI packages contain converted text, images, the source basename and hash, source locations and review guidance. They do not bundle the original document, its absolute path or restoration sidecars. Content policies apply throughout the package; `complete` can include hidden content. Review `document.md`, `assets/` and `review.md` before sharing. Creating a package does not upload it.
+
 ## Untrusted input
 
 DocRedock applies limits and checks for XML DTDs, archive traversal/expansion, symlink escapes, suspicious formulas, and unsupported protected structures. Main limits are 200 MiB per source, 16 MiB per Markdown file, and 10 MiB per verified embedded image / 50 MiB total.

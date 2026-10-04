@@ -69,7 +69,7 @@ public sealed record OfficePackageIndex(string SchemaVersion, IReadOnlyList<Offi
 public sealed record OfficeRelationship(string PartUri, string Id, string Type, string Target, bool IsExternal);
 
 /// <summary>Typed, local-only job orchestrator. Restore is deliberately separate from Render.</summary>
-public sealed class DocumentService
+public sealed partial class DocumentService
 {
     // Keep a readable Markdown export bounded even when an Office package contains
     // unexpectedly large or numerous bitmaps.

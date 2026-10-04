@@ -9,6 +9,125 @@ namespace DocRedock.Tests.Markdown;
 public sealed class ReadableMarkdownTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Workbook_flattens_declared_merged_headers_and_splits_stacked_tables(bool stacked)
+    {
+        DocumentNode C(string id, int r, int c, string text, bool number = false, int toColumn = 0, int toRow = 0)
+        {
+            var n = Cell(id, r, c, text, r <= 2 || r is 5 or 6);
+            var e = n.Extensions!.ToDictionary(p => p.Key, p => p.Value);
+            e["is_numeric"] = JsonSerializer.SerializeToElement(number);
+            if (toColumn > 0) e["merged_to_column"] = JsonSerializer.SerializeToElement(toColumn);
+            if (toRow > 0) e["merged_to_row"] = JsonSerializer.SerializeToElement(toRow);
+            return n with { Extensions = e };
+        }
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", 1, 1, "項目", toRow: 2), C("B1", 1, 2, "売上", toColumn: 3),
+            C("B2", 2, 2, "2025", true), C("C2", 2, 3, "2026", true),
+            C("A3", 3, 1, "甲"), C("B3", 3, 2, "10", true), C("C3", 3, 3, "20", true),
+            C("A4", 4, 1, "乙"), C("B4", 4, 2, "30", true), C("C4", 4, 3, "40", true)
+        };
+        if (stacked) nodes.AddRange([
+            C("A5", 5, 1, "部署", toRow: 6), C("B5", 5, 2, "人数", toColumn: 3),
+            C("B6", 6, 2, "常勤"), C("C6", 6, 3, "非常勤"),
+            C("A7", 7, 1, "丙"), C("B7", 7, 2, "5", true), C("C7", 7, 3, "6", true),
+            C("A8", 8, 1, "丁"), C("B8", 8, 2, "7", true), C("C8", 8, 3, "8", true)]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(new(DocumentGraph.CurrentSchemaVersion, "headers", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Data", 0, nodes)]));
+        Assert.Contains("| 項目 | 売上 / 2025 | 売上 / 2026 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 甲 | 10 | 20 |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("|  | 2025 | 2026 |", markdown, StringComparison.Ordinal);
+        if (stacked) Assert.Contains("| 部署 | 人数 / 常勤 | 人数 / 非常勤 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_does_not_propagate_a_header_across_an_unmerged_blank()
+    {
+        var nodes = new[] { Cell("A1", 1, 1, "分類", true), Cell("B1", 1, 2, "売上", true), Cell("A2", 2, 1, "種類", true),
+            Cell("B2", 2, 2, "国内", true), Cell("C2", 2, 3, "海外", true), Cell("A3", 3, 1, "甲"), Cell("B3", 3, 2, "10"),
+            Cell("C3", 3, 3, "20"), Cell("A4", 4, 1, "乙"), Cell("B4", 4, 2, "30"), Cell("C4", 4, 3, "40") }
+            .Select(n => n with { Extensions = n.Extensions!.ToDictionary(p => p.Key, p => p.Value)
+                .Append(new KeyValuePair<string, JsonElement>("is_numeric", JsonSerializer.SerializeToElement(n.Order / 1000 >= 3 && n.Order % 1000 >= 2))).ToDictionary(p => p.Key, p => p.Value) }).ToArray();
+        var markdown = new ReadableMarkdownSerializer().Serialize(new(DocumentGraph.CurrentSchemaVersion, "no-merge", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Data", 0, nodes)]));
+        Assert.Contains("| 分類 / 種類 | 売上 / 国内 | 海外 |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("売上 / 海外", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_keeps_all_text_multirow_forms_without_flattening()
+    {
+        var markdown = new ReadableMarkdownSerializer().Serialize(new(DocumentGraph.CurrentSchemaVersion, "form", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Form", 0, [Cell("A1", 1, 1, "質問", true), Cell("B1", 1, 2, "回答", true),
+                Cell("A2", 2, 1, "名前"), Cell("B2", 2, 2, "記入してください"), Cell("A3", 3, 1, "所属"), Cell("B3", 3, 2, "任意")])]));
+        Assert.Contains("| 名前 | 記入してください |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("質問 / 名前", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_preserves_bilingual_row_labels_across_a_single_blank_column()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "statistics", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Data", 0,
+            [Cell("A1", 1, 1, "統計"),
+             Cell("A3", 3, 1, "道路種別", true), Cell("B3", 3, 2, "Kind", true),
+             Cell("D3", 3, 4, "総延長", true), Cell("E3", 3, 5, "実延長", true), Cell("F3", 3, 6, "舗装率", true),
+             Cell("A4", 4, 1, "計"), Cell("B4", 4, 2, "Total"), Cell("D4", 4, 4, "1285"), Cell("E4", 4, 5, "1231"), Cell("F4", 4, 6, "28.8"),
+             Cell("A5", 5, 1, "一般道路"), Cell("B5", 5, 2, "General roads"), Cell("D5", 5, 4, "1276"), Cell("E5", 5, 5, "1222"), Cell("F5", 5, 6, "28.2")])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("| 計 | Total | 1285 | 1231 | 28.8 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 一般道路 | General roads | 1276 | 1222 | 28.2 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_separates_sparse_schedule_rows_from_an_adjacent_lookup_list()
+    {
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "schedule", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Booking", 0,
+            [Cell("A1", 1, 1, "予約"), Cell("A2", 2, 1, "日付", true), Cell("B2", 2, 2, "曜日", true),
+             Cell("C2", 2, 3, "午前", true), Cell("D2", 2, 4, "午後", true), Cell("H2", 2, 8, "リスト"),
+             Cell("A3", 3, 1, "1"), Cell("B3", 3, 2, "水"), Cell("H3", 3, 8, "候補甲"),
+             Cell("A4", 4, 1, "2"), Cell("B4", 4, 2, "木"), Cell("H4", 4, 8, "候補乙")])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("| 日付 | 曜日 | 午前 | 午後 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 1 | 水 |  |  |", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| 1 | 水 |  |  | 候補甲 |", markdown, StringComparison.Ordinal);
+        Assert.True(markdown.IndexOf("候補甲", StringComparison.Ordinal) > markdown.IndexOf("| 2 | 木", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Workbook_does_not_split_a_gap_filled_by_another_row_or_merged_cell()
+    {
+        var bridge = Cell("C3", 3, 3, "統合ヘッダー", true);
+        bridge = bridge with { Extensions = bridge.Extensions!.ToDictionary(x => x.Key, x => x.Value)
+            .Append(new KeyValuePair<string, JsonElement>("merged_to_column", JsonSerializer.SerializeToElement(6))).ToDictionary(x => x.Key, x => x.Value) };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "bridge", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Data", 0,
+            [Cell("A1", 1, 1, "統合表"), Cell("A3", 3, 1, "項目", true), Cell("B3", 3, 2, "名前", true), bridge,
+             Cell("A4", 4, 1, "甲"), Cell("B4", 4, 2, "Alpha"), Cell("F4", 4, 6, "10"), Cell("G4", 4, 7, "20"),
+             Cell("A5", 5, 1, "乙"), Cell("B5", 5, 2, "Beta"), Cell("F5", 5, 6, "30"), Cell("G5", 5, 7, "40")])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("| 甲 | Alpha |  | 10 | 20 |", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Workbook_keeps_a_merged_source_note_outside_the_data_table()
+    {
+        var note = Cell("A5", 5, 1, "Source: public statistics", true);
+        note = note with { Extensions = note.Extensions!.ToDictionary(x => x.Key, x => x.Value)
+            .Append(new KeyValuePair<string, JsonElement>("merged_to_column", JsonSerializer.SerializeToElement(4))).ToDictionary(x => x.Key, x => x.Value) };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "note", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Data", 0,
+            [Cell("A1", 1, 1, "Data"), Cell("A3", 3, 1, "項目", true), Cell("B3", 3, 2, "件数", true),
+             Cell("A4", 4, 1, "甲"), Cell("B4", 4, 2, "10"), note])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("\n\nSource: public statistics\n", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("| Source: public statistics |", markdown, StringComparison.Ordinal);
+    }
+
+    [Theory]
     [InlineData(OcrReviewMode.LowConfidence, 2)]
     [InlineData(OcrReviewMode.All, 3)]
     [InlineData(OcrReviewMode.Summary, 0)]

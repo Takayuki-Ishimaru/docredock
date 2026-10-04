@@ -2,6 +2,19 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [Unreleased]
+
+## [0.3.0] - 2026-10-04
+
+- Improved Office readability: contents-slide dot leaders no longer become diagrams when repeated beside page references without arrows or attached endpoints; Excel multirow headers become column paths using merges and explicit center-across ranges, with stacked numeric tables separated; Word resolves heading style names, inheritance and outline levels, conservatively recognizes directly formatted titles/chapters, and retains source image display sizes through HTML image tags.
+- Improved readable Office conversion: kept bilingual Excel row labels beside their numeric data and separated sparse schedules from adjacent lookup lists; retained all paragraphs of PowerPoint diagram nodes and edge labels; exported cached Word chart series as Markdown tables, with an explicit placeholder/warning when cached data is unavailable.
+- Added local AI packages in the GUI, CLI, and API: full readable Markdown, source-linked semantic parts, shared image assets, conversion review, and JSON manifests with source/file SHA-256 hashes. Choose a folder or deterministic ZIP. Content policies and selected sheets apply throughout the package; tables, visual groups, PDF pages, slides, and sheets stay intact even above the soft size target. Failed/cancelled exports leave no partial package, and CLI `--force` replaces an existing package only after successful conversion.
+- Excluded PDF paths used only for clipping (`W n` / `W* n`) from visual extraction, avoiding unnecessary fallback warnings and review images while keeping text visibility checks and actually painted paths.
+- Distinguished source comparison from checking hidden content before sharing in the CLI export summary. Including hidden content still warns without adding source-review pages or images.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.0.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.0.md)
+
 ## [0.2.12]
 
 - Decoded each PDF font through the resource dictionary of the page or Form XObject that uses it. A page and its forms that each call a different font `/F1` no longer all come out in the characters of whichever font came last, and fonts written inline in a resource dictionary are decoded with their own ToUnicode map. A font name that is not defined where it is used and that the document gives to differently decoding fonts is not guessed: the page gets a `PdfFontResourceAmbiguous` warning and a review page.

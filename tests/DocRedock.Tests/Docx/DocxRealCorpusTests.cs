@@ -205,7 +205,11 @@ public sealed class DocxRealCorpusTests
         Assert.Contains("## ", readableMarkdown, StringComparison.Ordinal);
         Assert.Contains("- ", readableMarkdown, StringComparison.Ordinal);
         Assert.Contains("|", readableMarkdown, StringComparison.Ordinal);
-        Assert.Contains("![", readableMarkdown, StringComparison.Ordinal);
+        var imagePaths = System.Text.RegularExpressions.Regex.Matches(readableMarkdown,
+            @"!\[[^\]]*\]\((?<path>[^)]+)\)|<img\b[^>]*\bsrc=""(?<path>[^""]+)""")
+            .Select(match => match.Groups["path"].Value).ToArray();
+        Assert.NotEmpty(imagePaths);
+        Assert.All(imagePaths, path => Assert.True(File.Exists(Path.Combine(root, Uri.UnescapeDataString(path)))));
         Assert.Contains("v2.4.0", readableMarkdown, StringComparison.Ordinal);
 
         var exported = await service.ExportAsync(new DocumentExportOptions(source, sidecarPath, roundtripMarkdownPath));

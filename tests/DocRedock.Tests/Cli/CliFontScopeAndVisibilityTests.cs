@@ -50,4 +50,19 @@ public sealed class CliFontScopeAndVisibilityTests : IDisposable
         Assert.Contains("INFORMATION PdfClippedTextExcluded:", output, StringComparison.Ordinal);
         Assert.Contains("Warnings: 0", output, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData("form-bbox-clipped.pdf", "CLIPPED\\_SENTINEL")]
+    [InlineData("layer-off.pdf", "HIDDEN\\_LAYER")]
+    public async Task Complete_output_names_the_sharing_review_without_requesting_source_images(string fixture, string hiddenText)
+    {
+        var (exit, output, markdown) = await ExportAsync(fixture, "--content-policy", "complete");
+
+        Assert.Equal(1, exit);
+        Assert.Contains(hiddenText, markdown, StringComparison.Ordinal);
+        Assert.Contains("Human review: source comparison not required; hidden content included - review before sharing", output, StringComparison.Ordinal);
+        Assert.Contains("Pages requiring review: 0", output, StringComparison.Ordinal);
+        Assert.Contains("Review image pages: 0", output, StringComparison.Ordinal);
+        Assert.Contains("WARNING HiddenContentIncluded:", output, StringComparison.Ordinal);
+    }
 }

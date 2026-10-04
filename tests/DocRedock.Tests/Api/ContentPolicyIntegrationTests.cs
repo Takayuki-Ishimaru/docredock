@@ -345,7 +345,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         return (await File.ReadAllTextAsync(markdown), result.Diagnostics);
     }
 
-    private static IReadOnlyDictionary<string, string> DocxParts() => new Dictionary<string, string>
+    internal static IReadOnlyDictionary<string, string> DocxParts() => new Dictionary<string, string>
     {
         ["[Content_Types].xml"] = """
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -400,7 +400,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         ["word/media/hidden-header.png"] = DocxHiddenHeaderImagePayload,
     };
 
-    private static IReadOnlyDictionary<string, string> XlsxParts() => new Dictionary<string, string>
+    internal static IReadOnlyDictionary<string, string> XlsxParts() => new Dictionary<string, string>
     {
         ["[Content_Types].xml"] = """
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -474,7 +474,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         ["xl/media/very-hidden.png"] = "VERY_HIDDEN_IMAGE_PAYLOAD",
     };
 
-    private static IReadOnlyDictionary<string, string> PptxParts() => new Dictionary<string, string>
+    internal static IReadOnlyDictionary<string, string> PptxParts() => new Dictionary<string, string>
     {
         ["[Content_Types].xml"] = """
             <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -604,7 +604,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
             """,
     };
 
-    private static void WritePackage(string path, IReadOnlyDictionary<string, string> parts)
+    internal static void WritePackage(string path, IReadOnlyDictionary<string, string> parts)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var output = File.Create(path);

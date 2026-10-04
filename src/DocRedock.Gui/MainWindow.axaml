@@ -222,6 +222,13 @@
                              Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
               </RadioButton>
+              <RadioButton x:Name="AiPackageExportRadio" Classes="radio-card" GroupName="ExportFormat"
+                           IsCheckedChanged="OnReadableChanged" AutomationProperties.Name="AI向けパッケージ">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="AI向けパッケージ" FontWeight="Bold" />
+                  <TextBlock Text="全文・分割本文・出典・確認レポート・画像をまとめます。" Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+              </RadioButton>
               <RadioButton x:Name="RoundTripExportRadio" Classes="radio-card" GroupName="ExportFormat"
                            IsCheckedChanged="OnReadableChanged">
                 <StackPanel Spacing="3">
@@ -265,6 +272,16 @@
                   <TextBox x:Name="OcrLanguagesTextBox" Grid.Column="1" Text="jpn+eng" IsEnabled="False" PlaceholderText="例: jpn+eng" MaxLength="80" />
                 </Grid>
                 <StackPanel x:Name="ReadableOptionsPanel" Spacing="8">
+                  <StackPanel x:Name="AiPackageOptionsPanel" Spacing="6" IsVisible="False">
+                    <TextBlock Text="パッケージの保存形式" Classes="muted caption" />
+                    <ComboBox x:Name="AiPackageFormComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
+                              AutomationProperties.Name="AIパッケージの保存形式">
+                      <ComboBoxItem Content="フォルダー（推奨）" Tag="dir" />
+                      <ComboBoxItem Content="ZIP" Tag="zip" />
+                    </ComboBox>
+                    <TextBlock Text="分割は約12,000文字が目安です。表・図やページ・シートを一体で保つため、目安を超えることがあります。"
+                               Classes="muted caption" TextWrapping="Wrap" />
+                  </StackPanel>
                   <TextBlock Text="接続推定" Classes="muted caption" />
                   <ComboBox x:Name="VisualInferenceModeComboBox" SelectedIndex="1" SelectionChanged="OnSettingsChanged"
                             AutomationProperties.Name="視覚接続の推定モード">

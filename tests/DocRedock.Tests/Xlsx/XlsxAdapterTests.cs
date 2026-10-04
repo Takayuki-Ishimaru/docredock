@@ -12,6 +12,36 @@ namespace DocRedock.Tests.Xlsx;
 
 public sealed class XlsxAdapterTests
 {
+    [Theory]
+    [InlineData("centerContinuous", true, 3)]
+    [InlineData("center", true, 0)]
+    [InlineData("centerContinuous", false, 0)]
+    public void Center_across_headers_extend_only_over_explicit_matching_empty_cells(string alignment, bool blankPresent, int expectedEnd)
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes("<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts><font><sz val=\"11\"/></font></fonts><cellXfs><xf/><xf fontId=\"0\"><alignment horizontal=\"" + alignment + "\"/></xf></cellXfs></styleSheet>");
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes("<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>" +
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>項目</t></is></c><c r=\"B1\" s=\"1\" t=\"inlineStr\"><is><t>売上</t></is></c>" +
+            (blankPresent ? "<c r=\"C1\" s=\"1\"/>" : "") + "<c r=\"D1\" s=\"1\" t=\"inlineStr\"><is><t>利益</t></is></c></row>" +
+            "<row r=\"2\"><c r=\"B2\" s=\"1\" t=\"inlineStr\"><is><t>Revenue</t></is></c><c r=\"C2\" s=\"1\"/></row>" +
+            "<row r=\"3\"><c r=\"B3\" t=\"inlineStr\"><is><t>国内</t></is></c><c r=\"C3\" t=\"inlineStr\"><is><t>海外</t></is></c><c r=\"D3\" t=\"inlineStr\"><is><t>純利益</t></is></c></row>" +
+            "<row r=\"4\"><c r=\"A4\" t=\"inlineStr\"><is><t>甲</t></is></c><c r=\"B4\"><v>10</v></c><c r=\"C4\"><v>20</v></c><c r=\"D4\"><v>30</v></c></row>" +
+            "<row r=\"5\"><c r=\"A5\" t=\"inlineStr\"><is><t>乙</t></is></c><c r=\"B5\"><v>40</v></c><c r=\"C5\"><v>50</v></c><c r=\"D5\"><v>60</v></c></row>" +
+            "</sheetData><mergeCells><mergeCell ref=\"A1:A3\"/></mergeCells></worksheet>");
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var entry in entries) { using var stream = zip.CreateEntry(entry.Key).Open(); stream.Write(entry.Value); }
+        var bytes = output.ToArray(); var adapter = new XlsxAdapter(); var extraction = adapter.Extract(new MemoryStream(bytes));
+        var cell = Assert.Single(extraction.Worksheets).Cells.Single(c => c.CellReference == "B1");
+        Assert.Equal(expectedEnd > 0 ? (int?)expectedEnd : null, cell.CenterAcrossToColumn);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extraction.Graph);
+        if (alignment == "centerContinuous")
+            Assert.Contains(expectedEnd > 0 ? "| 項目 | 売上 / Revenue / 国内 | 売上 / Revenue / 海外 | 利益 / 純利益 |" : "| 項目 | 売上 / Revenue / 国内 | Revenue / 海外 | 利益 / 純利益 |", markdown, StringComparison.Ordinal);
+        else Assert.Contains("Revenue", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 甲 | 10 | 20 | 30 |", markdown, StringComparison.Ordinal);
+        Assert.Equal(bytes, adapter.Restore(new MemoryStream(bytes), adapter.CreatePatchPlan(extraction.Graph, extraction.Graph)).Bytes);
+    }
+
     [Fact]
     public void Shared_safe_engine_rejects_equal_candidates_without_false_edge()
     {

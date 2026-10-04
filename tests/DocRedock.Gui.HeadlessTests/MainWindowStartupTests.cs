@@ -218,6 +218,35 @@ public sealed class MainWindowStartupTests
             Assert.False(Get<Control>(window, "SidecarOptionsPanel").IsVisible);
             Assert.False(Get<Control>(window, "RoundTripWarningText").IsVisible);
 
+            var aiPackage = Get<RadioButton>(window, "AiPackageExportRadio");
+            var aiForm = Get<ComboBox>(window, "AiPackageFormComboBox");
+            aiPackage.IsChecked = true;
+            Assert.True(Get<Control>(window, "ReadableOptionsPanel").IsVisible);
+            Assert.True(Get<Control>(window, "AiPackageOptionsPanel").IsVisible);
+            Assert.False(Get<Control>(window, "SidecarOptionsPanel").IsVisible);
+            Assert.False(Get<CheckBox>(window, "EmbedReadableImagesCheckBox").IsEnabled);
+            Assert.Equal(new[] { "フォルダー（推奨）", "ZIP" }, aiForm.Items.Cast<ComboBoxItem>().Select(i => i.Content?.ToString()));
+            aiForm.SelectedIndex = 1;
+            // Reload the same control tree: unattached headless windows share a radio group
+            // scope, so constructing a second one would uncheck the first one's selection.
+            var initialized = typeof(MainWindow).GetField("_componentsInitialized", BindingFlags.NonPublic | BindingFlags.Instance)!;
+            initialized.SetValue(window, false);
+            try
+            {
+                readable.IsChecked = true;
+                aiForm.SelectedIndex = 0;
+                Invoke(window, "LoadSettings");
+                Assert.True(aiPackage.IsChecked);
+                Assert.Equal(1, aiForm.SelectedIndex);
+                Assert.True(Get<Control>(window, "AiPackageOptionsPanel").IsVisible);
+                Assert.False(Get<CheckBox>(window, "EmbedReadableImagesCheckBox").IsEnabled);
+            }
+            finally { initialized.SetValue(window, true); }
+            roundTrip.IsChecked = true;
+            Assert.False(Get<Control>(window, "AiPackageOptionsPanel").IsVisible);
+            readable.IsChecked = true;
+            Assert.True(Get<CheckBox>(window, "EmbedReadableImagesCheckBox").IsEnabled);
+
             var inferenceMode = Get<ComboBox>(window, "VisualInferenceModeComboBox");
             var inferenceLabels = inferenceMode.Items.Cast<ComboBoxItem>().Select(item => item.Content?.ToString() ?? string.Empty).ToArray();
             Assert.Equal(["接続推定なし（native only）", "安全優先（safe・推奨）", "復元優先（balanced）"], inferenceLabels);

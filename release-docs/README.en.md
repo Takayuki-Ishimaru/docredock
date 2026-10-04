@@ -6,6 +6,15 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.0 Public Beta
+
+- [v0.3.0 release notes](RELEASE_NOTES_v0.3.0.en.md)
+- Added AI packages in GUI, CLI and API: full Markdown, intact semantic parts, images, review guidance, source locations and hashes in a folder/ZIP
+- Improved Word headings/charts/image display, Excel tables and multiline PowerPoint labels
+- Suppressed unnecessary PDF visual warnings and distinguished source comparison from hidden-content sharing review
+
+## Published releases
+
 ### v0.2.12 Public Beta
 
 - [v0.2.12 release notes](RELEASE_NOTES_v0.2.12.en.md)

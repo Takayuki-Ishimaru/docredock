@@ -194,7 +194,7 @@ public sealed class MarkdownLiteralSyntaxEndToEndTests
         return text.ToString();
     }
 
-    private static async Task<string> CreateLiteralSyntaxDocxAsync()
+    internal static async Task<string> CreateLiteralSyntaxDocxAsync()
     {
         var directory = Path.Combine(Path.GetTempPath(), "docredock-e2e-literal-tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);

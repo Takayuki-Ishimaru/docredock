@@ -267,14 +267,12 @@ public partial class MainWindow : Window
     private void OnReadableChanged(object? sender, RoutedEventArgs e)
     {
         if (!_componentsInitialized) return;
-        if (sender is RadioButton radio && radio.IsChecked == true)
-            ReadableExportToggle.IsChecked = radio != RoundTripExportRadio;
-
-        var readable = ReadableExportToggle.IsChecked == true;
-        RoundTripExportRadio.IsChecked = !readable;
+        var readable = RoundTripExportRadio.IsChecked != true;
         ReadableOptionsPanel.IsVisible = readable;
         SidecarOptionsPanel.IsVisible = !readable;
         RoundTripWarningText.IsVisible = !readable;
+        AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
+        EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         SaveSettings();
         UpdateButtons();
     }
@@ -322,7 +320,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var readable = ReadableExportToggle.IsChecked == true;
+        var readable = RoundTripExportRadio.IsChecked != true;
         ClearLatestReview();
         SetExportBusy(true, readable ? "読みやすいMarkdownを作成しています…" : "MarkdownとDocRedockサイドカーを作成しています…");
         _exportCancellation = new CancellationTokenSource();
@@ -344,24 +342,31 @@ public partial class MainWindow : Window
                     showFormulas: ShowFormulasCheckBox.IsChecked == true,
                     includeSvgPreviews: IncludeSvgCheckBox.IsChecked == true,
                     includeDiagrams: IncludeDiagramsCheckBox.IsChecked == true,
-                    embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true,
+                    embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true && AiPackageExportRadio.IsChecked != true,
                     zipSidecar: ZipSidecarCheckBox.IsChecked == true,
                     contentPolicy: SelectedContentPolicy(),
                     inferenceMode: SelectedInferenceMode(),
                     includePdfFallbackImages: PdfFallbackImagesCheckBox.IsChecked == true,
                     ocrReview: OcrReviewModeComboBox.SelectedIndex switch { 1 => DocRedock.Markdown.OcrReviewMode.All,
-                        2 => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence }));
+                        2 => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
+                    aiPackage: AiPackageExportRadio.IsChecked == true,
+                    zipAiPackage: AiPackageFormComboBox.SelectedIndex == 1));
             }
 
             _latestOutputDirectory = _exportDirectory;
             _latestMarkdownPath = results[^1].MarkdownPath;
+            var openLabel = results[^1].AiPackagePath?.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) == true ? "パッケージを開く" : "Markdownを開く";
+            OpenMarkdownButton.Content = openLabel;
+            Avalonia.Automation.AutomationProperties.SetName(OpenMarkdownButton, openLabel);
             _latestReviewItems = results.SelectMany(result => result.ReviewItems ?? []).ToArray();
             _latestOcrReviewItems = results.Sum(result => result.OcrReview?.ReviewItems ?? 0);
             SaveSettings();
             ShowResult(
                 success: true,
                 title: results.Count == 1 ? "書き出しが完了しました" : $"{results.Count}件の書き出しが完了しました",
-                message: string.Join(Environment.NewLine, results.Select(result => result.IsReadable
+                message: string.Join(Environment.NewLine, results.Select(result => result.AiPackagePath is not null
+                    ? result.ExportSummary
+                    : result.IsReadable
                     ? $"Markdown: {result.MarkdownPath}（推定: {result.InferenceMode}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
                     : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}） 推定: {result.InferenceMode}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}")),
                 fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? results[0].Fidelity : "複数形式",
@@ -1225,6 +1230,9 @@ public partial class MainWindow : Window
             _exportDirectory = ExistingDirectory(settings.ExportDirectory);
             _restoreDirectory = ExistingDirectory(settings.RestoreDirectory);
             if (settings.Readable is not null) ReadableExportToggle.IsChecked = settings.Readable;
+            if (settings.Readable == false && settings.AiPackage != true) RoundTripExportRadio.IsChecked = true;
+            if (settings.AiPackage == true) AiPackageExportRadio.IsChecked = true;
+            AiPackageFormComboBox.SelectedIndex = settings.ZipAiPackage == true ? 1 : 0;
             if (settings.OcrEnabled is not null) OcrToggle.IsChecked = settings.OcrEnabled;
             if (!string.IsNullOrWhiteSpace(settings.OcrLanguages)) OcrLanguagesTextBox.Text = settings.OcrLanguages;
             if (settings.PdfFallback is not null) PdfFallbackToggle.IsChecked = settings.PdfFallback;
@@ -1241,8 +1249,10 @@ public partial class MainWindow : Window
             RestoreFolderText.Text = OutputFolderLabel(_restoreDirectory);
             OcrLanguagesTextBox.IsEnabled = OcrToggle.IsChecked == true;
             OcrLanguagesPanel.IsVisible = OcrToggle.IsChecked == true;
-            ReadableOptionsPanel.IsVisible = ReadableExportToggle.IsChecked == true;
-            SidecarOptionsPanel.IsVisible = ReadableExportToggle.IsChecked != true;
+            ReadableOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked != true;
+            SidecarOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked == true;
+            AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
+            EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         }
         catch (JsonException) { }
         catch (IOException) { }
@@ -1255,11 +1265,12 @@ public partial class MainWindow : Window
             var path = SettingsPath();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(new GuiSettings(_exportDirectory, _restoreDirectory,
-                ReadableExportToggle.IsChecked, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
+                RoundTripExportRadio.IsChecked != true, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
                 (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
-                (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence")));
+                (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence",
+                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1)));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1282,7 +1293,9 @@ public partial class MainWindow : Window
         string? ContentPolicy = null,
         string? InferenceMode = null,
         bool? IncludePdfFallbackImages = null,
-        string? OcrReview = null);
+        string? OcrReview = null,
+        bool? AiPackage = null,
+        bool? ZipAiPackage = null);
 
     private static void ShowError(TextBlock control, string message)
     {

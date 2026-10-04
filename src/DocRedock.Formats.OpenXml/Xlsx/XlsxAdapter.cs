@@ -28,7 +28,8 @@ public sealed record XlsxCellRecord(
     int? MergedToColumn = null,
     bool IsHiddenRow = false,
     bool IsHiddenColumn = false,
-    string SheetState = "visible")
+    string SheetState = "visible",
+    int? CenterAcrossToColumn = null)
 {
     public bool IsBlank => string.IsNullOrEmpty(Value) && string.IsNullOrEmpty(Formula);
 }
@@ -40,7 +41,8 @@ public sealed record XlsxCellStyle(
     bool HasBorder = false,
     bool IsCentered = false,
     double? FontSize = null,
-    string? NumberFormat = null);
+    string? NumberFormat = null,
+    bool IsCenterAcross = false);
 
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
@@ -314,7 +316,7 @@ public sealed class XlsxAdapter
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml);
-            var cells = ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges);
+            var cells = ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges));
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
@@ -544,6 +546,7 @@ public sealed class XlsxAdapter
         if (cell.DisplayValue is not null) extension["display_value"] = JsonSerializer.SerializeToElement(cell.DisplayValue);
         if (cell.MergedToRow is not null) extension["merged_to_row"] = JsonSerializer.SerializeToElement(cell.MergedToRow);
         if (cell.MergedToColumn is not null) extension["merged_to_column"] = JsonSerializer.SerializeToElement(cell.MergedToColumn);
+        if (cell.CenterAcrossToColumn is not null) extension["center_across_to_column"] = JsonSerializer.SerializeToElement(cell.CenterAcrossToColumn);
         extension["sheet_state"] = JsonSerializer.SerializeToElement(cell.SheetState);
         extension["hidden_row"] = JsonSerializer.SerializeToElement(cell.IsHiddenRow);
         extension["hidden_column"] = JsonSerializer.SerializeToElement(cell.IsHiddenColumn);
@@ -1218,7 +1221,8 @@ public sealed class XlsxAdapter
                 borderId.HasValue && borderId.Value >= 0 && borderId.Value < borders.Length && borders[borderId.Value],
                 alignment is "center" or "centerContinuous" or "distributed",
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length ? fonts[fontId.Value].Size : null,
-                numberFormatId is null ? null : ResolveNumberFormat(numberFormatId.Value, formats));
+                numberFormatId is null ? null : ResolveNumberFormat(numberFormatId.Value, formats),
+                alignment == "centerContinuous");
         }).ToArray();
     }
 
@@ -2285,6 +2289,19 @@ public sealed class XlsxAdapter
             result[id] = new PictureRelationship(resolvedTarget, external);
         }
         return result;
+    }
+
+    private static List<XlsxCellRecord> ApplyCenterAcrossRanges(List<XlsxCellRecord> cells)
+    {
+        var positions = cells.GroupBy(cell => (cell.RowIndex, cell.ColumnIndex)).ToDictionary(group => group.Key, group => group.First());
+        return cells.Select(cell =>
+        {
+            if (cell.IsBlank || cell.DisplayStyle?.IsCenterAcross != true || cell.MergedToColumn is not null) return cell;
+            var end = cell.ColumnIndex;
+            while (positions.TryGetValue((cell.RowIndex, end + 1), out var next) && next.IsBlank &&
+                next.DisplayStyle?.IsCenterAcross == true && next.MergedToColumn is null) end++;
+            return end > cell.ColumnIndex ? cell with { CenterAcrossToColumn = end } : cell;
+        }).ToList();
     }
 
     private static List<XlsxCellRecord> ApplyMergedRanges(

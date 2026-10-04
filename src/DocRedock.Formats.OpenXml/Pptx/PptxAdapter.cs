@@ -129,8 +129,10 @@ public sealed class PptxAdapter
                 ? tableOverlayShapeIds
                 : tableOverlayShapeIds.Concat(shapeGridTables.SelectMany(grid => grid.MemberShapeIds.Concat(grid.OverlayShapeIds)))
                     .ToHashSet(StringComparer.Ordinal);
+            var tocLeaderShapeIds = FindTocLeaderShapeIds(slide);
             var visualGraphs = BuildVisualGraphs(
-                visualExclusionShapeIds.Count > 0 ? slide with { Shapes = slide.Shapes.Where(s => !visualExclusionShapeIds.Contains(s.ShapeId)).ToArray() } : slide,
+                visualExclusionShapeIds.Count > 0 || tocLeaderShapeIds.Count > 0
+                    ? slide with { Shapes = slide.Shapes.Where(s => !visualExclusionShapeIds.Contains(s.ShapeId) && !tocLeaderShapeIds.Contains(s.ShapeId)).ToArray() } : slide,
                 out var visualLabelShapeIds, VisualInferenceTimeout, cancellationToken);
             visualDiagnostics.AddRange(visualGraphs.SelectMany(graph => graph.Diagnostics ?? []));
             var visual = visualGraphs.FirstOrDefault();
@@ -174,6 +176,7 @@ public sealed class PptxAdapter
                 if (gridMemberHostByShapeId.TryGetValue(shape.ShapeId, out var gridMemberHostId))
                     extension["table_grid_member_host"] = JsonSerializer.SerializeToElement(gridMemberHostId);
                 extension["shape_type"] = JsonSerializer.SerializeToElement(shape.ShapeType);
+                if (tocLeaderShapeIds.Contains(shape.ShapeId)) extension["decorative_toc_leader"] = JsonSerializer.SerializeToElement(true);
                 if (!string.IsNullOrWhiteSpace(shape.ShapePreset)) extension["shape_preset"] = JsonSerializer.SerializeToElement(shape.ShapePreset);
                 if (visualLabelShapeIds.Contains(shape.ShapeId)) extension["visual_edge_label"] = JsonSerializer.SerializeToElement(true);
                 if (visualConnectorShapeIds.Contains(shape.ShapeId)) extension["visual_graph_edge"] = JsonSerializer.SerializeToElement(true);
@@ -1701,6 +1704,31 @@ public sealed class PptxAdapter
             Geometry: grid.Geometry, Editability: NodeEditability.Protected, Extensions: extension);
     }
 
+    private static HashSet<string> FindTocLeaderShapeIds(PptxSlideRecord slide)
+    {
+        var visible = slide.Shapes.Where(s => !s.IsHidden && s.InheritedFrom is null).ToArray();
+        if (!visible.Any(s => System.Text.RegularExpressions.Regex.IsMatch(s.Text.Trim(),
+                @"^(目次|contents|table of contents|agenda)$", System.Text.RegularExpressions.RegexOptions.IgnoreCase))) return [];
+        var pageLabels = visible.Where(s => s.Geometry is not null &&
+            (s.Paragraphs ?? s.Text.Split('\n')).Count(p => System.Text.RegularExpressions.Regex.IsMatch(p.Trim(),
+                @"^(?:(?:[Pp]\.?\s*)?[0-9０-９]+(?:\s*[-–－〜]\s*[0-9０-９]+)?\s*)+$")) >= 3).ToArray();
+        var leaders = visible.Where(s => s.ShapeType == "connector" && s.LineStyle == "dotted" &&
+            string.IsNullOrWhiteSpace(s.Text) && s.ConnectorStartId is null && s.ConnectorEndId is null &&
+            ConnectorDirection(s) == ConnectionDirection.Unknown && s.Geometry is { Width: > 0 } &&
+            ConnectorPoints(s) is { Count: >= 2 } points &&
+            points.Max(p => p.Y) - points.Min(p => p.Y) <= Math.Max(1, s.Geometry.Width * .005) &&
+            pageLabels.Any(label =>
+            {
+                var g = label.Geometry!;
+                var endX = points.Max(p => p.X);
+                var y = points.Average(p => p.Y);
+                return y >= g.Y && y <= g.Y + g.Height && Math.Abs(endX - g.X) <= g.Width * .25;
+            })).ToArray();
+        // A repeated set beside a page-number column on a contents slide is layout
+        // evidence. A lone line, arrow, or explicitly attached relation stays intact.
+        return leaders.Length >= 3 ? leaders.Select(s => s.ShapeId).ToHashSet(StringComparer.Ordinal) : [];
+    }
+
     private static IReadOnlyList<VisualGraph> BuildVisualGraphs(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,
         TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
@@ -2273,7 +2301,7 @@ public sealed class PptxAdapter
 
         static string VisualLabel(PptxShapeRecord shape)
         {
-            var text = FirstLine(shape.Text);
+            var text = shape.Text.Trim();
             if (!string.IsNullOrWhiteSpace(text)) return text;
             return !string.IsNullOrWhiteSpace(shape.Name) ? shape.Name!.Trim() : shape.ShapePreset ?? "Directional shape";
         }
@@ -2491,7 +2519,7 @@ public sealed class PptxAdapter
         var connectorIdsByLabel = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
-            var text = FirstLine(candidate.Text);
+            var text = candidate.Text.Trim();
             if (candidate.Geometry is null || text.Length == 0 || text.Length > 80 ||
                 reservedEndpointShapeIds.Contains(candidate.ShapeId))
                 continue;

@@ -28,7 +28,8 @@ public sealed record ExportSummary(
     int OcrReviewItems = 0,
     int VisualReviewPages = 0,
     int UnanalyzedContent = 0,
-    int UnanalyzedContentPages = 0)
+    int UnanalyzedContentPages = 0,
+    bool HiddenContentIncluded = false)
 {
     /// <summary>OCR text that should be compared with its source image. This is a review hint,
     /// not a warning: it never changes the export status or exit code.</summary>
@@ -58,7 +59,10 @@ public sealed record ExportSummary(
         if (VisualReviewPages > 0) reasons.Add($"visual {VisualReviewPages} page(s)");
         if (UnanalyzedContentPages > 0) reasons.Add($"unanalyzed content {UnanalyzedContentPages} page(s)");
         if (OcrReviewRequired) reasons.Add($"OCR {OcrReviewItems} item(s)");
-        return reasons.Count == 0 ? "not required" : "required (" + string.Join(", ", reasons) + ")";
+        var review = reasons.Count == 0 ? "not required" : "required (" + string.Join(", ", reasons) + ")";
+        if (!HiddenContentIncluded) return review;
+        if (reasons.Count == 0) review = "source comparison not required";
+        return review + "; hidden content included - review before sharing";
     }
 }
 
@@ -101,7 +105,8 @@ public static class ExportSummaryBuilder
                 .Select(d => d.PartUri).Distinct(StringComparer.Ordinal).Count(),
             UnresolvedElements: graphs.Sum(CountUnresolvedElements),
             OcrImages: ocr.Images,
-            OcrReviewItems: ocr.ReviewItems);
+            OcrReviewItems: ocr.ReviewItems,
+            HiddenContentIncluded: diagnostics.Any(diagnostic => diagnostic.Code == "HiddenContentIncluded"));
     }
 
     // Count objects, not warnings; a raw shaft and the unresolved edge backed by it
