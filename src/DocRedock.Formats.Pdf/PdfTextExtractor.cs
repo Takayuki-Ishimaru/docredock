@@ -3480,6 +3480,20 @@ public static partial class PdfTextExtractor
                         continue;
                     }
                 }
+                // Line lengths vary within a column. Tighten the gutter using this baseline's
+                // overlapping whitespace before classifying fragments; otherwise a longer left
+                // line appears to straddle the first (shorter) line's gutter and closes the run.
+                for (var fragmentIndex = 0; fragmentIndex < baseline.Count - 1; fragmentIndex++)
+                {
+                    var left = baseline[fragmentIndex];
+                    var right = baseline[fragmentIndex + 1];
+                    var start = Math.Max(run.Start, left.BoundingBox.X + left.BoundingBox.Width);
+                    var end = Math.Min(run.End, right.BoundingBox.X);
+                    if (end - start < GutterThreshold(left, right)) continue;
+                    run.Start = start;
+                    run.End = end;
+                    break;
+                }
                 var sides = baseline.Select(fragment => ClassifyGutterSide(fragment, run.Start, run.End)).ToArray();
                 if (Array.IndexOf(sides, GutterSide.Straddle) >= 0)
                 {

@@ -53,7 +53,9 @@ public sealed partial class DocumentService
                 documentOptions.IncludeSvgPreviews, documentOptions.IncludeDiagrams, documentOptions.Sheets,
                 documentOptions.Title, documentOptions.ContentPolicy, documentOptions.OcrReview);
             // Re-render from graph references; string replacement could corrupt literal text or code.
-            await File.WriteAllTextAsync(documentPath, new ReadableMarkdownSerializer(markdownOptions).Serialize(graph),
+            var documentSerializer = new ReadableMarkdownSerializer(markdownOptions);
+            var documentMarkdown = documentSerializer.Serialize(graph);
+            await File.WriteAllTextAsync(documentPath, documentMarkdown,
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var partGraph = AiMapImageReferences(graph, "../assets/");
             var parts = AiPackageContentBuilder.Build(partGraph, markdownOptions, Path.GetFileName(source),
@@ -67,7 +69,7 @@ public sealed partial class DocumentService
                 await File.WriteAllTextAsync(Path.Combine(package, part.Path), part.Markdown,
                     new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             }
-            var summary = ExportSummaryBuilder.Build(graph, exported.Diagnostics);
+            var summary = ExportSummaryBuilder.Build(graph, exported.Diagnostics, documentSerializer.RenderedTables);
             var review = ExportReviewBuilder.Build(graph, exported.Diagnostics);
             await File.WriteAllTextAsync(Path.Combine(package, "review.md"), AiReviewMarkdown(review, summary, parts),
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
@@ -83,6 +85,37 @@ public sealed partial class DocumentService
                     .Select(g => new { code = g.Key.Code, severity = g.Key.Severity, count = g.Count() }).ToArray()
             };
             await AiWriteJsonAsync(Path.Combine(package, "report.json"), report, cancellationToken).ConfigureAwait(false);
+            // Keep the AI-facing manifest small. Full node identity and cell coordinates live
+            // in a separately hashed, compact index; repeated sheet/page/heading metadata is shared.
+            var locationIds = new Dictionary<string, string>(StringComparer.Ordinal);
+            var locations = new List<object>();
+            string LocationId(AiPackageSourceLocation sourceLocation)
+            {
+                var shared = sourceLocation with { NodeId = string.Empty, CellAddress = null };
+                var key = JsonSerializer.Serialize(shared, AiJson);
+                if (locationIds.TryGetValue(key, out var existing)) return existing;
+                var id = "source-" + (locations.Count + 1).ToString("D4", System.Globalization.CultureInfo.InvariantCulture);
+                locationIds.Add(key, id);
+                locations.Add(new { id, shared.PartitionId, shared.Label, shared.PageNumber,
+                    shared.SlideNumber, shared.SheetName, shared.HeadingPath });
+                return id;
+            }
+            var indexParts = parts.Select(part => new
+            {
+                part.Id,
+                sources = part.Sources.GroupBy(LocationId).Select(group => new
+                {
+                    source_id = group.Key,
+                    node_ids = group.Select(sourceLocation => sourceLocation.NodeId).ToArray(),
+                    cell_addresses = group.Any(sourceLocation => sourceLocation.CellAddress is not null)
+                        ? group.Select(sourceLocation => sourceLocation.CellAddress).ToArray() : null
+                }).ToArray()
+            }).ToArray();
+            var sourceIndex = new { schema_version = "1.0", parts = indexParts };
+            await File.WriteAllTextAsync(Path.Combine(package, "source-index.json"),
+                JsonSerializer.Serialize(sourceIndex, new JsonSerializerOptions(AiJson)
+                { WriteIndented = false, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }) + "\n",
+                new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var files = new List<object>();
             foreach (var file in Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
             {
@@ -92,7 +125,7 @@ public sealed partial class DocumentService
             }
             var manifest = new
             {
-                schema_version = "1.0",
+                schema_version = "2.0",
                 generator_version = typeof(DocumentService).Assembly.GetName().Version?.ToString(3),
                 source = new { file_name = Path.GetFileName(source), sha256 = sourceHash, format = graph.Format },
                 content_policy = DocumentContentPolicyRules.Name(DocumentContentPolicyRules.Parse(documentOptions.ContentPolicy)),
@@ -102,7 +135,10 @@ public sealed partial class DocumentService
                 },
                 target_characters = options.TargetCharacters,
                 document = "document.md", review = "review.md", report = "report.json",
-                parts = parts.Select(p => new { p.Id, p.Path, p.NodeIds, p.Sources, p.ExceedsTarget }).ToArray(),
+                source_index = "source-index.json",
+                locations,
+                parts = parts.Select(p => new { p.Id, p.Path, node_count = p.NodeIds.Count,
+                    source_ids = p.Sources.Select(LocationId).Distinct(StringComparer.Ordinal).ToArray(), p.ExceedsTarget }).ToArray(),
                 files
             };
             await AiWriteJsonAsync(Path.Combine(package, "manifest.json"), manifest, cancellationToken).ConfigureAwait(false);

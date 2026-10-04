@@ -40,6 +40,10 @@ public sealed partial class ReadableMarkdownSerializer
     /// <summary>Diagnostics produced while the last projection was serialized.</summary>
     public IReadOnlyList<MarkdownDiagnostic> Diagnostics { get; private set; } = Array.Empty<MarkdownDiagnostic>();
 
+    /// <summary>Number of GFM tables in the last readable projection, including tables formed
+    /// from worksheet cells and chart data. Fenced code is excluded.</summary>
+    public int RenderedTables { get; private set; }
+
     public ReadableMarkdownSerializer(ReadableMarkdownOptions? options = null) => this.options = options ?? new();
 
     public string Serialize(DocumentGraph graph)
@@ -68,9 +72,36 @@ public sealed partial class ReadableMarkdownSerializer
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node)).ToArray()
             }).ToArray()
         };
-        return projectedGraph.Format == DocumentFormatKind.Xlsx
+        var markdown = projectedGraph.Format == DocumentFormatKind.Xlsx
             ? SerializeWorkbook(projectedGraph)
             : SerializeDocument(projectedGraph);
+        RenderedTables = CountRenderedTables(markdown);
+        return markdown;
+    }
+
+    private static int CountRenderedTables(string markdown)
+    {
+        var count = 0;
+        char fenceCharacter = '\0';
+        var fenceLength = 0;
+        foreach (var line in markdown.Split('\n'))
+        {
+            var text = line.Trim();
+            if (text.Length >= 3 && text[0] is '`' or '~')
+            {
+                var length = text.TakeWhile(character => character == text[0]).Count();
+                if (length >= 3)
+                {
+                    if (fenceCharacter == '\0') { fenceCharacter = text[0]; fenceLength = length; }
+                    else if (fenceCharacter == text[0] && length >= fenceLength && text[length..].Length == 0)
+                        fenceCharacter = '\0';
+                    continue;
+                }
+            }
+            if (fenceCharacter == '\0' && System.Text.RegularExpressions.Regex.IsMatch(text,
+                    @"^\|(?:\s*:?-{3,}:?\s*\|)+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant)) count++;
+        }
+        return count;
     }
 
     private string SerializeWorkbook(DocumentGraph graph)
@@ -1017,6 +1048,16 @@ public sealed partial class ReadableMarkdownSerializer
     private static void RenderRowGroup(StringBuilder output, IReadOnlyList<SheetRow> rows)
     {
         var leadingCells = rows[0].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        if (rows.Count > 1 && leadingCells.Length == 1 && !leadingCells[0].IsOverlay &&
+            leadingCells[0].MaxColumn > leadingCells[0].Column && leadingCells[0].MaxRow <= leadingCells[0].Row &&
+            leadingCells[0].MaxColumn >= rows.SelectMany(row => row.Cells).Max(cell => cell.Column))
+        {
+            // A merged banner describes the region. Once adjacent tables have been separated,
+            // it must not become the first column's header or push the real header into the data.
+            WriteParagraph(output, EscapeLiteral(leadingCells[0].Text));
+            RenderRowGroup(output, rows.Skip(1).ToArray());
+            return;
+        }
         if (leadingCells.Length == 1 && !leadingCells[0].IsNumeric &&
             TryGetSectionHeading(leadingCells[0].Text, out var leadingHeading, out var leadingLevel))
         {
@@ -1189,8 +1230,8 @@ public sealed partial class ReadableMarkdownSerializer
 
     private static IReadOnlyList<int> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
     {
-        // A single blank column is often indentation between bilingual row labels and data.
-        // Split only at wider bands that remain empty across the section. Ignore standalone
+        // A single blank column can separate independent tables, or indent bilingual labels
+        // before numeric data. Use the surrounding rows to distinguish those layouts. Ignore standalone
         // merged titles so they do not reconnect two otherwise independent tables below them.
         var cells = rows.Where(row => row.Cells.Count > 1 || row.Cells[0].MaxColumn == row.Cells[0].Column)
             .SelectMany(row => row.Cells).OrderBy(cell => cell.Column).ToArray();
@@ -1199,10 +1240,27 @@ public sealed partial class ReadableMarkdownSerializer
         var end = cells[0].MaxColumn;
         foreach (var cell in cells.Skip(1))
         {
-            if (cell.Column - end >= 3) boundaries.Add(cell.Column);
+            if (cell.Column - end >= 3 || cell.Column - end == 2 &&
+                IsIndependentSingleColumnGap(rows, end, cell.Column)) boundaries.Add(cell.Column);
             end = Math.Max(end, cell.MaxColumn);
         }
         return boundaries;
+    }
+
+    private static bool IsIndependentSingleColumnGap(IReadOnlyList<SheetRow> rows, int leftEnd, int rightStart)
+    {
+        var leftRows = rows.Select(row => row.Cells.Where(cell => cell.MaxColumn <= leftEnd).ToArray())
+            .Where(cells => cells.Length >= 2).ToArray();
+        var rightRows = rows.Select(row => row.Cells.Where(cell => cell.Column >= rightStart).ToArray())
+            .Where(cells => cells.Length >= 2).ToArray();
+        if (leftRows.Length < 2 || rightRows.Length < 2) return false;
+        // A right-hand list has its own labels below its header. Numeric-only columns beside
+        // bilingual labels have no such independent row labels and stay with their source row.
+        bool Numeric(ReadableCell cell) => cell.IsNumeric || cell.IsFormula ||
+            double.TryParse(PlainText(cell.Text).TrimEnd('%', '％'),
+                NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out _);
+        return rightRows.Skip(1).Any(cells => !Numeric(cells[0])) ||
+               leftRows.SelectMany(cells => cells).Any(Numeric);
     }
 
     private static IEnumerable<RowFragment> SplitRow(SheetRow row, IReadOnlyList<int> boundaries)
