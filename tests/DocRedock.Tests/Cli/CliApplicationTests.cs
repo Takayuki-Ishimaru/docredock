@@ -32,7 +32,7 @@ public sealed class CliApplicationTests : IDisposable
         // line names the element and the page instead of a diagnostic record count.
         Assert.Contains("Output written: yes", stdout.ToString());
         Assert.Contains("Visual elements converted: partial (1 unresolved on 1 page(s))", stdout.ToString());
-        Assert.Contains("Human review: required (visual 1 page(s))", stdout.ToString());
+        Assert.Contains("Detected review items: visual 1 page(s)", stdout.ToString());
         Assert.Contains("Review page 1: 1 diagonal line(s) across a table not expressible as table symbols (table text was exported); review image unavailable",
             stdout.ToString());
     }
@@ -55,12 +55,12 @@ public sealed class CliApplicationTests : IDisposable
             if (engine is ReviewOcrEngine)
             {
                 Assert.Contains("OCR summary: images=1; regions=2; review_items=1; review_required=true", text);
-                Assert.Contains("Human review: required (OCR 1 item(s))", text);
+                Assert.Contains("Detected review items: OCR 1 item(s)", text);
             }
             else
             {
                 Assert.Contains("OCR summary: images=1; regions=2; review_items=0; review_required=false", text);
-                Assert.Contains("Human review: not required", text);
+                Assert.Contains("Detected review items: none", text);
             }
         }
         Assert.Equal(exits[0], exits[1]);

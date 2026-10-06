@@ -4,6 +4,26 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.2]
+
+- Improved Excel table boundaries: kept IDs, row labels, values and remarks together; separated independent tables and lookup lists using layout and declared Excel table ranges; listed uncertain boundaries for source comparison.
+- Fixed table titles and captions becoming column headers, and unnecessary headings above ordinary two-column tables.
+- Explained detected review items and how reading order and table structure were obtained in GUI/CLI results and AI-package review; excluded OCR review tables from rendered document table counts.
+- Added optional row blocks for large Excel tables in AI packages, with repeated headers, original cell ranges and neighbouring-part references. Manifest schema is `2.1`; report schema is `1.1`. Added API and Python readers for manifest schema `1.x` and `2.x` with file-hash verification.
+- Skipped images too small for OCR and shortened Vision OCR failure messages on macOS.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.2.md)
+
+## [0.3.1] - 2026-10-04
+
+- Fixed separation of independent Excel tables and lookup lists, PDF two-column reading order, and false changes in unchanged Word image paragraphs during experimental round-trip editing.
+- Compacted AI-package source metadata into shared locations and a separate detailed source index, and added section context to Word parts. Manifest schema changed from `1.0` to `2.0`.
+- Reported rendered Markdown tables separately, including those formed from Excel cells.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.1.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.1.md)
+
 ## [0.3.0] - 2026-10-04
 
 - Improved Office readability: contents-slide dot leaders no longer become diagrams when repeated beside page references without arrows or attached endpoints; Excel multirow headers become column paths using merges and explicit center-across ranges, with stacked numeric tables separated; Word resolves heading style names, inheritance and outline levels, conservatively recognizes directly formatted titles/chapters, and retains source image display sizes through HTML image tags.

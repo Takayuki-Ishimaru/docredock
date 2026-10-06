@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.1",
+  "summary": {
+    "warnings": 0,
+    "tables": 0,
+    "diagrams_reconstructed": 0,
+    "vector_pages": 0,
+    "native_edges": 0,
+    "high_confidence_edges": 0,
+    "medium_confidence_edges": 0,
+    "unresolved_relations": 0,
+    "fallback_paths": 0,
+    "fallback_pages": 0,
+    "rejected": 0,
+    "review_pages": 0,
+    "review_image_pages": 0,
+    "unresolved_elements": 0,
+    "ocr_images": 0,
+    "ocr_review_items": 0,
+    "visual_review_pages": 0,
+    "unanalyzed_content": 0,
+    "unanalyzed_content_pages": 0,
+    "hidden_content_included": false,
+    "rendered_tables": 2,
+    "table_boundary_review_items": 0,
+    "reading_order": "inferred",
+    "table_structure": "inferred",
+    "native_tables": 0,
+    "ocr_review_required": false,
+    "review_items_detected": false,
+    "all_visual_elements_converted": true
+  },
+  "review": {
+    "pages": [],
+    "ocr": {
+      "images": 0,
+      "regions": 0,
+      "review_items": 0,
+      "required": false
+    },
+    "table_boundaries": [],
+    "review_image_pages": 0,
+    "elements": 0,
+    "required": false
+  },
+  "diagnostics": []
+}

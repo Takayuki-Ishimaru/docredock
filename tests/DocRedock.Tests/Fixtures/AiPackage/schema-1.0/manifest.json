@@ -1,0 +1,192 @@
+{
+  "schema_version": "1.0",
+  "generator_version": "0.3.0",
+  "source": {
+    "file_name": "example.docx",
+    "sha256": "a63f6c709e7d03926ec0a132a1815958c25d9f63e666abb36d4d5ca1707f8fcc",
+    "format": "docx"
+  },
+  "content_policy": "visible",
+  "visual_inference": "safe",
+  "target_characters": 12000,
+  "document": "document.md",
+  "review": "review.md",
+  "report": "report.json",
+  "parts": [
+    {
+      "id": "part-0001",
+      "path": "parts/0001.md",
+      "node_ids": [
+        "n_4L5SQ2FD7FAKPOC3",
+        "n_ISE2GLYDWTRG5QMS",
+        "n_YRJYNC67L22KK2Z2"
+      ],
+      "sources": [
+        {
+          "node_id": "n_4L5SQ2FD7FAKPOC3",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB"
+          ]
+        },
+        {
+          "node_id": "n_ISE2GLYDWTRG5QMS",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 1. \u6982\u8981",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "1. \u6982\u8981"
+          ]
+        },
+        {
+          "node_id": "n_YRJYNC67L22KK2Z2",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 1. \u6982\u8981",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "1. \u6982\u8981"
+          ]
+        }
+      ],
+      "exceeds_target": false
+    },
+    {
+      "id": "part-0002",
+      "path": "parts/0002.md",
+      "node_ids": [
+        "n_5KWY7FGHF2472KEL",
+        "n_HKAC4O64B4XS5QHJ"
+      ],
+      "sources": [
+        {
+          "node_id": "n_5KWY7FGHF2472KEL",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 2. \u69CB\u6210",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "2. \u69CB\u6210"
+          ]
+        },
+        {
+          "node_id": "n_HKAC4O64B4XS5QHJ",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 2. \u69CB\u6210",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "2. \u69CB\u6210"
+          ]
+        }
+      ],
+      "exceeds_target": false
+    },
+    {
+      "id": "part-0003",
+      "path": "parts/0003.md",
+      "node_ids": [
+        "n_ROOZAYTVGSKLXIR6",
+        "n_SIADH6Z432U7CXFP",
+        "n_C6BG3WJ4ZCPRNTUD",
+        "n_JGELZ22XDWFUT5DH"
+      ],
+      "sources": [
+        {
+          "node_id": "n_ROOZAYTVGSKLXIR6",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 3. \u78BA\u8A8D",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "3. \u78BA\u8A8D"
+          ]
+        },
+        {
+          "node_id": "n_SIADH6Z432U7CXFP",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 3. \u78BA\u8A8D",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "3. \u78BA\u8A8D"
+          ]
+        },
+        {
+          "node_id": "n_C6BG3WJ4ZCPRNTUD",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 3. \u78BA\u8A8D",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "3. \u78BA\u8A8D"
+          ]
+        },
+        {
+          "node_id": "n_JGELZ22XDWFUT5DH",
+          "partition_id": "part-0001",
+          "label": "headings: AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB \u003E 3. \u78BA\u8A8D",
+          "page_number": null,
+          "slide_number": null,
+          "sheet_name": null,
+          "heading_path": [
+            "AI\u30D1\u30C3\u30B1\u30FC\u30B8\u306E\u30B5\u30F3\u30D7\u30EB",
+            "3. \u78BA\u8A8D"
+          ]
+        }
+      ],
+      "exceeds_target": false
+    }
+  ],
+  "files": [
+    {
+      "path": "document.md",
+      "bytes": 508,
+      "sha256": "500a844cd7e714ee454d9f3a4817f4f282fb0307df0afe31226e4818cb2fa690"
+    },
+    {
+      "path": "parts/0001.md",
+      "bytes": 206,
+      "sha256": "eeace4553402fcb88397788fcee0c8355df66cea15c7ceedb4f5a9ee4c1bd058"
+    },
+    {
+      "path": "parts/0002.md",
+      "bytes": 236,
+      "sha256": "56d64af6f9ba051c20c039cab03a4f5c367bd03c89e2af92e1197576357b2da0"
+    },
+    {
+      "path": "parts/0003.md",
+      "bytes": 180,
+      "sha256": "c7a9d165484c4d7fdc8326551b756e4d2e35c11eef36978a64812fe00d0ea59e"
+    },
+    {
+      "path": "report.json",
+      "bytes": 904,
+      "sha256": "6bfb72977bb2e5860f148d1046ea3afd56d74b9161241d07fa0f9f0c9d5279f5"
+    },
+    {
+      "path": "review.md",
+      "bytes": 325,
+      "sha256": "a5da16430f3115995daef76344187a05bd044f31c601b6409410f251e545640b"
+    }
+  ]
+}

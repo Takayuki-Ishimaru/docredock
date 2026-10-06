@@ -35,7 +35,7 @@ public sealed class CliFormXObjectReviewTests : IDisposable
 
         Assert.Equal(0, exit);
         Assert.Contains("Unanalyzed content: none", output, StringComparison.Ordinal);
-        Assert.Contains("Human review: not required", output, StringComparison.Ordinal);
+        Assert.Contains("Detected review items: none", output, StringComparison.Ordinal);
         Assert.Contains("FORM\\_TEXT\\_SENTINEL: approved",
             await File.ReadAllTextAsync(Path.Combine(root, "form-xobject-form.md")), StringComparison.Ordinal);
     }
@@ -48,7 +48,7 @@ public sealed class CliFormXObjectReviewTests : IDisposable
         Assert.Equal(1, exit);
         Assert.Contains("Visual elements converted: all", output, StringComparison.Ordinal);
         Assert.Contains("Unanalyzed content: 1 item(s) on 1 page(s)", output, StringComparison.Ordinal);
-        Assert.Contains("Human review: required (unanalyzed content 1 page(s))", output, StringComparison.Ordinal);
+        Assert.Contains("Detected review items: unanalyzed content 1 page(s)", output, StringComparison.Ordinal);
         Assert.Contains("Pages requiring review: 1", output, StringComparison.Ordinal);
         Assert.Contains("Review page 1: 1 drawing component(s) not analyzed; their text and graphics are missing from the Markdown; review image unavailable",
             output, StringComparison.Ordinal);

@@ -124,7 +124,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -156,6 +156,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return Invalid("--ai-package requires dir or zip and the readable profile.");
         if (aiPackage is null && args.Option("chunk-chars") is not null)
             return Invalid("--chunk-chars requires --ai-package dir or zip.");
+        if (aiPackage is null && args.HasFlag("table-row-blocks"))
+            return Invalid("--table-row-blocks requires --ai-package dir or zip.");
         var targetCharacters = 12_000;
         if (args.Option("chunk-chars") is { } size && (!int.TryParse(size, out targetCharacters) || targetCharacters is < 128 or > 1_000_000))
             return Invalid("--chunk-chars must be between 128 and 1000000.");
@@ -213,7 +215,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 using var packageTransaction = new StagedOutputTransaction([markdown], force, protectedInputs: protectedPaths);
                 var packageResult = await Service.ExportAiPackageAsync(new AiPackageExportOptions(
                     ReadableOptions(markdown), packageTransaction.PathFor(markdown),
-                    aiPackage == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters), token);
+                    aiPackage == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters,
+                    TableRowBlocks: args.HasFlag("table-row-blocks")), token);
                 token.ThrowIfCancellationRequested();
                 packageTransaction.Commit();
                 await output.WriteLineAsync($"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))");
@@ -236,10 +239,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             // Both lines render from the same finalized summary so the figures a user sees
             // (Visual summary's diagrams=/fallback= and the export block below) can never
             // disagree with each other (F-05).
-            var visualSummary = ExportSummaryBuilder.Build(readable.Graph, readable.Diagnostics, readable.RenderedTables);
+            var visualSummary = ExportSummaryBuilder.BuildReadable(readable.Graph, readable.Diagnostics, readable.Projection);
             await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
             await output.WriteLineAsync(visualSummary.ToString());
-            await WriteReviewAsync(ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics), markdown, sidecarPath: null);
+            await WriteReviewAsync(ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics, readable.Projection), markdown, sidecarPath: null);
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
@@ -292,6 +295,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             var image = ReviewImageLocation(page, markdownPath, sidecarPath);
             await output.WriteLineAsync($"Review {ExportReviewText.DescribeEnglish(page)}{(image is null ? string.Empty : "; " + image)}");
         }
+        foreach (var boundary in review.TableBoundaries ?? [])
+            await output.WriteLineAsync($"Review {ExportReviewText.TableBoundaryEnglish(boundary)}");
         if (review.Ocr.Images > 0)
             await output.WriteLineAsync($"OCR summary: images={review.Ocr.Images}; regions={review.Ocr.Regions}; " +
                 $"review_items={review.Ocr.ReviewItems}; review_required={(review.Ocr.Required ? "true" : "false")}");
@@ -733,7 +738,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         DocRedock {Version} Public Beta
           docredock --version
           docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
-                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
+                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
@@ -796,7 +801,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private sealed class Arguments
     {
         private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

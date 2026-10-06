@@ -22,7 +22,9 @@ public sealed record GuiExportResult(
     string? ExportSummary = null,
     IReadOnlyList<GuiReviewItem>? ReviewItems = null,
     OcrReviewSummary? OcrReview = null,
-    string? AiPackagePath = null)
+    string? AiPackagePath = null,
+    ExportSummary? Summary = null,
+    IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview>? TableBoundaries = null)
 {
     public string PackagePath => SidecarPath;
 }
@@ -88,7 +90,8 @@ public sealed class GuiWorkflowService
         bool includePdfFallbackImages = true,
         DocRedock.Markdown.OcrReviewMode ocrReview = DocRedock.Markdown.OcrReviewMode.LowConfidence,
         bool aiPackage = false,
-        bool zipAiPackage = false)
+        bool zipAiPackage = false,
+        bool tableRowBlocks = false)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -123,7 +126,7 @@ public sealed class GuiWorkflowService
                 new ReadableDocumentExportOptions(sourcePath, "document.md", enableOcr, NormalizeLanguages(ocrLanguages),
                     contentPolicy, showFormulas, includeSvgPreviews, includeDiagrams,
                     InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview),
-                aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory), cancellationToken).ConfigureAwait(false);
+                aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory, TableRowBlocks: tableRowBlocks), cancellationToken).ConfigureAwait(false);
             var aiMarkdown = zipAiPackage ? aiOutput : Path.Combine(aiOutput, "document.md");
             var reviewItems = BuildReviewItems(sourcePath, aiMarkdown, null, exported.Graph, exported.Review,
                 new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
@@ -149,7 +152,8 @@ public sealed class GuiWorkflowService
                 "AI package (one-way)", exported.Diagnostics, IsReadable: true, InferenceMode: inferenceMode,
                 VisualSummary: SummarizeVisualGraph(exported.Summary),
                 ExportSummary: $"AIパッケージ: {aiOutput}（{exported.Parts.Count}分割）\n{exported.Summary}",
-                ReviewItems: reviewItems, OcrReview: exported.Review.Ocr, AiPackagePath: aiOutput);
+                ReviewItems: reviewItems, OcrReview: exported.Review.Ocr, AiPackagePath: aiOutput,
+                Summary: exported.Summary, TableBoundaries: exported.Review.TableBoundaries);
         }
         if (useUniqueName) baseName = NextAvailableBaseName(outputDirectory, baseName, readable);
         var markdownPath = Path.Combine(outputDirectory, baseName + ".md");
@@ -174,8 +178,8 @@ public sealed class GuiWorkflowService
                     InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview), cancellationToken).ConfigureAwait(false);
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
-                var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics, exported.RenderedTables);
-                var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics);
+                var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
+                var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics, exported.Projection);
                 return new GuiExportResult(
                     markdownPath,
                     string.Empty,
@@ -191,7 +195,7 @@ public sealed class GuiWorkflowService
                     ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
                         new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
                             ContentPolicy: contentPolicy, OcrReview: ocrReview)),
-                    OcrReview: review.Ocr);
+                    OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries);
             }
             catch
             {
@@ -237,7 +241,7 @@ public sealed class GuiWorkflowService
                 ExportSummary: summary.ToString(),
                 ReviewItems: BuildReviewItems(sourcePath, markdownPath, sidecarForm == SidecarForm.Directory ? sidecarPath : null,
                     exported.Graph, review, new DocRedock.Markdown.ReadableMarkdownOptions(ContentPolicy: contentPolicy)),
-                OcrReview: review.Ocr);
+                OcrReview: review.Ocr, Summary: summary);
         }
         catch
         {
