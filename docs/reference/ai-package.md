@@ -53,7 +53,7 @@ By default a worksheet stays one part even above the target, so a table is never
 | --- | --- | --- |
 | `1.0` | v0.3.0 | `node_ids` and per-node `sources` inline in each part; no source index |
 | `2.0` | v0.3.1 | shared `locations`, per-part `node_count`/`source_ids`, separate `source-index.json` |
-| `2.1` | current | `2.0` plus `table_row_blocks`, per-part `estimated_tokens` and optional `table_block` |
+| `2.1` | v0.3.2 | `2.0` plus `table_row_blocks`, per-part `estimated_tokens` and optional `table_block` |
 
 Read the major version first. A minor version only adds fields, so a reader for `2.x` accepts `2.1` (and later `2.x`) by ignoring what it does not know. A different major version, a missing `schema_version`, or a value that is not `MAJOR.MINOR` must be refused with an explicit error rather than read as if it had a known layout.
 

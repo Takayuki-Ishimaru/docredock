@@ -4,10 +4,25 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
-- Excel: a single blank column no longer splits one table because a numeric ID or other number sits on its left; an ID with its quantities and row labels with their numbers stay in one table row. A side that holds only values, or a remarks column (備考, Notes), stays with the rows beside it; sides that each carry their own labels are separated, including a one-column list beside a table, which is now kept as a one-column table under its header. Declared Excel tables (ListObjects) are read and their ranges decide where they apply. A row of merged group titles no longer joins the independent lists beneath it. A block of values is a table of its own when the numbers show it is out of step with the table beside it (its header beside the other table's values, or its values starting beside the row that heads them), or when its first column is a run of periods under a period header (Year, 月, 日付) next to a table with numbers of its own. A formula's text result counts as a value only when it is a fixed word written in the formula (=IF(…,"達成","未達")); text it looks up or builds from other cells (='Sheet'!H5, VLOOKUP, =B2&" "&C2) counts like typed text, and filled-down copies are judged the same way. Tables that touch with no blank column between them are separated when each has its own merged title over ordinary cells and their structure differs (a declared Excel table on one side only, or a header row beside a legend that starts on the same row and labels each of its rows); styling alone does not split them, so group titles over the columns of one table keep it together. Each title in a row of titles stays with its own table instead of becoming part of a neighbouring table's header, and a list under a wide banner no longer gets an empty first column. When two sides occupy exactly the same rows and nothing in the layout tells them apart, the separation is reported for comparison (`XlsxTableBoundaryAmbiguous` information, an `<!-- inferred -->` note, "table boundaries" in the summary and review) without changing the exit code.
-- Export summaries say what was detected instead of whether review is "required": `Human review: not required` is now `Detected review items: none`, and new `Reading order` and `Table structure` lines say whether each came from the source, was inferred from layout (not compared with the source), needs comparison, or was not evaluated. The GUI shows the same in one Japanese line and lists Excel table boundaries to compare. AI package `report.json` is schema `1.1` with these fields and `review.table_boundaries`.
-- AI packages: optional table row blocks (`--table-row-blocks`, the GUI option, or `TableRowBlocks`) cut an Excel table too large for one part between rows; each block repeats the header and records the table ID, block number, original header and row cell ranges, and the previous and next part. Every part records `estimated_tokens`, a rough model-independent size. The manifest is schema `2.1` (additive to `2.0`) and keeps non-ASCII text readable instead of `\u` escapes. `AiPackageManifestReader` (API) and the standard-library Python example `docs/examples/ai_package_reader.py` read schema `1.x` and `2.x` packages, verify file hashes, and refuse other schemas with an explicit error; the format contract explains how to give a package to a model without sending the full document and the source index every time.
-- Fixed the workbook title being taken from a header cell (`# ID`), a one-cell caption above an Excel table becoming that table's first column header (pushing the real header into the data), a "文書情報" heading being added above an ordinary two-column table, and OCR review tables being counted as rendered document tables. On macOS, a spacer image of one or two pixels no longer produces an OCR warning with a Swift stack dump (and exit code 1): images less than 3 pixels wide or high are not sent to OCR (`OcrImageTooSmall` information), and a failure of the Vision helper is reported in one line. GUI tests no longer read or change the person's saved GUI settings or check for updates (`DOCREDOCK_GUI_SETTINGS_PATH`).
+## [0.3.2]
+
+- Improved Excel table boundaries: kept IDs, row labels, values and remarks together; separated independent tables and lookup lists using layout and declared Excel table ranges; listed uncertain boundaries for source comparison.
+- Fixed table titles and captions becoming column headers, and unnecessary headings above ordinary two-column tables.
+- Explained detected review items and how reading order and table structure were obtained in GUI/CLI results and AI-package review; excluded OCR review tables from rendered document table counts.
+- Added optional row blocks for large Excel tables in AI packages, with repeated headers, original cell ranges and neighbouring-part references. Manifest schema is `2.1`; report schema is `1.1`. Added API and Python readers for manifest schema `1.x` and `2.x` with file-hash verification.
+- Skipped images too small for OCR and shortened Vision OCR failure messages on macOS.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.2.md)
+
+## [0.3.1] - 2026-10-04
+
+- Fixed separation of independent Excel tables and lookup lists, PDF two-column reading order, and false changes in unchanged Word image paragraphs during experimental round-trip editing.
+- Compacted AI-package source metadata into shared locations and a separate detailed source index, and added section context to Word parts. Manifest schema changed from `1.0` to `2.0`.
+- Reported rendered Markdown tables separately, including those formed from Excel cells.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.1.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.1.md)
 
 ## [0.3.0] - 2026-10-04
 
