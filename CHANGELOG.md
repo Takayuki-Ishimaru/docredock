@@ -4,6 +4,13 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+- Hardened the AI package readers (Python example and .NET `AiPackageManifestReader`): a manifest is checked before anything is read through it (required fields and types, ids, paths, JSON keys and ZIP entries listed twice, unknown locations or parts, and every referenced file listed with its size and SHA-256), the source index must agree with the manifest, ZIP archives that readers would read differently (duplicate, NUL or backslash entry names, encrypted entries, other compression methods, CRC mismatches) and JSON with unpaired surrogate escapes or nesting deeper than 64 levels are refused by both readers, and malformed input is reported in one line instead of a traceback. The Python CLI verifies before printing a part (`--verify --part` used to print it unverified), keeps stdout for the part, and exits 0/1/2/3; `--fail-on-review` and `review_required`/`ReadReviewRequiredAsync` stop on packages that need review.
+- Added `export --fail-on-review`: exit code 11 when the export needs review (source-review pages, OCR items, Excel table boundaries), after writing the output. The default exit codes are unchanged.
+- Excel row blocks in AI packages repeat the short cell text directly above their table (title, unit and condition notes) before the header of every later block, and name its cells in `table_block.context_range`. Manifest schema is `2.2`.
+- Fixed several title, unit or condition lines directly above an Excel table becoming its header row, or turning a two-column table into label/value pairs.
+- Fixed rows of two Excel tables side by side under a merged title and description being interleaved, with the right table's header placed over the left table's rows.
+- Fixed AI package parts of a later Excel sheet or Word section taking a title of their own (a sheet's first cell, such as a date, or the generic title) instead of the document's, which also changed how that sheet was laid out compared with `document.md`.
+
 ## [0.3.2]
 
 - Improved Excel table boundaries: kept IDs, row labels, values and remarks together; separated independent tables and lookup lists using layout and declared Excel table ranges; listed uncertain boundaries for source comparison.

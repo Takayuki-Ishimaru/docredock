@@ -63,6 +63,35 @@ public sealed partial class ReadableMarkdownSerializer
 
     public ReadableMarkdownSerializer(ReadableMarkdownOptions? options = null) => this.options = options ?? new();
 
+    /// <summary>The level-1 title <see cref="Serialize"/> writes for the graph with these options: the
+    /// explicit <see cref="ReadableMarkdownOptions.Title"/>, the workbook's first title cell, a Word
+    /// document's title paragraph, or the generic title. A sheet or part of the document serialized
+    /// with this title as its <see cref="ReadableMarkdownOptions.Title"/> reads as it does in the
+    /// whole document; otherwise it would take a title of its own, such as its own first cell.</summary>
+    public string DocumentTitle(DocumentGraph graph)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        if (options.Title?.Trim() is { Length: > 0 } customTitle) return customTitle;
+        var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
+        var partitions = graph.Partitions
+            .Where(partition => graph.Format != DocumentFormatKind.Xlsx || IsIncludedPartition(partition.Id))
+            .OrderBy(partition => partition.Order).ThenBy(partition => partition.Id, StringComparer.Ordinal)
+            .Select(partition => partition with
+            {
+                Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node)).ToArray()
+            }).ToList();
+        if (graph.Format == DocumentFormatKind.Xlsx) return FindWorkbookTitle(partitions) ?? "ドキュメント";
+        if (graph.Format == DocumentFormatKind.Pptx) return "プレゼンテーション";
+        var title = partitions.SelectMany(partition => partition.Nodes)
+            .FirstOrDefault(node => node.Kind == NodeKind.Heading && ExtensionBool(node, "document_title"));
+        return title?.Content switch
+        {
+            TextNodeContent text when text.Text.Trim() is { Length: > 0 } plain => plain,
+            RichTextNodeContent rich when string.Concat(rich.Runs.Select(run => run.Text)).Trim() is { Length: > 0 } plain => plain,
+            _ => "ドキュメント",
+        };
+    }
+
     public string Serialize(DocumentGraph graph)
     {
         ArgumentNullException.ThrowIfNull(graph);
@@ -315,10 +344,54 @@ public sealed partial class ReadableMarkdownSerializer
         var leadingCells = rows[0].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
         if (leadingCells.Length == 1 && (leadingCells[0].MaxColumn > leadingCells[0].Column ||
             !leadingCells[0].IsNumeric && TryGetSectionHeading(leadingCells[0].Text, out _, out _))) return false;
+        // Captions over a header row that names the table's columns: the group is that table.
+        if (LoneCaptionRows(rows) is > 0 and var captions && NamesColumnsAfter(rows, captions)) return false;
         if (rows.Count == 1 && rows[0].Cells.Count > 1 && rows[0].Cells.All(cell => TryGetSectionHeading(cell.Text, out _, out _))) return false;
         var namesColumns = rows.Count >= 2 && IsHeaderRow(rows[0]) &&
             Enumerable.Range(0, rows[0].Cells.Count / 2).All(index => LooksLikeLabel(rows[0].Cells[index * 2 + 1]));
         return !namesColumns;
+    }
+
+    // How many caption rows to set apart at the start of a group: one lone caption above a row of
+    // several cells, or several when the row after them names the table's columns. Lone rows above
+    // anything else stay in the group: labels whose values are empty in a form ("承認者 |" above
+    // "作成者 | 設計担当"), category rows of a list ("食品", "野菜" above "トマト | 120 | 5").
+    private static int LeadingCaptionRows(IReadOnlyList<SheetRow> rows)
+    {
+        var captions = LoneCaptionRows(rows);
+        return captions == 1 || captions > 1 && NamesColumnsAfter(rows, captions) ? captions : 0;
+    }
+
+    // Rows at the start of a group with one non-numeric cell each, in the group's first column,
+    // followed by a row of several cells; 0 when the group does not start that way.
+    private static int LoneCaptionRows(IReadOnlyList<SheetRow> rows)
+    {
+        if (rows.Count < 2 || rows[0].Cells.Count == 0) return 0;
+        var column = rows[0].Cells[0].Column;
+        var captions = 0;
+        while (captions < rows.Count && IsLoneCaption(rows[captions], column)) captions++;
+        return captions < rows.Count && rows[captions].Cells.Count(cell => !string.IsNullOrWhiteSpace(cell.Text)) >= 2 ? captions : 0;
+    }
+
+    // Whether the row at index names the columns of the rows below it rather than being a row of data
+    // or a label/value pair: its cells are text, and either all emphasized (bold, filled or centered; a
+    // border alone also frames the fields of a form) or followed by numbers. Two columns need both, with
+    // numbers in the second column: a bold pair among label/value rows ("場所 | 本社") names nothing.
+    private static bool NamesColumnsAfter(IReadOnlyList<SheetRow> rows, int index)
+    {
+        var header = rows[index].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        var below = rows.Skip(index + 1).Take(3).ToArray();
+        if (header.Length < 2 || below.Length == 0 || header.Any(cell => cell.IsNumeric)) return false;
+        var emphasized = header.All(cell => cell.IsBold || cell.HasFill || cell.IsCentered);
+        return rows[index].Cells.Count > 2
+            ? emphasized || below.Any(row => row.Cells.Any(cell => cell.IsNumeric))
+            : emphasized && below.All(row => row.Cells.Count > 1 && row.Cells[1].IsNumeric);
+    }
+
+    private static bool IsLoneCaption(SheetRow row, int column)
+    {
+        var cells = row.Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        return cells.Length == 1 && !cells[0].IsOverlay && !cells[0].IsNumeric && cells[0].Column == column;
     }
 
     private void RecordStandaloneRow(StringBuilder output, SheetRow row)
@@ -1263,12 +1336,11 @@ public sealed partial class ReadableMarkdownSerializer
 
         if (TryWriteMultiRowHeaderTables(output, rows)) return;
 
-        // A lone caption in the first column above a table (an unmerged title, an instruction, a unit
-        // note) describes the table. It is not the first column's header: the table's own header is
-        // the next row, and the caption must not push it down into the data.
-        if (rows.Count >= 2 && leadingCells.Length == 1 && !leadingCells[0].IsOverlay && !leadingCells[0].IsNumeric &&
-            leadingCells[0].Column == rows[0].Cells[0].Column &&
-            rows[1].Cells.Count(cell => !string.IsNullOrWhiteSpace(cell.Text)) >= 2)
+        // Lone captions in the first column above a table (an unmerged title, an instruction, a unit
+        // or condition note) describe the table. None is the first column's header: the table's own
+        // header follows them, and they must not push it down into the data or turn the table into
+        // label/value pairs.
+        if (LeadingCaptionRows(rows) > 0)
         {
             RecordStandaloneRow(output, rows[0]);
             RenderRowGroup(output, WithoutEmptyColumns(rows.Skip(1)));
@@ -1452,7 +1524,7 @@ public sealed partial class ReadableMarkdownSerializer
             var metadataFragment = IsMetadataFragment(fragment.Cells);
             var startsSection = fragment.Cells.Count == 1 && !fragment.Cells[0].IsNumeric &&
                                 TryGetSectionHeading(fragment.Cells[0].Text, out _, out _);
-            var matching = startsSection || metadataFragment ? null : regions
+            IEnumerable<MutableRegion> candidates = startsSection || metadataFragment ? [] : regions
                     .Where(region => (region.HasSectionHeading
                                          ? region.MaxColumn - region.MinColumn >= 3
                                          : fragment.Cells.Count > 1 || region.MaxColumn == region.MinColumn ||
@@ -1461,13 +1533,28 @@ public sealed partial class ReadableMarkdownSerializer
                                            fragment.MinColumn >= region.MinColumn && fragment.MaxColumn <= region.MaxColumn) &&
                                      fragment.Row.Number - region.MaxRow <= (region.HasSectionHeading ? 12 : 4) &&
                                      fragment.Row.Number >= region.MinRow &&
-                                     !region.ContainsRow(fragment.Row.Number) &&
                                      BandsOverlap(region.MinColumn, region.MaxColumn, fragment.MinColumn, fragment.MaxColumn))
                     .OrderByDescending(region => region.MaxRow)
                     .ThenBy(region => Math.Abs(region.MinColumn - fragment.MinColumn))
                     // A banner spanning the sheet must not take rows that fit a table below it exactly.
-                    .ThenBy(region => Math.Abs(region.MaxColumn - fragment.MaxColumn))
-                    .FirstOrDefault();
+                    .ThenBy(region => Math.Abs(region.MaxColumn - fragment.MaxColumn));
+            // A region that already holds this row sits beside the fragment, across its columns. A region
+            // that ends before that one starts lies above it, so the fragment does not reach past it: two
+            // banners stacked over side-by-side tables (a title, then a description) must not hand the
+            // right table's rows to the upper banner, interleaving them with the left table's rows.
+            MutableRegion? matching = null;
+            var besideFrom = int.MaxValue;
+            foreach (var region in candidates)
+            {
+                if (region.ContainsRow(fragment.Row.Number))
+                {
+                    besideFrom = Math.Min(besideFrom, region.MinRow);
+                    continue;
+                }
+                // Ranked by last row, so every later candidate ends higher still.
+                if (besideFrom == int.MaxValue || region.MaxRow >= besideFrom) matching = region;
+                break;
+            }
             if (matching is null)
             {
                 matching = new MutableRegion();

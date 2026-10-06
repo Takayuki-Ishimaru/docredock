@@ -115,14 +115,149 @@ public sealed class AiPackageTableRowBlockTests
         nodes.Add(Cell("A128", "2. Costs", 0));
         nodes.AddRange(Table(129, 120, prefix: "Second"));
         var parts = AiPackageContentBuilder.Build(Sheet(nodes.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
-        var title = Assert.Single(parts, part => part.Markdown.Contains("2. Costs", StringComparison.Ordinal));
-        Assert.Equal(("table-0002", 1), (title.TableBlock!.TableId, title.TableBlock.Index));
-        Assert.True(title.Markdown.IndexOf("2. Costs", StringComparison.Ordinal) < title.Markdown.IndexOf("| Item | Q1 | Q2 |", StringComparison.Ordinal));
+        // The title introduces the second table: block 1 starts with it and later blocks repeat it.
+        var titled = parts.Where(part => part.Markdown.Contains("2. Costs", StringComparison.Ordinal)).ToArray();
+        Assert.Equal(parts.Where(part => part.TableBlock?.TableId == "table-0002"), titled);
+        Assert.Equal(1, titled[0].TableBlock!.Index);
+        Assert.All(titled, title =>
+        {
+            Assert.True(title.Markdown.IndexOf("2. Costs", StringComparison.Ordinal) < title.Markdown.IndexOf("| Item | Q1 | Q2 |", StringComparison.Ordinal));
+            Assert.Equal("A128:A128", title.TableBlock!.ContextRange);
+            Assert.Contains("cell-A128", title.NodeIds);
+        });
+        // The note is nearer the first table's last row: it stays there and is not repeated anywhere.
         var note = Assert.Single(parts, part => part.Markdown.Contains("Note: first table is provisional", StringComparison.Ordinal));
         Assert.Equal("table-0001", note.TableBlock!.TableId);
         Assert.Equal(note.TableBlock.Count, note.TableBlock.Index);
-        Assert.Contains("cell-A128", title.NodeIds);
         Assert.Contains("cell-A122", note.NodeIds);
+        Assert.All(parts.Where(part => part.TableBlock?.TableId == "table-0001"), part => Assert.Null(part.TableBlock!.ContextRange));
+    }
+
+    // v0.3.2 evaluation B: a block read alone must still say what its numbers mean. The cell text just
+    // above a cut table (title, unit, conditions) is repeated, as written, before the header of every
+    // later block, and the block names the cells it came from.
+    [Fact]
+    public void Later_blocks_repeat_the_title_unit_and_conditions_above_the_table_and_name_their_cells()
+    {
+        var nodes = new List<DocumentNode>
+        {
+            Cell("A1", "2025年度 営業報告", 0), Cell("A3", "売上実績（単位: 千円、税抜）", 0), Cell("A4", "対象: 国内全店", 0),
+            Cell("A5", "商品", 0, bold: true), Cell("B5", "売上", 0, bold: true),
+        };
+        for (var index = 1; index <= 300; index++)
+        {
+            nodes.Add(Cell($"A{5 + index}", $"商品{index}", 0));
+            nodes.Add(Cell($"B{5 + index}", (index * 10).ToString(System.Globalization.CultureInfo.InvariantCulture), 0, numeric: true));
+        }
+        var graph = Sheet(nodes.ToArray());
+        var whole = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Equal(1, Count(whole, "売上実績（単位: 千円、税抜）"));
+        var parts = AiPackageContentBuilder.Build(graph, new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.True(parts.Count >= 3, parts.Count.ToString());
+        var dataRows = new List<string>();
+        foreach (var part in parts)
+        {
+            var block = part.TableBlock!;
+            Assert.Equal("A3:A4", block.ContextRange);
+            var repeated = block.Index > 1 ? " (repeated)" : string.Empty;
+            Assert.Contains($"; header A5:B5{repeated}; context A3:A4{repeated}\n", part.Markdown, StringComparison.Ordinal);
+            foreach (var text in new[] { "売上実績（単位: 千円、税抜）", "対象: 国内全店" })
+            {
+                Assert.Equal(1, Count(part.Markdown, text));
+                Assert.True(part.Markdown.IndexOf(text, StringComparison.Ordinal) < part.Markdown.IndexOf("| 商品 | 売上 |", StringComparison.Ordinal));
+            }
+            Assert.Subset(part.NodeIds.ToHashSet(), new HashSet<string> { "cell-A3", "cell-A4", "cell-A5", "cell-B5" });
+            Assert.Equal(part.NodeIds.Count, part.Sources.Count);
+            Assert.False(part.ExceedsTarget);
+            dataRows.AddRange(part.Markdown.Split('\n').Where(line => line.StartsWith("| 商品", StringComparison.Ordinal) && line != "| 商品 | 売上 |"));
+        }
+        // Repeating the context never repeats, drops or reorders a data row.
+        Assert.Equal(whole.Split('\n').Where(line => line.StartsWith("| 商品", StringComparison.Ordinal) && line != "| 商品 | 売上 |"), dataRows);
+        var data = parts.SelectMany(part => part.NodeIds).Where(id => id is not ("cell-A3" or "cell-A4" or "cell-A5" or "cell-B5")).ToArray();
+        Assert.Equal(data.Length, data.Distinct().Count());
+    }
+
+    [Fact]
+    public void Long_text_another_table_or_an_image_above_a_cut_table_is_not_repeated()
+    {
+        var longText = string.Concat(Enumerable.Repeat("Long explanation of the figures below. ", 12));
+        var cases = new Dictionary<string, DocumentNode[]>
+        {
+            ["long"] = [Cell("A1", "Report", 0), Cell("A3", longText, 0)],
+            ["table"] = [Cell("A1", "Report", 0), Cell("A3", "Code", 0, bold: true), Cell("B3", "Name", 0, bold: true),
+                Cell("A4", "X1", 0), Cell("B4", "First", 0), Cell("A5", "X2", 0), Cell("B5", "Second", 0)],
+        };
+        foreach (var (name, above) in cases)
+        {
+            var parts = AiPackageContentBuilder.Build(Sheet([.. above, .. Table(8, 150)]), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+            var blocks = parts.Where(part => part.TableBlock is not null).ToArray();
+            Assert.True(blocks.Length >= 2, name);
+            Assert.All(blocks, part => Assert.Null(part.TableBlock!.ContextRange));
+            Assert.All(blocks.Skip(1), part => Assert.DoesNotContain(name == "long" ? "Long explanation" : "| Code |", part.Markdown, StringComparison.Ordinal));
+            Assert.DoesNotContain("; context", string.Concat(parts.Select(part => part.Markdown)), StringComparison.Ordinal);
+        }
+        var picture = new DocumentNode("picture", NodeKind.Image, null, 750, ContentLayer.Body, new ReferenceNodeContent("assets/chart.png", "Chart"),
+            Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["row"] = JsonSerializer.SerializeToElement(7) });
+        var withImage = AiPackageContentBuilder.Build(Sheet([Cell("A1", "Report", 0), picture, .. Table(8, 150)]), new(), Source,
+            new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.All(withImage.Where(part => part.TableBlock is not null), part => Assert.Null(part.TableBlock!.ContextRange));
+        Assert.Single(withImage, part => part.Markdown.Contains("assets/chart.png", StringComparison.Ordinal));
+    }
+
+    // Inputs from the independent review of the repeated context (2026-10-07).
+    [Fact]
+    public void A_note_that_belongs_to_the_previous_cut_table_is_never_repeated_with_the_next()
+    {
+        var nodes = new List<DocumentNode>();
+        nodes.AddRange(Table(1, 102, prefix: "First"));
+        nodes.Add(Cell("A105", "Note: first table is provisional", 0));
+        nodes.Add(Cell("A111", "2. Costs", 0));
+        nodes.AddRange(Table(112, 120, prefix: "Second"));
+        var parts = AiPackageContentBuilder.Build(Sheet(nodes.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        var second = parts.Where(part => part.TableBlock?.TableId == "table-0002").ToArray();
+        Assert.True(second.Length >= 2);
+        Assert.All(second, part => Assert.Equal("A111:A111", part.TableBlock!.ContextRange));
+        Assert.All(second, part => Assert.DoesNotContain("Note: first table is provisional", part.Markdown, StringComparison.Ordinal));
+        Assert.Single(parts, part => part.Markdown.Contains("Note: first table is provisional", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Repeated_context_never_holds_a_data_row_DocRedock_notes_or_text_far_above_the_table()
+    {
+        // Category rows above a headerless table are not captions: no data row becomes a repeated header.
+        var stock = new List<DocumentNode> { Cell("A1", "在庫表", 0), Cell("A3", "食品", 0), Cell("A4", "野菜", 0) };
+        for (var row = 5; row <= 300; row++)
+            stock.AddRange([Cell($"A{row}", $"品目{row}", 0), Cell($"B{row}", (row * 10).ToString(System.Globalization.CultureInfo.InvariantCulture), 0, numeric: true),
+                Cell($"C{row}", (row * 3).ToString(System.Globalization.CultureInfo.InvariantCulture), 0, numeric: true)]);
+        var parts = AiPackageContentBuilder.Build(Sheet(stock.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.True(parts.Count >= 3);
+        for (var row = 5; row <= 300; row++)
+            Assert.Equal(1, parts.Sum(part => Count(part.Markdown, $"| 品目{row} |")));
+        // A label/value block DocRedock formed above a table is not the table's title.
+        var form = new List<DocumentNode> { Cell("A1", "作成者", 0), Cell("B1", "山田", 0), Cell("A2", "部署", 0), Cell("B2", "営業部", 0) };
+        form.AddRange(Table(4, 200));
+        parts = AiPackageContentBuilder.Build(Sheet(form.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.All(parts.Where(part => part.TableBlock is not null), part => Assert.Null(part.TableBlock!.ContextRange));
+        Assert.Single(parts, part => part.Markdown.Contains("<!-- inferred", StringComparison.Ordinal));
+        // A list several rows above is not directly above the table.
+        var list = new List<DocumentNode> { Cell("A1", "Report", 0), Cell("A2", "East", 0), Cell("A3", "West", 0), Cell("A4", "North", 0) };
+        list.AddRange(Table(9, 200));
+        parts = AiPackageContentBuilder.Build(Sheet(list.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.All(parts.Where(part => part.TableBlock is not null), part => Assert.Null(part.TableBlock!.ContextRange));
+        Assert.Single(parts, part => part.Markdown.Contains("North", StringComparison.Ordinal));
+        // A merged title above the table names its whole merge.
+        var merged = new List<DocumentNode> { Cell("A1", "Report", 0), Cell("A3", "Sales (thousands)", 0, toColumn: 3) };
+        merged.AddRange(Table(5, 200));
+        parts = AiPackageContentBuilder.Build(Sheet(merged.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
+        Assert.All(parts, part => Assert.Equal("A3:C3", part.TableBlock!.ContextRange));
+        Assert.All(parts, part => Assert.Equal(1, Count(part.Markdown, "Sales (thousands)")));
+    }
+
+    private static int Count(string text, string value)
+    {
+        var count = 0;
+        for (var index = text.IndexOf(value, StringComparison.Ordinal); index >= 0; index = text.IndexOf(value, index + value.Length, StringComparison.Ordinal)) count++;
+        return count;
     }
 
     [Fact]
@@ -212,7 +347,7 @@ public sealed class AiPackageTableRowBlockTests
     private static DocumentGraph Sheet(params DocumentNode[] nodes) =>
         new(DocumentGraph.CurrentSchemaVersion, "book", DocumentFormatKind.Xlsx, [new DocumentPartition("sheet-Data", 0, nodes)]);
 
-    private static DocumentNode Cell(string address, string text, int order, bool bold = false, bool numeric = false)
+    private static DocumentNode Cell(string address, string text, int order, bool bold = false, bool numeric = false, int toColumn = 0)
     {
         var column = address.TakeWhile(char.IsLetter).Aggregate(0, (sum, letter) => sum * 26 + letter - 'A' + 1);
         var row = int.Parse(address[address.TakeWhile(char.IsLetter).Count()..], System.Globalization.CultureInfo.InvariantCulture);
@@ -224,6 +359,7 @@ public sealed class AiPackageTableRowBlockTests
                 ["column"] = JsonSerializer.SerializeToElement(column),
                 ["is_bold"] = JsonSerializer.SerializeToElement(bold),
                 ["is_numeric"] = JsonSerializer.SerializeToElement(numeric),
-            });
+            }.Concat(toColumn > 0 ? [new KeyValuePair<string, JsonElement>("merged_to_column", JsonSerializer.SerializeToElement(toColumn))] : [])
+            .ToDictionary(StringComparer.Ordinal));
     }
 }

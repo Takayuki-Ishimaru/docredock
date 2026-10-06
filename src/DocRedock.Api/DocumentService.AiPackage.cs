@@ -129,10 +129,11 @@ public sealed partial class DocumentService
                     bytes = new FileInfo(file).Length, sha256 = await AiHashAsync(file, cancellationToken).ConfigureAwait(false) });
             }
             // 2.1 adds table_row_blocks and, per part, estimated_tokens and table_block (present only on
-            // a block of a cut worksheet table). Every 2.0 field keeps its meaning.
+            // a block of a cut worksheet table); 2.2 adds table_block.context_range, the cells of the
+            // title or unit note that later blocks repeat before the header. Every 2.0 field keeps its meaning.
             var manifest = new
             {
-                schema_version = "2.1",
+                schema_version = "2.2",
                 generator_version = typeof(DocumentService).Assembly.GetName().Version?.ToString(3),
                 source = new { file_name = Path.GetFileName(source), sha256 = sourceHash, format = graph.Format },
                 content_policy = DocumentContentPolicyRules.Name(DocumentContentPolicyRules.Parse(documentOptions.ContentPolicy)),
@@ -187,6 +188,7 @@ public sealed partial class DocumentService
             {
                 table_id = block.TableId, index = block.Index, count = block.Count, header_range = block.HeaderRange,
                 row_range = block.RowRange, previous_part = block.PreviousPart, next_part = block.NextPart,
+                context_range = block.ContextRange,
             };
         return entry;
     }

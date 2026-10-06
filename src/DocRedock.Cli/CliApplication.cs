@@ -17,6 +17,8 @@ public enum ExitCode
     Success = 0, SuccessWithWarnings = 1, InvalidInput = 2, WorkspaceInvalid = 3,
     Unsupported = 4, SecurityPolicyViolation = 5, RestoreConflict = 6,
     ValidationFailed = 7, OcrPartialFailure = 8, LicenseValidationFailed = 9, InternalError = 10,
+    // Only with export --fail-on-review: the output was written, but something needs comparison with the source.
+    ReviewRequired = 11,
 }
 
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
@@ -124,7 +126,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--fail-on-review] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -223,7 +225,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 await output.WriteLineAsync(packageResult.Summary.ToString());
                 await output.WriteLineAsync("Review: review.md; report.json; source locations: manifest.json");
                 await WriteDiagnosticsAsync(packageResult.Diagnostics, quiet, args.HasFlag("verbose"));
-                return packageResult.Parts.Count == 0 || packageResult.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
+                return await ReviewExitCodeAsync(args, packageResult.Review,
+                    packageResult.Parts.Count == 0 || packageResult.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
             }
             var readableAssets = Path.Combine(Path.GetDirectoryName(markdown)!, Path.GetFileNameWithoutExtension(markdown) + ".assets");
             using var stagedOutputs = embedImages
@@ -242,7 +245,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             var visualSummary = ExportSummaryBuilder.BuildReadable(readable.Graph, readable.Diagnostics, readable.Projection);
             await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
             await output.WriteLineAsync(visualSummary.ToString());
-            await WriteReviewAsync(ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics, readable.Projection), markdown, sidecarPath: null);
+            var readableReview = ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics, readable.Projection);
+            await WriteReviewAsync(readableReview, markdown, sidecarPath: null);
             if (args.HasFlag("verbose"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
                     await output.WriteLineAsync(VisualEvidence(edge));
@@ -250,9 +254,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             if (!readable.Graph.Nodes.Any())
             {
                 await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found.");
-                return 1;
+                return await ReviewExitCodeAsync(args, readableReview, 1);
             }
-            return readable.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
+            return await ReviewExitCodeAsync(args, readableReview,
+                readable.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
         }
 
         var sidecarPath = SidecarFor(markdown);
@@ -272,11 +277,23 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             ? "Fidelity: F0 baseline; edited PDF requires explicit F3 render fallback"
             : "Fidelity: F0 baseline; supported Office edits use F1");
         await output.WriteLineAsync(ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString());
-        await WriteReviewAsync(ExportReviewBuilder.Build(result.Graph, result.Diagnostics), markdown,
-            sidecarForm == "dir" ? sidecarPath : null);
+        var review = ExportReviewBuilder.Build(result.Graph, result.Diagnostics);
+        await WriteReviewAsync(review, markdown, sidecarForm == "dir" ? sidecarPath : null);
         await WriteDiagnosticsAsync(result.Diagnostics, quiet, args.HasFlag("verbose"));
-        if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return 1; }
-        return result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0;
+        if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return await ReviewExitCodeAsync(args, review, 1); }
+        return await ReviewExitCodeAsync(args, review,
+            result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
+    }
+
+    // Review items never change the exit code by default. With --fail-on-review an export whose
+    // review is required (source-review pages, OCR items, worksheet table boundaries) returns
+    // ReviewRequired instead of 0 or 1, so an automated pipeline can stop before handing the output
+    // to a model. The output is written either way.
+    private async Task<int> ReviewExitCodeAsync(Arguments args, ExportReview review, int exitCode)
+    {
+        if (!args.HasFlag("fail-on-review") || !review.Required) return exitCode;
+        await output.WriteLineAsync($"Review required: compare the review items with the source before using the output (exit code {(int)ExitCode.ReviewRequired}, --fail-on-review).");
+        return (int)ExitCode.ReviewRequired;
     }
 
     private static VisualInferenceMode ParseInferenceMode(string value) => value switch
@@ -737,7 +754,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
           docredock --version
-          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--verbose] [--force] [--quiet]
+          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
                       readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
@@ -801,7 +818,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private sealed class Arguments
     {
         private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

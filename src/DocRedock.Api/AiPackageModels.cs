@@ -31,7 +31,13 @@ public sealed record AiPackageTableBlock(
     string? HeaderRange,
     string RowRange,
     string? PreviousPart,
-    string? NextPart);
+    string? NextPart)
+{
+    /// <summary>Cells of the short text just above the table (its title, unit or conditions) that
+    /// block 1 starts with and block 2 onward repeats before the header, so a block read alone still
+    /// says what its numbers mean. Null when the table has no such text. Manifest schema 2.2.</summary>
+    public string? ContextRange { get; init; }
+}
 
 public sealed record AiPackageSourceLocation(
     string NodeId,
