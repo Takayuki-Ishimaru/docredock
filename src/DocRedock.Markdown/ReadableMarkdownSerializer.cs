@@ -42,7 +42,24 @@ public sealed partial class ReadableMarkdownSerializer
 
     /// <summary>Number of GFM tables in the last readable projection, including tables formed
     /// from worksheet cells and chart data. Fenced code is excluded.</summary>
-    public int RenderedTables { get; private set; }
+    public int RenderedTables => Report.RenderedTables;
+
+    /// <summary>What the last projection inferred from layout: rendered tables, worksheet regions
+    /// written one after another although they sit side by side, and table boundaries that need
+    /// comparison with the source.</summary>
+    public ReadableProjectionReport Report { get; private set; } = ReadableProjectionReport.Empty;
+
+    /// <summary>When set, a workbook projection records where each worksheet's content was written
+    /// (<see cref="WorkbookLayout"/>). Off by default; it never changes the Markdown.</summary>
+    public bool RecordWorkbookLayout { get; init; }
+
+    /// <summary>The worksheet layout of the last workbook projection, or null when it was not
+    /// recorded or the graph is not a workbook.</summary>
+    public ReadableWorkbookLayout? WorkbookLayout { get; private set; }
+
+    private int sideBySideRegions;
+    private readonly List<ReadableTableBoundaryReview> tableBoundaryReviews = [];
+    private SheetLayoutRecorder? sheetRecorder;
 
     public ReadableMarkdownSerializer(ReadableMarkdownOptions? options = null) => this.options = options ?? new();
 
@@ -72,10 +89,13 @@ public sealed partial class ReadableMarkdownSerializer
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node)).ToArray()
             }).ToArray()
         };
+        sideBySideRegions = 0;
+        tableBoundaryReviews.Clear();
+        WorkbookLayout = null;
         var markdown = projectedGraph.Format == DocumentFormatKind.Xlsx
             ? SerializeWorkbook(projectedGraph)
             : SerializeDocument(projectedGraph);
-        RenderedTables = CountRenderedTables(markdown);
+        Report = new ReadableProjectionReport(CountRenderedTables(markdown), sideBySideRegions, tableBoundaryReviews.ToArray());
         return markdown;
     }
 
@@ -84,9 +104,15 @@ public sealed partial class ReadableMarkdownSerializer
         var count = 0;
         char fenceCharacter = '\0';
         var fenceLength = 0;
+        // The OCR review block lists recognized lines with their confidence in a table of its own;
+        // that is review information written by DocRedock, not a table of the document.
+        var inOcrReview = false;
         foreach (var line in markdown.Split('\n'))
         {
             var text = line.Trim();
+            if (fenceCharacter == '\0' && text.StartsWith("<details class=\"ocr-extraction\">", StringComparison.Ordinal)) inOcrReview = true;
+            else if (inOcrReview && text == "</details>") inOcrReview = false;
+            if (inOcrReview) continue;
             if (text.Length >= 3 && text[0] is '`' or '~')
             {
                 var length = text.TakeWhile(character => character == text[0]).Count();
@@ -114,6 +140,7 @@ public sealed partial class ReadableMarkdownSerializer
             ? customTitle
             : FindWorkbookTitle(partitions) ?? "ドキュメント";
         WriteHeading(output, 1, EscapeLiteral(title));
+        var sheets = RecordWorkbookLayout ? new List<(string PartitionId, int Start, int ContentStart, int End, List<ReadableSheetSegment> Segments)>() : null;
 
         foreach (var partition in partitions)
         {
@@ -124,7 +151,10 @@ public sealed partial class ReadableMarkdownSerializer
             var partitionMedia = partition.Nodes.Any(node => node.Kind is NodeKind.Image or NodeKind.ImageText);
             if (rows.Count == 0 && diagrams.Count == 0 && images.Count == 0 && !charts && !partitionMedia) continue;
 
+            var sheetStart = output.Length;
             WriteHeading(output, 2, EscapeLiteral(HumanizePartitionName(partition.Id)));
+            var contentStart = output.Length;
+            sheetRecorder = sheets is null ? null : new SheetLayoutRecorder();
             var hasSectionHeading = false;
             var index = 0;
             var insertions = diagrams.Select(diagram => new WorkbookInsertion(diagram.MinRow, diagram.Mermaid, null, diagram))
@@ -135,57 +165,167 @@ public sealed partial class ReadableMarkdownSerializer
             {
                 var next = index;
                 while (next < rows.Count && rows[next].Number < insertion.Row) next++;
-                RenderWorkbookRows(output, rows[index..next]
+                RenderWorkbookRows(output, partition, rows[index..next]
                     .Where(row => !IsRedundantTitle(row, title, partition.Id)).ToArray(), ref hasSectionHeading);
+                var start = output.Length;
                 if (insertion.Diagram is { } diagram)
                 {
                     WriteMermaid(output, diagram.Mermaid);
+                    var covered = next;
                     while (next < rows.Count && rows[next].Number <= diagram.MaxRow) next++;
+                    // The diagram stands for the cells it covers; they are not written separately.
+                    sheetRecorder?.Add(start, output.Length, rows[covered..next].SelectMany(row => row.Cells)
+                        .Select(cell => cell.NodeId).Prepend(diagram.NodeId));
                 }
                 else if (insertion.Image is { } image)
+                {
                     WriteImageNode(output, image, partition);
+                    sheetRecorder?.Add(start, output.Length, partition.Nodes
+                        .Where(node => node.Kind == NodeKind.ImageText && node.ParentId == image.Id).Select(node => node.Id).Prepend(image.Id));
+                }
                 index = next;
             }
-            RenderWorkbookRows(output, rows[index..]
+            RenderWorkbookRows(output, partition, rows[index..]
                 .Where(row => !IsRedundantTitle(row, title, partition.Id)).ToArray(), ref hasSectionHeading);
+            var notesStart = output.Length;
             WriteSheetOverlayLineStyleNotes(output, partition);
+            sheetRecorder?.Add(notesStart, output.Length, partition.Nodes
+                .Where(node => node.Kind == NodeKind.Shape && HasExtension(node, "sheet_overlay")).Select(node => node.Id));
+            var mediaStart = output.Length;
             RenderPartitionMedia(output, partition);
+            var rowImages = partition.Nodes.Where(node => node.Kind == NodeKind.Image && ExtensionInt(node, "row") is not null)
+                .Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+            sheetRecorder?.Add(mediaStart, output.Length, partition.Nodes.Where(node =>
+                node.Kind == NodeKind.Chart || node.Kind == NodeKind.Image && !rowImages.Contains(node.Id) ||
+                node.Kind == NodeKind.ImageText && (node.ParentId is null || !rowImages.Contains(node.ParentId))).Select(node => node.Id));
+            if (sheetRecorder is not null)
+                sheets!.Add((partition.Id, sheetStart, contentStart, output.Length, sheetRecorder.Segments));
+            sheetRecorder = null;
         }
 
-        return Finish(output);
+        var raw = output.ToString();
+        var markdown = Finish(output);
+        if (sheets is not null)
+        {
+            // Finish turns CRLF into LF and trims the end, so raw offsets are mapped onto its result.
+            var removed = new int[raw.Length + 1];
+            for (var position = 0; position < raw.Length; position++)
+                removed[position + 1] = removed[position] + (raw[position] == '\r' && position + 1 < raw.Length && raw[position + 1] == '\n' ? 1 : 0);
+            int Map(int offset) => Math.Min(offset - removed[offset], markdown.Length);
+            WorkbookLayout = new ReadableWorkbookLayout(sheets.Select(sheet => new ReadableSheetLayout(sheet.PartitionId,
+                Map(sheet.Start), Map(sheet.ContentStart), Map(sheet.End), sheet.Segments.Select(segment => segment with
+                {
+                    Start = Map(segment.Start), End = Map(segment.End),
+                    Table = segment.Table is not { } table ? null : table with
+                    {
+                        HeaderEnd = Map(table.HeaderEnd),
+                        Rows = table.Rows.Select(row => row with { Start = Map(row.Start), End = Map(row.End) }).ToArray(),
+                    },
+                }).ToArray())).ToArray());
+        }
+        return markdown;
     }
 
-    private static void RenderWorkbookRows(StringBuilder output, IReadOnlyList<SheetRow> rows, ref bool hasSectionHeading)
+    // Records where each piece of a worksheet's projection was written and which nodes it came
+    // from. Only an explicit RecordWorkbookLayout request creates one.
+    private sealed class SheetLayoutRecorder
+    {
+        public List<ReadableSheetSegment> Segments { get; } = [];
+
+        public void Add(int start, int end, IEnumerable<string?> nodeIds, ReadableSheetTable? table = null)
+        {
+            if (end > start)
+                Segments.Add(new(start, end, nodeIds.OfType<string>().Distinct(StringComparer.Ordinal).ToArray(), table));
+        }
+    }
+
+    private void RenderWorkbookRows(StringBuilder output, DocumentPartition partition, IReadOnlyList<SheetRow> rows, ref bool hasSectionHeading)
     {
         if (rows.Count == 0) return;
         var metadataRows = rows.TakeWhile(row => row.Cells.Count == 2 && LooksLikeLabel(row.Cells[0])).ToArray();
         if (metadataRows.Length > 0 && metadataRows.Length < rows.Count && rows[metadataRows.Length].Cells.Count >= 3 &&
             !metadataRows.Any(row => row.Cells.All(cell => cell.IsBold || cell.HasFill || cell.IsCentered)))
         {
+            var start = output.Length;
             WriteKeyValueRows(output, metadataRows);
-            RenderWorkbookRows(output, rows.Skip(metadataRows.Length).ToArray(), ref hasSectionHeading);
+            sheetRecorder?.Add(start, output.Length, NodeIdsOf(metadataRows));
+            RenderWorkbookRows(output, partition, rows.Skip(metadataRows.Length).ToArray(), ref hasSectionHeading);
             return;
         }
         var isolatedMetadataRows = rows.Where(row => IsMetadataFragment(row.Cells)).ToArray();
         if (isolatedMetadataRows.Length > 0)
         {
-            RenderWorkbookRows(output, rows.Except(isolatedMetadataRows).ToArray(), ref hasSectionHeading);
-            foreach (var row in isolatedMetadataRows) RenderStandaloneRow(output, row);
+            RenderWorkbookRows(output, partition, rows.Except(isolatedMetadataRows).ToArray(), ref hasSectionHeading);
+            foreach (var row in isolatedMetadataRows) RecordStandaloneRow(output, row);
             return;
         }
-        var regions = BuildRegions(rows);
-        if (!hasSectionHeading && regions.Any(region => region.MinRow <= 15 && LooksLikeKeyValueGroup(region.Rows)))
+        var regions = BuildRegions(rows, out var uncertainGaps);
+        // Name a document-information section only for label/value pairs: a table whose first row
+        // names its columns ("Item | Q1") is data, not information about the document.
+        if (!hasSectionHeading && regions.Any(region => region.MinRow <= 15 && IsDocumentInformationGroup(region.Rows)))
         {
             WriteInference(output, "セル配置から文書情報セクションを推定");
             WriteHeading(output, 3, "文書情報");
             hasSectionHeading = true;
         }
+        sideBySideRegions += regions.Count(region => regions.Any(other => other.MinColumn < region.MinColumn &&
+            other.MinRow <= region.Rows[^1].Number && region.MinRow <= other.Rows[^1].Number));
+        var pending = uncertainGaps.ToList();
         foreach (var region in regions)
         {
+            if (pending.FirstOrDefault(gap => region.MinColumn >= gap.RightStart && region.MinColumn <= gap.RightEnd &&
+                    region.MinRow <= gap.MaxRow && region.Rows[^1].Number >= gap.MinRow) is { } gap)
+            {
+                pending.Remove(gap);
+                ReportUncertainBoundary(output, partition, gap);
+            }
             RenderRowGroup(output, region.Rows);
             hasSectionHeading |= region.Rows.SelectMany(row => row.Cells)
                 .Any(cell => !cell.IsNumeric && TryGetSectionHeading(cell.Text, out _, out _));
         }
+    }
+
+    // The two sides of the gap are written as separate tables. Say so where it happens, and report
+    // the ranges once, so a reader of the Markdown and of the export summary compares the same place.
+    private void ReportUncertainBoundary(StringBuilder output, DocumentPartition partition, SheetGap gap)
+    {
+        var gapColumn = gap.LeftEnd + 1;
+        var sheet = SheetName(partition.Id);
+        var review = new ReadableTableBoundaryReview(partition.Id, sheet,
+            CellRange(gapColumn, gap.MinRow, gapColumn, gap.MaxRow),
+            CellRange(gap.LeftStart, gap.MinRow, gap.LeftEnd, gap.MaxRow),
+            CellRange(gap.RightStart, gap.MinRow, gap.RightEnd, gap.MaxRow));
+        WriteInference(output, $"{ColumnLetters(gapColumn)}列の空白を境に左右を別の表として出力（同じ行の対応は原本で確認）");
+        tableBoundaryReviews.Add(review);
+        AddDiagnostic(new MarkdownDiagnostic("XlsxTableBoundaryAmbiguous",
+            $"Sheet '{sheet}': the cells on either side of blank column {ColumnLetters(gapColumn)} ({review.LeftRange} and {review.RightRange}) " +
+            "were output as separate tables; whether their rows belong together could not be determined from the layout. Compare with the source.",
+            MarkdownDiagnosticSeverity.Info, gap.RightNodeId ?? partition.Id + "!" + review.GapRange));
+    }
+
+    private static IEnumerable<string?> NodeIdsOf(IEnumerable<SheetRow> rows) =>
+        rows.SelectMany(row => row.Cells).SelectMany(cell => (cell.OverlayNodeIds ?? []).Prepend(cell.NodeId));
+
+    // Label/value pairs ("文書番号 | EXPS-DES-001 | 版 | 1.2") are information about the document.
+    // A group whose first row names its columns ("Item | Q1") above data rows is a table, even when
+    // every first cell happens to be a short label, so it gets no document-information heading.
+    private static bool IsDocumentInformationGroup(IReadOnlyList<SheetRow> rows)
+    {
+        if (!LooksLikeKeyValueGroup(rows)) return false;
+        var leadingCells = rows[0].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        if (leadingCells.Length == 1 && (leadingCells[0].MaxColumn > leadingCells[0].Column ||
+            !leadingCells[0].IsNumeric && TryGetSectionHeading(leadingCells[0].Text, out _, out _))) return false;
+        if (rows.Count == 1 && rows[0].Cells.Count > 1 && rows[0].Cells.All(cell => TryGetSectionHeading(cell.Text, out _, out _))) return false;
+        var namesColumns = rows.Count >= 2 && IsHeaderRow(rows[0]) &&
+            Enumerable.Range(0, rows[0].Cells.Count / 2).All(index => LooksLikeLabel(rows[0].Cells[index * 2 + 1]));
+        return !namesColumns;
+    }
+
+    private void RecordStandaloneRow(StringBuilder output, SheetRow row)
+    {
+        var start = output.Length;
+        RenderStandaloneRow(output, row);
+        sheetRecorder?.Add(start, output.Length, NodeIdsOf([row]));
     }
 
     private bool IsIncludedPartition(string partitionId)
@@ -932,6 +1072,32 @@ public sealed partial class ReadableMarkdownSerializer
         // filter below -- a covered position with no existing Cell node still needs a synthesized
         // cell so its marker survives that filter and joins the header/label region.
         ApplySheetOverlays(partition, cellsByPosition);
+        // A copy of a filled-down (or filled-across) formula is judged against the written formula
+        // nearest above it in its column, or else to its left in its row.
+        var copies = cellsByPosition.Values.Where(cell => cell.IsFormulaCopy).ToArray();
+        if (copies.Length > 0)
+        {
+            var written = cellsByPosition.Values.Where(cell => cell.IsFormula).ToArray();
+            var byColumn = written.GroupBy(cell => cell.Column).ToDictionary(group => group.Key, group => group.OrderBy(cell => cell.Row).ToArray());
+            var byRow = written.GroupBy(cell => cell.Row).ToDictionary(group => group.Key, group => group.OrderBy(cell => cell.Column).ToArray());
+            static ReadableCell? Before(ReadableCell[]? ordered, int position, Func<ReadableCell, int> key)
+            {
+                if (ordered is null) return null;
+                var (low, high) = (0, ordered.Length - 1);
+                ReadableCell? found = null;
+                while (low <= high)
+                {
+                    var middle = (low + high) / 2;
+                    if (key(ordered[middle]) < position) { found = ordered[middle]; low = middle + 1; }
+                    else high = middle - 1;
+                }
+                return found;
+            }
+            foreach (var copy in copies)
+                if ((Before(byColumn.GetValueOrDefault(copy.Column), copy.Row, cell => cell.Row) ??
+                     Before(byRow.GetValueOrDefault(copy.Row), copy.Column, cell => cell.Column)) is { } source)
+                    cellsByPosition[(copy.Row, copy.Column)] = copy with { IsComputed = IsComputedResult(source.Formula!, DisplayOf(copy), copy.ReturnsText) };
+        }
 
         var cells = cellsByPosition.Values
             .Where(cell => !string.IsNullOrWhiteSpace(cell.Text))
@@ -970,8 +1136,10 @@ public sealed partial class ReadableMarkdownSerializer
                 var fragment = OverlayFragment(overlay, OverlayGlyph(overlay, row, column), isLabelSlot);
                 if (fragment.Length == 0) continue;
                 cellsByPosition[(row, column)] = cellsByPosition.TryGetValue((row, column), out var existing)
-                    ? existing with { Text = existing.Text.Length == 0 ? fragment : existing.Text + "\n" + fragment, IsOverlay = true }
-                    : new ReadableCell(row, column, fragment, false, false, false, false, false, false, null, column, IsOverlay: true);
+                    ? existing with { Text = existing.Text.Length == 0 ? fragment : existing.Text + "\n" + fragment, IsOverlay = true,
+                        OverlayNodeIds = [.. existing.OverlayNodeIds ?? [], node.Id] }
+                    : new ReadableCell(row, column, fragment, false, false, false, false, false, false, null, column, IsOverlay: true,
+                        OverlayNodeIds: [node.Id]);
             }
         }
     }
@@ -1000,7 +1168,7 @@ public sealed partial class ReadableMarkdownSerializer
         .Select(node => new ReadableDiagram(
             ExtensionInt(node, "diagram_min_row") ?? int.MaxValue,
             ExtensionInt(node, "diagram_max_row") ?? int.MaxValue,
-            NodeText(node).Trim()))
+            NodeText(node).Trim(), node.Id))
         .Where(diagram => !string.IsNullOrWhiteSpace(diagram.Mermaid))
         .OrderBy(diagram => diagram.MinRow)
         .ToList();
@@ -1036,18 +1204,32 @@ public sealed partial class ReadableMarkdownSerializer
                     : $"`={formula!.TrimStart('=')}` → {value}"
                 : string.IsNullOrWhiteSpace(value) ? "（保存済み計算値なし）" : value
             : value;
+        var returnsText = StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "str");
         return new ReadableCell(row.Value, column.Value, text, !string.IsNullOrWhiteSpace(formula),
             ExtensionBool(node, "is_numeric") || StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "n"),
             ExtensionBool(node, "is_bold"), ExtensionBool(node, "has_fill"), ExtensionBool(node, "has_border"),
             ExtensionBool(node, "is_centered"), ExtensionDouble(node, "font_size"),
             Math.Max(ExtensionInt(node, "merged_to_column") ?? column.Value, ExtensionInt(node, "center_across_to_column") ?? column.Value),
             MaxRow: ExtensionInt(node, "merged_to_row") ?? row.Value,
-            IsCenterAcross: ExtensionInt(node, "center_across_to_column") > column.Value);
+            IsCenterAcross: ExtensionInt(node, "center_across_to_column") > column.Value,
+            NodeId: node.Id, Table: ExtensionString(node, "excel_table"), Display: value,
+            IsComputed: !string.IsNullOrWhiteSpace(formula) && IsComputedResult(formula!, value, returnsText),
+            IsFormulaCopy: string.IsNullOrWhiteSpace(formula) && ExtensionBool(node, "is_formula"),
+            Formula: string.IsNullOrWhiteSpace(formula) ? null : formula, ReturnsText: returnsText);
     }
 
-    private static void RenderRowGroup(StringBuilder output, IReadOnlyList<SheetRow> rows)
+    // A formula's result is a value unless it is text the formula did not choose itself: one of the
+    // fixed words written in the formula (=IF(…,"達成","未達")) is a computed value, while text it looked
+    // up or built from other cells (='月次分析'!H5, VLOOKUP, =B2&" "&C2), like a name, is read as typed
+    // text. Numbers, logical values, errors and results never saved are values.
+    private static bool IsComputedResult(string formula, string result, bool returnsText) =>
+        !returnsText || result.Length == 0 || FormulaStringRegex().Matches(formula)
+            .Any(literal => literal.Groups[1].Value.Replace("\"\"", "\"", StringComparison.Ordinal).Trim() is { Length: > 0 } word && word == result);
+
+    private void RenderRowGroup(StringBuilder output, IReadOnlyList<SheetRow> rows)
     {
         var leadingCells = rows[0].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
+        var start = output.Length;
         if (rows.Count > 1 && leadingCells.Length == 1 && !leadingCells[0].IsOverlay &&
             leadingCells[0].MaxColumn > leadingCells[0].Column && leadingCells[0].MaxRow <= leadingCells[0].Row &&
             leadingCells[0].MaxColumn >= rows.SelectMany(row => row.Cells).Max(cell => cell.Column))
@@ -1055,14 +1237,16 @@ public sealed partial class ReadableMarkdownSerializer
             // A merged banner describes the region. Once adjacent tables have been separated,
             // it must not become the first column's header or push the real header into the data.
             WriteParagraph(output, EscapeLiteral(leadingCells[0].Text));
-            RenderRowGroup(output, rows.Skip(1).ToArray());
+            sheetRecorder?.Add(start, output.Length, [leadingCells[0].NodeId]);
+            RenderRowGroup(output, WithoutEmptyColumns(rows.Skip(1)));
             return;
         }
         if (leadingCells.Length == 1 && !leadingCells[0].IsNumeric &&
             TryGetSectionHeading(leadingCells[0].Text, out var leadingHeading, out var leadingLevel))
         {
             WriteHeading(output, leadingLevel, EscapeLiteral(leadingHeading));
-            if (rows.Count > 1) RenderRowGroup(output, rows.Skip(1).ToArray());
+            sheetRecorder?.Add(start, output.Length, [leadingCells[0].NodeId]);
+            if (rows.Count > 1) RenderRowGroup(output, WithoutEmptyColumns(rows.Skip(1)));
             return;
         }
         var width = rows[0].Cells.Count;
@@ -1073,37 +1257,100 @@ public sealed partial class ReadableMarkdownSerializer
                 _ = TryGetSectionHeading(cell.Text, out var heading, out var level);
                 WriteHeading(output, level, EscapeLiteral(heading));
             }
+            sheetRecorder?.Add(start, output.Length, NodeIdsOf(rows));
             return;
         }
 
         if (TryWriteMultiRowHeaderTables(output, rows)) return;
 
+        // A lone caption in the first column above a table (an unmerged title, an instruction, a unit
+        // note) describes the table. It is not the first column's header: the table's own header is
+        // the next row, and the caption must not push it down into the data.
+        if (rows.Count >= 2 && leadingCells.Length == 1 && !leadingCells[0].IsOverlay && !leadingCells[0].IsNumeric &&
+            leadingCells[0].Column == rows[0].Cells[0].Column &&
+            rows[1].Cells.Count(cell => !string.IsNullOrWhiteSpace(cell.Text)) >= 2)
+        {
+            RecordStandaloneRow(output, rows[0]);
+            RenderRowGroup(output, WithoutEmptyColumns(rows.Skip(1)));
+            return;
+        }
+
         if (rows.Count >= 2 && IsHeaderRow(rows[0]))
         {
-            WriteTable(output, rows[0].Cells.Select(cell => cell.Text).ToArray(),
-                rows.Skip(1).Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+            WriteSheetTable(output, rows[0].Cells.Select(cell => cell.Text).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
             return;
         }
 
         if (LooksLikeKeyValueGroup(rows))
         {
             WriteKeyValueRows(output, rows);
+            sheetRecorder?.Add(start, output.Length, NodeIdsOf(rows));
             return;
         }
 
         if (rows.Count >= 2 && width is >= 2 and <= 16)
         {
             if (FirstColumnLooksLikeData(rows))
-                WriteTable(output, Enumerable.Repeat(string.Empty, width).ToArray(), rows.Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+                WriteSheetTable(output, Enumerable.Repeat(string.Empty, width).ToArray(), [], rows);
             else
-                WriteTable(output, rows[0].Cells.Select(cell => cell.Text).ToArray(), rows.Skip(1).Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+                WriteSheetTable(output, rows[0].Cells.Select(cell => cell.Text).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
             return;
         }
 
-        foreach (var row in rows) RenderStandaloneRow(output, row);
+        // A one-column list under an emphasized header (a candidate or lookup list beside a table)
+        // keeps its items under that header. Instructions, notes, sentences and headings stay
+        // paragraphs: every item must be a short, unemphasized name.
+        static bool IsListName(ReadableCell cell) => cell.Text.Length <= 40 && !cell.Text.Contains('\n') &&
+            cell.Text.IndexOfAny(['。', '．', '！', '？', '!', '?']) < 0 && !NoteRegex().IsMatch(cell.Text) && !LooksLikeCode(cell.Text);
+        if (rows.Count >= 3 && width == 1 && rows[0].Cells[0] is { IsNumeric: false } header && (header.IsBold || header.HasFill) &&
+            IsListName(header) && rows.Skip(1).All(row => !row.Cells[0].IsBold && IsListName(row.Cells[0])))
+        {
+            WriteSheetTable(output, [header.Text], rows.Take(1).ToArray(), rows.Skip(1).ToArray());
+            return;
+        }
+
+        foreach (var row in rows) RecordStandaloneRow(output, row);
     }
 
-    private static bool TryWriteMultiRowHeaderTables(StringBuilder output, IReadOnlyList<SheetRow> rows)
+    // A region's rows are padded to every column any of its rows uses. Once a banner, caption or
+    // heading above a table has been written on its own, the columns only it occupied are left out,
+    // so a list under a wide banner does not get an empty first column.
+    private static SheetRow[] WithoutEmptyColumns(IEnumerable<SheetRow> rows)
+    {
+        var rest = rows.ToArray();
+        var used = rest.SelectMany(row => row.Cells).Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).Select(cell => cell.Column).ToHashSet();
+        return rest.Select(row => row with { Cells = row.Cells.Where(cell => used.Contains(cell.Column)).ToArray() }).ToArray();
+    }
+
+    // WriteTable for worksheet rows: the same Markdown, plus, when a layout is being recorded, where
+    // the header and each data row line were written and which cells they came from.
+    private void WriteSheetTable(StringBuilder output, IReadOnlyList<string> headers, IReadOnlyList<SheetRow> headerRows,
+        IReadOnlyList<SheetRow> dataRows)
+    {
+        if (sheetRecorder is null)
+        {
+            WriteTable(output, headers, dataRows.Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+            return;
+        }
+        var start = output.Length;
+        WriteTableRow(output, headers);
+        WriteTableRow(output, headers.Select(_ => "---").ToArray());
+        var headerEnd = output.Length;
+        var lines = new List<ReadableSheetTableRow>();
+        foreach (var row in dataRows)
+        {
+            var lineStart = output.Length;
+            WriteTableRow(output, Enumerable.Range(0, headers.Count).Select(index => index < row.Cells.Count ? row.Cells[index].Text : string.Empty).ToArray());
+            lines.Add(new(lineStart, output.Length, row.Number, NodeIdsOf([row]).OfType<string>().Distinct(StringComparer.Ordinal).ToArray()));
+        }
+        output.AppendLine();
+        var cells = headerRows.Concat(dataRows).SelectMany(row => row.Cells).ToArray();
+        sheetRecorder.Add(start, output.Length, NodeIdsOf(headerRows.Concat(dataRows)), new ReadableSheetTable(headerEnd,
+            NodeIdsOf(headerRows).OfType<string>().Distinct(StringComparer.Ordinal).ToArray(), headerRows.Select(row => row.Number).ToArray(),
+            cells.Length == 0 ? 0 : cells.Min(cell => cell.Column), cells.Length == 0 ? 0 : cells.Max(cell => cell.MaxColumn), lines));
+    }
+
+    private bool TryWriteMultiRowHeaderTables(StringBuilder output, IReadOnlyList<SheetRow> rows)
     {
         var start = -1;
         for (var index = 2; index < Math.Min(rows.Count - 1, 17); index++)
@@ -1132,8 +1379,10 @@ public sealed partial class ReadableMarkdownSerializer
         var dataEnd = start;
         while (dataEnd < rows.Count && IsNumericDataRow(rows[dataEnd])) dataEnd++;
         if (dataEnd - start < 2) return false;
+        var bannerStart = output.Length;
         foreach (var banner in banners)
             WriteParagraph(output, EscapeLiteral(string.Join(" — ", banner.Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).Select(cell => cell.Text))));
+        sheetRecorder?.Add(bannerStart, output.Length, NodeIdsOf(banners));
 
         var columns = rows[0].Cells.Select(cell => cell.Column).ToArray();
         var sourceHeaders = headerRows.SelectMany(row => row.Cells).Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
@@ -1145,7 +1394,7 @@ public sealed partial class ReadableMarkdownSerializer
                 .OrderBy(cell => cell.Row).Select(cell => cell.Text).Distinct(StringComparer.Ordinal).ToArray();
             return path.Length > 0 ? string.Join(" / ", path) : $"列 {column}";
         }).ToArray();
-        WriteTable(output, headers, rows.Skip(start).Take(dataEnd - start).Select(row => row.Cells.Select(cell => cell.Text).ToArray()));
+        WriteSheetTable(output, headers, headerRows, rows.Skip(start).Take(dataEnd - start).ToArray());
         if (dataEnd < rows.Count) RenderRowGroup(output, rows.Skip(dataEnd).ToArray());
         return true;
     }
@@ -1184,11 +1433,21 @@ public sealed partial class ReadableMarkdownSerializer
     /// This preserves blank values inside a table while keeping side-by-side tables
     /// independent.
     /// </summary>
-    private static IReadOnlyList<SheetRegion> BuildRegions(IReadOnlyList<SheetRow> rows)
+    private static IReadOnlyList<SheetRegion> BuildRegions(IReadOnlyList<SheetRow> rows, out IReadOnlyList<SheetGap> uncertainGaps)
     {
         var regions = new List<MutableRegion>();
-        var boundaries = SheetRegionBoundaries(rows);
-        foreach (var fragment in rows.SelectMany(row => SplitRow(row, boundaries)).OrderBy(fragment => fragment.Row.Number).ThenBy(fragment => fragment.MinColumn))
+        var gaps = SheetRegionBoundaries(rows);
+        uncertainGaps = gaps.Where(gap => gap.Split && gap.Uncertain).ToArray();
+        // A single blank column that was judged across rows, or the edge between two tables that touch,
+        // separates every row it applies to, even one whose cells happen to sit far apart because a cell
+        // beside the boundary is blank.
+        IEnumerable<RowFragment> Fragments(SheetRow row)
+        {
+            var applying = gaps.Where(gap => SplitsRow(gap, row.Number)).ToArray();
+            return SplitRow(row, applying.Select(gap => gap.RightStart).ToArray(),
+                applying.Where(gap => gap.RightStart - gap.LeftEnd <= 2).Select(gap => gap.RightStart).ToHashSet());
+        }
+        foreach (var fragment in rows.SelectMany(Fragments).OrderBy(fragment => fragment.Row.Number).ThenBy(fragment => fragment.MinColumn))
         {
             var metadataFragment = IsMetadataFragment(fragment.Cells);
             var startsSection = fragment.Cells.Count == 1 && !fragment.Cells[0].IsNumeric &&
@@ -1206,6 +1465,8 @@ public sealed partial class ReadableMarkdownSerializer
                                      BandsOverlap(region.MinColumn, region.MaxColumn, fragment.MinColumn, fragment.MaxColumn))
                     .OrderByDescending(region => region.MaxRow)
                     .ThenBy(region => Math.Abs(region.MinColumn - fragment.MinColumn))
+                    // A banner spanning the sheet must not take rows that fit a table below it exactly.
+                    .ThenBy(region => Math.Abs(region.MaxColumn - fragment.MaxColumn))
                     .FirstOrDefault();
             if (matching is null)
             {
@@ -1228,51 +1489,397 @@ public sealed partial class ReadableMarkdownSerializer
                label.Equals("Public Beta", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static IReadOnlyList<int> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
+    /// <summary>One empty-column gap between two column blocks of a section. <see cref="Split"/>
+    /// separates the blocks into different regions; <see cref="Uncertain"/> marks a split that the
+    /// layout could not justify either way, so the output says so and a person compares it.</summary>
+    private sealed record SheetGap(int LeftStart, int LeftEnd, int RightStart, int RightEnd, int MinRow, int MaxRow,
+        bool Split, bool Uncertain = false, string? RightNodeId = null);
+
+    // Rows of merged titles that would bridge a blank column of the ordinary rows: a single banner,
+    // or a row of group titles where one title spans a column every other row leaves empty
+    // ("対象者タグ" over three code lists). They neither reconnect the tables below nor count as rows
+    // of them. A sheet drawn entirely in merged cells (方眼紙) has no ordinary rows, so its merged
+    // cells keep defining its columns, and a merged header beside ordinary cells still bridges.
+    private static HashSet<int> BridgingTitleRows(IReadOnlyList<SheetRow> rows)
     {
-        // A single blank column can separate independent tables, or indent bilingual labels
-        // before numeric data. Use the surrounding rows to distinguish those layouts. Ignore standalone
-        // merged titles so they do not reconnect two otherwise independent tables below them.
-        var cells = rows.Where(row => row.Cells.Count > 1 || row.Cells[0].MaxColumn == row.Cells[0].Column)
+        static bool Merged(ReadableCell cell) => cell.MaxColumn > cell.Column && !cell.IsOverlay;
+        var covered = new HashSet<int>();
+        foreach (var cell in rows.Where(row => !row.Cells.All(Merged)).SelectMany(row => row.Cells))
+            for (var column = cell.Column; column <= cell.MaxColumn; column++) covered.Add(column);
+        var (first, last) = covered.Count == 0 ? (0, 0) : (covered.Min(), covered.Max());
+        bool Bridges(ReadableCell cell)
+        {
+            for (var column = Math.Max(cell.Column, first + 1); column <= Math.Min(cell.MaxColumn, last - 1); column++)
+                if (!covered.Contains(column)) return true;
+            return false;
+        }
+        return rows.Where(row => row.Cells.Count > 0 && row.Cells.All(Merged) &&
+                (row.Cells.Count == 1 || row.Cells.Any(Bridges)))
+            .Select(row => row.Number).ToHashSet();
+    }
+
+    private static IReadOnlyList<SheetGap> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
+    {
+        // Column blocks are separated by at least one column that no cell (and no merge) covers.
+        // Two or more empty columns always separate regions. A single empty column can separate
+        // independent tables, or be a spacer inside one table (bilingual labels before their data,
+        // an ID beside its quantities); DecideSingleColumnGap weighs the surrounding rows.
+        var titles = BridgingTitleRows(rows);
+        var cells = rows.Where(row => !titles.Contains(row.Number))
             .SelectMany(row => row.Cells).OrderBy(cell => cell.Column).ToArray();
         if (cells.Length == 0) return [];
-        var boundaries = new List<int>();
+        var blocks = new List<(int Start, int End)>();
+        var start = cells[0].Column;
         var end = cells[0].MaxColumn;
         foreach (var cell in cells.Skip(1))
         {
-            if (cell.Column - end >= 3 || cell.Column - end == 2 &&
-                IsIndependentSingleColumnGap(rows, end, cell.Column)) boundaries.Add(cell.Column);
+            if (cell.Column - end >= 2)
+            {
+                blocks.Add((start, end));
+                start = cell.Column;
+            }
             end = Math.Max(end, cell.MaxColumn);
         }
-        return boundaries;
+        blocks.Add((start, end));
+        var gaps = new List<SheetGap>();
+        var groupStart = blocks[0].Start;
+        var groupEnd = blocks[0].End;
+        foreach (var block in blocks.Skip(1))
+        {
+            // The left side is everything joined since the previous split, so a later gap is judged
+            // against the whole table it would extend, not only the nearest block.
+            var gap = block.Start - groupEnd == 2
+                ? DecideSingleColumnGap(rows, titles, groupStart, groupEnd, block.Start, block.End)
+                : new SheetGap(groupStart, groupEnd, block.Start, block.End, 0, 0, Split: true);
+            gaps.Add(gap);
+            if (gap.Split) groupStart = block.Start;
+            groupEnd = block.End;
+        }
+        // Two tables can also touch, with no blank column between them. Such an edge only separates the
+        // rows it was found in; blank columns are still judged over whole blocks.
+        foreach (var block in blocks)
+            gaps.AddRange(TouchingTableEdges(rows, block.Start, block.End).Select(edge =>
+                new SheetGap(block.Start, edge.Column - 1, edge.Column, block.End, edge.MinRow, edge.MaxRow, Split: true)));
+        return gaps;
     }
 
-    private static bool IsIndependentSingleColumnGap(IReadOnlyList<SheetRow> rows, int leftEnd, int rightStart)
+    // A blank column separates every row; the edge between touching tables only the rows it was found in.
+    private static bool SplitsRow(SheetGap gap, int row) =>
+        gap.Split && (gap.RightStart - gap.LeftEnd > 1 || row >= gap.MinRow && row <= gap.MaxRow);
+
+    /// <summary>
+    /// Edges inside one block where a table starts right after another, with no blank column between
+    /// them, and the rows each edge separates. The evidence must come from the author's own layout: a
+    /// row of merged titles in which two titles touch, over ordinary (unmerged) cells in the rows
+    /// directly below; under each title a first column of labels; and a difference in structure, not
+    /// only in styling: one block is a declared Excel table the other is not part of, or one block
+    /// starts with a header row while the other, starting on the same row, labels each of its rows in
+    /// an emphasised first column (a legend such as 読み方 beside a list). Group titles over the values of one table (2024年 |
+    /// 2025年), over columns of the same rows (担当者 | 連絡先, a WBS schedule), and remarks titles
+    /// therefore keep one table, and so does a sheet drawn entirely in merged cells (方眼紙), whose every
+    /// row would otherwise look like titles. Only the title row and the rows under the titles are cut.
+    /// </summary>
+    private static IEnumerable<(int Column, int MinRow, int MaxRow)> TouchingTableEdges(IReadOnlyList<SheetRow> rows, int blockStart, int blockEnd)
     {
-        var leftRows = rows.Select(row => row.Cells.Where(cell => cell.MaxColumn <= leftEnd).ToArray())
-            .Where(cells => cells.Length >= 2).ToArray();
-        var rightRows = rows.Select(row => row.Cells.Where(cell => cell.Column >= rightStart).ToArray())
-            .Where(cells => cells.Length >= 2).ToArray();
-        if (leftRows.Length < 2 || rightRows.Length < 2) return false;
-        // A right-hand list has its own labels below its header. Numeric-only columns beside
-        // bilingual labels have no such independent row labels and stay with their source row.
-        bool Numeric(ReadableCell cell) => cell.IsNumeric || cell.IsFormula ||
-            double.TryParse(PlainText(cell.Text).TrimEnd('%', '％'),
-                NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out _);
-        return rightRows.Skip(1).Any(cells => !Numeric(cells[0])) ||
-               leftRows.SelectMany(cells => cells).Any(Numeric);
+        static bool Merged(ReadableCell cell) => cell.MaxColumn > cell.Column && !cell.IsOverlay;
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var titles = rows[index].Cells.Where(cell => cell.Column >= blockStart && cell.MaxColumn <= blockEnd).ToArray();
+            if (titles.Length < 2 || !rows[index].Cells.All(Merged)) continue;
+            for (var pair = 1; pair < titles.Length; pair++)
+            {
+                var (left, right) = (titles[pair - 1], titles[pair]);
+                if (right.Column != left.MaxColumn + 1 ||
+                    new[] { left, right }.Any(title => AnnotationHeaderRegex().IsMatch(PlainText(title.Text).Trim()))) continue;
+                // The rows directly under the titles: contiguous, inside the columns of the row of titles,
+                // up to a blank row, the next row of merged cells or a cell across the edge.
+                var below = new List<SheetRow>();
+                var previous = Math.Max(rows[index].Number, rows[index].Cells.Max(cell => cell.MaxRow));
+                foreach (var row in rows.Skip(index + 1))
+                {
+                    var inBlock = row.Cells.Where(cell => cell.MaxColumn >= blockStart && cell.Column <= blockEnd).ToArray();
+                    if (row.Number != previous + 1 || row.Cells.Count > 1 && row.Cells.All(Merged) ||
+                        inBlock.Any(cell => cell.Column < titles[0].Column || cell.MaxColumn > titles[^1].MaxColumn ||
+                            cell.Column <= left.MaxColumn && cell.MaxColumn >= right.Column)) break;
+                    below.Add(row);
+                    previous = row.Number;
+                }
+                var leftRows = Under(below, left);
+                var rightRows = Under(below, right);
+                if (leftRows.Length < 2 || rightRows.Length < 2) continue;
+                if (leftRows.Concat(rightRows).SelectMany(row => row.Cells).Any(Merged)) continue;
+                if (!HasOwnLabels(leftRows, left.Column) || !HasOwnLabels(rightRows, right.Column)) continue;
+                var tables = (Left: leftRows.SelectMany(row => row.Cells).Select(cell => cell.Table).Distinct().ToArray(),
+                    Right: rightRows.SelectMany(row => row.Cells).Select(cell => cell.Table).Distinct().ToArray());
+                // A legend beside a table starts beside the table's header; a column of emphasised values
+                // that starts beside its first data row (grades of each person) belongs to those rows.
+                var shapes = new[] { Shape(leftRows, left.Column), Shape(rightRows, right.Column) };
+                if (tables.Left.Concat(tables.Right).Any(table => table is not null) && !tables.Left.Intersect(tables.Right).Any() ||
+                    shapes.Contains("header-row") && shapes.Contains("header-column") && leftRows[0].Number == rightRows[0].Number)
+                    yield return (right.Column, rows[index].Number, previous);
+            }
+        }
+
+        static SheetRow[] Under(IEnumerable<SheetRow> below, ReadableCell title) => below
+            .Select(row => new SheetRow(row.Number, row.Cells.Where(cell => cell.Column >= title.Column && cell.MaxColumn <= title.MaxColumn).ToArray()))
+            .Where(row => row.Cells.Count > 0).ToArray();
+        // The block's first column names its rows: every cell there is a label, not a value.
+        static bool HasOwnLabels(IReadOnlyList<SheetRow> block, int column)
+        {
+            var first = block.SelectMany(row => row.Cells).Where(cell => cell.Column == column).ToArray();
+            return first.Length >= 2 && !first.Any(IsValueCell);
+        }
+        // How a block names its contents: a header row (an emphasised first row over plainer rows), a
+        // header column (an emphasised first cell in every row beside plain cells), or neither.
+        static string Shape(IReadOnlyList<SheetRow> block, int firstColumn)
+        {
+            static bool Emphasised(ReadableCell cell) => cell.IsBold || cell.HasFill;
+            if (block[0].Cells.All(Emphasised) && !IsSubstantiveValue(block[0].Cells[0]) && block.Skip(1).Any(row => !row.Cells.All(Emphasised)))
+                return "header-row";
+            return block.All(row => row.Cells[0].Column == firstColumn && Emphasised(row.Cells[0]) && row.Cells.Skip(1).Any(cell => !Emphasised(cell)))
+                ? "header-column" : "other";
+        }
     }
 
-    private static IEnumerable<RowFragment> SplitRow(SheetRow row, IReadOnlyList<int> boundaries)
+    /// <summary>
+    /// Decides whether one empty column separates two tables. Evidence is weighed in this order:
+    /// <list type="number">
+    /// <item>Explicit Excel table (ListObject) ranges: different tables, or a table and plain cells,
+    /// are separate; one table is never split.</item>
+    /// <item>A side that holds the values of the rows the other side labels stays with them: below at
+    /// most two header rows its first column has no labels, at least three quarters of its cells are
+    /// values (numbers, dates, formula results other than looked-up names, marks; a stray "未定" is
+    /// allowed), and its value rows lie within the other side's rows. Columns headed 備考/Notes are
+    /// annotations and do not count.
+    /// This keeps an ID/name column with its quantities, and row labels with their data. A values
+    /// block is a table of its own instead when it is out of step with the other side: its header
+    /// beside the other side's data rows (it starts lower down) or its values beside the other side's
+    /// header (it starts higher up). It is also a table of its own when its first column is headed
+    /// as a period (年, 月, 日付, Year ...) and runs through regular periods while the other side has
+    /// values of its own: two tables, each keyed by its own rows. Beside text only (施策, 担当), a
+    /// period column keys the rows of one table and stays with them.</item>
+    /// <item>A single remarks column (備考, Notes, ...) annotates the rows beside it.</item>
+    /// <item>Otherwise both sides carry their own labels, and they are output as separate tables, so
+    /// no row of one is presented as belonging to a row of the other. When the two sides start or end
+    /// on different rows (a header above the other's, a shorter list) or each has its own merged
+    /// title, the layout itself shows they are independent. When they occupy exactly the same rows
+    /// with nothing else to tell them apart, the split is marked uncertain for comparison with the
+    /// source.</item>
+    /// </list>
+    /// The number of cells on a side is never evidence by itself: a numeric ID column is part of
+    /// its table, not a sign that a neighbouring block is independent.
+    /// </summary>
+    private static SheetGap DecideSingleColumnGap(IReadOnlyList<SheetRow> rows, IReadOnlySet<int> titleRows,
+        int leftStart, int leftEnd, int rightStart, int rightEnd)
+    {
+        var sides = rows.Where(row => !titleRows.Contains(row.Number)).Select(row => (row.Number,
+                Left: row.Cells.Where(cell => cell.Column >= leftStart && cell.MaxColumn <= leftEnd).ToArray(),
+                Right: row.Cells.Where(cell => cell.Column >= rightStart && cell.MaxColumn <= rightEnd).ToArray()))
+            .Where(row => row.Left.Length > 0 || row.Right.Length > 0).ToArray();
+        // A row belongs to a side's extent when that side has a cell in each of two columns (or its
+        // only column). Titles, unit notes and lone total labels therefore do not shift the extent.
+        var leftExtent = sides.Where(row => row.Left.Length >= Math.Min(2, leftEnd - leftStart + 1)).ToArray();
+        var rightExtent = sides.Where(row => row.Right.Length >= Math.Min(2, rightEnd - rightStart + 1)).ToArray();
+        var leftRows = leftExtent.Select(row => row.Number).ToArray();
+        var rightRows = rightExtent.Select(row => row.Number).ToArray();
+        // The ranges a reviewer compares are the two tables, not every note elsewhere in the section.
+        var spanned = leftRows.Concat(rightRows).DefaultIfEmpty().ToArray();
+        var occupied = sides.Select(row => row.Number).DefaultIfEmpty().ToArray();
+        var (minRow, maxRow) = leftRows.Length + rightRows.Length > 0 ? (spanned.Min(), spanned.Max()) : (occupied.Min(), occupied.Max());
+        SheetGap Decide(bool split, bool uncertain = false) => new(leftStart, leftEnd, rightStart, rightEnd, minRow, maxRow,
+            split, uncertain, sides.SelectMany(row => row.Right).Select(cell => cell.NodeId).FirstOrDefault(id => id is not null));
+
+        var leftTables = (leftExtent.Length > 0 ? leftExtent : sides).SelectMany(row => row.Left)
+            .Select(cell => cell.Table).Distinct().ToArray();
+        var rightTables = (rightExtent.Length > 0 ? rightExtent : sides).SelectMany(row => row.Right)
+            .Select(cell => cell.Table).Distinct().ToArray();
+        if (leftTables.Concat(rightTables).Any(table => table is not null))
+        {
+            if (leftTables.Length == 1 && rightTables.Length == 1 && leftTables[0] == rightTables[0]) return Decide(false);
+            if (!leftTables.Intersect(rightTables).Any()) return Decide(true);
+        }
+
+        if (leftRows.Length < 2 || rightRows.Length < 2) return Decide(false);
+        var leftSide = sides.Select(row => (row.Number, Cells: row.Left)).ToArray();
+        var rightSide = sides.Select(row => (row.Number, Cells: row.Right)).ToArray();
+        if (HoldsValuesOf(leftSide, rightSide, rightRows) || HoldsValuesOf(rightSide, leftSide, leftRows)) return Decide(false);
+        if (rightStart == rightEnd && sides.SelectMany(row => row.Right).FirstOrDefault() is { } rightHeader &&
+            AnnotationHeaderRegex().IsMatch(PlainText(rightHeader.Text).Trim())) return Decide(false);
+        // Each side under its own merged title in one row ("計画前提" over A:B, "分類マスタ" over
+        // D:E) is two tables by the author's own layout, not one table with a spacer column.
+        var ownTitles = rows.Any(row => row.Cells.Count > 1 && row.Cells.All(cell => cell.MaxColumn > cell.Column && !cell.IsOverlay) &&
+            row.Cells.Any(cell => cell.Column >= leftStart && cell.MaxColumn <= leftEnd) &&
+            row.Cells.Any(cell => cell.Column >= rightStart && cell.MaxColumn <= rightEnd));
+        return Decide(true, uncertain: !ownTitles && rightRows[0] == leftRows[0] && rightRows[^1] == leftRows[^1]);
+    }
+
+    // Whether one side holds the values of rows labelled by the other side (the other side's cells by
+    // row, and otherRows, the rows it spans, in order). Header rows are the text rows before the first
+    // value (at most two). From there on, the side's first column has no labels and at least three
+    // quarters of its cells are values; all those rows lie within the other side's rows. A dash or
+    // similar placeholder is neutral: it neither starts the values nor counts as a label. Columns
+    // headed 備考/Notes are annotations and are left out.
+    private static bool HoldsValuesOf(IReadOnlyList<(int Number, ReadableCell[] Cells)> side,
+        IReadOnlyList<(int Number, ReadableCell[] Cells)> other, IReadOnlyList<int> otherRows)
+    {
+        var rows = side.Where(row => row.Cells.Length > 0).ToArray();
+        var annotations = rows.SelectMany(row => row.Cells).GroupBy(cell => cell.Column)
+            .Where(group => AnnotationHeaderRegex().IsMatch(PlainText(group.First().Text).Trim()))
+            .Select(group => group.Key).ToHashSet();
+        var headers = new List<(int Number, ReadableCell[] Cells)>();
+        var data = new List<(int Number, ReadableCell[] Cells)>();
+        foreach (var (number, all) in rows)
+        {
+            var cells = all.Where(cell => !annotations.Contains(cell.Column)).ToArray();
+            if (cells.Length == 0) continue;
+            if (data.Count == 0 && !cells.Any(IsSubstantiveValue))
+            {
+                if (cells.Any(cell => !IsValueCell(cell)))
+                {
+                    headers.Add((number, cells));
+                    if (headers.Count > 2) return false;
+                }
+                continue;
+            }
+            data.Add((number, cells));
+        }
+        if (data.Count == 0 || otherRows.Count == 0 || data[0].Number < otherRows[0] || data[^1].Number > otherRows[^1]) return false;
+        // Only the other side's rows beside this block count: a table stacked above or below in the
+        // same columns, or a list lower on the sheet, says nothing about it.
+        var beside = RowsBeside(other, headers.Count > 0 ? headers[0].Number : data[0].Number, data[^1].Number);
+        var besideCells = beside.ToDictionary(row => row.Number, row => row.Cells);
+        // Out of step with the other side, as its values show: a header of its own beside a data row of
+        // the other side (labels with values, not emphasised like a header: a table that starts lower
+        // down), or values that start beside the other side's first row while that row heads its
+        // values (one that starts higher up): no values in it and values in the row below, or, for a
+        // header of several columns, emphasised over a plain row below. A row the other side merely
+        // lacks, a second header row, a caption or date in the corner, a year in a header, bold row
+        // labels of a statement, or a category row without a count inside a table is neither.
+        static bool Emphasised(ReadableCell cell) => cell.IsBold || cell.HasFill;
+        if (headers.Any(header => besideCells.TryGetValue(header.Number, out var cells) && cells.Length >= 2 &&
+                cells.Any(IsSubstantiveValue) && !cells.All(Emphasised))) return false;
+        if (headers.Count > 0 && beside.Length > 1 && beside[0].Number == data[0].Number && !beside[0].Cells.Any(IsSubstantiveValue) &&
+            (beside[1].Cells.Any(IsSubstantiveValue) ||
+             beside[0].Cells.Length >= 2 && beside[0].Cells.All(Emphasised) && !beside[1].Cells.All(Emphasised)))
+            return false;
+        var cellsOfData = data.SelectMany(row => row.Cells).ToArray();
+        var firstColumn = cellsOfData.Min(cell => cell.Column);
+        if (cellsOfData.Any(cell => cell.Column == firstColumn && !IsValueCell(cell))) return false;
+        if (cellsOfData.Count(IsValueCell) * 4 < cellsOfData.Length * 3) return false;
+        // A first column headed as a period whose entries run through regular periods keys rows of its
+        // own. Beside another table with values of its own, that is a second table by year, month or
+        // date, not values of the other's rows; beside text only, the periods key one table.
+        var keys = data.Select(row => row.Cells.FirstOrDefault(cell => cell.Column == firstColumn)).ToArray();
+        return !(beside.Any(row => row.Cells.Any(IsSubstantiveValue)) && keys.Length >= 3 && keys.All(cell => cell is not null) &&
+            cellsOfData.Any(cell => cell.Column != firstColumn) &&
+            headers.Count > 0 && headers[^1].Cells.FirstOrDefault(cell => cell.Column <= firstColumn && cell.MaxColumn >= firstColumn) is { } keyHeader &&
+            PeriodHeaderRegex().IsMatch(PlainText(keyHeader.Text).Trim()) && IsPeriodSequence(keys!));
+    }
+
+    // The rows of a side next to rows first..last: its runs of rows (two blank rows or more end a run)
+    // that overlap them.
+    private static (int Number, ReadableCell[] Cells)[] RowsBeside(IReadOnlyList<(int Number, ReadableCell[] Cells)> side, int first, int last)
+    {
+        var rows = side.Where(row => row.Cells.Length > 0).OrderBy(row => row.Number).ToArray();
+        var beside = new List<(int Number, ReadableCell[] Cells)>();
+        for (var start = 0; start < rows.Length;)
+        {
+            var end = start;
+            while (end + 1 < rows.Length && rows[end + 1].Number - rows[end].Number <= 2) end++;
+            if (rows[start].Number <= last && rows[end].Number >= first) beside.AddRange(rows[start..(end + 1)]);
+            start = end + 1;
+        }
+        return beside.ToArray();
+    }
+
+    // Periods with a constant step, newest first or last: years (2024, 2025), months (4月, 5月,
+    // 2024年4月, or dates on the same day or the last day of each month), or dates (2026-04-01,
+    // 4月8日 ...). Full-width digits are read as digits. Repeated or unordered entries are data.
+    private static bool IsPeriodSequence(IReadOnlyList<ReadableCell> cells)
+    {
+        var periods = cells.Select(cell => TryReadPeriod(PlainText(DisplayOf(cell)).Normalize(NormalizationForm.FormKC).Trim(), out var unit, out var index)
+            ? (Unit: unit, Index: index) : ((string Unit, long Index)?)null).ToArray();
+        if (periods.Any(period => period is null) || periods.Select(period => period!.Value.Unit).Distinct().Count() != 1) return false;
+        var unitOfAll = periods[0]!.Value.Unit;
+        bool Regular(IReadOnlyList<long> indexes, bool aroundTheYear)
+        {
+            var steps = indexes.Zip(indexes.Skip(1), (previous, next) => aroundTheYear ? (next - previous + 12) % 12 : next - previous).Distinct().ToArray();
+            return steps.Length == 1 && steps[0] != 0;
+        }
+        var indexes = periods.Select(period => period!.Value.Index).ToArray();
+        if (Regular(indexes, unitOfAll == "month-of-year")) return true;
+        // Monthly dates are a whole month apart, which is not a constant number of days.
+        if (unitOfAll != "day") return false;
+        var days = indexes.Select(day => new DateTime(day * TimeSpan.TicksPerDay)).ToArray();
+        return (days.All(day => day.Day == days[0].Day) || days.All(day => day.Day == DateTime.DaysInMonth(day.Year, day.Month))) &&
+            Regular(days.Select(day => day.Year * 12L + day.Month).ToArray(), false);
+    }
+
+    private static bool TryReadPeriod(string text, out string unit, out long index)
+    {
+        (unit, index) = (string.Empty, 0);
+        // Only ASCII digits from here on: int.Parse does not read other digits that \d matches.
+        if (text.Any(character => char.IsDigit(character) && character is < '0' or > '9')) return false;
+        if (Regex.Match(text, @"^(\d{4})$") is { Success: true } year && int.Parse(year.Groups[1].Value, CultureInfo.InvariantCulture) is >= 1900 and <= 2100 and var y)
+            (unit, index) = ("year", y);
+        else if (Regex.Match(text, @"^(\d{4})年(\d{1,2})月$") is { Success: true } yearMonth)
+            (unit, index) = ("month", long.Parse(yearMonth.Groups[1].Value, CultureInfo.InvariantCulture) * 12 + int.Parse(yearMonth.Groups[2].Value, CultureInfo.InvariantCulture));
+        else if (Regex.Match(text, @"^(\d{1,2})月$") is { Success: true } month && int.Parse(month.Groups[1].Value, CultureInfo.InvariantCulture) is >= 1 and <= 12 and var m)
+            (unit, index) = ("month-of-year", m);
+        else if (Regex.Match(text, @"^(?:(\d{4})年)?(\d{1,2})月(\d{1,2})日$") is { Success: true } japaneseDate &&
+                 DateTime.TryParseExact($"{(japaneseDate.Groups[1].Success ? japaneseDate.Groups[1].Value : "2000")}-{int.Parse(japaneseDate.Groups[2].Value, CultureInfo.InvariantCulture):D2}-" +
+                     $"{int.Parse(japaneseDate.Groups[3].Value, CultureInfo.InvariantCulture):D2}", "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var japaneseDay))
+            // A month and day without a year ("4月1日") is placed in a leap year, so 2月29日 parses too.
+            (unit, index) = (japaneseDate.Groups[1].Success ? "day" : "day-of-year", japaneseDay.Ticks / TimeSpan.TicksPerDay);
+        else if (Regex.Match(text, @"^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?$") is { Success: true } date)
+        {
+            var (dateYear, dateMonth) = (int.Parse(date.Groups[1].Value, CultureInfo.InvariantCulture), int.Parse(date.Groups[2].Value, CultureInfo.InvariantCulture));
+            if (!date.Groups[3].Success)
+                (unit, index) = dateMonth is >= 1 and <= 12 ? ("month", dateYear * 12L + dateMonth) : (string.Empty, 0);
+            else if (DateTime.TryParseExact($"{dateYear:D4}-{dateMonth:D2}-{int.Parse(date.Groups[3].Value, CultureInfo.InvariantCulture):D2}", "yyyy-MM-dd",
+                         CultureInfo.InvariantCulture, DateTimeStyles.None, out var day))
+                (unit, index) = ("day", day.Ticks / TimeSpan.TicksPerDay);
+        }
+        return unit.Length > 0;
+    }
+
+    // A value other than a placeholder dash: something that shows the column holds data.
+    private static bool IsSubstantiveValue(ReadableCell cell) =>
+        IsValueCell(cell) && !PlaceholderRegex().IsMatch(PlainText(DisplayOf(cell)).Trim());
+
+    // A computed formula result is a value (see ReadableCell.IsComputed); other cells, including text
+    // a formula looked up, count by what they show.
+    private static bool IsValueCell(ReadableCell cell)
+    {
+        if (cell.IsNumeric || cell.IsOverlay || cell.IsComputed) return true;
+        var text = PlainText(DisplayOf(cell)).Trim();
+        return ValueTextRegex().IsMatch(text) || DateValueRegex().IsMatch(text);
+    }
+
+    private static string DisplayOf(ReadableCell cell) => cell.Display ?? cell.Text;
+
+    private static string ColumnLetters(int column)
+    {
+        var letters = new StringBuilder();
+        for (; column > 0; column = (column - 1) / 26) letters.Insert(0, (char)('A' + (column - 1) % 26));
+        return letters.ToString();
+    }
+
+    private static string CellRange(int startColumn, int startRow, int endColumn, int endRow) =>
+        $"{ColumnLetters(startColumn)}{startRow}:{ColumnLetters(endColumn)}{endRow}";
+
+    private static IEnumerable<RowFragment> SplitRow(SheetRow row, IReadOnlyList<int> boundaries, IReadOnlySet<int> judged)
     {
         // Preserve compact rows as one logical table row. This keeps a four-column
         // header aligned with its following data row even when the source uses wide
         // visual spacing between cells (a common revision-history layout).
         // P-Overlay (XLSX): see the ReadableCell.IsOverlay comment -- a row an overlay touched
         // must never split into an orphaned label fragment and an orphaned marker fragment.
+        var crossesJudgedGap = Enumerable.Range(1, Math.Max(0, row.Cells.Count - 1)).Any(index =>
+            judged.Any(boundary => row.Cells[index - 1].MaxColumn < boundary && row.Cells[index].Column >= boundary));
         if (boundaries.Count == 0 || row.Cells.Any(cell => cell.IsOverlay) ||
             row.Cells.Count == 1 && row.Cells[0].MaxColumn > row.Cells[0].Column ||
-            row.Cells.Count <= 4 && !Enumerable.Range(1, row.Cells.Count - 1)
+            !crossesJudgedGap && row.Cells.Count <= 4 && !Enumerable.Range(1, row.Cells.Count - 1)
                 .Any(index => row.Cells[index].Column - row.Cells[index - 1].MaxColumn <= 2))
         {
             yield return new(row, row.Cells);
@@ -1401,8 +2008,16 @@ public sealed partial class ReadableMarkdownSerializer
     {
         foreach (var partition in partitions)
         {
-            var cell = ReadRows(partition).SelectMany(row => row.Cells).FirstOrDefault();
-            if (cell is not null && PlainText(cell.Text).Length <= 140) return PlainText(cell.Text);
+            var row = ReadRows(partition).FirstOrDefault();
+            if (row is null) continue;
+            // The first cell of a header row ("ID", "Item", ...) names a column, not the document. In
+            // a header the unmerged first cell has a neighbour right next to it, or within one spacer
+            // column when more headers follow. A title stands alone, is merged across, or is followed
+            // only by a note or number further away ("見積書 | | No.123", "Title ... Updated 2026-08-23").
+            var first = row.Cells[0];
+            var gap = row.Cells.Count > 1 ? row.Cells[1].Column - first.MaxColumn : int.MaxValue;
+            if (first.MaxColumn == first.Column && (gap == 1 || gap == 2 && row.Cells.Count >= 3)) return null;
+            if (PlainText(first.Text).Length <= 140) return PlainText(first.Text);
         }
         return null;
     }
@@ -2543,6 +3158,16 @@ public sealed partial class ReadableMarkdownSerializer
         return true;
     }
 
+    // The worksheet's own name, as on its tab and in the AI package manifest (the section heading
+    // uses HumanizePartitionName instead).
+    private static string SheetName(string partitionId)
+    {
+        var value = partitionId.Trim();
+        foreach (var prefix in new[] { "sheet-", "worksheet-", "partition-" })
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return value[prefix.Length..];
+        return value;
+    }
+
     private static string HumanizePartitionName(string id)
     {
         var value = id.Trim();
@@ -2725,7 +3350,14 @@ public sealed partial class ReadableMarkdownSerializer
     // that a region can then never join back together (BuildRegions accepts at most one fragment
     // per row per region). A row genuinely made of two independent tables never carries an overlay
     // marker, so this stays narrowly scoped to the case this feature introduces.
-    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false, int MaxRow = 0, bool IsCenterAcross = false)
+    // Table is the Excel table (ListObject) the cell belongs to, when the workbook declares one:
+    // explicit source structure that outranks every layout heuristic in SheetRegionBoundaries.
+    // Display is what the cell shows (a formula's saved result, without the formula ShowFormulas adds
+    // to Text). IsComputed marks a formula result that is a value (see IsComputedResult); text a
+    // formula looked up or built from other cells is read like typed text. IsFormulaCopy marks a copy
+    // of a formula filled down or across, which Excel stores without its text (Formula is null); it is
+    // judged against the formula it copies.
+    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false, int MaxRow = 0, bool IsCenterAcross = false, string? NodeId = null, string? Table = null, IReadOnlyList<string>? OverlayNodeIds = null, string? Display = null, bool IsComputed = false, bool IsFormulaCopy = false, string? Formula = null, bool ReturnsText = false)
     {
         public bool IsHeaderStyled => IsBold || HasFill || HasBorder || IsCentered || FontSize is >= 12;
     }
@@ -2765,7 +3397,7 @@ public sealed partial class ReadableMarkdownSerializer
             return new SheetRegion(MinRow, MinColumn, rows);
         }
     }
-    private sealed record ReadableDiagram(int MinRow, int MaxRow, string Mermaid);
+    private sealed record ReadableDiagram(int MinRow, int MaxRow, string Mermaid, string NodeId);
     private sealed record SequenceParticipant(VisualNode Node, string Alias, double CenterX);
     private sealed record SequenceSegment(VisualEdge Edge, double StartX, double StartY, double EndX, double EndY)
     {
@@ -2807,6 +3439,28 @@ public sealed partial class ReadableMarkdownSerializer
 
     [GeneratedRegex(@"^[A-Z][A-Z0-9_]{2,}$", RegexOptions.CultureInvariant)]
     private static partial Regex UppercaseValueRegex();
+
+    // A value written as text: an amount or count with its sign, currency, grouping and unit, a
+    // percentage, a time or date, or a mark that stands for a value (—, ○, ×, ✓ ...). Words are not
+    // values, so a list of names or statuses is never mistaken for data columns.
+    [GeneratedRegex(@"^(?:[+\-−－▲△]?[¥￥$€£]?[(（]?[0-9０-９][0-9０-９,，]*(?:[.．][0-9０-９]+)?[)）]?\s*(?:%|％|円|千円|万円|百万円|億円|件|人|名|個|台|回|日|時間|分|秒|歳|か月|ヶ月|km|m|kg|g)?|\d{1,2}:\d{2}(?::\d{2})?|\d{4}年\d{1,2}月(?:\d{1,2}日)?|\d{1,2}月(?:\d{1,2}日)?|[—–―‐\-－ー○◯◎●×✕△▲□■☆★✓✔])$", RegexOptions.CultureInvariant)]
+    private static partial Regex ValueTextRegex();
+
+    // A dash that stands for "no value" in a data cell.
+    [GeneratedRegex(@"^[—–―‐\-－ー]+$", RegexOptions.CultureInvariant)]
+    private static partial Regex PlaceholderRegex();
+
+    // Headers of a column that annotates each row beside it rather than listing items of its own.
+    [GeneratedRegex(@"^(?:備考|摘要|注記|注|メモ|コメント|補足|特記事項|説明|notes?|remarks?|comments?|memo)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex AnnotationHeaderRegex();
+
+    // A string written in a formula: "達成", with "" for a quotation mark inside it.
+    [GeneratedRegex(@"""((?:[^""]|"""")*)""", RegexOptions.CultureInvariant)]
+    private static partial Regex FormulaStringRegex();
+
+    // Headers of a column that keys rows by period.
+    [GeneratedRegex(@"^(?:年|年度|会計年度|月|年月|日|日付|期|期間|四半期|週|year|fy|fiscal year|month|date|period|quarter|week)$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PeriodHeaderRegex();
 
     // Group names: indent (leading spaces/tabs, preserved verbatim), then exactly one of
     // atx (# .. ######), quote (>), bullet (- or +), or olnum+oldelim (ordered marker digits

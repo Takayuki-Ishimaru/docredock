@@ -37,7 +37,7 @@ public sealed class PdfFormXObjectFixtureTests
             Assert.Contains("[END]", form.Markdown, StringComparison.Ordinal);
             var summary = ExportSummaryBuilder.Build(form.Result.Graph, form.Result.Diagnostics);
             Assert.Equal((0, 0, 0), (summary.ReviewPages, summary.UnanalyzedContent, summary.Warnings));
-            Assert.Contains("Human review: not required", summary.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Detected review items: none", summary.ToString(), StringComparison.Ordinal);
             Assert.Contains("Unanalyzed content: none", summary.ToString(), StringComparison.Ordinal);
         }
         finally { Directory.Delete(root, true); }
@@ -100,7 +100,7 @@ public sealed class PdfFormXObjectFixtureTests
             var text = summary.ToString();
             Assert.Contains("Visual elements converted: all", text, StringComparison.Ordinal);
             Assert.Contains("Unanalyzed content: 1 item(s) on 1 page(s)", text, StringComparison.Ordinal);
-            Assert.Contains("Human review: required (unanalyzed content 1 page(s))", text, StringComparison.Ordinal);
+            Assert.Contains("Detected review items: unanalyzed content 1 page(s)", text, StringComparison.Ordinal);
             Assert.Contains(export.Result.Diagnostics, d => d.Code == "PdfFormXObjectUnparsed" && d.Severity == DiagnosticSeverity.Warning);
             Assert.Contains(export.Result.Diagnostics, d => d.Code == "PdfReviewImageAttached");
 

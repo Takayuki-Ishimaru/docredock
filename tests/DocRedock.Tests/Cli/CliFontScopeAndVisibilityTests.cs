@@ -37,7 +37,7 @@ public sealed class CliFontScopeAndVisibilityTests : IDisposable
         Assert.Equal(0, exit);
         Assert.Matches("XXX[\\s\\S]*YYY[\\s\\S]*ZZZ", markdown);
         Assert.Contains("Warnings: 0", output, StringComparison.Ordinal);
-        Assert.Contains("Human review: not required", output, StringComparison.Ordinal);
+        Assert.Contains("Detected review items: none", output, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class CliFontScopeAndVisibilityTests : IDisposable
 
         Assert.Equal(1, exit);
         Assert.Contains(hiddenText, markdown, StringComparison.Ordinal);
-        Assert.Contains("Human review: source comparison not required; hidden content included - review before sharing", output, StringComparison.Ordinal);
+        Assert.Contains("Detected review items: hidden content included - review before sharing", output, StringComparison.Ordinal);
         Assert.Contains("Pages requiring review: 0", output, StringComparison.Ordinal);
         Assert.Contains("Review image pages: 0", output, StringComparison.Ordinal);
         Assert.Contains("WARNING HiddenContentIncluded:", output, StringComparison.Ordinal);

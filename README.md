@@ -16,9 +16,9 @@ A local-first Office-to-Markdown converter for AI workflows. Round-trip editing 
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.3.1 Public Beta support
+## v0.3.2 Public Beta support
 
-v0.3.1 fixes Excel tables, PDF column order and experimental Word round-trip editing, and compacts **AI package** source metadata. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
+v0.3.2 improves Excel table boundaries and conversion review guidance, and adds optional row blocks for large Excel tables in **AI packages**. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
 
 | Feature | Status |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.1 fixes Excel tables, PDF column order and experimental Word round-trip edi
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.1 release notes](release-docs/RELEASE_NOTES_v0.3.1.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.2 release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md).
 
 ## Use it in 30 seconds
 
@@ -75,7 +75,7 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 ## Important limitations
 
-- v0.3.1 is a Public Beta, not a production-stable release.
+- v0.3.2 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -88,9 +88,9 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.3.1 supported features](docs/en/supported-features.md)
+- [v0.3.2 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.3.1 release notes](release-docs/RELEASE_NOTES_v0.3.1.en.md)
+- [v0.3.2 release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

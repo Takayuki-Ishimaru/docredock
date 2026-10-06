@@ -135,7 +135,8 @@ public sealed class V030EvaluationRegressionTests : IDisposable
         Assert.True(bytes.Length < documentBytes, $"Manifest {bytes.Length} bytes, document {documentBytes} bytes");
         using var manifest = JsonDocument.Parse(bytes);
         var json = manifest.RootElement;
-        Assert.Equal("2.0", json.GetProperty("schema_version").GetString());
+        // 2.1 only adds fields (row blocks, token estimates); the compact 2.0 layout is unchanged.
+        Assert.Equal("2.1", json.GetProperty("schema_version").GetString());
         var locationIds = json.GetProperty("locations").EnumerateArray().Select(location => location.GetProperty("id").GetString()).ToArray();
         Assert.Single(locationIds);
         var part = Assert.Single(json.GetProperty("parts").EnumerateArray());

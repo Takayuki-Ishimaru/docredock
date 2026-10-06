@@ -5,6 +5,7 @@ using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Formats.OpenXml.Pptx;
 using DocRedock.Providers.Abstractions.Providers;
+using DocRedock.Render;
 
 namespace DocRedock.Tests.Pptx;
 
@@ -121,6 +122,14 @@ public sealed class PptxComplexFixtureTests
             var markdown = Path.Combine(root, "source.md");
             var sidecar = Path.Combine(root, "source.drmd");
             File.Copy(fixture, source);
+            // OCR skips images under three pixels, so the fixture's 1x1 stand-in picture would never
+            // reach the engine; give the copy a picture OCR would read.
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            {
+                archive.GetEntry("ppt/media/image.png")!.Delete();
+                await using var media = archive.CreateEntry("ppt/media/image.png").Open();
+                await media.WriteAsync(PngRasterImage.Encode(40, 20, new byte[40 * 20 * 3]));
+            }
             var exported = await new DocumentService(new PartitionTestOcrEngine()).ExportAsync(
                 new DocumentExportOptions(source, sidecar, markdown, EnableOcr: true, OcrLanguages: ["eng"]));
 
