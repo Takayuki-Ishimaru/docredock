@@ -19,10 +19,10 @@ var result = await new DocumentService().ExportAiPackageAsync(
 ## Files and JSON contracts
 
 - `document.md`: full readable projection, with image destinations under `assets/`.
-- `parts/0001.md`, …: stable numeric order; image destinations under `../assets/`. Word parts carry `section_path: Parent > Child` source metadata after the source filename, including table-only and list-only parts. These breadcrumbs do not repeat the section body or invent missing headings. A block of a cut worksheet table carries a `table_block:` line there instead (see [Table row blocks](#table-row-blocks)).
+- `parts/0001.md`, …: stable numeric order; image destinations under `../assets/`. Every part starts with the same title line as `document.md` (the document's title, never one taken from the part's own first cell), and a sheet, page or slide in a part is written exactly as in `document.md`. Word parts carry `section_path: Parent > Child` source metadata after the source filename, including table-only and list-only parts. These breadcrumbs do not repeat the section body or invent missing headings. A block of a cut worksheet table carries a `table_block:` line there instead (see [Table row blocks](#table-row-blocks)).
 - `assets/`: selected/copied media when present.
 - `review.md`: what was detected for review (source-review pages, OCR items, worksheet table boundaries), how reading order and tables were obtained, hidden-content notice, affected part links and oversized-unit notices.
-- `manifest.json`: schema version `2.1`, generator version, `source` (`file_name`, lowercase SHA-256, format), normalized `content_policy`, `visual_inference`, `target_characters`, `table_row_blocks`, the document/review/report paths, `source_index`, shared `locations`, `parts`, and `files`.
+- `manifest.json`: schema version `2.2`, generator version, `source` (`file_name`, lowercase SHA-256, format), normalized `content_policy`, `visual_inference`, `target_characters`, `table_row_blocks`, the document/review/report paths, `source_index`, shared `locations`, `parts`, and `files`.
 - `source-index.json`: compact machine-readable schema version `1.0`; complete node identities and Excel cell coordinates. Load this file when detailed node/source correspondence is needed, rather than passing it to the AI with every part.
 - `report.json`: schema version `1.1`, `summary`, `review`, and grouped diagnostic `code`/`severity`/`count`. Diagnostic messages are omitted because they can contain source text or names outside the selected scope.
 
@@ -32,7 +32,7 @@ JSON property names use snake_case; enum names are lowercase snake_case. Strings
 
 The source index has `parts`, each with an `id` and `sources` groups. Each group has `source_id` referring to a manifest location and the complete `node_ids` array. Groups containing worksheet cells also have `cell_addresses`, aligned one-for-one with `node_ids` (null for a non-cell node in the same group). These are original worksheet addresses such as `A1` or `F501`; sheet names live in the shared location. A location identifies the extracted node's source, not a guaranteed character-range correspondence after inference. The in-memory `AiPackagePart` API retains complete `NodeIds` and `Sources`, with `CellAddress` on cell sources.
 
-Each manifest file entry contains a relative `path`, `bytes`, and SHA-256. All package files except `manifest.json` are indexed (a manifest cannot hash itself). Consumers can validate these before importing (`AiPackageManifestReader.VerifyFilesAsync`). The source hash lets a person match a package to their retained original; it is not a signature. The package includes the original basename, not its absolute path.
+Each manifest file entry contains a relative `path`, `bytes`, and SHA-256. All package files except `manifest.json` are indexed (a manifest cannot hash itself), so every file the manifest refers to — `document`, `review`, `report`, `source_index` and each part — is listed; the readers below refuse a manifest that leaves one out instead of passing verification without checking it. Consumers can validate these before importing (`AiPackageManifestReader.VerifyFilesAsync`). The source hash lets a person match a package to their retained original; it is not a signature. The package includes the original basename, not its absolute path.
 
 Content policies and selected sheets apply throughout. `complete` may contain hidden text, comments, revisions or notes; `summary.hidden_content_included` and the readable review notice identify that sharing decision. Conversion/source-review pages, OCR review items, worksheet table boundaries and hidden-content sharing review remain separate. No warning does not certify complete conversion. Image links and source filenames are escaped as Markdown literals/destinations; source document text remains content, not instructions issued by DocRedock.
 
@@ -40,11 +40,12 @@ Content policies and selected sheets apply throughout. `complete` may contain hi
 
 By default a worksheet stays one part even above the target, so a table is never separated from its header. With `--table-row-blocks` (CLI), 「大きなExcelの表を行ブロックに分割」 (GUI) or `TableRowBlocks: true` (API), a worksheet whose readable projection exceeds the target has every table that is too large for one part cut between data rows:
 
-- Each block is a slice of the same Markdown as `document.md`; rows are never re-rendered, repeated or reordered, and a part never holds rows of two different cut tables. Short text just before a cut table (its title, a heading or unit note; up to about a quarter of the target) goes with its first block. Between two cut tables, text nearer the first table's last row stays with that table's last block, and text nearer the second table goes with the second table's first block.
+- Each block is a slice of the same Markdown as `document.md`; rows are never re-rendered, repeated or reordered, and a part never holds rows of two different cut tables. Short text just before a cut table (its title, a heading or unit note; up to about a quarter of the target) goes with its first block. Between two cut tables, text nearer the first table's last row stays with that table's last block (or, when that block is full, in a part of its own), and text nearer the second table goes with the second table's first block.
 - When the target leaves less room than about 512 characters after a part's fixed lines, blocks still hold about 512 characters of rows; such parts are marked `exceeds_target`.
 - Blocks after the first start with the table's header lines again. The part's `table_block:` line says so, for example `table_block: table-0001 2/13; rows A48:F90; header A1:F1 (repeated)`.
-- The manifest part's `table_block` has `table_id` (unique in the package), `index` and `count` (1-based block number and number of blocks), `header_range` (null when the table has no header row), `row_range` (the original cells of this block's data rows), and `previous_part`/`next_part` (null at either end).
-- Every data cell belongs to exactly one block; header cells belong to every block of their table, so their node IDs appear in each block's source-index entry. A shape drawn over a table row belongs to the block that holds the row its marker is in. Nodes not written on their own (a title cell used as the document heading) stay with the sheet's first part.
+- The cell text directly above a cut table — its title, unit or condition notes, such as `売上実績（単位: 千円、税抜）` and `対象: 国内全店` — is repeated before the header in every block after the first, exactly as written in `document.md`, so a block read alone still says what its numbers mean. Only lines written from cells qualify, each at most one blank row above the next and over the table's columns, up to about an eighth of the target; another table, an image, a diagram, text further up and text DocRedock wrote itself (an inferred note, a label/value list it formed) are not repeated, and nothing is reworded or added. The `table_block:` line names its cells: `table_block: table-0001 2/3; rows A44:C81; header A5:C5 (repeated); context A3:A4 (repeated)`.
+- The manifest part's `table_block` has `table_id` (unique in the package), `index` and `count` (1-based block number and number of blocks), `header_range` (null when the table has no header row), `row_range` (the original cells of this block's data rows), `context_range` (the cells of the repeated text above the table, null when there is none; from schema `2.2`), and `previous_part`/`next_part` (null at either end).
+- Every data cell belongs to exactly one block; header cells, and the cells of the repeated text above the table, belong to every block of their table, so their node IDs appear in each block's source-index entry. A shape drawn over a table row belongs to the block that holds the row its marker is in. Nodes not written on their own (a title cell used as the document heading) stay with the sheet's first part.
 - Small tables, sheets that fit the target, and PDF/PowerPoint/Word documents are unchanged.
 
 ## Reading packages and compatibility
@@ -54,10 +55,23 @@ By default a worksheet stays one part even above the target, so a table is never
 | `1.0` | v0.3.0 | `node_ids` and per-node `sources` inline in each part; no source index |
 | `2.0` | v0.3.1 | shared `locations`, per-part `node_count`/`source_ids`, separate `source-index.json` |
 | `2.1` | v0.3.2 | `2.0` plus `table_row_blocks`, per-part `estimated_tokens` and optional `table_block` |
+| `2.2` | next release | `2.1` plus `table_block.context_range`; row blocks after the first repeat the text above their table |
 
-Read the major version first. A minor version only adds fields, so a reader for `2.x` accepts `2.1` (and later `2.x`) by ignoring what it does not know. A different major version, a missing `schema_version`, or a value that is not `MAJOR.MINOR` must be refused with an explicit error rather than read as if it had a known layout.
+Read the major version first. A minor version only adds fields, so a reader for `2.x` accepts `2.2` (and later `2.x`) by ignoring what it does not know. A different major version, a missing `schema_version`, or a value that is not exactly `MAJOR.MINOR` (no spaces or line breaks) must be refused with an explicit error rather than read as if it had a known layout. `source-index.json` and `report.json` have their own schema versions; readers accept `1.x` of both.
 
-.NET consumers can use `AiPackageManifestReader`, which normalizes all three layouts and refuses anything else with `AiPackageSchemaException` (a `NotSupportedException` naming the value and `supported: 1.x, 2.x`). A manifest that is not JSON or lacks a required field (`source`, a file's `bytes`, a `2.x` `source_index` when the index is read) raises `InvalidDataException`. Names that would leave the package (absolute, drive or `..` paths) and symbolic links inside a package folder are refused rather than followed:
+Check a manifest before reading anything through it, and refuse it rather than reading part of it when:
+
+- a field the reader uses is missing or has the wrong JSON type: `source` (`file_name`, a 64-digit hexadecimal `sha256`, `format`), `content_policy`, `files` (each with a relative `path`, `bytes` as a whole number and a 64-digit `sha256`), `parts` (each with `id` and `path`; `2.x` also `node_count` and `source_ids`; `1.x` `node_ids` and `sources` of the same length), and in `2.x` `locations` (each with `id`, `partition_id` and `label`). Optional fields may be absent or null;
+- a JSON object names a key twice, or an id or path appears twice (`locations`, `parts`, `files`), or a part names an unknown location or neighbouring part;
+- a file the manifest refers to is missing from `files` (see above), or a path would leave the package;
+- a JSON file is nested more than 64 levels deep or contains an unpaired surrogate escape (`\ud800` without its pair);
+- a ZIP holds two entries with the same name, or an entry name with a NUL or a backslash (readers would disagree about which file is meant).
+
+A ZIP entry that is encrypted, compressed with a method other than stored or deflate, or whose bytes do not match the archive's CRC-32 is refused when it is read; a file in a package folder that is a link is refused, and one that reports no size (a pipe or device) is read as empty without waiting on it.
+
+When the source index is read, it must list each manifest part exactly once, give each part groups that name exactly that part's locations, add up to its `node_count`, and have one cell address (or null) per node ID where `cell_addresses` is present.
+
+.NET consumers can use `AiPackageManifestReader`, which normalizes every layout and refuses another schema with `AiPackageSchemaException` (a `NotSupportedException` naming the value and `supported: 1.x, 2.x`; a source index or report of another schema is refused the same way). A manifest that fails one of the checks above, a `2.x` package without `source_index` when the index is read, and a package JSON file that is not UTF-8 JSON raise `InvalidDataException`, naming the file and the field (`AI package manifest.json: files[0].bytes is missing.`). Names that would leave the package (absolute, drive, colon or `..` paths) and symbolic links inside a package folder are refused rather than followed:
 
 ```csharp
 var manifest = await AiPackageManifestReader.ReadAsync("input.ai-package.zip");   // directory or ZIP
@@ -66,20 +80,24 @@ foreach (var part in manifest.Parts)
         string.Join("; ", part.Locations.Select(location => location.Label)));
 // Only when an answer has to be traced back to nodes or cells:
 var index = await AiPackageManifestReader.ReadSourceIndexAsync("input.ai-package.zip", manifest);
-var problems = await AiPackageManifestReader.VerifyFilesAsync("input.ai-package.zip", manifest);
+var problems = await AiPackageManifestReader.VerifyFilesAsync("input.ai-package.zip", manifest);   // empty: intact
+var review = await AiPackageManifestReader.ReadReviewRequiredAsync("input.ai-package.zip", manifest);
 ```
 
 For a `1.x` manifest the reader builds the shared locations from the inline sources (`source-0001`, … in order of first appearance) and `ReadSourceIndexAsync` groups the inline node IDs (with any inline `cell_address`); `NodeIds` on a part is filled only for `1.x`.
 
-[`docs/examples/ai_package_reader.py`](../examples/ai_package_reader.py) is a standard-library Python version of the same rules (directory or ZIP, schema `1.x`/`2.x`, `UnsupportedSchemaError`, hash verification) and a small CLI:
+[`docs/examples/ai_package_reader.py`](../examples/ai_package_reader.py) is a standard-library Python version of the same rules (directory or ZIP, schema `1.x`/`2.x`, the checks above, `PackageError` and its subclass `UnsupportedSchemaError`, hash verification, `review_required`) and a small CLI:
 
 ```sh
 python3 docs/examples/ai_package_reader.py input.ai-package.zip            # parts, labels, token estimates
 python3 docs/examples/ai_package_reader.py input.ai-package.zip --verify   # check sizes and SHA-256
 python3 docs/examples/ai_package_reader.py input.ai-package --part part-0002
+python3 docs/examples/ai_package_reader.py input.ai-package --verify --part part-0002 --fail-on-review > part.md
 ```
 
-The three real sample packages used by both readers' tests are in `tests/DocRedock.Tests/Fixtures/AiPackage/`.
+Checks run before anything is printed. `--verify` prints `files ok` or one line per listed file that is missing, changed or refused (a link, an encrypted or unreadable ZIP entry); together with `--part`, those lines go to stderr and the part is printed only when every listed file matches, as the exact bytes that were verified whatever the console encoding. `--fail-on-review` stops without printing when `report.json` says review is required. Exit codes: 0 success, 1 `--verify` found a listed file missing, changed or refused, 2 the package cannot be read (not a package or ZIP, an ambiguous ZIP, unsupported schema, malformed manifest or JSON, a manifest path that would leave the package, unknown part), 3 review required with `--fail-on-review`; each error is one line on stderr. The .NET `VerifyFilesAsync` returns missing and changed files and raises `InvalidDataException` for a refused one.
+
+The real sample packages used by both readers' tests, one per manifest schema, are in `tests/DocRedock.Tests/Fixtures/AiPackage/`.
 
 ## Giving a package to a model
 
@@ -88,6 +106,7 @@ The three real sample packages used by both readers' tests are in `tests/DocRedo
 - Send `document.md` when the whole document fits the model's context, or the parts one by one (or a few at a time, using `estimated_tokens`) when it does not. Each part names its source file and location (`section_path`, `table_block`), so it can be read alone.
 - Keep `source-index.json` on your side. Load it only when an answer has to be traced back to node IDs or worksheet cells — for example to turn "part-0007, row 3" into a cell address — and do not add it to the prompt.
 - Read `review.md` (or `report.json`) before relying on the output: it lists pages to compare with the source, OCR items, worksheet table boundaries to check, and whether hidden content was included.
+- In an automated pipeline, stop before the model when review is required instead of relying on exit code 0 alone: `docredock export … --ai-package zip --fail-on-review` returns 11 when `review.required` is true (the package is still written), and for a package you received, `ai_package_reader.py PACKAGE --verify --fail-on-review` returns 1 or 3, or call `AiPackageManifestReader.VerifyFilesAsync` and `ReadReviewRequiredAsync`. Hidden content is reported separately in `summary.hidden_content_included`.
 
 ## Report
 

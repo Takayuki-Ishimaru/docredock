@@ -92,8 +92,9 @@ jobs:
         run: |
           python3 -m unittest discover -s tools -p test_generate_v031_regression_fixtures.py
           python3 -m unittest discover -s tools -p test_generate_v032_regression_fixtures.py
+          python3 -m unittest discover -s tools -p test_generate_v033_regression_fixtures.py
       - name: Verify the AI package reader example against every manifest schema
-        run: python3 -m unittest discover -s tools -p test_ai_package_reader_example.py
+        run: python3 -m unittest discover -s tools -p 'test_ai_package_reader_*.py'
       - name: Run source semantic suite
         run: python3 tools/v023_semantic_quality.py --source-cli src/DocRedock.Cli/bin/Release/net10.0/DocRedock.Cli --output artifacts/SOURCE-PDF-SEMANTICS-EVIDENCE.json
       - name: Upload source semantic evidence

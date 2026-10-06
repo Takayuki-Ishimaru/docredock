@@ -1,0 +1,127 @@
+{
+  "schema_version": "2.2",
+  "generator_version": "0.3.2",
+  "source": {
+    "file_name": "captioned_sales.xlsx",
+    "sha256": "61800939be1d131f41f269f8a31932c0784bf4109f1588bffed776582479ac39",
+    "format": "xlsx"
+  },
+  "content_policy": "visible",
+  "visual_inference": "safe",
+  "target_characters": 1000,
+  "table_row_blocks": true,
+  "document": "document.md",
+  "review": "review.md",
+  "report": "report.json",
+  "source_index": "source-index.json",
+  "locations": [
+    {
+      "id": "source-0001",
+      "partition_id": "sheet-Data",
+      "label": "sheet Data",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": "Data",
+      "heading_path": null
+    }
+  ],
+  "parts": [
+    {
+      "id": "part-0001",
+      "path": "parts/0001.md",
+      "node_count": 120,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": false,
+      "estimated_tokens": 319,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 1,
+        "count": 3,
+        "header_range": "A5:C5",
+        "row_range": "A6:C43",
+        "previous_part": null,
+        "next_part": "part-0002",
+        "context_range": "A3:A4"
+      }
+    },
+    {
+      "id": "part-0002",
+      "path": "parts/0002.md",
+      "node_count": 119,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": false,
+      "estimated_tokens": 325,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 2,
+        "count": 3,
+        "header_range": "A5:C5",
+        "row_range": "A44:C81",
+        "previous_part": "part-0001",
+        "next_part": "part-0003",
+        "context_range": "A3:A4"
+      }
+    },
+    {
+      "id": "part-0003",
+      "path": "parts/0003.md",
+      "node_count": 17,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": false,
+      "estimated_tokens": 104,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 3,
+        "count": 3,
+        "header_range": "A5:C5",
+        "row_range": "A82:C85",
+        "previous_part": "part-0002",
+        "next_part": null,
+        "context_range": "A3:A4"
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "document.md",
+      "bytes": 2070,
+      "sha256": "8e6ee1112660c5f6720a9b49c915a5948b4ded93324d1d0dab8d05bfebfef9fe"
+    },
+    {
+      "path": "parts/0001.md",
+      "bytes": 1165,
+      "sha256": "b2e36181ee5568444edcb98ffe5d02a85c1c2e7665b7732969ec301c5220a3d8"
+    },
+    {
+      "path": "parts/0002.md",
+      "bytes": 1188,
+      "sha256": "54b109ac6f9b700857bfa26e94e2fb2f92e9fe0b4c443bb8a62316d2094489cf"
+    },
+    {
+      "path": "parts/0003.md",
+      "bytes": 372,
+      "sha256": "95e2ffc2af27ba908127d1a0c5d48d76a14adbf0d48cf2c37a5c7487c44f1647"
+    },
+    {
+      "path": "report.json",
+      "bytes": 1122,
+      "sha256": "79e32916d5d07f8f2feac22016a72c0eed52d0ae0fe59296e5b71eadad27ac13"
+    },
+    {
+      "path": "review.md",
+      "bytes": 624,
+      "sha256": "9b236451044b559ff89ca52601fa436163617428dc56422e237e77470afdb006"
+    },
+    {
+      "path": "source-index.json",
+      "bytes": 7192,
+      "sha256": "847b6a57fd3376b6599054740717d4253feb4a4481a700ff7cf9ce46cab58954"
+    }
+  ]
+}

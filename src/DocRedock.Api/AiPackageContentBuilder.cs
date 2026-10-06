@@ -54,6 +54,12 @@ public static class AiPackageContentBuilder
             .ThenBy(partition => partition.Id, StringComparer.Ordinal)
             .ToArray();
         var serializer = new ReadableMarkdownSerializer(options);
+        // Every part carries the document's own title, as document.md does. A sheet or Word section
+        // written on its own would take a title of its own instead (a sheet's first cell, such as a
+        // date, or the generic title), and a sheet whose first cell became the title would also be
+        // laid out differently from its place in document.md.
+        var titledOptions = options with { Title = serializer.DocumentTitle(graph) };
+        var titled = new ReadableMarkdownSerializer(titledOptions);
         var headingPaths = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
         if (graph.Format == DocumentFormatKind.Docx)
             foreach (var sourcePartition in ordered)
@@ -70,7 +76,7 @@ public static class AiPackageContentBuilder
             if (partition.Nodes.Count == 0) continue;
             if (isWorkbook && !IsSheetSelected(partition.Id, options.IncludedSheets)) continue;
             if (isWorkbook && partOptions.TableRowBlocks &&
-                BuildRowBlockParts(graph, ordered, partitionIndex, partition, options, sourceFileName,
+                BuildRowBlockParts(graph, ordered, partitionIndex, partition, titledOptions, sourceFileName,
                     targetCharacters, ref partNumber, ref tableNumber, cancellationToken) is { } blocks)
             {
                 parts.AddRange(blocks);
@@ -87,7 +93,9 @@ public static class AiPackageContentBuilder
                 var groupNodes = group.Nodes;
                 if (groupNodes.Length == 0) continue;
 
-                var markdown = serializer.Serialize(BuildGroupGraph(graph, ordered, partitionIndex, partition, group));
+                // The Word part that holds the title paragraph writes it itself.
+                var markdown = (isWorkbook || graph.Format == DocumentFormatKind.Docx && !group.Nodes.Any(IsDocumentTitle) ? titled : serializer)
+                    .Serialize(BuildGroupGraph(graph, ordered, partitionIndex, partition, group));
                 if (IsHeaderOnly(markdown)) continue;
                 var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format,
                     partitionIndex + 1, headingPaths)).ToArray();
@@ -110,8 +118,13 @@ public static class AiPackageContentBuilder
 
     // One piece of a worksheet's projection in output order: an ordinary segment, or one data row
     // of a table that is cut between rows (Table >= 0, the first row also carrying the header).
-    // Text without nodes between segments (an inferred note, a heading) goes with the next piece.
-    private sealed record SheetPiece(int Start, int End, IReadOnlyList<string> NodeIds, int Table = -1, int Row = -1);
+    // Text without nodes between segments (an inferred note, a heading) goes with the next piece;
+    // TextStart is where the piece's own segment begins. Tabular marks a table that is not cut.
+    private sealed record SheetPiece(int Start, int End, IReadOnlyList<string> NodeIds, int Table = -1, int Row = -1,
+        int TextStart = -1, bool Tabular = false);
+
+    // Cell text just above a cut table (its title, unit or conditions) that later blocks repeat.
+    private sealed record TableContext(int Start, int End, IReadOnlyList<string> NodeIds, string Range);
 
     private sealed class RowBlockDraft
     {
@@ -158,7 +171,7 @@ public static class AiPackageContentBuilder
             var table = tables.IndexOf(segment);
             if (table < 0)
             {
-                pieces.Add(new(position, segment.End, segment.NodeIds));
+                pieces.Add(new(position, segment.End, segment.NodeIds, TextStart: segment.Start, Tabular: segment.Table is not null));
                 position = segment.End;
                 continue;
             }
@@ -176,12 +189,21 @@ public static class AiPackageContentBuilder
         // of rows instead of one row each.
         var available = Math.Max(target - overhead, MinimumBlockCharacters);
         var rowOf = new Dictionary<string, int>(StringComparer.Ordinal);
+        // Cells only: the first column and the last row and column a cell covers, merges included.
+        var cellArea = new Dictionary<string, (int Column, int LastRow, int LastColumn)>(StringComparer.Ordinal);
         foreach (var node in partition.Nodes)
-            if (node.Extensions?.TryGetValue("row", out var row) == true && row.ValueKind == System.Text.Json.JsonValueKind.Number &&
-                row.TryGetInt32(out var number)) rowOf[node.Id] = number;
+        {
+            if (ExtensionInt(node, "row") is not { } row) continue;
+            rowOf[node.Id] = row;
+            if (node.Kind == NodeKind.Cell && ExtensionInt(node, "column") is { } column)
+                cellArea[node.Id] = (column, Math.Max(row, ExtensionInt(node, "merged_to_row") ?? row),
+                    Math.Max(column, ExtensionInt(node, "merged_to_column") ?? column));
+        }
         int? PieceRow(SheetPiece piece) => piece.NodeIds.Where(rowOf.ContainsKey).Select(id => (int?)rowOf[id]).Min();
+        var contexts = new TableContext?[tables.Count];
         var drafts = new List<RowBlockDraft>();
         var current = new RowBlockDraft();
+        var previousTable = -1;
         foreach (var piece in pieces)
         {
             token.ThrowIfCancellationRequested();
@@ -190,15 +212,17 @@ public static class AiPackageContentBuilder
             {
                 // A cut table starts. Short text just before it (its title, a heading, a unit note)
                 // goes with its first block. After another cut table, only text nearer to this
-                // table's rows than to that table's last row moves; the rest stays with that table.
+                // table's rows than to that table's last row moves; the rest stays with that table, in
+                // its last block or, when that block was full, in a part of its own.
                 var text = current.Pieces.Count - (current.Pieces.FindLastIndex(item => item.Table >= 0) + 1);
-                var eligible = current.Pieces.Skip(current.Pieces.Count - text).ToList();
-                if (current.Table >= 0)
+                var trailing = current.Pieces.Skip(current.Pieces.Count - text).ToList();
+                var eligible = trailing;
+                if (previousTable >= 0)
                 {
-                    var previousLast = tables[current.Table].Table!.Rows[^1].Row;
+                    var previousLast = tables[previousTable].Table!.Rows[^1].Row;
                     var table = tables[piece.Table].Table!;
                     var nextFirst = table.HeaderRows.Count > 0 ? table.HeaderRows.Min() : table.Rows[0].Row;
-                    eligible = eligible.SkipWhile(item => PieceRow(item) is not { } at || at - previousLast <= nextFirst - at).ToList();
+                    eligible = trailing.SkipWhile(item => PieceRow(item) is not { } at || at - previousLast <= nextFirst - at).ToList();
                 }
                 var moving = new List<SheetPiece>();
                 var budget = Math.Max(available / 4, 1);
@@ -207,7 +231,8 @@ public static class AiPackageContentBuilder
                     budget -= eligible[index].End - eligible[index].Start;
                     moving.Insert(0, eligible[index]);
                 }
-                if (current.Table >= 0 || current.Pieces.Count > 0 && current.Length + length > available)
+                contexts[piece.Table] = Context(moving, Math.Max(available / 8, 1), tables[piece.Table].Table!);
+                if (current.Table >= 0 || current.Pieces.Count > 0 && (eligible.Count < trailing.Count || current.Length + length > available))
                 {
                     current.Pieces.RemoveRange(current.Pieces.Count - moving.Count, moving.Count);
                     current.Length -= moving.Sum(item => item.End - item.Start);
@@ -221,10 +246,11 @@ public static class AiPackageContentBuilder
                 drafts.Add(current);
                 current = new RowBlockDraft();
             }
-            if (current.Pieces.Count == 0 && piece.Row > 0) current.Length += headers[piece.Table].Length;
+            if (current.Pieces.Count == 0 && piece.Row > 0)
+                current.Length += headers[piece.Table].Length + (contexts[piece.Table] is { } repeated ? repeated.End - repeated.Start : 0);
             current.Pieces.Add(piece);
             current.Length += length;
-            if (piece.Table >= 0) current.Table = piece.Table;
+            if (piece.Table >= 0) current.Table = previousTable = piece.Table;
         }
         drafts.Add(current);
 
@@ -249,10 +275,13 @@ public static class AiPackageContentBuilder
             var first = draft.Pieces[0];
             var repeatsHeader = first.Row > 0;
             var body = new StringBuilder(prefix);
+            var repeatedContext = repeatsHeader ? contexts[first.Table] : null;
+            if (repeatedContext is not null) body.Append(markdown, repeatedContext.Start, repeatedContext.End - repeatedContext.Start);
             if (repeatsHeader) body.Append(headers[first.Table]);
             foreach (var piece in draft.Pieces) body.Append(markdown, piece.Start, piece.End - piece.Start);
             var ids = draft.Pieces.SelectMany(piece => piece.NodeIds)
-                .Concat(repeatsHeader ? tables[first.Table].Table!.HeaderNodeIds : []).ToHashSet(StringComparer.Ordinal);
+                .Concat(repeatsHeader ? tables[first.Table].Table!.HeaderNodeIds : [])
+                .Concat(repeatedContext?.NodeIds ?? []).ToHashSet(StringComparer.Ordinal);
             // Nodes no segment wrote out on its own (a title cell, a covered overlay) stay with the
             // sheet's first part, so every node of the sheet is still in some part.
             if (index == 0) ids.UnionWith(partition.Nodes.Select(node => node.Id).Where(id => !assigned.Contains(id)));
@@ -268,7 +297,8 @@ public static class AiPackageContentBuilder
                     table.HeaderRows.Count == 0 ? null : CellRange(table.MinColumn, table.HeaderRows.Min(), table.MaxColumn, table.HeaderRows.Max()),
                     CellRange(table.MinColumn, rows.Min(), table.MaxColumn, rows.Max()),
                     blockIndex > 0 ? PartId(blocks[draft.Table][blockIndex - 1]) : null,
-                    blockIndex + 1 < blocks[draft.Table].Length ? PartId(blocks[draft.Table][blockIndex + 1]) : null);
+                    blockIndex + 1 < blocks[draft.Table].Length ? PartId(blocks[draft.Table][blockIndex + 1]) : null)
+                { ContextRange = contexts[draft.Table]?.Range };
             }
             var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format, partitionIndex + 1, noHeadings)).ToArray();
             var text = InsertSourceLine(body.ToString(), sourceFileName, sources, block);
@@ -278,7 +308,43 @@ public static class AiPackageContentBuilder
         }
         partNumber += drafts.Count;
         return parts;
+
+        // The cell text directly above a cut table, up to the budget: its title, unit or conditions,
+        // which block 1 starts with and later blocks repeat before the header so that a block read
+        // alone still says what its numbers mean. Only lines written from cells qualify, each at most
+        // one blank row above the next and over the table's columns; never another table, an image,
+        // a diagram, or text DocRedock wrote itself (an inferred note, label/value lists it formed).
+        TableContext? Context(List<SheetPiece> before, int limit, ReadableSheetTable table)
+        {
+            var start = -1;
+            var nextRow = table.HeaderRows.Count > 0 ? table.HeaderRows.Min() : table.Rows[0].Row;
+            for (var index = before.Count - 1; index >= 0; index--)
+            {
+                var item = before[index];
+                if (item.Tabular || item.TextStart < 0 || item.NodeIds.Count == 0 || !item.NodeIds.All(cellArea.ContainsKey) ||
+                    before[^1].End - item.TextStart > limit || WrittenByDocRedock(markdown, item.TextStart, before[^1].End) ||
+                    nextRow - item.NodeIds.Max(id => cellArea[id].LastRow) > 2 ||
+                    item.NodeIds.All(id => cellArea[id].Column > table.MaxColumn || cellArea[id].LastColumn < table.MinColumn)) break;
+                nextRow = item.NodeIds.Min(id => rowOf[id]);
+                start = index;
+            }
+            if (start < 0) return null;
+            var nodeIds = before.Skip(start).SelectMany(item => item.NodeIds).ToArray();
+            return new TableContext(before[start].TextStart, before[^1].End, nodeIds,
+                CellRange(nodeIds.Min(id => cellArea[id].Column), nodeIds.Min(id => rowOf[id]),
+                    nodeIds.Max(id => cellArea[id].LastColumn), nodeIds.Max(id => cellArea[id].LastRow)));
+        }
     }
+
+    // DocRedock's own notes are HTML comments on lines of their own; source text never starts a line
+    // with one, since "<" is escaped.
+    private static bool WrittenByDocRedock(string markdown, int start, int end) =>
+        markdown.AsSpan(start, end - start).StartsWith("<!--", StringComparison.Ordinal) ||
+        markdown.IndexOf("\n<!--", start, end - start, StringComparison.Ordinal) >= 0;
+
+    private static int? ExtensionInt(DocumentNode node, string name) =>
+        node.Extensions?.TryGetValue(name, out var value) == true && value.ValueKind == System.Text.Json.JsonValueKind.Number &&
+        value.TryGetInt32(out var number) ? number : null;
 
     private static string CellRange(int startColumn, int startRow, int endColumn, int endRow) =>
         $"{ColumnLetters(startColumn)}{startRow.ToString(CultureInfo.InvariantCulture)}:{ColumnLetters(endColumn)}{endRow.ToString(CultureInfo.InvariantCulture)}";
@@ -370,6 +436,9 @@ public static class AiPackageContentBuilder
         return groups;
     }
 
+    private static bool IsDocumentTitle(DocumentNode node) => node.Kind == NodeKind.Heading &&
+        node.Extensions?.TryGetValue("document_title", out var title) == true && title.ValueKind == System.Text.Json.JsonValueKind.True;
+
     private static bool IsVisibleSheetOverlay(DocumentNode node) => node.Kind == NodeKind.Shape &&
         node.Extensions?.ContainsKey("sheet_overlay") == true &&
         (!node.Extensions.TryGetValue("sheet_state", out var state) || state.ValueKind == System.Text.Json.JsonValueKind.Null ||
@@ -457,8 +526,12 @@ public static class AiPackageContentBuilder
         // A block read alone still says which table it continues, which rows it holds, and that
         // its first lines repeat the header rather than add rows.
         if (tableBlock is { } block)
+        {
+            var repeated = block.Index > 1 ? " (repeated)" : string.Empty;
             line += $"\ntable_block: {block.TableId} {block.Index}/{block.Count}; rows {block.RowRange}" +
-                (block.HeaderRange is null ? "; no header row" : $"; header {block.HeaderRange}{(block.Index > 1 ? " (repeated)" : string.Empty)}");
+                (block.HeaderRange is null ? "; no header row" : $"; header {block.HeaderRange}{repeated}") +
+                (block.ContextRange is null ? string.Empty : $"; context {block.ContextRange}{repeated}");
+        }
         var text = markdown.Replace("\r\n", "\n", StringComparison.Ordinal).TrimEnd('\n');
         var firstBreak = text.IndexOf('\n');
         return firstBreak < 0

@@ -303,7 +303,22 @@ public sealed class CapabilityReporterTests
 
         Assert.False(result.Succeeded);
         if (File.Exists(childFile) && int.TryParse(await File.ReadAllTextAsync(childFile), out var child))
-            Assert.Throws<ArgumentException>(() => System.Diagnostics.Process.GetProcessById(child));
+        {
+            // The kill is sent before the probe returns, but a busy machine can take a moment to
+            // reap the child. A child that was never killed keeps sleeping and still fails here.
+            var exited = false;
+            for (var attempt = 0; attempt < 50 && !exited; attempt++)
+            {
+                try
+                {
+                    using var process = System.Diagnostics.Process.GetProcessById(child);
+                    exited = process.HasExited;
+                }
+                catch (ArgumentException) { exited = true; }
+                if (!exited) await Task.Delay(100);
+            }
+            Assert.True(exited, $"child process {child} is still running");
+        }
     }
 
     private static DocumentNode VisualNode(string id, VisualGraph visual) => new(id, NodeKind.Image, null, 0,
