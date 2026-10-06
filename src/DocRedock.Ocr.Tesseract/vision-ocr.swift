@@ -41,12 +41,22 @@ request.recognitionLevel = .accurate
 request.recognitionLanguages = orderedLanguages.isEmpty ? ["ja-JP", "en-US"] : orderedLanguages
 request.usesLanguageCorrection = true
 
+// An error thrown at top level would crash the interpreter and print a stack dump; report one line.
 let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-try handler.perform([request])
+do {
+    try handler.perform([request])
+} catch {
+    FileHandle.standardError.write(Data("text recognition failed: \(error.localizedDescription)\n".utf8))
+    exit(5)
+}
 let lines = (request.results ?? []).compactMap { observation -> OcrLine? in
     guard let candidate = observation.topCandidates(1).first else { return nil }
     let box = observation.boundingBox
     return OcrLine(text: candidate.string, confidence: Double(candidate.confidence), x: box.origin.x,
                    y: box.origin.y, width: box.size.width, height: box.size.height)
 }
-FileHandle.standardOutput.write(try JSONEncoder().encode(lines))
+guard let json = try? JSONEncoder().encode(lines) else {
+    FileHandle.standardError.write(Data("recognized text could not be encoded\n".utf8))
+    exit(6)
+}
+FileHandle.standardOutput.write(json)

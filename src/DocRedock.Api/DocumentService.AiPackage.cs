@@ -15,6 +15,9 @@ public sealed partial class DocumentService
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
         WriteIndented = true,
+        // Sheet names, headings and labels stay readable (and a third of the size for Japanese)
+        // instead of \uXXXX escapes; HTML-sensitive and control characters are still escaped.
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All),
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
     };
 
@@ -59,7 +62,7 @@ public sealed partial class DocumentService
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var partGraph = AiMapImageReferences(graph, "../assets/");
             var parts = AiPackageContentBuilder.Build(partGraph, markdownOptions, Path.GetFileName(source),
-                options.TargetCharacters, cancellationToken);
+                new AiPackagePartOptions(options.TargetCharacters, options.TableRowBlocks), cancellationToken);
             Directory.CreateDirectory(Path.Combine(package, "parts"));
             foreach (var part in parts)
             {
@@ -69,15 +72,17 @@ public sealed partial class DocumentService
                 await File.WriteAllTextAsync(Path.Combine(package, part.Path), part.Markdown,
                     new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             }
-            var summary = ExportSummaryBuilder.Build(graph, exported.Diagnostics, documentSerializer.RenderedTables);
-            var review = ExportReviewBuilder.Build(graph, exported.Diagnostics);
+            var summary = ExportSummaryBuilder.BuildReadable(graph, exported.Diagnostics, documentSerializer.Report);
+            var review = ExportReviewBuilder.Build(graph, exported.Diagnostics, documentSerializer.Report);
             await File.WriteAllTextAsync(Path.Combine(package, "review.md"), AiReviewMarkdown(review, summary, parts),
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             // Codes and counts expose conversion limitations without copying diagnostic messages
             // that may contain text or names excluded by the chosen content policy.
             var report = new
             {
-                schema_version = "1.0",
+                // 1.1 adds the reading-order/table-structure basis, table boundary review items and
+                // review.table_boundaries; every 1.0 field is unchanged.
+                schema_version = "1.1",
                 summary,
                 review,
                 diagnostics = exported.Diagnostics.GroupBy(d => (d.Code, d.Severity))
@@ -123,9 +128,11 @@ public sealed partial class DocumentService
                 files.Add(new { path = Path.GetRelativePath(package, file).Replace('\\', '/'),
                     bytes = new FileInfo(file).Length, sha256 = await AiHashAsync(file, cancellationToken).ConfigureAwait(false) });
             }
+            // 2.1 adds table_row_blocks and, per part, estimated_tokens and table_block (present only on
+            // a block of a cut worksheet table). Every 2.0 field keeps its meaning.
             var manifest = new
             {
-                schema_version = "2.0",
+                schema_version = "2.1",
                 generator_version = typeof(DocumentService).Assembly.GetName().Version?.ToString(3),
                 source = new { file_name = Path.GetFileName(source), sha256 = sourceHash, format = graph.Format },
                 content_policy = DocumentContentPolicyRules.Name(DocumentContentPolicyRules.Parse(documentOptions.ContentPolicy)),
@@ -134,11 +141,11 @@ public sealed partial class DocumentService
                     VisualInferenceMode.NativeOnly => "native-only", VisualInferenceMode.Balanced => "balanced", _ => "safe"
                 },
                 target_characters = options.TargetCharacters,
+                table_row_blocks = options.TableRowBlocks,
                 document = "document.md", review = "review.md", report = "report.json",
                 source_index = "source-index.json",
                 locations,
-                parts = parts.Select(p => new { p.Id, p.Path, node_count = p.NodeIds.Count,
-                    source_ids = p.Sources.Select(LocationId).Distinct(StringComparer.Ordinal).ToArray(), p.ExceedsTarget }).ToArray(),
+                parts = parts.Select(p => ManifestPart(p, p.Sources.Select(LocationId).Distinct(StringComparer.Ordinal).ToArray())).ToArray(),
                 files
             };
             await AiWriteJsonAsync(Path.Combine(package, "manifest.json"), manifest, cancellationToken).ConfigureAwait(false);
@@ -168,6 +175,22 @@ public sealed partial class DocumentService
         finally { TryDeleteDirectory(staging); }
     }
 
+    private static Dictionary<string, object?> ManifestPart(AiPackagePart part, IReadOnlyList<string> sourceIds)
+    {
+        var entry = new Dictionary<string, object?>
+        {
+            ["id"] = part.Id, ["path"] = part.Path, ["node_count"] = part.NodeIds.Count, ["source_ids"] = sourceIds,
+            ["exceeds_target"] = part.ExceedsTarget, ["estimated_tokens"] = part.EstimatedTokens,
+        };
+        if (part.TableBlock is { } block)
+            entry["table_block"] = new
+            {
+                table_id = block.TableId, index = block.Index, count = block.Count, header_range = block.HeaderRange,
+                row_range = block.RowRange, previous_part = block.PreviousPart, next_part = block.NextPart,
+            };
+        return entry;
+    }
+
     private static DocumentGraph AiPackageGraph(DocumentGraph graph, ReadableDocumentExportOptions options)
     {
         var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
@@ -195,25 +218,42 @@ public sealed partial class DocumentService
 
     private static string AiReviewMarkdown(ExportReview review, ExportSummary summary, IReadOnlyList<AiPackagePart> parts)
     {
+        // Sheet names and other source labels are literal text, never Markdown syntax.
+        static string Literal(string value) => AiPackageContentBuilder.EscapeLiteral(value);
         var text = new StringBuilder("# 変換後の確認事項 / Conversion review\n\n");
         text.Append("- 原本照合が必要なページ / Source review pages: ").Append(summary.ReviewPages).Append('\n');
         text.Append("- OCR確認 / OCR review items: ").Append(summary.OcrReviewItems).Append('\n');
-        text.Append("- 非表示内容を含む / Hidden content included: ").Append(summary.HiddenContentIncluded ? "yes" : "no").Append("\n\n");
+        text.Append("- 表の区切りの確認 / Table boundaries to compare: ").Append(summary.TableBoundaryReviewItems).Append('\n');
+        text.Append("- 非表示内容を含む / Hidden content included: ").Append(summary.HiddenContentIncluded ? "yes" : "no").Append('\n');
+        // What was evaluated: "nothing detected" never means reading order and tables were verified.
+        text.Append("- 読み順 / Reading order: ").Append(ExportSummaryText.ReadingOrderJapanese(summary.ReadingOrder))
+            .Append(" / ").Append(ExportSummaryText.ReadingOrderEnglish(summary.ReadingOrder)).Append('\n');
+        text.Append("- 表構造 / Table structure: ").Append(ExportSummaryText.TableStructureJapanese(summary.TableStructure, summary.TableBoundaryReviewItems))
+            .Append(" / ").Append(ExportSummaryText.TableStructureEnglish(summary.TableStructure, summary.TableBoundaryReviewItems)).Append("\n\n");
         if (summary.HiddenContentIncluded) text.Append("非表示内容が含まれています。AIへ渡す前に共有範囲を確認してください。 / Review hidden content before sharing.\n\n");
         foreach (var page in review.Pages)
         {
-            text.Append("## ").Append(ExportReviewText.Location(page)).Append("\n\n");
-            text.Append(ExportReviewText.DescribeJapanese(page)).Append("\n\n");
+            text.Append("## ").Append(Literal(ExportReviewText.Location(page))).Append("\n\n");
+            text.Append(Literal(ExportReviewText.DescribeJapanese(page))).Append("\n\n");
             foreach (var part in parts.Where(p => p.Sources.Any(s => s.PartitionId == page.PartitionId)))
                 text.Append("- [").Append(part.Id).Append("](").Append(part.Path).Append(")\n");
             if (page.ReviewImageReference is { } image)
                 text.Append("\n![原本照合用画像](").Append(MarkdownPathEncoder.Encode(image)).Append(")\n");
             text.Append('\n');
         }
+        foreach (var boundary in review.TableBoundaries ?? [])
+        {
+            text.Append("## ").Append(Literal($"シート「{boundary.SheetName}」 {boundary.GapRange}")).Append("\n\n");
+            text.Append(Literal(ExportReviewText.TableBoundaryJapanese(boundary))).Append("\n\n");
+            foreach (var part in parts.Where(p => p.Sources.Any(s => s.PartitionId == boundary.PartitionId)))
+                text.Append("- [").Append(part.Id).Append("](").Append(part.Path).Append(")\n");
+            text.Append('\n');
+        }
         if (review.Ocr.Required) text.Append(ExportReviewText.OcrJapanese(review.Ocr)).Append("\n\n");
         foreach (var part in parts.Where(p => p.ExceedsTarget))
             text.Append("- [").Append(part.Id).Append("](").Append(part.Path).Append("): 表・図等を保つため分割サイズの目安を超えています。\n");
-        if (!review.Required && !summary.HiddenContentIncluded) text.Append("照合が必要な箇所は検出されませんでした。変換の完全性を保証するものではありません。\n");
+        if (!review.Required && !summary.HiddenContentIncluded)
+            text.Append("照合が必要な箇所は検出されませんでした。読み順・表構造は上記のとおりで、変換の完全性を保証するものではありません。\n");
         return text.ToString();
     }
 

@@ -122,6 +122,10 @@
                      AutomationProperties.Name="原本照合が必要な内容" />
           <TextBlock x:Name="ResultOcrText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="OCR結果の確認" />
+          <TextBlock x:Name="ResultTableText" Classes="caption" TextWrapping="Wrap" IsVisible="False" MaxLines="4"
+                     AutomationProperties.Name="表の区切りの確認" />
+          <TextBlock x:Name="ResultEvaluationText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False" MaxLines="4"
+                     AutomationProperties.Name="検出された要確認事項と読み順・表構造の評価" />
           <TextBlock x:Name="ResultHiddenText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="除外した非表示の内容" />
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
@@ -281,6 +285,11 @@
                     </ComboBox>
                     <TextBlock Text="分割は約12,000文字が目安です。表・図やページ・シートを一体で保つため、目安を超えることがあります。"
                                Classes="muted caption" TextWrapping="Wrap" />
+                    <CheckBox x:Name="TableRowBlocksCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
+                              AutomationProperties.Name="大きなExcelの表を行ブロックに分割"
+                              ToolTip.Tip="目安を超えるExcelの表を行の区切りで分割します。各分割には見出し行と元のセル範囲を付けます。">
+                      <TextBlock Text="大きなExcelの表を行ブロックに分割（見出し行を各分割に再掲）" TextWrapping="Wrap" />
+                    </CheckBox>
                   </StackPanel>
                   <TextBlock Text="接続推定" Classes="muted caption" />
                   <ComboBox x:Name="VisualInferenceModeComboBox" SelectedIndex="1" SelectionChanged="OnSettingsChanged"

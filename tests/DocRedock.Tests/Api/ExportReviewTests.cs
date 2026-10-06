@@ -139,7 +139,7 @@ public sealed class ExportReviewTests
         var text = summary.ToString();
         Assert.Contains("Output written: yes", text);
         Assert.Contains("Visual elements converted: all", text);
-        Assert.Contains("Human review: required (OCR 3 item(s))", text);
+        Assert.Contains("Detected review items: OCR 3 item(s)", text);
         Assert.Contains("OCR review items: 3 (confidence below 80% or not reported, in 1 image(s))", text);
         var review = ExportReviewBuilder.Build(graph, []);
         Assert.Empty(review.Pages);
@@ -154,7 +154,7 @@ public sealed class ExportReviewTests
             [new DocumentPartition("document", 0, [new DocumentNode("p", NodeKind.Paragraph, null, 0, ContentLayer.Body, new TextNodeContent("text"))])]);
         var text = ExportSummaryBuilder.Build(graph, []).ToString();
         Assert.Contains("Visual elements converted: all", text);
-        Assert.Contains("Human review: not required", text);
+        Assert.Contains("Detected review items: none", text);
         Assert.DoesNotContain("OCR review items", text);
         Assert.False(ExportReviewBuilder.Build(graph, []).Required);
     }
@@ -178,14 +178,14 @@ public sealed class ExportReviewTests
         var text = summary.ToString();
         if (!hiddenContent)
         {
-            Assert.Contains("Human review: not required", text);
+            Assert.Contains("Detected review items: none", text);
             Assert.DoesNotContain("review before sharing", text);
         }
         else
         {
             Assert.Contains(sourceReview
-                ? "Human review: required (visual 1 page(s)); hidden content included - review before sharing"
-                : "Human review: source comparison not required; hidden content included - review before sharing", text);
+                ? "Detected review items: visual 1 page(s); hidden content included - review before sharing"
+                : "Detected review items: hidden content included - review before sharing", text);
         }
     }
 

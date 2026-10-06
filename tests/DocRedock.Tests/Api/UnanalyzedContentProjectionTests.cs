@@ -59,7 +59,7 @@ public sealed class UnanalyzedContentProjectionTests
                 d.Message.Contains("unresolved tables/figures and content that could not be analyzed", StringComparison.Ordinal));
             var summary = ExportSummaryBuilder.Build(result.Graph, result.Diagnostics);
             Assert.Equal((1, 1, 1), (summary.ReviewPages, summary.VisualReviewPages, summary.UnanalyzedContentPages));
-            Assert.Contains("Human review: required (visual 1 page(s), unanalyzed content 1 page(s))", summary.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Detected review items: visual 1 page(s), unanalyzed content 1 page(s)", summary.ToString(), StringComparison.Ordinal);
             var page = Assert.Single(ExportReviewBuilder.Build(result.Graph, result.Diagnostics).Pages);
             Assert.Contains(page.Elements, element => element.Kind == ReviewElementKind.UnanalyzedContent);
             Assert.Contains(page.Elements, element => element.Kind is ReviewElementKind.Line or ReviewElementKind.Arrow);
@@ -84,7 +84,7 @@ public sealed class UnanalyzedContentProjectionTests
 
         Assert.Equal((1, 1, 1), (summary.ReviewPages, summary.UnanalyzedContent, summary.UnanalyzedContentPages));
         Assert.Equal(ReviewElementKind.UnanalyzedContent, Assert.Single(page.Elements).Kind);
-        Assert.Contains("Human review: required (unanalyzed content 1 page(s))", summary.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Detected review items: unanalyzed content 1 page(s)", summary.ToString(), StringComparison.Ordinal);
     }
 
     private sealed class BlankRasterizer : IPdfRasterizer

@@ -50,6 +50,10 @@ public partial class MainWindow : Window
     // diagnostics so the result panel can say "saved" and "please compare" separately.
     private IReadOnlyList<GuiReviewItem> _latestReviewItems = [];
     private int _latestOcrReviewItems;
+    // Worksheet table boundaries the layout could not decide, and one line per result saying what
+    // was detected and how reading order and tables were obtained (never "no review needed").
+    private IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview> _latestTableBoundaries = [];
+    private IReadOnlyList<string> _latestEvaluation = [];
     private ReviewWindow? _reviewWindow;
     private CancellationTokenSource? _exportCancellation;
     private CancellationTokenSource? _restoreCancellation;
@@ -350,7 +354,8 @@ public partial class MainWindow : Window
                     ocrReview: OcrReviewModeComboBox.SelectedIndex switch { 1 => DocRedock.Markdown.OcrReviewMode.All,
                         2 => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
                     aiPackage: AiPackageExportRadio.IsChecked == true,
-                    zipAiPackage: AiPackageFormComboBox.SelectedIndex == 1));
+                    zipAiPackage: AiPackageFormComboBox.SelectedIndex == 1,
+                    tableRowBlocks: TableRowBlocksCheckBox.IsChecked == true));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -360,6 +365,11 @@ public partial class MainWindow : Window
             Avalonia.Automation.AutomationProperties.SetName(OpenMarkdownButton, openLabel);
             _latestReviewItems = results.SelectMany(result => result.ReviewItems ?? []).ToArray();
             _latestOcrReviewItems = results.Sum(result => result.OcrReview?.ReviewItems ?? 0);
+            _latestTableBoundaries = results.SelectMany(result => result.TableBoundaries ?? []).ToArray();
+            _latestEvaluation = results.Where(result => result.Summary is not null)
+                .Select(result => (results.Count > 1 ? Path.GetFileName(result.AiPackagePath ?? result.MarkdownPath) + "：" : string.Empty) +
+                    ExportSummaryText.EvaluationJapanese(result.Summary!))
+                .ToArray();
             SaveSettings();
             ShowResult(
                 success: true,
@@ -720,6 +730,8 @@ public partial class MainWindow : Window
         ResultCountsText.IsVisible = false;
         ResultReviewText.IsVisible = false;
         ResultOcrText.IsVisible = false;
+        ResultTableText.IsVisible = false;
+        ResultEvaluationText.IsVisible = false;
         ResultHiddenText.IsVisible = false;
         ResultKickerText.Text = "PROCESSING";
         ResultTitleText.Text = "処理しています";
@@ -739,6 +751,8 @@ public partial class MainWindow : Window
     {
         _latestReviewItems = [];
         _latestOcrReviewItems = 0;
+        _latestTableBoundaries = [];
+        _latestEvaluation = [];
         // A review window always describes the latest export; a new run closes the previous one.
         _reviewWindow?.Close();
         _reviewWindow = null;
@@ -763,19 +777,26 @@ public partial class MainWindow : Window
         // object IDs, and confidences stay in the collapsed details below.
         var review = success ? _latestReviewItems : [];
         var ocrReviewItems = success ? _latestOcrReviewItems : 0;
-        var counts = ReviewCountsText(review, ocrReviewItems);
+        var tableBoundaries = success ? _latestTableBoundaries : [];
+        var counts = ReviewCountsText(review, ocrReviewItems, tableBoundaries.Count);
         ResultCountsText.Text = counts;
         ResultCountsText.IsVisible = counts.Length > 0;
         ResultReviewText.IsVisible = warning;
         ResultReviewText.Text = warning ? ReviewSummaryText(review, diagnostics) : "";
         ResultOcrText.IsVisible = ocrReviewItems > 0;
         ResultOcrText.Text = ocrReviewItems > 0 ? ExportReviewText.OcrJapanese(new OcrReviewSummary(0, 0, ocrReviewItems)) : "";
+        var tables = TableBoundaryText(tableBoundaries);
+        ResultTableText.IsVisible = tables.Length > 0;
+        ResultTableText.Text = tables;
+        var evaluation = success ? string.Join(Environment.NewLine, _latestEvaluation) : "";
+        ResultEvaluationText.IsVisible = evaluation.Length > 0;
+        ResultEvaluationText.Text = evaluation;
         var hidden = success ? HiddenContentText(diagnostics) : "";
         ResultHiddenText.IsVisible = hidden.Length > 0;
         ResultHiddenText.Text = hidden;
         ResultMessageText.Text = message;
         AutomationProperties.SetHelpText(ResultPanel, string.Join(" ", new[]
-            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, hidden, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
+            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, tables, evaluation, hidden, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
@@ -792,7 +813,7 @@ public partial class MainWindow : Window
 
     // "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件／OCR確認 3件": pages, images, and
     // elements a person acts on, never the number of diagnostic records.
-    private static string ReviewCountsText(IReadOnlyList<GuiReviewItem> review, int ocrReviewItems)
+    private static string ReviewCountsText(IReadOnlyList<GuiReviewItem> review, int ocrReviewItems, int tableBoundaries = 0)
     {
         var parts = new List<string>();
         if (review.Count > 0)
@@ -807,7 +828,18 @@ public partial class MainWindow : Window
             if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
         }
         if (ocrReviewItems > 0) parts.Add($"OCR確認 {ocrReviewItems}件");
+        if (tableBoundaries > 0) parts.Add($"表の区切りの確認 {tableBoundaries}件");
         return string.Join("／", parts);
+    }
+
+    // Where a worksheet blank column separated two tables without enough evidence: the sheet and the
+    // ranges to compare. Like OCR review, it is a hint and never turns the result into a warning.
+    private static string TableBoundaryText(IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview> boundaries)
+    {
+        const int maxShown = 3;
+        var lines = boundaries.Take(maxShown).Select(ExportReviewText.TableBoundaryJapanese).ToList();
+        if (boundaries.Count > maxShown) lines.Add($"ほか{boundaries.Count - maxShown}か所（Markdownの「inferred」注記を参照）");
+        return string.Join(Environment.NewLine, lines);
     }
 
     // What the selected content policy left out of the Markdown, so a clean result is never read as
@@ -1233,6 +1265,7 @@ public partial class MainWindow : Window
             if (settings.Readable == false && settings.AiPackage != true) RoundTripExportRadio.IsChecked = true;
             if (settings.AiPackage == true) AiPackageExportRadio.IsChecked = true;
             AiPackageFormComboBox.SelectedIndex = settings.ZipAiPackage == true ? 1 : 0;
+            TableRowBlocksCheckBox.IsChecked = settings.TableRowBlocks == true;
             if (settings.OcrEnabled is not null) OcrToggle.IsChecked = settings.OcrEnabled;
             if (!string.IsNullOrWhiteSpace(settings.OcrLanguages)) OcrLanguagesTextBox.Text = settings.OcrLanguages;
             if (settings.PdfFallback is not null) PdfFallbackToggle.IsChecked = settings.PdfFallback;
@@ -1270,14 +1303,18 @@ public partial class MainWindow : Window
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
                 (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
                 (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence",
-                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1)));
+                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked)));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
     }
 
     private static string? ExistingDirectory(string? path) => !string.IsNullOrWhiteSpace(path) && Directory.Exists(path) ? path : null;
-    private static string SettingsPath() => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DocRedock", "gui-settings.json");
+    // DOCREDOCK_GUI_SETTINGS_PATH points the window at another settings file. The headless tests use a
+    // temporary one, so running them never reads or changes a person's saved choices.
+    private static string SettingsPath() => Environment.GetEnvironmentVariable("DOCREDOCK_GUI_SETTINGS_PATH") is { Length: > 0 } path
+        ? path
+        : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DocRedock", "gui-settings.json");
     private sealed record GuiSettings(
         string? ExportDirectory,
         string? RestoreDirectory,
@@ -1295,7 +1332,8 @@ public partial class MainWindow : Window
         bool? IncludePdfFallbackImages = null,
         string? OcrReview = null,
         bool? AiPackage = null,
-        bool? ZipAiPackage = null);
+        bool? ZipAiPackage = null,
+        bool? TableRowBlocks = null);
 
     private static void ShowError(TextBlock control, string message)
     {

@@ -178,6 +178,49 @@ public sealed class ReviewFlowTests
         finally { window.Close(); }
     }
 
+    // v0.3.1 evaluation, priority 3: the panel names what was detected and how reading order and
+    // tables were obtained, and a worksheet table boundary to compare is a hint like OCR, not a warning.
+    [AvaloniaFact]
+    public void Table_boundaries_and_the_evaluation_line_are_shown_without_turning_the_result_into_a_warning()
+    {
+        var window = new MainWindow();
+        try
+        {
+            SetField(window, "_latestReviewItems", (IReadOnlyList<GuiReviewItem>)[]);
+            SetField(window, "_latestOcrReviewItems", 0);
+            SetField(window, "_latestTableBoundaries", (IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview>)
+                [new DocRedock.Markdown.ReadableTableBoundaryReview("sheet-Data", "Data", "C1:C3", "A1:B3", "D1:D3")]);
+            var summary = new ExportSummary(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, RenderedTables: 2, TableBoundaryReviewItems: 1,
+                ReadingOrder: StructureBasis.Inferred, TableStructure: StructureBasis.NeedsComparison);
+            SetField(window, "_latestEvaluation", (IReadOnlyList<string>)[ExportSummaryText.EvaluationJapanese(summary)]);
+            Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, Array.Empty<Diagnostic>());
+            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("書き出しが完了しました", Get<TextBlock>(window, "ResultTitleText").Text);
+            Assert.Equal("表の区切りの確認 1件", Get<TextBlock>(window, "ResultCountsText").Text);
+            Assert.True(Get<TextBlock>(window, "ResultTableText").IsVisible);
+            Assert.Contains("シート「Data」：C列の空白の左右（A1:B3／D1:D3）を別の表として出力しました。", Get<TextBlock>(window, "ResultTableText").Text);
+            Assert.Equal("検出された要確認事項: あり（上記）／読み順: 配置から推定（原本とは未照合）／表構造: 配置から推定・1か所要照合",
+                Get<TextBlock>(window, "ResultEvaluationText").Text);
+            Assert.False(Get<Button>(window, "OpenReviewButton").IsVisible);
+
+            // Nothing detected still says how reading order and tables were obtained; it never says
+            // that no review is needed.
+            SetField(window, "_latestTableBoundaries", (IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview>)[]);
+            SetField(window, "_latestEvaluation", (IReadOnlyList<string>)[ExportSummaryText.EvaluationJapanese(summary with
+                { TableBoundaryReviewItems = 0, TableStructure = StructureBasis.Inferred, ReadingOrder = StructureBasis.Source })]);
+            Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, Array.Empty<Diagnostic>());
+            Assert.False(Get<TextBlock>(window, "ResultTableText").IsVisible);
+            Assert.False(Get<TextBlock>(window, "ResultCountsText").IsVisible);
+            Assert.Equal("検出された要確認事項: なし／読み順: 原本の順序／表構造: 配置から推定（原本とは未照合）",
+                Get<TextBlock>(window, "ResultEvaluationText").Text);
+
+            Invoke(window, "ShowResult", false, "書き出しできませんでした", "error", null, Array.Empty<Diagnostic>());
+            Assert.False(Get<TextBlock>(window, "ResultTableText").IsVisible);
+            Assert.False(Get<TextBlock>(window, "ResultEvaluationText").IsVisible);
+        }
+        finally { window.Close(); }
+    }
+
     [Fact]
     public void Review_image_paths_stay_next_to_the_markdown_or_inside_the_sidecar()
     {

@@ -1,0 +1,142 @@
+{
+  "schema_version": "2.0",
+  "generator_version": "0.3.1",
+  "source": {
+    "file_name": "chunking.docx",
+    "sha256": "b534896df1dbf14fa697e035e701e70cab5b796a556ad7589abdbb2675af961f",
+    "format": "docx"
+  },
+  "content_policy": "visible",
+  "visual_inference": "safe",
+  "target_characters": 2000,
+  "document": "document.md",
+  "review": "review.md",
+  "report": "report.json",
+  "source_index": "source-index.json",
+  "locations": [
+    {
+      "id": "source-0001",
+      "partition_id": "part-0001",
+      "label": "headings: Section 1",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": null,
+      "heading_path": [
+        "Section 1"
+      ]
+    },
+    {
+      "id": "source-0002",
+      "partition_id": "part-0001",
+      "label": "headings: Section 2",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": null,
+      "heading_path": [
+        "Section 2"
+      ]
+    },
+    {
+      "id": "source-0003",
+      "partition_id": "part-0001",
+      "label": "headings: Section 3",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": null,
+      "heading_path": [
+        "Section 3"
+      ]
+    },
+    {
+      "id": "source-0004",
+      "partition_id": "part-0001",
+      "label": "headings: Section 4",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": null,
+      "heading_path": [
+        "Section 4"
+      ]
+    }
+  ],
+  "parts": [
+    {
+      "id": "part-0001",
+      "path": "parts/0001.md",
+      "node_count": 3,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": false
+    },
+    {
+      "id": "part-0002",
+      "path": "parts/0002.md",
+      "node_count": 4,
+      "source_ids": [
+        "source-0002"
+      ],
+      "exceeds_target": false
+    },
+    {
+      "id": "part-0003",
+      "path": "parts/0003.md",
+      "node_count": 11,
+      "source_ids": [
+        "source-0003"
+      ],
+      "exceeds_target": true
+    },
+    {
+      "id": "part-0004",
+      "path": "parts/0004.md",
+      "node_count": 3,
+      "source_ids": [
+        "source-0004"
+      ],
+      "exceeds_target": false
+    }
+  ],
+  "files": [
+    {
+      "path": "document.md",
+      "bytes": 4288,
+      "sha256": "dc57de6305537f79966d17af0b11aba4f28e1c43b3a2bdb48a063c6ee0273b8f"
+    },
+    {
+      "path": "parts/0001.md",
+      "bytes": 590,
+      "sha256": "2ee62ff088e17e1131a2cdf43e1c3d901d70749e7715b60cd1ff8c08f0728509"
+    },
+    {
+      "path": "parts/0002.md",
+      "bytes": 648,
+      "sha256": "ccb3895ea9453dc8c9184570de4170b8a7a8a62111ba1a5bc583eeaf4af8046d"
+    },
+    {
+      "path": "parts/0003.md",
+      "bytes": 2719,
+      "sha256": "10ccb99d0692f89260a24ae57325f811c7aba91e9226d775f563e6ebd02c78d8"
+    },
+    {
+      "path": "parts/0004.md",
+      "bytes": 590,
+      "sha256": "9cb0e17d73ce99b19319a0bdd6b728131e9499dd5ed30005407bd53a9beb0d4b"
+    },
+    {
+      "path": "report.json",
+      "bytes": 954,
+      "sha256": "1418fea5e6ef53d63bceac2199467d01c22babc61f463a708054ae793512d0d2"
+    },
+    {
+      "path": "review.md",
+      "bytes": 431,
+      "sha256": "75497ffce294bd45ed1a33321ac22f5a61f6b463f6331131229c4ac05e42d2e3"
+    },
+    {
+      "path": "source-index.json",
+      "bytes": 764,
+      "sha256": "d13da0e45dc7cd53750a3fc9c89b4c229f9563403ee7b2a96badd8d04615e0fd"
+    }
+  ]
+}

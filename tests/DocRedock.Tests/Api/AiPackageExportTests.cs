@@ -54,7 +54,7 @@ public sealed class AiPackageExportTests : IDisposable
         Assert.DoesNotContain(root, allText, StringComparison.Ordinal);
         Assert.Equal(policy == "complete", result.Summary.HiddenContentIncluded);
         using var manifest = JsonDocument.Parse(files["manifest.json"]);
-        Assert.Equal("2.0", manifest.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal("2.1", manifest.RootElement.GetProperty("schema_version").GetString());
         Assert.Equal(policy, manifest.RootElement.GetProperty("content_policy").GetString());
         Assert.Equal(Convert.ToHexStringLower(SHA256.HashData(before)),
             manifest.RootElement.GetProperty("source").GetProperty("sha256").GetString());
@@ -177,6 +177,13 @@ public sealed class AiPackageExportTests : IDisposable
         var source = await MarkdownLiteralSyntaxEndToEndTests.CreateLiteralSyntaxDocxAsync();
         try
         {
+            // OCR skips images under three pixels; the document's 1x1 picture would never reach the engine.
+            using (var archive = ZipFile.Open(source, ZipArchiveMode.Update))
+            {
+                archive.GetEntry("word/media/image1.png")!.Delete();
+                await using var media = archive.CreateEntry("word/media/image1.png").Open();
+                await media.WriteAsync(PngRasterImage.Encode(40, 20, new byte[40 * 20 * 3]));
+            }
             var before = await File.ReadAllBytesAsync(source);
             using var cts = new CancellationTokenSource();
             var engine = new WaitingOcrEngine();

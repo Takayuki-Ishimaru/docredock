@@ -1,5 +1,6 @@
 using System.Globalization;
 using DocRedock.Core.Documents;
+using DocRedock.Markdown;
 
 namespace DocRedock.Api;
 
@@ -70,8 +71,21 @@ public static class ExportReviewText
             if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
         }
         if (review.Ocr.Required) parts.Add($"OCR確認 {review.Ocr.ReviewItems}件");
+        if (review.TableBoundaries is { Count: > 0 } boundaries) parts.Add($"表の区切りの確認 {boundaries.Count}件");
         return string.Join("／", parts);
     }
+
+    /// <summary>「シート「Data」：C列の空白の左右（A1:B3／D1:D3）を別の表として出力しました。…」</summary>
+    public static string TableBoundaryJapanese(ReadableTableBoundaryReview boundary) =>
+        $"シート「{boundary.SheetName}」：{GapColumn(boundary)}列の空白の左右（{boundary.LeftRange}／{boundary.RightRange}）を別の表として出力しました。" +
+        "同じ行の内容が対応しているかを配置から判断できなかったため、原本で確認してください。";
+
+    public static string TableBoundaryEnglish(ReadableTableBoundaryReview boundary) =>
+        $"sheet '{boundary.SheetName}': cells on either side of blank column {GapColumn(boundary)} ({boundary.LeftRange}, {boundary.RightRange}) " +
+        "were output as separate tables; compare with the source whether their rows belong together";
+
+    private static string GapColumn(ReadableTableBoundaryReview boundary) =>
+        new(boundary.GapRange.TakeWhile(char.IsLetter).ToArray());
 
     public static string OcrJapanese(OcrReviewSummary ocr) =>
         $"OCR：信頼度80%未満または不明の認識結果{ocr.ReviewItems}件を原画像と照合してください（Markdownの「OCR照合情報」に行番号付きで記載）。推測による自動修正はしていません。";

@@ -18,9 +18,21 @@ public static class GuiTestAppBuilder
 {
     // Skia drawing decodes real bitmaps: the review window sizes and zooms its page image from
     // the image's pixel size, which the stub renderer reports as 1x1.
-    public static AppBuilder BuildAvaloniaApp() => AppBuilder.Configure<App>()
-        .UseSkia()
-        .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
+    public static AppBuilder BuildAvaloniaApp()
+    {
+        // Every MainWindow loads and saves GUI settings and checks for updates when it opens. Keep
+        // both away from the person running the tests: a throwaway settings file and no network.
+        var settings = Directory.CreateTempSubdirectory("docredock-gui-settings-").FullName;
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try { Directory.Delete(settings, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+        };
+        Environment.SetEnvironmentVariable("DOCREDOCK_GUI_SETTINGS_PATH", Path.Combine(settings, "gui-settings.json"));
+        Environment.SetEnvironmentVariable("DOCREDOCK_DISABLE_UPDATE_CHECK", "1");
+        return AppBuilder.Configure<App>()
+            .UseSkia()
+            .UseHeadless(new AvaloniaHeadlessPlatformOptions { UseHeadlessDrawing = false });
+    }
 }
 
 public sealed class MainWindowStartupTests
@@ -41,6 +53,31 @@ public sealed class MainWindowStartupTests
         {
             window.Close();
         }
+    }
+
+    [AvaloniaFact]
+    public void Table_row_blocks_are_remembered_in_the_settings_file_the_tests_own()
+    {
+        var path = Environment.GetEnvironmentVariable("DOCREDOCK_GUI_SETTINGS_PATH");
+        Assert.False(string.IsNullOrEmpty(path));
+        Assert.StartsWith(Path.GetFullPath(Path.GetTempPath()), Path.GetFullPath(path!), StringComparison.Ordinal);
+        var window = new MainWindow();
+        try
+        {
+            Get<RadioButton>(window, "AiPackageExportRadio").IsChecked = true;
+            Assert.False(Get<CheckBox>(window, "TableRowBlocksCheckBox").IsChecked);
+            Get<CheckBox>(window, "TableRowBlocksCheckBox").IsChecked = true;
+        }
+        finally { window.Close(); }
+        try
+        {
+            Assert.Contains("\"TableRowBlocks\":true", File.ReadAllText(path!), StringComparison.Ordinal);
+            var reopened = new MainWindow();
+            try { Assert.True(Get<CheckBox>(reopened, "TableRowBlocksCheckBox").IsChecked); }
+            finally { reopened.Close(); }
+        }
+        // Other tests start from the defaults again.
+        finally { File.Delete(path!); }
     }
 
     [AvaloniaFact]

@@ -20,6 +20,7 @@ public sealed class VisionOcrEngine : IOcrEngine
     private readonly string swiftExecutable;
     private readonly TimeSpan defaultTimeout;
     private readonly long maxOutputBytes;
+    private const int MaxErrorMessageLength = 500;
 
     public VisionOcrEngine(
         string? helperPath = null,
@@ -107,7 +108,7 @@ public sealed class VisionOcrEngine : IOcrEngine
             var output = await stdoutTask.ConfigureAwait(false);
             var error = await stderrTask.ConfigureAwait(false);
             if (process.ExitCode != 0)
-                return Failure(OcrProcessingStatus.Failed, "ProcessFailed", error.Length == 0 ? $"Vision OCR exited with code {process.ExitCode}." : error);
+                return Failure(OcrProcessingStatus.Failed, "ProcessFailed", ProcessErrorMessage(error, $"Vision OCR exited with code {process.ExitCode}."));
             if (output.Length >= maxOutputBytes)
                 return Failure(OcrProcessingStatus.Failed, "OutputLimit", "Vision OCR output exceeded the configured limit.");
             try
@@ -187,6 +188,19 @@ public sealed class VisionOcrEngine : IOcrEngine
 
     private static OcrAttemptResult Failure(OcrProcessingStatus status, string code, string message) =>
         new(status, null, [new OcrDiagnostic(code, message, DiagnosticSeverity.Warning)]);
+
+    /// <summary>The helper's own message. When the Swift interpreter itself crashes it follows the
+    /// message with a stack dump of the compiler, which says nothing about the image; that is cut
+    /// off and the rest kept to one short line.</summary>
+    private static string ProcessErrorMessage(string error, string fallback)
+    {
+        var message = string.Join(" ", error.Split('\n')
+            .Select(line => line.Trim())
+            .TakeWhile(line => !line.StartsWith("Stack dump", StringComparison.Ordinal))
+            .Where(line => line.Length > 0));
+        if (message.Length == 0) return fallback;
+        return message.Length <= MaxErrorMessageLength ? message : message[..MaxErrorMessageLength].TrimEnd() + "...";
+    }
 
     private static async Task<string> ReadLimitedAsync(StreamReader reader, long maxBytes, CancellationToken cancellationToken)
     {
