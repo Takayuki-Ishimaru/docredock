@@ -16,10 +16,11 @@ Usage:
     python3 docs/examples/ai_package_reader.py PACKAGE [--verify] [--part PART_ID] [--fail-on-review]
 
 Checks run before anything is printed. --verify prints "files ok" or one line
-per listed file that is missing, changed or refused (a link, an encrypted or
-unreadable ZIP entry); with --part those lines go to stderr and the part is
-printed, as the exact bytes that were verified, only when every listed file
-matches. Exit codes: 0 success; 1 --verify found a listed file missing, changed
+per listed file that is missing, changed or refused (a link, a pipe or device,
+an encrypted or unreadable ZIP entry); with --part those lines go to stderr and
+the part is printed, as the exact bytes that were verified, only when every
+listed file matches. The .NET AiPackageManifestReader reports the same lines.
+Exit codes: 0 success; 1 --verify found a listed file missing, changed
 or refused; 2 the package cannot be read (not a package directory or ZIP, an
 ambiguous ZIP, unsupported schema, malformed JSON or manifest, a manifest path
 that would leave the package, unknown part id); 3 --fail-on-review and
@@ -32,6 +33,8 @@ import hashlib
 import json
 import posixpath
 import re
+import stat
+import struct
 import sys
 import zipfile
 import zlib
@@ -47,6 +50,8 @@ MAX_DEPTH = 64
 LOCATION_FIELDS = ("partition_id", "label", "page_number", "slide_number", "sheet_name", "heading_path")
 MAX_COUNT = 2 ** 31 - 1
 MAX_BYTES = 2 ** 63 - 1
+# Files larger than this are refused rather than read into memory (the .NET reader uses the same limit).
+MAX_FILE_BYTES = 2147483520
 
 
 class PackageError(ValueError):
@@ -69,6 +74,20 @@ def _safe_rel(rel):
     return rel
 
 
+def _extra_ids(extra):
+    """The ids of a ZIP extra field's blocks."""
+    ids = set()
+    while len(extra) >= 4:
+        block, length = struct.unpack_from("<HH", extra)
+        ids.add(block)
+        extra = extra[4 + length:]
+    return ids
+
+
+def _too_large(rel):
+    return PackageError("cannot read %r: it is larger than %d bytes" % (rel, MAX_FILE_BYTES))
+
+
 def _missing(rel):
     return FileNotFoundError(errno.ENOENT, "file not found in the package", rel)
 
@@ -78,6 +97,35 @@ def _decode(data, name):
         return data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise PackageError("%s is not UTF-8 text (%s)" % (name, exc))
+
+
+def _zip_end(path):
+    """Start, size and entry count of the central directory and the position of the end record that
+    describes it, found as Python's zipfile finds them: the last 22 bytes, else the last signature in
+    the final 64 KiB, then the Zip64 records its locator points to."""
+    with open(path, "rb") as fp:
+        fp.seek(0, 2)
+        size = fp.tell()
+        start = max(size - 65535 - 22, 0)
+        fp.seek(start)
+        tail = fp.read()
+        at = (len(tail) - 22 if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\0\0"
+              else tail.rfind(b"PK\x05\x06"))
+        if at < 0 or at + 22 > len(tail):
+            raise PackageError("not a package folder or ZIP archive: %s (File is not a zip file)" % path)
+        disk, directory_disk, _, count, directory_size, directory_offset = struct.unpack_from("<HHHHII", tail, at + 4)
+        location = start + at
+        if location >= 20:
+            fp.seek(location - 20)
+            locator = fp.read(20)
+            if locator[:4] == b"PK\x06\x07":
+                record = struct.unpack_from("<Q", locator, 8)[0]
+                fp.seek(record)
+                data = fp.read(56)
+                if len(data) == 56 and data[:4] == b"PK\x06\x06":
+                    disk, directory_disk, _, count, directory_size, directory_offset = struct.unpack_from("<IIQQQQ", data, 16)
+                    location = record
+    return disk, directory_disk, directory_offset, directory_size, count, location
 
 
 def _entry_name(info):
@@ -104,7 +152,9 @@ class Package:
         elif self.path.is_file():
             try:
                 self._zip = zipfile.ZipFile(self.path)
-            except (zipfile.BadZipFile, EOFError, ValueError, NotImplementedError) as exc:
+            except NotImplementedError as exc:
+                raise PackageError("%s uses a ZIP feature this reader does not read (%s)" % (self.path, exc))
+            except (zipfile.BadZipFile, EOFError, ValueError) as exc:
                 raise PackageError("not a package folder or ZIP archive: %s (%s)" % (self.path, exc))
             self._kind = "zip"
             try:
@@ -116,30 +166,57 @@ class Package:
             raise FileNotFoundError(errno.ENOENT, "package not found", str(self.path))
 
     def _index_entries(self):
+        # A package ZIP is read only when it is plain, so that every reader reads it the same way: the
+        # .NET AiPackageManifestReader makes the same checks in the same order with the same messages.
         # Readers disagree on which of two equal names they return (Python the last, .NET the first),
-        # and on names with a NUL (Python cuts them there) or a backslash (Python on Windows turns it
-        # into "/"), so such an archive is refused instead of being read differently by each reader.
+        # on names with a NUL (Python cuts them there) or a backslash (Python on Windows turns it into
+        # "/"), on a Unicode Path extra field (Python 3.12 renames the entry by it), and on end records
+        # that do not describe the directory they end.
+        infos = self._zip.infolist()
+        disk, directory_disk, offset, size, count, location = _zip_end(self.path)
+        if disk or directory_disk:
+            raise PackageError("the ZIP spans several disks")
+        if offset + size != location:
+            raise PackageError("the ZIP's central directory does not end where its end record begins")
+        if count != len(infos):
+            raise PackageError("the ZIP's end record counts %d entries, but its central directory holds %d"
+                               % (count, len(infos)))
         twice = set()
-        for info in self._zip.infolist():
+        for info in infos:
             name = _entry_name(info)
             if "\0" in name or "\\" in name:
                 raise PackageError("the ZIP holds an entry name with a %s: %r"
                                    % ("NUL" if "\0" in name else "backslash", name))
+            if _extra_ids(info.extra) & {0x7075}:
+                raise PackageError("the ZIP gives %r a Unicode Path extra field" % name)
             if name in self._entries:
                 twice.add(name)
             self._entries[name] = info
         if twice:
             raise PackageError("the ZIP holds more than one entry named " + ", ".join(map(repr, sorted(twice))))
+        # Where each entry must end: at the next local header or the central directory (Python 3.12).
+        self._ends = {}
+        end = self._zip.start_dir
+        for info in reversed(sorted(infos, key=lambda item: item.header_offset)):
+            self._ends[id(info)] = end
+            end = info.header_offset
 
     def _dir_file(self, rel):
-        # A link inside a package folder could point anywhere; DocRedock never writes one.
+        # A link inside a package folder could point anywhere, and a pipe or device could block or
+        # never end; DocRedock writes neither. A folder where a file should be is a missing file.
         current = self.path
         for segment in rel.split("/"):
             current = current / segment
             if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
                 raise PackageError("package path is a link: " + repr(rel))
-        if not current.is_file():
+        try:
+            mode = current.stat().st_mode
+        except (FileNotFoundError, NotADirectoryError):
             raise _missing(rel)
+        if stat.S_ISDIR(mode):
+            raise _missing(rel)
+        if not stat.S_ISREG(mode):
+            raise PackageError("package path is not a regular file: " + repr(rel))
         return current
 
     def _entry(self, rel):
@@ -159,18 +236,58 @@ class Package:
             return self._dir_file(rel).stat().st_size
         return self._entry(rel).file_size
 
+    def _open_checks(self, rel, info):
+        # What zipfile checks when it opens an entry, in its order and with its messages, including
+        # the overlap check only Python 3.12 has, so every Python version refuses the same entries.
+        def unreadable(reason):
+            return PackageError("cannot read %r from the ZIP: %s" % (rel, reason))
+        with open(self.path, "rb") as fp:
+            fp.seek(info.header_offset)
+            header = fp.read(30)
+            if len(header) != 30:
+                raise unreadable("Truncated file header")
+            if header[:4] != b"PK\x03\x04":
+                raise unreadable("Bad magic number for file header")
+            flags, = struct.unpack_from("<H", header, 6)
+            name_length, extra_length = struct.unpack_from("<HH", header, 26)
+            name = fp.read(name_length)
+        if info.flag_bits & 0x20:
+            raise unreadable("compressed patched data (flag bit 5)")
+        if info.flag_bits & 0x40:
+            raise unreadable("strong encryption (flag bit 6)")
+        try:
+            local = name.decode("utf-8" if flags & 0x800 else "cp437")
+        except UnicodeDecodeError:
+            raise unreadable("the file name in its header is not UTF-8")
+        if local != info.orig_filename:
+            raise unreadable("File name in directory %r and header %r differ." % (info.orig_filename, name))
+        end = self._ends[id(info)]
+        if info.header_offset + 30 + name_length + extra_length + info.compress_size > end and end != info.header_offset:
+            raise unreadable("Overlapped entries: %r (possible zip bomb)" % info.orig_filename)
+
     def read_bytes(self, rel):
         rel = _safe_rel(rel)
         if self._kind == "dir":
+            path = self._dir_file(rel)
+            if path.stat().st_size > MAX_FILE_BYTES:
+                raise _too_large(rel)
             try:
-                return self._dir_file(rel).read_bytes()
+                return path.read_bytes()
             except FileNotFoundError:
                 raise _missing(rel)
         info = self._entry(rel)
+        self._open_checks(rel, info)
+        if info.file_size > MAX_FILE_BYTES:
+            raise _too_large(rel)
         try:
-            return self._zip.read(info)
-        except (zipfile.BadZipFile, NotImplementedError, EOFError, zlib.error) as exc:
+            data = self._zip.read(info)
+        except EOFError:
+            data = None
+        except (zipfile.BadZipFile, NotImplementedError, zlib.error) as exc:
             raise PackageError("cannot read %r from the ZIP: %s" % (rel, exc))
+        if data is None or len(data) != info.file_size:
+            raise PackageError("cannot read %r from the ZIP: it ends before its size in the ZIP" % rel)
+        return data
 
     def read_text(self, rel):
         return _decode(self.read_bytes(rel), rel)

@@ -19,6 +19,7 @@ import tempfile
 import unittest
 import warnings
 import zipfile
+import zlib
 
 ROOT = Path(__file__).resolve().parent.parent
 spec = importlib.util.spec_from_file_location('ai_package_reader', ROOT / 'docs/examples/ai_package_reader.py')
@@ -638,3 +639,78 @@ class TestReviewFindings(PackageFixture):
         end = raw.index(',', first)
         (path / 'manifest.json').write_text(raw[:first] + '9' * 5000 + raw[end:], encoding='utf-8')
         self.load(path, reader.PackageError)
+
+
+class TestPlainZipAndSpecialFiles(PackageFixture):
+    """A package ZIP is read only when it is plain, and a package folder holds only regular files: the
+    same rules, order and words as the .NET AiPackageManifestReader (tests/DocRedock.Tests/Api/
+    AiPackageReaderParityTests.cs runs both readers on the same packages)."""
+
+    def patched(self, change):
+        data = bytearray(self.zipped(self.build()).read_bytes())
+        change(data)
+        target = self.unique('patched.zip')
+        target.write_bytes(bytes(data))
+        return target
+
+    @staticmethod
+    def central(data, name):
+        end = len(data) - 22
+        position, = struct.unpack_from('<I', data, end + 16)
+        while True:
+            length, = struct.unpack_from('<H', data, position + 28)
+            if bytes(data[position + 46:position + 46 + length]) == name.encode():
+                return position
+            position += 46 + length + sum(struct.unpack_from('<HH', data, position + 30))
+
+    def test_a_pipe_in_a_package_folder_is_refused_without_being_opened(self):
+        if not hasattr(os, 'mkfifo'):
+            self.skipTest('pipes are unavailable')
+        path = self.build()
+        (path / 'parts/0001.md').unlink()
+        os.mkfifo(path / 'parts/0001.md')
+        self.assert_problems(path, ["parts/0001.md: refused (package path is not a regular file: 'parts/0001.md')"])
+        self.assert_refused(path, '--part', 'part-0001', says='not a regular file')
+
+    def test_archives_that_readers_would_read_differently_are_refused_whole(self):
+        def version(data):
+            struct.pack_into('<B', data, self.central(data, 'parts/0001.md') + 6, 100)
+        def count(data):
+            struct.pack_into('<HH', data, len(data) - 22 + 8, *(value + 1 for value in struct.unpack_from('<HH', data, len(data) - 22 + 8)))
+        def disks(data):
+            struct.pack_into('<H', data, len(data) - 22 + 4, 1)
+        for name, change, says in [('version needed 10.0', version, 'uses a ZIP feature this reader does not read (zip file version 10.0)'),
+                                   ('end record count', count, "the ZIP's end record counts"),
+                                   ('several disks', disks, 'the ZIP spans several disks')]:
+            with self.subTest(case=name):
+                self.assert_refused(self.patched(change), '--verify', says=says)
+        path = self.build()
+        target = self.unique('unicode-path.zip')
+        with zipfile.ZipFile(target, 'w') as archive:
+            for name, data in self.entries_of(path):
+                info = zipfile.ZipInfo(name)
+                if name == 'review.md':
+                    info.extra = struct.pack('<HHBL', 0x7075, 5 + 4, 1, zlib.crc32(name.encode())) + b'x.md'
+                archive.writestr(info, data)
+        self.assert_refused(target, '--verify', says="a Unicode Path extra field")
+
+    def test_entries_are_checked_as_zipfile_opens_them_whatever_the_python_version(self):
+        def flag(bit):
+            def change(data):
+                position = self.central(data, 'parts/0001.md') + 8
+                struct.pack_into('<H', data, position, struct.unpack_from('<H', data, position)[0] | bit)
+            return change
+        def local_name(data):
+            header, = struct.unpack_from('<I', data, self.central(data, 'parts/0001.md') + 42)
+            data[header + 30 + 6] = ord('X')
+        def overlap(data):
+            position = self.central(data, 'parts/0001.md') + 20
+            struct.pack_into('<I', data, position, struct.unpack_from('<I', data, position)[0] + 4096)
+        prefix = "parts/0001.md: refused (cannot read 'parts/0001.md' from the ZIP: "
+        for name, change, line in [
+                ('patched data', flag(0x20), prefix + 'compressed patched data (flag bit 5))'),
+                ('strong encryption', flag(0x40), prefix + 'strong encryption (flag bit 6))'),
+                ('other local name', local_name, prefix + "File name in directory 'parts/0001.md' and header b'parts/X001.md' differ.)"),
+                ('overlapping entries', overlap, prefix + "Overlapped entries: 'parts/0001.md' (possible zip bomb))")]:
+            with self.subTest(case=name):
+                self.assert_problems(self.patched(change), [line])

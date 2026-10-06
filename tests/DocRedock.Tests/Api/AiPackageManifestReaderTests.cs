@@ -210,7 +210,9 @@ public sealed class AiPackageManifestReaderTests : IDisposable
         File.Delete(Path.Combine(copy, "parts", "0002.md"));
         File.CreateSymbolicLink(Path.Combine(copy, "parts", "0002.md"), outside);
         var manifest = await AiPackageManifestReader.ReadAsync(copy);
-        await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.VerifyFilesAsync(copy, manifest));
+        // Refused, not followed, and reported like any other problem, in the Python reader's words.
+        Assert.Equal(["parts/0002.md: refused (package path is a link: 'parts/0002.md')"],
+            await AiPackageManifestReader.VerifyFilesAsync(copy, manifest));
     }
 
     [Fact]
@@ -231,8 +233,11 @@ public sealed class AiPackageManifestReaderTests : IDisposable
         Assert.Equal(2, problems.Count);
         Assert.Contains(problems, problem => problem.StartsWith("parts/0002.md:", StringComparison.Ordinal));
         Assert.Contains(problems, problem => problem == "parts/0003.md: missing");
+        Assert.Equal($"parts/0002.md: sha256 mismatch (expected {manifest.Files.Single(file => file.Path == "parts/0002.md").Sha256}, got " +
+            $"{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(changed)))})", problems[0]);
         var escaping = manifest with { Files = [new AiPackageManifestFile("../outside.txt", 1, new string('0', 64))] };
-        await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.VerifyFilesAsync(copy, escaping));
+        Assert.Equal(["../outside.txt: refused (unsafe package path: '../outside.txt')"],
+            await AiPackageManifestReader.VerifyFilesAsync(copy, escaping));
         Assert.Throws<InvalidDataException>(() => AiPackageManifestReader.Parse("{ not json"));
     }
 
@@ -491,14 +496,19 @@ public sealed class AiPackageManifestReaderTests : IDisposable
             foreach (var offset in new[] { local + 14, central + 16 }) bytes[offset] ^= 0xFF;
         await File.WriteAllBytesAsync(zip, bytes);
         var manifest = name == "manifest.json" ? null : await AiPackageManifestReader.ReadAsync(zip);
-        var error = manifest is null
-            ? await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.ReadAsync(zip))
-            : await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.VerifyFilesAsync(zip, manifest));
-        Assert.Contains(change == "encrypted" ? "encrypted" : "CRC-32", error.Message, StringComparison.Ordinal);
+        if (manifest is null)
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.ReadAsync(zip));
+            return;
+        }
+        var problem = Assert.Single(await AiPackageManifestReader.VerifyFilesAsync(zip, manifest));
+        Assert.Equal(change == "encrypted"
+            ? $"{name}: refused ('{name}' is encrypted in the ZIP)"
+            : $"{name}: refused (cannot read '{name}' from the ZIP: Bad CRC-32 for file '{name}')", problem);
     }
 
     [Fact]
-    public async Task A_pipe_in_a_package_folder_is_never_waited_on()
+    public async Task A_pipe_in_a_package_folder_is_refused_without_being_opened()
     {
         if (OperatingSystem.IsWindows()) return;
         var copy = Copy(Sample("2.2"), "pipe");
@@ -506,12 +516,12 @@ public sealed class AiPackageManifestReaderTests : IDisposable
         File.Delete(part);
         using (var mkfifo = System.Diagnostics.Process.Start("mkfifo", part)) await mkfifo!.WaitForExitAsync();
         var manifest = await AiPackageManifestReader.ReadAsync(copy);
-        // Listed with its real size, the pipe is a changed file; listed as empty, it reads as empty.
-        var problems = await AiPackageManifestReader.VerifyFilesAsync(copy, manifest).WaitAsync(TimeSpan.FromSeconds(10));
-        Assert.Equal("parts/0003.md", Assert.Single(problems).Split(':')[0]);
+        // Never opened: refused as the Python reader refuses it, whatever size the manifest lists.
+        const string refused = "parts/0003.md: refused (package path is not a regular file: 'parts/0003.md')";
+        Assert.Equal([refused], await AiPackageManifestReader.VerifyFilesAsync(copy, manifest).WaitAsync(TimeSpan.FromSeconds(10)));
         var empty = manifest with { Files = [.. manifest.Files.Select(file => file.Path == "parts/0003.md"
             ? file with { Bytes = 0, Sha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData([])) } : file)] };
-        Assert.Empty(await AiPackageManifestReader.VerifyFilesAsync(copy, empty).WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.Equal([refused], await AiPackageManifestReader.VerifyFilesAsync(copy, empty).WaitAsync(TimeSpan.FromSeconds(10)));
         File.Delete(Path.Combine(copy, "manifest.json"));
         using (var mkfifo = System.Diagnostics.Process.Start("mkfifo", Path.Combine(copy, "manifest.json"))) await mkfifo!.WaitForExitAsync();
         await Assert.ThrowsAsync<InvalidDataException>(() => AiPackageManifestReader.ReadAsync(copy).WaitAsync(TimeSpan.FromSeconds(10)));
