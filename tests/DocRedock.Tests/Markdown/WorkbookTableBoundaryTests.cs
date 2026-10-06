@@ -428,6 +428,733 @@ public sealed class WorkbookTableBoundaryTests
         Assert.Equal(("C1:C3", "A1:B3", "D1:D3"), (review.GapRange, review.LeftRange, review.RightRange));
     }
 
+    // Adjacent tables: no blank column between them, only their own titles and headers.
+
+    // The "前提・分類" sheet of the business-plan workbook: three tables, each under its own merged
+    // title in row 3. A:B and D:E are separated by a blank column; D:E and F:G touch.
+    private static DocumentNode[] PlanAssumptionsSheet(string? categoryTable = null) =>
+    [
+        C("A1", "前提・分類 | FY2026 事業計画", bold: true, fill: true, toColumn: 7),
+        C("A3", "計画前提", bold: true, fill: true, border: true, toColumn: 2), C("D3", "分類マスタ", bold: true, fill: true, border: true, toColumn: 5),
+        C("F3", "読み方", bold: true, fill: true, border: true, toColumn: 7),
+        C("A4", "計画年度", bold: true, fill: true, border: true), C("B4", "2026", numeric: true, fill: true, border: true), C("D4", "カテゴリ", bold: true, fill: true, table: categoryTable), C("E4", "重点テーマ", bold: true, fill: true, table: categoryTable),
+        C("F4", "入力セル", bold: true, fill: true, border: true), C("G4", "淡い黄: 編集可能な前提・実績", border: true),
+        C("A5", "基準通貨", bold: true, fill: true, border: true), C("B5", "JPY", fill: true, border: true), C("D5", "プロダクト", border: true, table: categoryTable), C("E5", "継続収益", border: true, table: categoryTable),
+        C("F5", "計算セル", bold: true, fill: true, border: true), C("G5", "淡い青: 数式で導出", border: true),
+        C("A6", "粗利率目標", bold: true, fill: true, border: true), C("B6", "42.0%", numeric: true, fill: true, border: true), C("D6", "マーケティング", border: true, table: categoryTable), C("E6", "獲得効率", border: true, table: categoryTable),
+        C("F6", "ステータス", bold: true, fill: true, border: true), C("G6", "条件付き書式で進捗と注意点を表示", border: true),
+        C("A7", "投資上限", bold: true, fill: true, border: true), C("B7", "¥50,000,000", numeric: true, fill: true, border: true), C("D7", "オペレーション", border: true, table: categoryTable), C("E7", "品質・自動化", border: true, table: categoryTable),
+        C("F7", "出典", bold: true, fill: true, border: true), C("G7", "https://example.com/plan", border: true),
+        C("A8", "更新日", bold: true, fill: true, border: true), C("B8", "2026-08-26", numeric: true, fill: true, border: true), C("D8", "人材", border: true, table: categoryTable), C("E8", "組織能力", border: true, table: categoryTable),
+    ];
+
+    // In the workbook the first sheet supplies the document title, so the banner of this sheet stays
+    // in its rows; it must not draw the rows of the tables below into itself.
+    private static string SerializeWithTitle(DocumentNode[] nodes, out ReadableMarkdownSerializer serializer)
+    {
+        serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(Title: "FY2026 事業計画"));
+        return serializer.Serialize(Graph(nodes));
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("CategoryMaster")]
+    public void Each_title_of_a_row_of_merged_titles_stays_with_its_own_table(string? categoryTable)
+    {
+        var markdown = SerializeWithTitle(PlanAssumptionsSheet(categoryTable), out _);
+        AssertIndependent(markdown, ["計画前提", "計画年度", "JPY"], ["分類マスタ", "カテゴリ", "プロダクト"]);
+        AssertIndependent(markdown, ["計画前提", "計画年度", "JPY"], ["読み方", "入力セル", "淡い黄"]);
+        // Each title comes right before its own rows.
+        Assert.True(markdown.IndexOf("計画前提", StringComparison.Ordinal) < markdown.IndexOf("計画年度", StringComparison.Ordinal), markdown);
+        Assert.True(markdown.IndexOf("分類マスタ", StringComparison.Ordinal) < markdown.IndexOf("カテゴリ", StringComparison.Ordinal), markdown);
+        Assert.True(markdown.IndexOf("読み方", StringComparison.Ordinal) < markdown.IndexOf("入力セル", StringComparison.Ordinal), markdown);
+        Assert.True(markdown.IndexOf("計画年度", StringComparison.Ordinal) < markdown.IndexOf("分類マスタ", StringComparison.Ordinal), markdown);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("CategoryMaster")]
+    public void Adjacent_tables_under_their_own_titles_are_separated(string? categoryTable)
+    {
+        var markdown = SerializeWithTitle(PlanAssumptionsSheet(categoryTable), out var serializer);
+        AssertIndependent(markdown, ["分類マスタ", "カテゴリ", "プロダクト", "人材"], ["読み方", "入力セル", "計算セル", "淡い黄"]);
+        Assert.True(SameTableRow(markdown, "プロダクト", "継続収益"), markdown);
+        Assert.True(markdown.Contains("計算セル", StringComparison.Ordinal) && markdown.Contains("淡い青: 数式で導出", StringComparison.Ordinal), markdown);
+        Assert.True(markdown.IndexOf("読み方", StringComparison.Ordinal) > markdown.IndexOf("人材", StringComparison.Ordinal), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Group_titles_over_the_values_of_one_table_keep_it_together()
+    {
+        var (markdown, serializer) = Serialize(
+            C("B1", "2024年", bold: true, fill: true, toColumn: 3), C("D1", "2025年", bold: true, fill: true, toColumn: 5),
+            C("A2", "項目", bold: true, fill: true), C("B2", "上期", bold: true), C("C2", "下期", bold: true), C("D2", "上期", bold: true), C("E2", "下期", bold: true),
+            C("A3", "売上"), N("B3", 10), N("C3", 20), N("D3", 30), N("E3", 40),
+            C("A4", "費用"), N("B4", 5), N("C4", 6), N("D4", 7), N("E4", 8));
+        Assert.True(SameTableRow(markdown, "売上", "10", "20", "30", "40"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Group_titles_over_text_columns_of_the_same_rows_keep_them_together(bool shorterContacts)
+    {
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", "担当者", bold: true, fill: true, toColumn: 2), C("C1", "連絡先", bold: true, fill: true, toColumn: 4),
+            C("A2", "氏名", bold: true, fill: true), C("B2", "部署", bold: true, fill: true), C("C2", "電話", bold: true, fill: true), C("D2", "メール", bold: true, fill: true),
+            C("A3", "山田"), C("B3", "営業"), C("C3", "03-1111-2222"), C("D3", "yamada@example.com"),
+            C("A4", "佐藤"), C("B4", "経理"), C("C4", "03-3333-4444"), C("D4", "sato@example.com"),
+            C("A5", "鈴木"), C("B5", "総務"),
+        };
+        if (!shorterContacts) nodes.AddRange([C("C5", "03-5555-6666"), C("D5", "suzuki@example.com")]);
+        var (markdown, serializer) = Serialize(nodes.ToArray());
+        Assert.True(SameTableRow(markdown, "山田", "営業", "03-1111-2222", "yamada@example.com"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    // The dashboard of the business-plan workbook: two tables side by side, each under its own merged
+    // title, the right one shorter, below KPI tiles that span the blank column between them.
+    private static DocumentNode[] DashboardSheet()
+    {
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", "FY2026 事業計画ダッシュボード", bold: true, fill: true, toColumn: 12),
+            C("A4", "総予算", bold: true, fill: true, border: true, toColumn: 3), C("D4", "実績", bold: true, fill: true, border: true, toColumn: 6),
+            C("G4", "予算消化率", bold: true, fill: true, border: true, toColumn: 9), C("J4", "遅延案件", bold: true, fill: true, border: true, toColumn: 12),
+            C("A5", "¥44,900,000", numeric: true, bold: true, border: true, toColumn: 3), C("D5", "¥13,530,000", numeric: true, bold: true, border: true, toColumn: 6),
+            C("G5", "30%", numeric: true, bold: true, border: true, toColumn: 9), C("J5", "2", numeric: true, bold: true, border: true, toColumn: 12),
+            C("A10", "優先アクション（差異が大きい案件）", bold: true, fill: true, border: true, toColumn: 6),
+            C("H10", "カテゴリ別 予算・実績", bold: true, fill: true, border: true, toColumn: 12),
+        };
+        foreach (var (column, header) in new[] { ("A", "案件ID"), ("B", "案件名"), ("C", "責任者"), ("D", "ステータス"), ("E", "差異"), ("F", "進捗率"), ("H", "カテゴリ"), ("I", "予算"), ("J", "実績") })
+            nodes.Add(C(column + "11", header, bold: true, fill: true));
+        var projects = new[] { ("PJ-001", "サブスク基盤", "佐藤", "進行中", "¥85,714", "35%"), ("PJ-002", "展示会リード獲得", "田中", "完了", "-¥27,083", "96%"),
+            ("PJ-003", "CS 自動応答", "鈴木", "遅延", "-¥50,000", "40%"), ("PJ-004", "採用ブランディング", "高橋", "進行中", "¥66,667", "33%"),
+            ("PJ-005", "価格体系見直し", "伊藤", "進行中", "¥100,000", "25%") };
+        for (var index = 0; index < projects.Length; index++)
+        {
+            var (id, name, owner, status, difference, progress) = projects[index];
+            var row = index + 12;
+            nodes.AddRange([C($"A{row}", id, border: true, formula: $"'案件一覧'!A{row - 7}"), C($"B{row}", name, border: true, formula: $"'案件一覧'!B{row - 7}"),
+                C($"C{row}", owner, border: true, formula: $"'案件一覧'!E{row - 7}"), C($"D{row}", status, border: true, formula: $"'案件一覧'!F{row - 7}"),
+                C($"E{row}", difference, numeric: true, border: true, formula: $"'案件一覧'!K{row - 7}"), C($"F{row}", progress, numeric: true, border: true, formula: $"'案件一覧'!I{row - 7}")]);
+        }
+        var categories = new[] { ("プロダクト", "¥18,100,000", "¥5,030,000"), ("マーケティング", "¥10,600,000", "¥3,520,000"),
+            ("オペレーション", "¥11,500,000", "¥4,100,000"), ("人材", "¥4,700,000", "¥880,000") };
+        for (var index = 0; index < categories.Length; index++)
+        {
+            var (category, budget, actual) = categories[index];
+            var row = index + 12;
+            nodes.AddRange([C($"H{row}", category, border: true, formula: $"'月次分析'!H{row - 7}"), C($"I{row}", budget, numeric: true, border: true, formula: $"'月次分析'!I{row - 7}"),
+                C($"J{row}", actual, numeric: true, border: true, formula: $"'月次分析'!J{row - 7}")]);
+        }
+        return nodes.ToArray();
+    }
+
+    [Fact]
+    public void Two_titled_tables_side_by_side_are_not_joined_under_one_header()
+    {
+        var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(Title: "FY2026 事業計画"));
+        var markdown = serializer.Serialize(Graph(DashboardSheet()));
+        AssertIndependent(markdown, ["優先アクション", "PJ-001", "サブスク基盤", "PJ-005"], ["カテゴリ別", "プロダクト", "マーケティング", "人材"]);
+        Assert.True(SameTableRow(markdown, "PJ-001", "サブスク基盤", "佐藤", "進行中", "¥85,714", "35%"), markdown);
+        Assert.True(SameTableRow(markdown, "プロダクト", "¥18,100,000", "¥5,030,000"), markdown);
+        Assert.True(markdown.IndexOf("カテゴリ別 予算・実績", StringComparison.Ordinal) < markdown.IndexOf("| カテゴリ |", StringComparison.Ordinal), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Lists_under_one_banner_keep_their_own_rows_and_columns()
+    {
+        // The lower block of the "参考UMタグ" sheet: a banner over three lists, two with subtitles.
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", "対象者タグ", fill: true, toColumn: 8), C("J1", "コンテンツタグ", fill: true, toColumn: 11),
+            C("A2", "住民向け情報", bold: true, toColumn: 2), C("D2", "事業者向け情報", bold: true, toColumn: 5),
+        };
+        for (var index = 0; index < 6; index++)
+            nodes.AddRange([C($"A{index + 3}", $"T0008{6 + index}", border: true), C($"B{index + 3}", $"住民{index}", border: true),
+                C($"D{index + 3}", $"T0010{3 + index}", border: true), C($"E{index + 3}", $"業種{index}", border: true)]);
+        for (var index = 0; index < 4; index++)
+            nodes.AddRange([C($"G{index + 3}", $"T0012{2 + index}", border: true), C($"H{index + 3}", $"その他{index}", border: true),
+                C($"J{index + 3}", $"T0007{7 + index}", border: true), C($"K{index + 3}", $"内容{index}", border: true)]);
+        var markdown = SerializeWithTitle(nodes.ToArray(), out _);
+        AssertIndependent(markdown, ["住民0", "住民5"], ["業種0", "その他0", "内容0"]);
+        AssertIndependent(markdown, ["その他0", "その他3"], ["業種0", "内容0"]);
+        Assert.Contains("| T00086 | 住民0 |\n| --- | --- |\n| T00087 | 住民1 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| T00122 | その他0 |\n| --- | --- |\n| T00123 | その他1 |", markdown, StringComparison.Ordinal);
+    }
+
+    // Values-only blocks: the values of the rows beside them, or a table of their own.
+
+    [Fact]
+    public void A_values_table_whose_header_sits_beside_the_data_of_another_table_is_its_own_table()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true),
+            C("A2", "Apple"), N("B2", 10), C("D2", "Target", bold: true), C("E2", "Actual", bold: true),
+            C("A3", "Pear"), N("B3", 20), N("D3", 100), N("E3", 90),
+            C("A4", "Plum"), N("B4", 30), N("D4", 120), N("E4", 130),
+            C("A5", "Fig"), N("B5", 40));
+        AssertIndependent(markdown, ["Apple", "Pear", "Plum", "Fig"], ["Target", "100", "120"]);
+        Assert.True(SameTableRow(markdown, "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData("Year", "2024", "2025", "2026")]
+    [InlineData("Year", "2026", "2025", "2024")]
+    [InlineData("年度", "2024", "2025", "2026")]
+    [InlineData("月", "4月", "5月", "6月")]
+    [InlineData("日付", "2026-04-01", "2026-04-02", "2026-04-03")]
+    [InlineData("日付", "4月1日", "4月8日", "4月15日")]
+    [InlineData("Date", "2026年3月30日", "2026年3月31日", "2026年4月1日")]
+    public void A_values_table_keyed_by_its_own_periods_is_separated_and_marked_for_comparison(string key, string first, string second, string third)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", key, bold: true), C("E1", "Target", bold: true),
+            C("A2", "Apple"), N("B2", 10), C("D2", first, numeric: first.All(char.IsDigit)), N("E2", 100),
+            C("A3", "Pear"), N("B3", 20), C("D3", second, numeric: second.All(char.IsDigit)), N("E3", 120),
+            C("A4", "Plum"), N("B4", 30), C("D4", third, numeric: third.All(char.IsDigit)), N("E4", 140));
+        AssertIndependent(markdown, ["Apple", "Pear", "Plum"], [first, second, third]);
+        Assert.True(SameTableRow(markdown, first, "100"), markdown);
+        var review = Assert.Single(serializer.Report.TableBoundaryReviews);
+        Assert.Equal(("C1:C4", "A1:B4", "D1:E4"), (review.GapRange, review.LeftRange, review.RightRange));
+    }
+
+    [Theory]
+    [InlineData("Quantity", 2, 3, 4)]
+    [InlineData("Year", 2024, 2024, 2026)]
+    [InlineData("Year", 2024, 2026, 2025)]
+    public void Values_that_only_look_like_a_sequence_stay_with_their_rows(string header, int first, int second, int third)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Owner", bold: true), C("D1", header, bold: true), C("E1", "Amount", bold: true),
+            C("A2", "Apple"), C("B2", "Sato"), N("D2", first), N("E2", 100),
+            C("A3", "Pear"), C("B3", "Kato"), N("D3", second), N("E3", 120),
+            C("A4", "Plum"), C("B4", "Ito"), N("D4", third), N("E4", 140));
+        Assert.True(SameTableRow(markdown, "Apple", "Sato", first.ToString(System.Globalization.CultureInfo.InvariantCulture), "100"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Values_under_the_second_row_of_a_two_row_header_stay_with_their_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "商品", bold: true, fill: true), C("B1", "情報", bold: true, fill: true),
+            C("A2", "ID", bold: true, fill: true), C("B2", "Item", bold: true, fill: true), C("D2", "Quantity", bold: true, fill: true), C("E2", "Amount", bold: true, fill: true),
+            N("A3", 1), C("B3", "Apple"), N("D3", 2), N("E3", 100),
+            N("A4", 2), C("B4", "Pear"), N("D4", 3), N("E4", 200));
+        Assert.True(SameTableRow(markdown, "1", "Apple", "2", "100"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_list_of_names_computed_by_formulas_is_a_list_not_values()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "Owner", bold: true),
+            C("A2", "Revenue"), N("B2", 100), C("D2", "Sato", formula: "Staff!A2"),
+            C("A3", "Cost"), N("B3", 80), C("D3", "Kato", formula: "Staff!A3"),
+            C("A4", "Tax"), N("B4", 20));
+        AssertIndependent(markdown, ["Revenue", "Cost", "Tax"], ["Sato", "Kato"]);
+        AssertNoBoundaryReview(serializer);
+        // A formula that computes a number is still a value of the rows beside it.
+        var (computed, computedSerializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "Total", bold: true),
+            C("A2", "Revenue"), N("B2", 100), C("D2", "130", numeric: true, formula: "B2*1.3"),
+            C("A3", "Cost"), N("B3", 80), C("D3", "104", numeric: true, formula: "B3*1.3"));
+        Assert.True(SameTableRow(computed, "Revenue", "100", "130"), computed);
+        AssertNoBoundaryReview(computedSerializer);
+    }
+
+    // Second review: layouts traced against the first version of these rules.
+
+    [Theory]
+    [InlineData("月", "４月", "５月", "６月")]
+    [InlineData("年度", "２０２４", "２０２５", "２０２６")]
+    [InlineData("日付", "２０２６/４/１", "２０２６/４/２", "２０２６/４/３")]
+    [InlineData("日付", "４月１日", "４月２日", "４月３日")]
+    public void Full_width_periods_are_read_as_periods(string key, string first, string second, string third)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "金額", bold: true), C("D1", key, bold: true), C("E1", "目標", bold: true),
+            C("A2", "売上"), N("B2", 10), C("D2", first), N("E2", 100),
+            C("A3", "費用"), N("B3", 20), C("D3", second), N("E3", 120),
+            C("A4", "利益"), N("B4", 30), C("D4", third), N("E4", 140));
+        AssertIndependent(markdown, ["売上", "費用", "利益"], [first, second, third]);
+        Assert.Single(serializer.Report.TableBoundaryReviews);
+    }
+
+    [Fact]
+    public void Values_under_a_group_title_stay_with_their_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "内訳", bold: true), C("D1", "2024年度", bold: true, toColumn: 5),
+            C("D2", "上期", bold: true), C("E2", "下期", bold: true),
+            C("A3", "売上"), C("B3", "国内"), N("D3", 10), N("E3", 20),
+            C("A4", "費用"), C("B4", "人件費"), N("D4", 5), N("E4", 6),
+            C("A5", "利益"), C("B5", "営業"), N("D5", 5), N("E5", 14));
+        Assert.True(SameTableRow(markdown, "売上", "国内", "10", "20"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Values_beside_vertically_merged_label_headers_stay_with_their_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true, toRow: 2), C("B1", "内訳", bold: true, toRow: 2), C("D1", "売上", bold: true), C("E1", "利益", bold: true),
+            C("D2", "（千円）"), C("E2", "（千円）"),
+            C("A3", "東日本"), C("B3", "関東"), N("D3", 10), N("E3", 2),
+            C("A4", "西日本"), C("B4", "関西"), N("D4", 8), N("E4", 1),
+            C("A5", "合計"), C("B5", "全国"), N("D5", 18), N("E5", 3));
+        Assert.True(SameTableRow(markdown, "東日本", "関東", "10", "2"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Values_beside_a_plain_second_header_row_stay_with_their_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "商品", bold: true), C("B1", "情報", bold: true),
+            C("A2", "ID"), C("B2", "Item"), C("D2", "Quantity"), C("E2", "Amount"),
+            N("A3", 1), C("B3", "Apple"), N("D3", 2), N("E3", 100),
+            N("A4", 2), C("B4", "Pear"), N("D4", 3), N("E4", 200));
+        Assert.True(SameTableRow(markdown, "1", "Apple", "2", "100"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Values_starting_beside_the_header_of_another_table_are_their_own_table()
+    {
+        var (markdown, _) = Serialize(
+            C("D1", "Target", bold: true), C("E1", "Actual", bold: true),
+            C("A2", "Item", bold: true), C("B2", "Q1", bold: true), N("D2", 100), N("E2", 90),
+            C("A3", "Apple"), N("B3", 10), N("D3", 120), N("E3", 130),
+            C("A4", "Pear"), N("B4", 20), N("D4", 140), N("E4", 150),
+            C("A5", "Plum"), N("B5", 30));
+        Assert.False(SameTableRow(markdown, "Item", "Q1", "100", "90"), markdown);
+        AssertIndependent(markdown, ["Apple", "Pear", "Plum"], ["Target", "120", "140"]);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_work_breakdown_under_group_titles_stays_one_table(bool numericYears)
+    {
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", "基本情報", bold: true, fill: true, toColumn: 3), C("D1", "スケジュール", bold: true, fill: true, toColumn: 8),
+            C("A2", "タスク", bold: true, fill: true), C("B2", "担当", bold: true, fill: true), C("C2", "状態", bold: true, fill: true),
+            C("D2", "マイルストーン", bold: true, fill: true),
+        };
+        var months = numericYears ? new[] { "2024", "2025", "2026", "2027" } : ["4月", "5月", "6月", "7月"];
+        for (var index = 0; index < months.Length; index++)
+            nodes.Add(C($"{(char)('E' + index)}2", months[index], bold: true, fill: true, numeric: numericYears));
+        nodes.AddRange([
+            C("A3", "要件定義"), C("B3", "佐藤"), C("C3", "完了"), C("D3", "要件確定"), C("E3", "●"),
+            C("A4", "設計"), C("B4", "田中"), C("C4", "進行中"), C("D4", "設計レビュー"), C("F4", "●"), C("G4", "●"),
+            C("A5", "実装"), C("B5", "鈴木"), C("C5", "未着手"), C("D5", "リリース"), C("H5", "●")]);
+        var (markdown, serializer) = Serialize(nodes.ToArray());
+        Assert.True(SameTableRow(markdown, "要件定義", "佐藤", "完了", "要件確定", "●"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_remarks_group_beside_a_titled_table_stays_with_its_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "担当者", bold: true, fill: true, toColumn: 2), C("C1", "備考", bold: true, fill: true, toColumn: 4, toRow: 2),
+            C("A2", "氏名", bold: true, fill: true), C("B2", "部署", bold: true, fill: true),
+            C("A3", "山田"), C("B3", "営業"), C("C3", "4月から在宅勤務"),
+            C("A4", "佐藤"), C("B4", "経理"), C("C4", "兼務あり"),
+            C("A5", "鈴木"), C("B5", "総務"), C("C5", "新任"));
+        Assert.True(SameTableRow(markdown, "山田", "営業", "4月から在宅勤務"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Group_titles_over_unemphasised_sub_headers_keep_one_table()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "担当者", bold: true, fill: true, toColumn: 2), C("C1", "連絡先", bold: true, fill: true, toColumn: 4),
+            C("A2", "氏名", bold: true, fill: true), C("B2", "部署", bold: true, fill: true), C("C2", "電話", border: true), C("D2", "メール", border: true),
+            C("A3", "山田"), C("B3", "営業"), C("C3", "03-1111-2222", border: true), C("D3", "yamada@example.com", border: true),
+            C("A4", "佐藤"), C("B4", "経理"), C("C4", "03-3333-4444", border: true), C("D4", "sato@example.com", border: true));
+        Assert.True(SameTableRow(markdown, "山田", "営業", "03-1111-2222", "yamada@example.com"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void An_edge_between_touching_tables_does_not_cut_a_table_lower_on_the_sheet()
+    {
+        var nodes = PlanAssumptionsSheet().ToList();
+        nodes.AddRange([
+            C("D20", "部門", bold: true), C("E20", "責任者", bold: true), C("F20", "拠点", bold: true), C("G20", "連絡先", bold: true), C("H20", "備考", bold: true),
+            C("D21", "営業部"), C("E21", "山田"), C("F21", "東京"), C("G21", "内線100"), C("H21", "本社"),
+            C("D22", "経理部"), C("E22", "佐藤"), C("F22", "大阪"), C("G22", "内線200"), C("H22", "支社")]);
+        var markdown = SerializeWithTitle(nodes.ToArray(), out _);
+        Assert.True(SameTableRow(markdown, "営業部", "山田", "東京", "内線100", "本社"), markdown);
+        AssertIndependent(markdown, ["分類マスタ", "カテゴリ", "プロダクト"], ["読み方", "入力セル", "計算セル"]);
+    }
+
+    [Theory]
+    [InlineData("年度", "2023", "2024", "2025", "主な施策", "担当", "DX推進", "佐藤")]
+    [InlineData("日付", "2026-04-01", "2026-04-02", "2026-04-03", "作業内容", "担当", "環境構築", "佐藤")]
+    public void A_period_key_at_the_start_of_a_table_keys_its_rows(string key, string first, string second, string third,
+        string textHeader, string ownerHeader, string text, string owner)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", key, bold: true), C("B1", "件数", bold: true), C("D1", textHeader, bold: true), C("E1", ownerHeader, bold: true),
+            C("A2", first, numeric: first.All(char.IsDigit)), N("B2", 3), C("D2", text), C("E2", owner),
+            C("A3", second, numeric: second.All(char.IsDigit)), N("B3", 5), C("D3", "品質改善"), C("E3", "田中"),
+            C("A4", third, numeric: third.All(char.IsDigit)), N("B4", 7), C("D4", "教育"), C("E4", "鈴木"));
+        Assert.True(SameTableRow(markdown, first, "3", text, owner), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Dates_of_the_rows_of_a_schedule_stay_with_them()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "研修", bold: true), C("B1", "講師", bold: true), C("D1", "日付", bold: true), C("E1", "時間", bold: true),
+            C("A2", "新人研修"), C("B2", "佐藤"), C("D2", "2026-04-01"), C("E2", "9:00"),
+            C("A3", "安全教育"), C("B3", "田中"), C("D3", "2026-04-02"), C("E3", "10:00"),
+            C("A4", "OJT"), C("B4", "鈴木"), C("D4", "2026-04-03"), C("E4", "13:00"));
+        Assert.True(SameTableRow(markdown, "新人研修", "佐藤", "2026-04-01", "9:00"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData("2026-04-01", "2026-05-01", "2026-06-01")]
+    [InlineData("2026-04-30", "2026-05-31", "2026-06-30")]
+    public void Months_stored_as_dates_are_periods(string first, string second, string third)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "月", bold: true), C("E1", "Target", bold: true),
+            C("A2", "Apple"), N("B2", 10), C("D2", first, numeric: true), N("E2", 100),
+            C("A3", "Pear"), N("B3", 20), C("D3", second, numeric: true), N("E3", 120),
+            C("A4", "Plum"), N("B4", 30), C("D4", third, numeric: true), N("E4", 140));
+        AssertIndependent(markdown, ["Apple", "Pear", "Plum"], [first, second, third]);
+        Assert.Single(serializer.Report.TableBoundaryReviews);
+    }
+
+    [Fact]
+    public void Showing_formulas_does_not_change_where_tables_are_split()
+    {
+        var nodes = new[]
+        {
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "年度", bold: true), C("E1", "Target", bold: true),
+            C("A2", "Apple"), N("B2", 10), N("D2", 2024), N("E2", 100),
+            C("A3", "Pear"), N("B3", 20), C("D3", "2025", numeric: true, formula: "D2+1"), N("E3", 120),
+            C("A4", "Plum"), N("B4", 30), C("D4", "2026", numeric: true, formula: "D3+1"), N("E4", 140),
+        };
+        foreach (var showFormulas in new[] { false, true })
+        {
+            var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ShowFormulas: showFormulas));
+            var markdown = serializer.Serialize(Graph(nodes));
+            AssertIndependent(markdown, ["Apple", "Pear", "Plum"], ["Target", "2024"]);
+            Assert.Single(serializer.Report.TableBoundaryReviews);
+        }
+    }
+
+    [Fact]
+    public void A_status_computed_by_a_formula_is_a_value_of_its_row()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "目標", bold: true), C("D1", "実績", bold: true), C("E1", "判定", bold: true),
+            C("A2", "売上"), N("B2", 100), N("D2", 120), C("E2", "達成", formula: "IF(D2>=B2,\"達成\",\"未達\")"),
+            C("A3", "費用"), N("B3", 80), N("D3", 90), C("E3", "未達", formula: "IF(D3>=B3,\"達成\",\"未達\")"),
+            C("A4", "利益"), N("B4", 20), N("D4", 30), C("E4", "達成", formula: "IF(D4>=B4,\"達成\",\"未達\")"));
+        Assert.True(SameTableRow(markdown, "売上", "100", "120", "達成"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    // Third review: the checks must look at the rows beside the values, not the whole section.
+
+    [Fact]
+    public void A_table_stacked_below_another_in_the_same_columns_keeps_its_values()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "部署", bold: true), C("B1", "責任者", bold: true),
+            C("A2", "営業部"), C("B2", "山田"), C("A3", "経理部"), C("B3", "佐藤"), C("A4", "総務部"), C("B4", "鈴木"),
+            C("A10", "項目", bold: true), C("B10", "担当", bold: true), C("D10", "予算", bold: true), C("E10", "実績", bold: true),
+            C("A11", "広告"), C("B11", "田中"), N("D11", 100), N("E11", 90),
+            C("A12", "研修"), C("B12", "伊藤"), N("D12", 50), N("E12", 60),
+            C("A13", "旅費"), C("B13", "高橋"), N("D13", 30), N("E13", 20));
+        Assert.True(SameTableRow(markdown, "広告", "田中", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Numbers_elsewhere_in_the_section_do_not_decide_the_header_of_a_table(bool totalRow)
+    {
+        var nodes = new List<DocumentNode>
+        {
+            C("A1", "項目", bold: true), C("B1", "担当", bold: true), C("D1", "予算", bold: true), C("E1", "実績", bold: true),
+            C("A2", "広告"), C("B2", "田中"), N("D2", 100), N("E2", 90),
+            C("A3", "研修"), C("B3", "伊藤"), N("D3", 50), N("E3", 60),
+            C("A4", "旅費"), C("B4", "高橋"), N("D4", 30), N("E4", 20),
+        };
+        if (totalRow) nodes.AddRange([C("A5", "合計"), C("B5", "3件"), N("D5", 180), N("E5", 170)]);
+        else nodes.AddRange([C("A20", "月", bold: true), C("B20", "件数", bold: true), C("A21", "4月"), N("B21", 3), C("A22", "5月"), N("B22", 5), C("A23", "6月"), N("B23", 7)]);
+        var (markdown, serializer) = Serialize(nodes.ToArray());
+        Assert.True(SameTableRow(markdown, "広告", "田中", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Numbers_lower_on_the_sheet_do_not_turn_a_period_key_into_a_second_table()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "年度", bold: true), C("B1", "売上", bold: true), C("D1", "施策", bold: true), C("E1", "担当", bold: true),
+            N("A2", 2023), N("B2", 100), C("D2", "DX推進"), C("E2", "佐藤"),
+            N("A3", 2024), N("B3", 120), C("D3", "品質改善"), C("E3", "田中"),
+            N("A4", 2025), N("B4", 140), C("D4", "教育"), C("E4", "鈴木"),
+            C("D20", "区分", bold: true), C("E20", "件数", bold: true), C("D21", "A"), N("E21", 1), C("D22", "B"), N("E22", 2));
+        Assert.True(SameTableRow(markdown, "2023", "100", "DX推進", "佐藤"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void An_edge_between_touching_tables_does_not_change_decisions_lower_on_the_sheet()
+    {
+        var nodes = PlanAssumptionsSheet().ToList();
+        nodes.AddRange([
+            C("D20", "ID", bold: true), C("E20", "品目", bold: true), C("F20", "区分", bold: true), C("G20", "担当", bold: true), C("I20", "数量", bold: true), C("J20", "金額", bold: true),
+            N("D21", 1), C("E21", "用紙"), C("F21", "消耗品"), C("G21", "山田"), N("I21", 10), N("J21", 5000),
+            N("D22", 2), C("E22", "トナー"), C("F22", "消耗品"), C("G22", "佐藤"), N("I22", 2), N("J22", 12000)]);
+        var markdown = SerializeWithTitle(nodes.ToArray(), out var serializer);
+        Assert.True(SameTableRow(markdown, "1", "用紙", "消耗品", "山田", "10", "5000"), markdown);
+        Assert.Empty(serializer.Report.TableBoundaryReviews);
+    }
+
+    [Fact]
+    public void Three_touching_tables_under_their_own_titles_are_separated()
+    {
+        var (markdown, _) = Serialize(
+            C("A1", "分類マスタ", bold: true, fill: true, toColumn: 2), C("C1", "読み方", bold: true, fill: true, toColumn: 4), C("E1", "担当一覧", bold: true, fill: true, toColumn: 6),
+            C("A2", "カテゴリ", bold: true, fill: true), C("B2", "重点テーマ", bold: true, fill: true), C("C2", "入力セル", bold: true, fill: true), C("D2", "黄色: 編集可"),
+            C("E2", "氏名", bold: true, fill: true), C("F2", "部署", bold: true, fill: true),
+            C("A3", "プロダクト"), C("B3", "継続収益"), C("C3", "計算セル", bold: true, fill: true), C("D3", "青: 数式"), C("E3", "山田"), C("F3", "営業"),
+            C("A4", "マーケティング"), C("B4", "獲得効率"), C("C4", "出典", bold: true, fill: true), C("D4", "URL"), C("E4", "佐藤"), C("F4", "経理"),
+            C("A5", "人材"), C("B5", "組織能力"), C("E5", "鈴木"), C("F5", "総務"));
+        AssertIndependent(markdown, ["プロダクト", "マーケティング"], ["計算セル", "出典"]);
+        AssertIndependent(markdown, ["計算セル", "出典"], ["山田", "佐藤"]);
+    }
+
+    [Fact]
+    public void Emphasised_values_beside_the_rows_of_a_titled_table_stay_with_them()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "社員", bold: true, fill: true, toColumn: 2), C("C1", "評価", bold: true, fill: true, toColumn: 4),
+            C("A2", "氏名", bold: true, fill: true), C("B2", "部署", bold: true, fill: true),
+            C("A3", "山田"), C("B3", "営業"), C("C3", "S評価", bold: true), C("D3", "目標を大きく上回った"),
+            C("A4", "佐藤"), C("B4", "経理"), C("C4", "A評価", bold: true), C("D4", "目標を達成"),
+            C("A5", "鈴木"), C("B5", "総務"), C("C5", "B評価", bold: true), C("D5", "一部未達"));
+        Assert.True(SameTableRow(markdown, "山田", "営業", "S評価", "目標を大きく上回った"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData("VLOOKUP(A2,Staff!A:B,2,FALSE)")]
+    [InlineData("IFERROR(INDEX(Staff!B:B,MATCH(A2,Staff!A:A,0)),\"\")")]
+    [InlineData("IF(A2=\"\",\"\",XLOOKUP(A2,Staff!A:A,Staff!B:B))")]
+    public void Names_looked_up_by_a_formula_are_labels(string lookup)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "Owner", bold: true),
+            C("A2", "Revenue"), N("B2", 100), C("D2", "Sato", formula: lookup),
+            C("A3", "Cost"), N("B3", 80), C("D3", "Kato", formula: lookup.Replace("A2", "A3", StringComparison.Ordinal)));
+        AssertIndependent(markdown, ["Revenue", "Cost"], ["Sato", "Kato"]);
+        Assert.Single(serializer.Report.TableBoundaryReviews);
+    }
+
+    [Fact]
+    public void Copies_of_a_filled_down_status_formula_are_values_like_the_formula()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "目標", bold: true), C("D1", "実績", bold: true), C("E1", "判定", bold: true),
+            C("A2", "売上"), N("B2", 100), N("D2", 120), C("E2", "達成", formula: "IF(D2>=B2,\"達成\",\"未達\")"),
+            C("A3", "費用"), N("B3", 80), N("D3", 90), C("E3", "未達", sharedFormula: true),
+            C("A4", "利益"), N("B4", 20), N("D4", 30), C("E4", "達成", sharedFormula: true));
+        Assert.True(SameTableRow(markdown, "費用", "80", "90", "未達"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void An_open_ended_date_does_not_stop_the_conversion()
+    {
+        var (markdown, _) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "日付", bold: true), C("E1", "Target", bold: true),
+            C("A2", "Apple"), N("B2", 10), C("D2", "2026-03-31", numeric: true), N("E2", 100),
+            C("A3", "Pear"), N("B3", 20), C("D3", "2026-04-30", numeric: true), N("E3", 120),
+            C("A4", "Plum"), N("B4", 30), C("D4", "9999-12-31", numeric: true), N("E4", 140));
+        Assert.Contains("9999-12-31", markdown, StringComparison.Ordinal);
+    }
+
+    // Fourth review: being out of step needs values as evidence, not a guessed header row.
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public void Row_labels_under_an_empty_corner_stay_with_their_values(bool boldLabels, bool twoLabelColumns)
+    {
+        var labelEnd = twoLabelColumns ? "B" : "A";
+        var values = twoLabelColumns ? ("D", "E") : ("C", "D");
+        var nodes = new List<DocumentNode> { C($"{values.Item1}1", "予算", bold: true), C($"{values.Item2}1", "実績", bold: true) };
+        var labels = new[] { "売上", "費用", "利益", "人件費" };
+        for (var index = 0; index < labels.Length; index++)
+        {
+            var row = index + 2;
+            nodes.Add(C($"A{row}", labels[index], bold: boldLabels));
+            if (twoLabelColumns) nodes.Add(C($"{labelEnd}{row}", "内訳" + index));
+            nodes.AddRange([N($"{values.Item1}{row}", 100 + index), N($"{values.Item2}{row}", 90 + index)]);
+        }
+        var markdown = SerializeWithTitle(nodes.ToArray(), out var serializer);
+        Assert.True(SameTableRow(markdown, "売上", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Each_copy_of_a_formula_is_judged_by_what_it_shows()
+    {
+        // The written formula shows its fixed word, the copies show names they looked up.
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "Owner", bold: true),
+            C("A2", "Revenue"), N("B2", 100), C("D2", "なし", formula: "IF(Staff!A2=\"\",\"なし\",Staff!B2)"),
+            C("A3", "Cost"), N("B3", 80), C("D3", "Kato Jiro", sharedFormula: true),
+            C("A4", "Tax"), N("B4", 20), C("D4", "Ito Hanako", sharedFormula: true));
+        AssertIndependent(markdown, ["Revenue", "Cost", "Tax"], ["Kato Jiro", "Ito Hanako"]);
+        Assert.Single(serializer.Report.TableBoundaryReviews);
+    }
+
+    [Fact]
+    public void Values_starting_beside_the_bold_header_of_a_text_table_are_their_own_table()
+    {
+        var (markdown, _) = Serialize(
+            C("D1", "Target", bold: true), C("E1", "Actual", bold: true),
+            C("A2", "Code", bold: true), C("B2", "Name", bold: true), N("D2", 100), N("E2", 90),
+            C("A3", "K01"), C("B3", "Alpha"), N("D3", 120), N("E3", 130),
+            C("A4", "K02"), C("B4", "Beta"), N("D4", 140), N("E4", 150),
+            C("A5", "K03"), C("B5", "Gamma"));
+        Assert.False(SameTableRow(markdown, "Code", "Name", "100", "90"), markdown);
+        AssertIndependent(markdown, ["Alpha", "Beta", "Gamma"], ["Target", "120", "140"]);
+    }
+
+    [Theory]
+    [InlineData("bold")]
+    [InlineData("fill")]
+    public void Statement_rows_under_an_empty_corner_stay_with_their_values(string emphasis)
+    {
+        var markdown = SerializeWithTitle([
+            C("C1", "前期", bold: true), C("D1", "当期", bold: true),
+            C("A2", "売上高", bold: emphasis == "bold", fill: emphasis == "fill"), N("C2", 1000), N("D2", 1200),
+            C("A3", "売上原価"), N("C3", 600), N("D3", 700),
+            C("A4", "売上総利益", bold: emphasis == "bold", fill: emphasis == "fill"), N("C4", 400), N("D4", 500)], out var serializer);
+        Assert.True(SameTableRow(markdown, "売上高", "1000", "1200"), markdown);
+        Assert.True(SameTableRow(markdown, "売上原価", "600", "700"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_year_in_the_header_of_the_labelled_side_is_not_a_value()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "2025", bold: true, numeric: true), C("D1", "増減", bold: true), C("E1", "増減率", bold: true),
+            C("A2", "売上"), N("B2", 100), N("D2", 10), C("E2", "11%"),
+            C("A3", "費用"), N("B3", 80), N("D3", -5), C("E3", "-6%"),
+            C("A4", "利益"), N("B4", 20), N("D4", 15), C("E4", "300%"),
+            C("A5", "人員"), N("B5", 12), N("D5", 1));
+        Assert.True(SameTableRow(markdown, "売上", "100", "10", "11%"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_date_caption_in_the_corner_does_not_split_the_table()
+    {
+        var markdown = SerializeWithTitle([
+            C("A1", "2026/04/01現在"), C("C1", "予算", bold: true), C("D1", "実績", bold: true),
+            C("A2", "営業"), N("C2", 100), N("D2", 90),
+            C("A3", "経理"), N("C3", 50), N("D3", 60),
+            C("A4", "総務"), N("C4", 30), N("D4", 20),
+            C("A5", "※速報値")], out var serializer);
+        Assert.True(SameTableRow(markdown, "営業", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_category_row_without_a_count_keeps_its_values_in_the_table()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "項目", bold: true), C("B1", "件数", bold: true), C("D1", "予算", bold: true), C("E1", "実績", bold: true),
+            C("A2", "東日本"), N("D2", 300), N("E2", 280),
+            C("A3", "東京"), N("B3", 5), N("D3", 200), N("E3", 190),
+            C("A4", "仙台"), N("B4", 3), N("D4", 100), N("E4", 90));
+        Assert.True(SameTableRow(markdown, "東日本", "300", "280"), markdown);
+        Assert.True(SameTableRow(markdown, "東京", "5", "200", "190"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_table_one_blank_row_below_another_keeps_its_values()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "部署", bold: true), C("B1", "責任者", bold: true),
+            C("A2", "営業部"), C("B2", "山田"), C("A3", "経理部"), C("B3", "佐藤"),
+            C("A5", "項目", bold: true), C("B5", "担当", bold: true), C("D5", "予算", bold: true), C("E5", "実績", bold: true),
+            C("A6", "広告"), C("B6", "田中"), N("D6", 100), N("E6", 90),
+            C("A7", "研修"), C("B7", "伊藤"), N("D7", 50), N("E7", 60),
+            C("A8", "旅費"), C("B8", "高橋"), N("D8", 30), N("E8", 20));
+        Assert.True(SameTableRow(markdown, "広告", "田中", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void A_caption_above_a_label_column_does_not_split_its_table()
+    {
+        var markdown = SerializeWithTitle([
+            C("A1", "単位：千円"),
+            C("A2", "部門", bold: true), C("C2", "予算", bold: true), C("D2", "実績", bold: true),
+            C("A3", "営業"), N("C3", 100), N("D3", 90),
+            C("A4", "経理"), N("C4", 50), N("D4", 60),
+            C("A5", "総務"), N("C5", 30), N("D5", 20)], out var serializer);
+        Assert.True(SameTableRow(markdown, "営業", "100", "90"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Fact]
+    public void Values_beside_a_plain_second_header_row_of_text_labels_stay_with_their_rows()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "商品", bold: true), C("B1", "情報", bold: true),
+            C("A2", "名称"), C("B2", "分類"), C("D2", "数量"), C("E2", "金額"),
+            C("A3", "りんご"), C("B3", "果物"), N("D3", 2), N("E3", 300),
+            C("A4", "なす"), C("B4", "野菜"), N("D4", 3), N("E4", 200));
+        Assert.True(SameTableRow(markdown, "りんご", "果物", "2", "300"), markdown);
+        AssertNoBoundaryReview(serializer);
+    }
+
+    [Theory]
+    [InlineData("Staff!B2&\" \"&Staff!C2")]
+    [InlineData("IF(Staff!A2=\"\",\"\",Staff!B2)")]
+    public void Names_built_by_a_filled_down_formula_are_labels(string formula)
+    {
+        var (markdown, serializer) = Serialize(
+            C("A1", "Item", bold: true), C("B1", "Q1", bold: true), C("D1", "Owner", bold: true),
+            C("A2", "Revenue"), N("B2", 100), C("D2", "Sato Taro", formula: formula),
+            C("A3", "Cost"), N("B3", 80), C("D3", "Kato Jiro", sharedFormula: true),
+            C("A4", "Tax"), N("B4", 20), C("D4", "Ito Hanako", sharedFormula: true));
+        AssertIndependent(markdown, ["Revenue", "Cost", "Tax"], ["Sato Taro", "Kato Jiro", "Ito Hanako"]);
+        Assert.Single(serializer.Report.TableBoundaryReviews);
+    }
+
     private static void AssertNoBoundaryReview(ReadableMarkdownSerializer serializer)
     {
         Assert.Empty(serializer.Report.TableBoundaryReviews);
@@ -462,7 +1189,8 @@ public sealed class WorkbookTableBoundaryTests
     private static DocumentNode N(string address, int value, string? table = null) =>
         C(address, value.ToString(System.Globalization.CultureInfo.InvariantCulture), numeric: true, table: table);
 
-    private static DocumentNode C(string address, string value, bool bold = false, bool numeric = false, string? table = null, int toColumn = 0)
+    private static DocumentNode C(string address, string value, bool bold = false, bool numeric = false, string? table = null, int toColumn = 0,
+        bool fill = false, bool border = false, string? formula = null, int toRow = 0, bool sharedFormula = false)
     {
         var match = Regex.Match(address, @"^([A-Z]+)(\d+)$");
         var column = match.Groups[1].Value.Aggregate(0, (sum, letter) => sum * 26 + letter - 'A' + 1);
@@ -473,9 +1201,20 @@ public sealed class WorkbookTableBoundaryTests
             ["column"] = JsonSerializer.SerializeToElement(column),
             ["is_bold"] = JsonSerializer.SerializeToElement(bold),
             ["is_numeric"] = JsonSerializer.SerializeToElement(numeric),
+            ["has_fill"] = JsonSerializer.SerializeToElement(fill),
+            ["has_border"] = JsonSerializer.SerializeToElement(border),
         };
         if (table is not null) extensions["excel_table"] = JsonSerializer.SerializeToElement(table);
         if (toColumn > 0) extensions["merged_to_column"] = JsonSerializer.SerializeToElement(toColumn);
+        if (toRow > 0) extensions["merged_to_row"] = JsonSerializer.SerializeToElement(toRow);
+        // Excel stores a formula filled down as one written formula and copies that only point to it
+        // (<f t="shared" si="0"/>), which are read with an empty formula.
+        if (formula is not null || sharedFormula)
+        {
+            extensions["is_formula"] = JsonSerializer.SerializeToElement(true);
+            extensions["formula"] = JsonSerializer.SerializeToElement(formula ?? string.Empty);
+            extensions["cell_type"] = JsonSerializer.SerializeToElement(numeric ? "n" : "str");
+        }
         return new DocumentNode("cell-" + address, NodeKind.Cell, null, row * 1000 + column, ContentLayer.Body, new TextNodeContent(value),
             new SourceAnchor("xlsx", "/xl/worksheets/sheet1.xml", [new AnchorLocator("cell_address", address)]), Extensions: extensions);
     }
