@@ -1,5 +1,8 @@
+using System.Buffers.Binary;
 using System.Globalization;
 using System.IO.Compression;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -180,10 +183,11 @@ public static class AiPackageManifestReader
     }
 
     /// <summary>Checks every file the manifest lists against its size and SHA-256. Returns one
-    /// message per missing or changed file; an empty list means the package is intact. The manifest
-    /// read by <see cref="Parse(string)"/> already lists every file it refers to. A name that would
-    /// leave the package, a link inside a package folder or an unreadable ZIP entry raises
-    /// <see cref="InvalidDataException"/>.</summary>
+    /// message per listed file that is missing, changed or refused (a link, pipe or device in a
+    /// package folder, an encrypted or unreadable ZIP entry), in the same words as
+    /// docs/examples/ai_package_reader.py; an empty list means the package is intact. The manifest read
+    /// by <see cref="Parse(string)"/> already lists every file it refers to. A package that cannot be
+    /// opened at all (not a folder or a plain ZIP) raises <see cref="InvalidDataException"/>.</summary>
     public static async Task<IReadOnlyList<string>> VerifyFilesAsync(string packagePath, AiPackageManifest manifest,
         CancellationToken cancellationToken = default)
     {
@@ -200,15 +204,17 @@ public static class AiPackageManifestReader
                 var size = files.Size(file.Path);
                 if (size != file.Bytes)
                 {
-                    problems.Add($"{file.Path}: {size} bytes, manifest lists {file.Bytes}");
+                    problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {size})");
                     continue;
                 }
                 bytes = await files.ReadAsync(file.Path, cancellationToken).ConfigureAwait(false);
             }
             catch (FileNotFoundException) { problems.Add($"{file.Path}: missing"); continue; }
-            if (bytes.LongLength != file.Bytes) problems.Add($"{file.Path}: {bytes.LongLength} bytes, manifest lists {file.Bytes}");
-            else if (!StringComparer.OrdinalIgnoreCase.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), file.Sha256))
-                problems.Add($"{file.Path}: SHA-256 differs from the manifest");
+            catch (InvalidDataException refused) when (IsRefused(refused)) { problems.Add($"{file.Path}: refused ({refused.Message})"); continue; }
+            var expected = file.Sha256.ToLowerInvariant();
+            var actual = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            if (bytes.LongLength != file.Bytes) problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {bytes.LongLength})");
+            else if (actual != expected) problems.Add($"{file.Path}: sha256 mismatch (expected {expected}, got {actual})");
         }
         return problems;
     }
@@ -557,12 +563,34 @@ public static class AiPackageManifestReader
         }
     }
 
-    // A package is a directory or a ZIP with its files at the root, opened once per call.
+    // Why a package file is refused: a link, pipe or device in a package folder, a path that would
+    // leave the package, or a ZIP entry that cannot be read as every reader reads it. The message is
+    // the text docs/examples/ai_package_reader.py prints after "refused (".
+    private const string RefusedKey = "DocRedock.AiPackage.Refused";
+
+    private static InvalidDataException Refused(string reason, Exception? inner = null) => new(reason, inner) { Data = { [RefusedKey] = true } };
+
+    private static bool IsRefused(InvalidDataException exception) => exception.Data.Contains(RefusedKey);
+
+    // A package is a directory or a ZIP with its files at the root, opened once per call. Files are
+    // read as docs/examples/ai_package_reader.py reads them, so both readers accept and refuse the same
+    // packages, for the same reasons, worded the same way.
     private sealed class PackageFiles : IDisposable
     {
         private readonly string? directory;
+        private readonly string? archive;
         private readonly ZipArchive? zip;
-        private readonly Dictionary<string, ZipArchiveEntry> entries = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, ZipItem> entries = new(StringComparer.Ordinal);
+
+        // Files larger than this are refused rather than read into memory (both readers use the limit).
+        private const long MaxFileBytes = 2_147_483_520;
+
+        // One central directory record and the .NET entry at the same position.
+        private sealed record ZipItem(ZipArchiveEntry Entry, string OriginalName, int Flags, int Method, long HeaderOffset,
+            long CompressedSize, long Size, uint Crc)
+        {
+            public long End { get; set; }
+        }
 
         public PackageFiles(string packagePath)
         {
@@ -573,18 +601,40 @@ public static class AiPackageManifestReader
                 return;
             }
             if (!File.Exists(packagePath)) throw new FileNotFoundException("AI package not found.", packagePath);
-            zip = ZipFile.OpenRead(packagePath);
+            archive = packagePath;
+            var records = ZipLayout.Read(packagePath);
+            try { zip = ZipFile.OpenRead(packagePath); }
+            catch (InvalidDataException exception) { throw new InvalidDataException($"not a package folder or ZIP archive: {packagePath} ({exception.Message})", exception); }
             try
             {
-                // .NET returns the first of two equal names and Python the last; Python also cuts a name
-                // at NUL and, on Windows, reads a backslash as "/". Such an archive is refused rather than
-                // read differently by different consumers.
-                foreach (var entry in zip.Entries)
+                if (zip.Entries.Count != records.Count)
+                    throw new InvalidDataException($"not a package folder or ZIP archive: {packagePath} (its central directory could not be read)");
+                // A package ZIP is read only when it is plain, so that every reader reads it the same way
+                // (the Python example makes the same checks in the same order): .NET returns the first of
+                // two equal names and Python the last, Python cuts a name at NUL and on Windows reads a
+                // backslash as "/", and Python 3.12 renames an entry by a Unicode Path extra field.
+                var twice = new SortedSet<string>(StringComparer.Ordinal);
+                var items = new List<ZipItem>();
+                for (var index = 0; index < records.Count; index++)
                 {
-                    if (entry.FullName.IndexOfAny(['\0', '\\']) >= 0)
-                        throw new InvalidDataException($"The AI package ZIP holds an entry name with a {(entry.FullName.Contains('\0') ? "NUL" : "backslash")}: '{entry.FullName}'.");
-                    if (!entries.TryAdd(entry.FullName, entry))
-                        throw new InvalidDataException($"The AI package ZIP holds more than one entry named '{entry.FullName}'.");
+                    var record = records[index];
+                    var name = zip.Entries[index].FullName;
+                    if (name.IndexOfAny(['\0', '\\']) >= 0)
+                        throw new InvalidDataException($"the ZIP holds an entry name with a {(name.Contains('\0') ? "NUL" : "backslash")}: {Python.Repr(name)}");
+                    if (record.UnicodePath) throw new InvalidDataException($"the ZIP gives {Python.Repr(name)} a Unicode Path extra field");
+                    var item = new ZipItem(zip.Entries[index], record.OriginalName, record.Flags, record.Method, record.HeaderOffset,
+                        record.CompressedSize, record.Size, record.Crc);
+                    items.Add(item);
+                    if (!entries.TryAdd(name, item)) twice.Add(name);
+                }
+                if (twice.Count > 0)
+                    throw new InvalidDataException("the ZIP holds more than one entry named " + string.Join(", ", twice.Select(Python.Repr)));
+                // Where each entry must end: at the next local header or the central directory (Python 3.12).
+                var end = records.DirectoryStart;
+                foreach (var item in items.OrderBy(item => item.HeaderOffset).Reverse())
+                {
+                    item.End = end;
+                    end = item.HeaderOffset;
                 }
             }
             catch
@@ -594,29 +644,75 @@ public static class AiPackageManifestReader
             }
         }
 
-        public long Size(string relativePath) => zip is null ? new FileInfo(Resolve(relativePath)).Length : Entry(relativePath).Length;
+        public long Size(string relativePath) => zip is null ? new FileInfo(Resolve(relativePath)).Length : Entry(relativePath).Size;
 
         public async Task<byte[]> ReadAsync(string relativePath, CancellationToken token)
         {
             if (zip is null)
             {
                 var path = Resolve(relativePath);
-                // A pipe or device reports no length and could block or never end; an empty file needs no read.
-                return new FileInfo(path).Length == 0 ? [] : await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
+                var length = new FileInfo(path).Length;
+                if (length > MaxFileBytes) throw TooLarge(relativePath);
+                // Where stat is unavailable a pipe or device was not ruled out; it reports no length,
+                // and an empty file needs no read.
+                return length == 0 ? [] : await File.ReadAllBytesAsync(path, token).ConfigureAwait(false);
             }
-            var entry = Entry(relativePath);
-            await using var input = entry.Open();
-            using var buffer = new MemoryStream();
-            await input.CopyToAsync(buffer, token).ConfigureAwait(false);
-            var bytes = buffer.ToArray();
-            // Python's zipfile refuses an entry whose bytes do not match the archive's own CRC-32, so this
-            // reader does too, whatever the manifest says.
-            if (Crc32(bytes) != entry.Crc32)
-                throw new InvalidDataException($"AI package entry '{relativePath}' does not match its CRC-32 in the ZIP.");
+            var item = Entry(relativePath);
+            OpenChecks(relativePath, item);
+            if (item.Size > MaxFileBytes) throw TooLarge(relativePath);
+            var bytes = new byte[item.Size];
+            var total = 0;
+            try
+            {
+                await using var input = item.Entry.Open();
+                while (total < bytes.Length)
+                {
+                    var read = await input.ReadAsync(bytes.AsMemory(total, Math.Min(bytes.Length - total, 81920)), token).ConfigureAwait(false);
+                    if (read == 0) break;
+                    total += read;
+                }
+            }
+            catch (InvalidDataException exception)
+            {
+                throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: {exception.Message}", exception);
+            }
+            // As Python's zipfile does: the bytes up to the entry's size, checked against its CRC-32.
+            if (Crc32(bytes.AsSpan(0, total)) != item.Crc)
+                throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: Bad CRC-32 for file {Python.Repr(item.OriginalName)}");
+            if (total != bytes.Length)
+                throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: it ends before its size in the ZIP");
             return bytes;
         }
 
-        private static uint Crc32(byte[] bytes)
+        private static InvalidDataException TooLarge(string relativePath) =>
+            Refused($"cannot read {Python.Repr(relativePath)}: it is larger than {MaxFileBytes} bytes");
+
+        // What Python's zipfile checks when it opens an entry, in its order and with its messages,
+        // including the overlap check Python 3.12 added.
+        private void OpenChecks(string relativePath, ZipItem item)
+        {
+            InvalidDataException Unreadable(string reason) => Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: {reason}");
+            using var stream = new FileStream(archive!, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var header = new byte[30];
+            stream.Position = item.HeaderOffset;
+            if (stream.ReadAtLeast(header, header.Length, throwOnEndOfStream: false) != header.Length) throw Unreadable("Truncated file header");
+            if (!header.AsSpan(0, 4).SequenceEqual("PK\u0003\u0004"u8)) throw Unreadable("Bad magic number for file header");
+            var flags = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(6));
+            var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(26));
+            var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header.AsSpan(28));
+            var name = new byte[nameLength];
+            var nameRead = stream.ReadAtLeast(name, name.Length, throwOnEndOfStream: false);
+            name = name[..nameRead];
+            if ((item.Flags & 0x20) != 0) throw Unreadable("compressed patched data (flag bit 5)");
+            if ((item.Flags & 0x40) != 0) throw Unreadable("strong encryption (flag bit 6)");
+            if (ZipLayout.Decode(name, flags) is not { } local) throw Unreadable("the file name in its header is not UTF-8");
+            if (local != item.OriginalName)
+                throw Unreadable($"File name in directory {Python.Repr(item.OriginalName)} and header {Python.BytesRepr(name)} differ.");
+            if (item.HeaderOffset + 30 + nameLength + extraLength + item.CompressedSize > item.End && item.End != item.HeaderOffset)
+                throw Unreadable($"Overlapped entries: {Python.Repr(item.OriginalName)} (possible zip bomb)");
+        }
+
+        private static uint Crc32(ReadOnlySpan<byte> bytes)
         {
             var crc = 0xFFFFFFFFu;
             foreach (var value in bytes)
@@ -640,31 +736,268 @@ public static class AiPackageManifestReader
 
         private static void CheckPath(string relativePath)
         {
-            if (!IsPackagePath(relativePath))
-                throw new InvalidDataException($"AI package path '{relativePath}' is not a relative path inside the package.");
+            if (!IsPackagePath(relativePath)) throw Refused($"unsafe package path: {Python.Repr(relativePath)}");
         }
 
-        private ZipArchiveEntry Entry(string relativePath)
+        private ZipItem Entry(string relativePath)
         {
             CheckPath(relativePath);
-            if (!entries.TryGetValue(relativePath, out var entry)) throw new FileNotFoundException("AI package file not found.", relativePath);
-            return entry.IsEncrypted ? throw new InvalidDataException($"AI package entry '{relativePath}' is encrypted in the ZIP.") : entry;
+            if (!entries.TryGetValue(relativePath, out var item)) throw new FileNotFoundException("AI package file not found.", relativePath);
+            if ((item.Flags & 0x1) != 0) throw Refused($"{Python.Repr(relativePath)} is encrypted in the ZIP");
+            if (item.Method is not (0 or 8))
+                throw Refused($"{Python.Repr(relativePath)} uses ZIP compression method {item.Method}; packages use deflate");
+            return item;
         }
 
         private string Resolve(string relativePath)
         {
             CheckPath(relativePath);
-            // A link inside a package folder could point anywhere; DocRedock never writes one.
+            // A link inside a package folder could point anywhere, and a pipe or device could block or
+            // never end; DocRedock writes neither. A folder where a file should be is a missing file.
             var path = directory!;
             foreach (var segment in relativePath.Split('/'))
             {
                 path = System.IO.Path.Combine(path, segment);
                 var item = Directory.Exists(path) ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
+                if (item.LinkTarget is not null) throw Refused($"package path is a link: {Python.Repr(relativePath)}");
                 if (!item.Exists) throw new FileNotFoundException("AI package file not found.", relativePath);
-                if (item.LinkTarget is not null)
-                    throw new InvalidDataException($"AI package path '{relativePath}' is a link; packages contain only regular files.");
             }
-            return File.Exists(path) ? path : throw new FileNotFoundException("AI package file not found.", relativePath);
+            if (!File.Exists(path)) throw new FileNotFoundException("AI package file not found.", relativePath);
+            return FileKind.IsRegular(path) ? path : throw Refused($"package path is not a regular file: {Python.Repr(relativePath)}");
         }
+    }
+
+    // The central directory of a package ZIP, read as Python's zipfile reads it, with the plain-ZIP
+    // checks both example readers make before either library reads an entry.
+    private sealed class ZipLayout : List<ZipLayout.Record>
+    {
+        public sealed record Record(string OriginalName, int Flags, int Method, long HeaderOffset, long CompressedSize, long Size,
+            uint Crc, bool UnicodePath);
+
+        public long DirectoryStart { get; private init; }
+
+        private static readonly UTF8Encoding StrictName = new(false, true);
+
+        // Code page 437 above 0x7F, as Python decodes a ZIP name without the UTF-8 flag.
+        private const string Cp437High =
+            "ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ";
+
+        public static string? Decode(ReadOnlySpan<byte> name, int flags)
+        {
+            if ((flags & 0x800) != 0)
+            {
+                try { return StrictName.GetString(name); }
+                catch (DecoderFallbackException) { return null; }
+            }
+            var text = new StringBuilder(name.Length);
+            foreach (var value in name) text.Append(value < 0x80 ? (char)value : Cp437High[value - 0x80]);
+            return text.ToString();
+        }
+
+        public static ZipLayout Read(string path)
+        {
+            InvalidDataException NotZip(string detail) => new($"not a package folder or ZIP archive: {path} ({detail})");
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var length = stream.Length;
+            var start = Math.Max(length - 65535 - 22, 0);
+            var tail = new byte[length - start];
+            stream.Position = start;
+            stream.ReadExactly(tail);
+            // The end record: the last 22 bytes when there is no comment, else the last signature.
+            var at = tail.Length >= 22 && tail.AsSpan(tail.Length - 22, 4).SequenceEqual("PK\u0005\u0006"u8) &&
+                tail[^1] == 0 && tail[^2] == 0 ? tail.Length - 22 : tail.AsSpan().LastIndexOf("PK\u0005\u0006"u8);
+            if (at < 0 || at + 22 > tail.Length) throw NotZip("File is not a zip file");
+            long disk = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(at + 4));
+            long directoryDisk = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(at + 6));
+            long count = BinaryPrimitives.ReadUInt16LittleEndian(tail.AsSpan(at + 10));
+            long size = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(at + 12));
+            long offset = BinaryPrimitives.ReadUInt32LittleEndian(tail.AsSpan(at + 16));
+            var location = start + at;
+            if (location >= 20)
+            {
+                var locator = new byte[20];
+                stream.Position = location - 20;
+                stream.ReadExactly(locator);
+                if (locator.AsSpan(0, 4).SequenceEqual("PK\u0006\u0007"u8))
+                {
+                    var record = (long)BinaryPrimitives.ReadUInt64LittleEndian(locator.AsSpan(8));
+                    var data = new byte[56];
+                    if (record >= 0 && record + 56 <= length)
+                    {
+                        stream.Position = record;
+                        stream.ReadExactly(data);
+                        if (data.AsSpan(0, 4).SequenceEqual("PK\u0006\u0006"u8))
+                        {
+                            disk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(16));
+                            directoryDisk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(20));
+                            count = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(32));
+                            size = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(40));
+                            offset = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(48));
+                            location = record;
+                        }
+                    }
+                }
+            }
+            if (size < 0 || offset < 0 || offset + size > length) throw NotZip("Bad offset for central directory");
+            var directory = new byte[size];
+            stream.Position = offset;
+            stream.ReadExactly(directory);
+            var layout = new ZipLayout { DirectoryStart = offset };
+            for (var position = 0; position < directory.Length;)
+            {
+                if (position + 46 > directory.Length) throw NotZip("Truncated central directory");
+                ReadOnlySpan<byte> header = directory.AsSpan(position);
+                if (!header[..4].SequenceEqual("PK\u0001\u0002"u8)) throw NotZip("Bad magic number for central directory");
+                var flags = BinaryPrimitives.ReadUInt16LittleEndian(header[8..]);
+                var nameLength = BinaryPrimitives.ReadUInt16LittleEndian(header[28..]);
+                var extraLength = BinaryPrimitives.ReadUInt16LittleEndian(header[30..]);
+                var commentLength = BinaryPrimitives.ReadUInt16LittleEndian(header[32..]);
+                if (position + 46 + nameLength + extraLength + commentLength > directory.Length) throw NotZip("Truncated central directory");
+                var name = Decode(header.Slice(46, nameLength), flags) ?? throw NotZip("an entry name is not UTF-8");
+                var extract = header[6];
+                if (extract > 63)
+                    throw new InvalidDataException($"{path} uses a ZIP feature this reader does not read (zip file version {(extract / 10.0).ToString("0.0", CultureInfo.InvariantCulture)})");
+                long compressed = BinaryPrimitives.ReadUInt32LittleEndian(header[20..]);
+                long uncompressed = BinaryPrimitives.ReadUInt32LittleEndian(header[24..]);
+                long headerOffset = BinaryPrimitives.ReadUInt32LittleEndian(header[42..]);
+                var unicodePath = false;
+                var extra = header.Slice(46 + nameLength, extraLength);
+                while (extra.Length >= 4)
+                {
+                    var id = BinaryPrimitives.ReadUInt16LittleEndian(extra);
+                    var blockLength = BinaryPrimitives.ReadUInt16LittleEndian(extra[2..]);
+                    if (blockLength + 4 > extra.Length) throw NotZip($"Corrupt extra field {id:x4} (size={blockLength})");
+                    var block = extra.Slice(4, blockLength);
+                    if (id == 0x0001)
+                    {
+                        // Zip64 sizes and offset, in this order, for each field the record left at 0xFFFFFFFF.
+                        if (uncompressed == 0xFFFFFFFF) uncompressed = Zip64Value(ref block) ?? throw NotZip("Corrupt zip64 extra field");
+                        if (compressed == 0xFFFFFFFF) compressed = Zip64Value(ref block) ?? throw NotZip("Corrupt zip64 extra field");
+                        if (headerOffset == 0xFFFFFFFF) headerOffset = Zip64Value(ref block) ?? throw NotZip("Corrupt zip64 extra field");
+                    }
+                    else if (id == 0x7075) unicodePath = true;
+                    extra = extra[(4 + blockLength)..];
+                }
+                layout.Add(new Record(name, flags, BinaryPrimitives.ReadUInt16LittleEndian(header[10..]), headerOffset, compressed, uncompressed,
+                    BinaryPrimitives.ReadUInt32LittleEndian(header[16..]), unicodePath));
+                position += 46 + nameLength + extraLength + commentLength;
+            }
+            if (disk != 0 || directoryDisk != 0) throw new InvalidDataException("the ZIP spans several disks");
+            if (offset + size != location) throw new InvalidDataException("the ZIP's central directory does not end where its end record begins");
+            if (count != layout.Count)
+                throw new InvalidDataException($"the ZIP's end record counts {count} entries, but its central directory holds {layout.Count}");
+            return layout;
+        }
+
+        private static long? Zip64Value(ref ReadOnlySpan<byte> block)
+        {
+            if (block.Length < 8) return null;
+            var value = (long)BinaryPrimitives.ReadUInt64LittleEndian(block);
+            block = block[8..];
+            return value;
+        }
+    }
+
+    // How docs/examples/ai_package_reader.py words things, so both readers report a refused file alike.
+    private static class Python
+    {
+        public static string Repr(string value)
+        {
+            var quote = value.Contains('\'') && !value.Contains('"') ? '"' : '\'';
+            var text = new StringBuilder().Append(quote);
+            foreach (var character in value)
+            {
+                if (character == '\\' || character == quote) text.Append('\\').Append(character);
+                else if (character == '\t') text.Append("\\t");
+                else if (character == '\n') text.Append("\\n");
+                else if (character == '\r') text.Append("\\r");
+                else if (character < 0x20 || character is >= '\u007f' and <= ' ')
+                    text.Append("\\x").Append(((int)character).ToString("x2", CultureInfo.InvariantCulture));
+                else if (char.GetUnicodeCategory(character) is UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.Surrogate or
+                         UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned or UnicodeCategory.LineSeparator or
+                         UnicodeCategory.ParagraphSeparator or UnicodeCategory.SpaceSeparator)
+                    text.Append("\\u").Append(((int)character).ToString("x4", CultureInfo.InvariantCulture));
+                else text.Append(character);
+            }
+            return text.Append(quote).ToString();
+        }
+
+        public static string BytesRepr(ReadOnlySpan<byte> value)
+        {
+            var quote = value.Contains((byte)'\'') && !value.Contains((byte)'"') ? '"' : '\'';
+            var text = new StringBuilder("b").Append(quote);
+            foreach (var item in value)
+            {
+                if (item == '\\' || item == quote) text.Append('\\').Append((char)item);
+                else if (item == '\t') text.Append("\\t");
+                else if (item == '\n') text.Append("\\n");
+                else if (item == '\r') text.Append("\\r");
+                else if (item is < 0x20 or >= 0x7f) text.Append("\\x").Append(item.ToString("x2", CultureInfo.InvariantCulture));
+                else text.Append((char)item);
+            }
+            return text.Append(quote).ToString();
+        }
+    }
+
+    // Whether an existing path names a regular file, from stat(2) as DocRedock.Cli's FileIdentity
+    // reads it: false for a pipe, socket or device, which could block or never end when read. True
+    // where folders hold none of those (Windows) or stat is unavailable.
+    private static class FileKind
+    {
+        private const int StatBufferSize = 256;
+
+        public static bool IsRegular(string path)
+        {
+            try
+            {
+                var mode = OperatingSystem.IsMacOS() ? MacMode(path) : OperatingSystem.IsLinux() ? LinuxMode(path) : null;
+                return mode is not { } value || (value & 0xF000) == 0x8000;
+            }
+            catch (Exception exception) when (exception is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return true;
+            }
+        }
+
+        private static bool Supported => RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64;
+
+        // macOS, 64-bit-inode layout on both architectures: st_mode is a uint16 at offset 4.
+        [SupportedOSPlatform("macos")]
+        private static int? MacMode(string path)
+        {
+            if (!Supported) return null;
+            var buffer = new byte[StatBufferSize];
+            var result = RuntimeInformation.ProcessArchitecture == Architecture.X64 ? MacStatX64(path, buffer) : MacStatArm64(path, buffer);
+            return result == 0 ? BitConverter.ToUInt16(buffer, 4) : null;
+        }
+
+        // Linux (glibc and musl): st_mode is a uint32 at offset 24 on x86_64 and 16 on aarch64. glibc
+        // before 2.33 exports only the versioned __xstat.
+        [SupportedOSPlatform("linux")]
+        private static int? LinuxMode(string path)
+        {
+            if (!Supported) return null;
+            var buffer = new byte[StatBufferSize];
+            int result;
+            try { result = LinuxStat(path, buffer); }
+            catch (EntryPointNotFoundException) { result = LinuxXStat(RuntimeInformation.ProcessArchitecture == Architecture.X64 ? 1 : 0, path, buffer); }
+            return result == 0 ? (int)BitConverter.ToUInt32(buffer, RuntimeInformation.ProcessArchitecture == Architecture.X64 ? 24 : 16) : null;
+        }
+
+        [SupportedOSPlatform("macos")]
+        [DllImport("libc", EntryPoint = "stat$INODE64")]
+        private static extern int MacStatX64(string path, byte[] statBuffer);
+
+        [SupportedOSPlatform("macos")]
+        [DllImport("libc", EntryPoint = "stat")]
+        private static extern int MacStatArm64(string path, byte[] statBuffer);
+
+        [SupportedOSPlatform("linux")]
+        [DllImport("libc", EntryPoint = "stat")]
+        private static extern int LinuxStat(string path, byte[] statBuffer);
+
+        [SupportedOSPlatform("linux")]
+        [DllImport("libc", EntryPoint = "__xstat")]
+        private static extern int LinuxXStat(int version, string path, byte[] statBuffer);
     }
 }

@@ -65,9 +65,14 @@ Check a manifest before reading anything through it, and refuse it rather than r
 - a JSON object names a key twice, or an id or path appears twice (`locations`, `parts`, `files`), or a part names an unknown location or neighbouring part;
 - a file the manifest refers to is missing from `files` (see above), or a path would leave the package;
 - a JSON file is nested more than 64 levels deep or contains an unpaired surrogate escape (`\ud800` without its pair);
-- a ZIP holds two entries with the same name, or an entry name with a NUL or a backslash (readers would disagree about which file is meant).
+- a ZIP is not plain (below): readers would disagree about which file is meant or what it holds.
 
-A ZIP entry that is encrypted, compressed with a method other than stored or deflate, or whose bytes do not match the archive's CRC-32 is refused when it is read; a file in a package folder that is a link is refused, and one that reports no size (a pipe or device) is read as empty without waiting on it.
+Both readers read a package ZIP only when it is plain, and check it the same way, in the same order, as Python's `zipfile` does (including the checks only Python 3.12 has), so every Python version and .NET agree:
+
+- the whole archive: its end record describes the central directory right before it (the same entry count, one disk, nothing in between); every entry needs at most ZIP 6.3 to extract and has a name without NUL or backslash that no other entry has, and no Unicode Path extra field (names without the UTF-8 flag are read as UTF-8 when they are valid UTF-8, as macOS `ditto` writes them, else as code page 437);
+- an entry when it is used: not encrypted, stored or deflate-compressed, its local header found with the same name and without flag bits 5 or 6, its data ending before the next entry, and its bytes (up to its size) matching the archive's CRC-32.
+
+In a package folder, a link, pipe or device is refused without being opened, and a folder where a file should be is a missing file. Either reader refuses a file larger than 2,147,483,520 bytes rather than reading it into memory.
 
 When the source index is read, it must list each manifest part exactly once, give each part groups that name exactly that part's locations, add up to its `node_count`, and have one cell address (or null) per node ID where `cell_addresses` is present.
 
@@ -95,7 +100,7 @@ python3 docs/examples/ai_package_reader.py input.ai-package --part part-0002
 python3 docs/examples/ai_package_reader.py input.ai-package --verify --part part-0002 --fail-on-review > part.md
 ```
 
-Checks run before anything is printed. `--verify` prints `files ok` or one line per listed file that is missing, changed or refused (a link, an encrypted or unreadable ZIP entry); together with `--part`, those lines go to stderr and the part is printed only when every listed file matches, as the exact bytes that were verified whatever the console encoding. `--fail-on-review` stops without printing when `report.json` says review is required. Exit codes: 0 success, 1 `--verify` found a listed file missing, changed or refused, 2 the package cannot be read (not a package or ZIP, an ambiguous ZIP, unsupported schema, malformed manifest or JSON, a manifest path that would leave the package, unknown part), 3 review required with `--fail-on-review`; each error is one line on stderr. The .NET `VerifyFilesAsync` returns missing and changed files and raises `InvalidDataException` for a refused one.
+Checks run before anything is printed. `--verify` prints `files ok` or one line per listed file that is missing, changed or refused (a link, pipe or device, an encrypted or unreadable ZIP entry); together with `--part`, those lines go to stderr and the part is printed only when every listed file matches, as the exact bytes that were verified whatever the console encoding. `--fail-on-review` stops without printing when `report.json` says review is required. Exit codes: 0 success, 1 `--verify` found a listed file missing, changed or refused, 2 the package cannot be read (not a package or ZIP, an ambiguous ZIP, unsupported schema, malformed manifest or JSON, a manifest path that would leave the package, unknown part), 3 review required with `--fail-on-review`; each error is one line on stderr. The .NET `VerifyFilesAsync` returns the same lines in the same words, and raises `InvalidDataException` where the CLI exits with 2. `tests/DocRedock.Tests/Api/AiPackageReaderParityTests.cs` runs both readers on the same crafted packages.
 
 The real sample packages used by both readers' tests, one per manifest schema, are in `tests/DocRedock.Tests/Fixtures/AiPackage/`.
 
