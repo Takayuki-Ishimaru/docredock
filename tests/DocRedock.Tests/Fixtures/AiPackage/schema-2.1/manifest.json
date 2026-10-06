@@ -1,0 +1,187 @@
+{
+  "schema_version": "2.1",
+  "generator_version": "0.3.1",
+  "source": {
+    "file_name": "workbook_base.xlsx",
+    "sha256": "9589660d035b66bf1908a8577c36e32d831da5ac2510a55cdb550700c3d0885d",
+    "format": "xlsx"
+  },
+  "content_policy": "visible",
+  "visual_inference": "safe",
+  "target_characters": 128,
+  "table_row_blocks": true,
+  "document": "document.md",
+  "review": "review.md",
+  "report": "report.json",
+  "source_index": "source-index.json",
+  "locations": [
+    {
+      "id": "source-0001",
+      "partition_id": "sheet-Summary",
+      "label": "sheet Summary",
+      "page_number": null,
+      "slide_number": null,
+      "sheet_name": "Summary",
+      "heading_path": null
+    }
+  ],
+  "parts": [
+    {
+      "id": "part-0001",
+      "path": "parts/0001.md",
+      "node_count": 1,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": false,
+      "estimated_tokens": 22
+    },
+    {
+      "id": "part-0002",
+      "path": "parts/0002.md",
+      "node_count": 8,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": true,
+      "estimated_tokens": 52,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 1,
+        "count": 3,
+        "header_range": "A2:F2",
+        "row_range": "A3:F3",
+        "previous_part": null,
+        "next_part": "part-0003"
+      }
+    },
+    {
+      "id": "part-0003",
+      "path": "parts/0003.md",
+      "node_count": 8,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": true,
+      "estimated_tokens": 54,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 2,
+        "count": 3,
+        "header_range": "A2:F2",
+        "row_range": "A4:F4",
+        "previous_part": "part-0002",
+        "next_part": "part-0004"
+      }
+    },
+    {
+      "id": "part-0004",
+      "path": "parts/0004.md",
+      "node_count": 8,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": true,
+      "estimated_tokens": 54,
+      "table_block": {
+        "table_id": "table-0001",
+        "index": 3,
+        "count": 3,
+        "header_range": "A2:F2",
+        "row_range": "A5:F5",
+        "previous_part": "part-0003",
+        "next_part": null
+      }
+    },
+    {
+      "id": "part-0005",
+      "path": "parts/0005.md",
+      "node_count": 4,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": true,
+      "estimated_tokens": 46,
+      "table_block": {
+        "table_id": "table-0002",
+        "index": 1,
+        "count": 2,
+        "header_range": "H1:I1",
+        "row_range": "H2:I2",
+        "previous_part": null,
+        "next_part": "part-0006"
+      }
+    },
+    {
+      "id": "part-0006",
+      "path": "parts/0006.md",
+      "node_count": 4,
+      "source_ids": [
+        "source-0001"
+      ],
+      "exceeds_target": true,
+      "estimated_tokens": 48,
+      "table_block": {
+        "table_id": "table-0002",
+        "index": 2,
+        "count": 2,
+        "header_range": "H1:I1",
+        "row_range": "H3:I3",
+        "previous_part": "part-0005",
+        "next_part": null
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "document.md",
+      "bytes": 280,
+      "sha256": "bfeb8fdcedf1c8d02380c740ad0dd5ae796ca8400212a0be6e3b2684a429afe3"
+    },
+    {
+      "path": "parts/0001.md",
+      "bytes": 82,
+      "sha256": "445be277107e1a6faecaa89b26d26f378d9d51f45bac90b1e3a1110185d57e85"
+    },
+    {
+      "path": "parts/0002.md",
+      "bytes": 204,
+      "sha256": "7ea134613639d37b07af0ebb56bae12633ec4bf13e2700543531c2f99e8357ff"
+    },
+    {
+      "path": "parts/0003.md",
+      "bytes": 210,
+      "sha256": "de7e86cbaccb2d72912a5dc201de8fd22b578822066cc105f95d790f75a8c69d"
+    },
+    {
+      "path": "parts/0004.md",
+      "bytes": 212,
+      "sha256": "0a70795bba831d887484adcf680d6ea34fe68197c1c6cb41f548c4298fc52ed2"
+    },
+    {
+      "path": "parts/0005.md",
+      "bytes": 178,
+      "sha256": "69b90047c65bff7753be9b7fc5a819d2d64cf4662f0bb54d303d8f8f3d0cba3b"
+    },
+    {
+      "path": "parts/0006.md",
+      "bytes": 189,
+      "sha256": "33e3b448bdeb9bcfdcab6a0d62ebf75225e96d7753cf0ff4b9147d01e50f17e9"
+    },
+    {
+      "path": "report.json",
+      "bytes": 1124,
+      "sha256": "8d5bd71feed3fd7b8b84fd2d252c2748954b69ca5dd9d00d34ed127b3067575a"
+    },
+    {
+      "path": "review.md",
+      "bytes": 1223,
+      "sha256": "3ebaec5d6bd7230c25e41f2ca74c7a7e29dccb27bc15280c8c6c197c96c4f3e8"
+    },
+    {
+      "path": "source-index.json",
+      "bytes": 1439,
+      "sha256": "140dda8c41c319d8a3d26fb24a97885b9d076e6eed9486384cfccc80fac18a52"
+    }
+  ]
+}

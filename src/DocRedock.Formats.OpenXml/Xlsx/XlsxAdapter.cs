@@ -29,10 +29,23 @@ public sealed record XlsxCellRecord(
     bool IsHiddenRow = false,
     bool IsHiddenColumn = false,
     string SheetState = "visible",
-    int? CenterAcrossToColumn = null)
+    int? CenterAcrossToColumn = null,
+    string? TableName = null)
 {
     public bool IsBlank => string.IsNullOrEmpty(Value) && string.IsNullOrEmpty(Formula);
 }
+
+/// <summary>An Excel table (ListObject) that a worksheet declares through a tablePart relationship.
+/// Its range is explicit source structure: every cell inside it belongs to that table.</summary>
+public sealed record XlsxTableRecord(
+    string Name,
+    string Range,
+    int MinRow,
+    int MaxRow,
+    int MinColumn,
+    int MaxColumn,
+    int HeaderRowCount = 1,
+    int TotalsRowCount = 0);
 
 /// <summary>Presentation properties resolved from styles.xml for readable projections.</summary>
 public sealed record XlsxCellStyle(
@@ -236,7 +249,8 @@ public sealed record XlsxWorksheetRecord(
     string SheetState = "visible",
     IReadOnlySet<int>? HiddenRows = null,
     IReadOnlySet<int>? HiddenColumns = null,
-    XlsxWorksheetMetrics? Metrics = null)
+    XlsxWorksheetMetrics? Metrics = null,
+    IReadOnlyList<XlsxTableRecord>? Tables = null)
 {
     public int RowCount => MinRow == 0 || MaxRow < MinRow ? 0 : MaxRow - MinRow + 1;
     public int ColumnCount => MinColumn == 0 || MaxColumn < MinColumn ? 0 : MaxColumn - MinColumn + 1;
@@ -316,12 +330,13 @@ public sealed class XlsxAdapter
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml);
-            var cells = ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges));
+            var tables = ReadTables(package, sheet.PartUri, xml);
+            var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
             var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells, sheetVisibility, warnings);
-            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns, metrics);
+            var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns, metrics, tables);
             worksheets.Add(worksheet);
             var nodes = cells
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
@@ -547,6 +562,7 @@ public sealed class XlsxAdapter
         if (cell.MergedToRow is not null) extension["merged_to_row"] = JsonSerializer.SerializeToElement(cell.MergedToRow);
         if (cell.MergedToColumn is not null) extension["merged_to_column"] = JsonSerializer.SerializeToElement(cell.MergedToColumn);
         if (cell.CenterAcrossToColumn is not null) extension["center_across_to_column"] = JsonSerializer.SerializeToElement(cell.CenterAcrossToColumn);
+        if (cell.TableName is not null) extension["excel_table"] = JsonSerializer.SerializeToElement(cell.TableName);
         extension["sheet_state"] = JsonSerializer.SerializeToElement(cell.SheetState);
         extension["hidden_row"] = JsonSerializer.SerializeToElement(cell.IsHiddenRow);
         extension["hidden_column"] = JsonSerializer.SerializeToElement(cell.IsHiddenColumn);
@@ -2302,6 +2318,50 @@ public sealed class XlsxAdapter
                 next.DisplayStyle?.IsCenterAcross == true && next.MergedToColumn is null) end++;
             return end > cell.ColumnIndex ? cell with { CenterAcrossToColumn = end } : cell;
         }).ToList();
+    }
+
+    /// <summary>Reads the Excel tables (ListObjects) a worksheet declares with tablePart elements.
+    /// Only relationships the worksheet itself references are followed; a part without a readable
+    /// <c>table/@ref</c> is ignored, so a damaged table never invents a boundary.</summary>
+    private static IReadOnlyList<XlsxTableRecord> ReadTables(Dictionary<string, byte[]> package, string worksheetPartUri, byte[] worksheetXml)
+    {
+        var ids = new List<string>();
+        using (var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml))
+            while (reader.Read())
+                if (reader is { NodeType: XmlNodeType.Element, LocalName: "tablePart" } &&
+                    reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") is { Length: > 0 } id)
+                    ids.Add(id);
+        if (ids.Count == 0) return [];
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
+        var result = new List<XlsxTableRecord>();
+        foreach (var id in ids.Distinct(StringComparer.Ordinal))
+        {
+            if (!relationships.TryGetValue(id, out var partUri) || !package.TryGetValue(partUri, out var bytes)) continue;
+            using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+            while (reader.Read())
+            {
+                if (reader.NodeType != XmlNodeType.Element) continue;
+                if (reader.LocalName == "table" && reader.GetAttribute("ref") is { } reference && ParseRange(reference) is { } range)
+                {
+                    var name = reader.GetAttribute("displayName") ?? reader.GetAttribute("name") ?? "Table" + reader.GetAttribute("id");
+                    result.Add(new(name, reference, range.MinRow, range.MaxRow, range.MinColumn, range.MaxColumn,
+                        Math.Max(0, AttributeInt(reader, "headerRowCount", 1)), Math.Max(0, AttributeInt(reader, "totalsRowCount", 0))));
+                }
+                break;
+            }
+        }
+        return result;
+    }
+
+    private static List<XlsxCellRecord> ApplyTableRanges(List<XlsxCellRecord> cells, IReadOnlyList<XlsxTableRecord> tables)
+    {
+        if (tables.Count == 0) return cells;
+        return cells.Select(cell => tables.FirstOrDefault(table =>
+                cell.RowIndex >= table.MinRow && cell.RowIndex <= table.MaxRow &&
+                cell.ColumnIndex >= table.MinColumn && cell.ColumnIndex <= table.MaxColumn) is { } owner
+            ? cell with { TableName = owner.Name }
+            : cell).ToList();
     }
 
     private static List<XlsxCellRecord> ApplyMergedRanges(

@@ -157,6 +157,25 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
+    public void Ocr_review_tables_are_not_counted_as_document_tables()
+    {
+        var image = new DocumentNode("image", NodeKind.Image, null, 0, ContentLayer.Body,
+            new ReferenceNodeContent("review.assets/source.png", "原画像"));
+        var regions = new[] { new DocRedock.Providers.Abstractions.Providers.OcrTextRegion("AP|", null, .42, 1) };
+        var ocr = new DocumentNode("ocr", NodeKind.ImageText, "image", 1, ContentLayer.Derived,
+            new TextNodeContent("AP|"), Extensions: new Dictionary<string, JsonElement>
+            { ["ocr_regions"] = JsonSerializer.SerializeToElement(regions) });
+        var table = new DocumentNode("table", NodeKind.Table, null, 2, ContentLayer.Body,
+            new TableNodeContent([new TableCell[] { "A", "B" }, new TableCell[] { "1", "2" }]));
+        var serializer = new ReadableMarkdownSerializer();
+        var markdown = serializer.Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "ocr-tables", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [image, ocr, table])]));
+        Assert.Contains("| 行 | 認識文字 | 信頼度 | 原画像の位置 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| A | B |", markdown, StringComparison.Ordinal);
+        Assert.Equal(1, serializer.RenderedTables);
+    }
+
+    [Fact]
     public void Raw_path_only_markdown_fallback_requires_source_review_despite_resolved_ledger()
     {
         var visual = new VisualGraph("raw", [], [], Paths: [new VisualPath("raw-path")],

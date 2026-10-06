@@ -62,11 +62,14 @@ public sealed record OcrReviewSummary(int Images, int Regions, int ReviewItems)
     public bool Required => ReviewItems > 0;
 }
 
-public sealed record ExportReview(IReadOnlyList<ReviewPage> Pages, OcrReviewSummary Ocr)
+/// <param name="TableBoundaries">Worksheet blank columns at which the readable projection separated
+/// two tables although the layout could not show whether their rows belong together.</param>
+public sealed record ExportReview(IReadOnlyList<ReviewPage> Pages, OcrReviewSummary Ocr,
+    IReadOnlyList<ReadableTableBoundaryReview>? TableBoundaries = null)
 {
     public int ReviewImagePages => Pages.Count(page => page.ReviewImageReference is not null);
     public int Elements => Pages.Sum(page => page.Elements.Count);
-    public bool Required => Pages.Count > 0 || Ocr.Required;
+    public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 };
 }
 
 /// <summary>Finds an attached review image on disk: next to the readable Markdown (its .assets
@@ -100,7 +103,11 @@ public static class ExportReviewBuilder
     /// <see cref="ExportSummary.UnresolvedElements"/>, classified by what they look like, plus one
     /// <see cref="ReviewElementKind.UnanalyzedContent"/> per item counted by
     /// <see cref="ExportSummary.UnanalyzedContent"/>.</summary>
-    public static ExportReview Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics)
+    public static ExportReview Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics) => Build(graph, diagnostics, null);
+
+    /// <summary>As <see cref="Build(DocumentGraph, IReadOnlyList{Diagnostic})"/>, plus the worksheet
+    /// table boundaries the readable projection reported for comparison.</summary>
+    public static ExportReview Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, ReadableProjectionReport? projection)
     {
         ArgumentNullException.ThrowIfNull(graph); ArgumentNullException.ThrowIfNull(diagnostics);
         var pages = new List<ReviewPage>();
@@ -123,7 +130,7 @@ public static class ExportReviewBuilder
                     (StringComparer.Ordinal.Equals(d.PartUri, $"pdf:page:{number}") || StringComparer.Ordinal.Equals(d.PartUri, partition.SourcePartUri))),
                 partition.Nodes.Any(node => node.Kind == NodeKind.Table)));
         }
-        return new ExportReview(pages, BuildOcr(graph));
+        return new ExportReview(pages, BuildOcr(graph), projection?.TableBoundaryReviews ?? []);
     }
 
     /// <summary>OCR regions whose confidence is below the readable threshold or missing, the same

@@ -41,6 +41,7 @@ v0.3.1では、**AI向けパッケージ**を利用できます。GUIで「AI向
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
 docredock export input.xlsx --ai-package zip --sheets Summary,Data --output workbook.ai-package.zip
 docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.ai-package.zip
+docredock export input.xlsx --ai-package dir --table-row-blocks --output workbook.ai-package
 ```
 
 既定の出力名は`<元ファイル名>.ai-package`または`<元ファイル名>.ai-package.zip`です。
@@ -55,11 +56,15 @@ docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.
 | `source-index.json` | 全ノードIDとExcelの元セル座標。詳細が必要なときに読み込む索引 |
 | `report.json` | 変換結果と確認事項、診断コード・件数のJSON |
 
-Wordは見出しと意味のまとまりで分割し、既定のサイズ目安は12,000文字です。表・入れ子の表、図と構成要素、連続するリストはまとめて保持します。PDFはページ、PowerPointはスライド、Excelはシートごとに保持します。大きい単位は目安を超える場合があり、`exceeds_target`と`review.md`に記録されます。文字数の目安であり、AIモデルのトークン上限ではありません。CLIでは`--chunk-chars`、APIでは`TargetCharacters`で128～1,000,000文字を指定でき、GUIでは既定値を使います。
+Wordは見出しと意味のまとまりで分割し、既定のサイズ目安は12,000文字です。表・入れ子の表、図と構成要素、連続するリストはまとめて保持します。PDFはページ、PowerPointはスライド、Excelはシートごとに保持します。大きい単位は目安を超える場合があり、`exceeds_target`と`review.md`に記録されます。文字数の目安であり、AIモデルのトークン上限ではありません。CLIでは`--chunk-chars`、APIでは`TargetCharacters`で128～1,000,000文字を指定でき、GUIでは既定値を使います。各分割には、渡す量の見積もりに使える`estimated_tokens`（ASCII 4文字・その他1文字を1トークンとした概算）も記録します。実際のトークン数はモデルによって異なります。
+
+大きなExcelの表は、任意で行の区切りで分割できます（既定はオフ）。CLIの`--table-row-blocks`、GUIの「大きなExcelの表を行ブロックに分割」、APIの`TableRowBlocks`で指定します。シートが目安を超えるとき、1つの分割に収まらない表を行ブロックに分けます。各ブロックは表の見出し行から始まり、分割と`manifest.json`に、表のID、何番目のブロックか、見出し行とそのブロックの行の元のセル範囲、前後の分割を記録します。行の重複・欠落・並べ替えは起きません。小さな表やほかの形式は従来どおりです。
 
 簡潔なmanifestでは、実際のPDFページ番号、スライド番号、シート名、Wordの見出し階層を共有の出典情報として記録します。全ノードIDとExcelの元セル座標は別の詳細索引に保持します。Wordのページ番号は推測しません。空の単位や設定で全て除外された単位は分割を作りません。`visible`／`sanitized`／`complete`とシート指定は、全文、分割、出典、画像に共通して適用されます。`complete`には非表示内容が含まれる場合があり、共有前の確認を表示します。元のOffice/PDFファイルと元ファイルの絶対パスは同梱しません。
 
-現在のmanifestはschema `2.0`です。公開済みv0.3.0のschema `1.0`を読むツールは、形式仕様に記載した共有出典・詳細索引への対応が必要です。変換結果では、Excelセルから組み立てた表を含め、Markdownに出力した表の件数も確認できます。件数は本文の意味や読み順の正しさを保証するものではありません。
+現在のmanifestはschema `2.1`です。v0.3.1の`2.0`に、`table_row_blocks`と各分割の`estimated_tokens`・`table_block`を追加しました。読み取る側はメジャー番号で判定し、知らない項目は無視してください。v0.3.0のパッケージはschema `1.0`です。APIの`AiPackageManifestReader`と、標準ライブラリだけで動くPythonの読み取り例[`docs/examples/ai_package_reader.py`](../examples/ai_package_reader.py)は、`1.x`と`2.x`を同じ形で読み、それ以外のschemaは明示的なエラーにします。変換結果では、Excelセルから組み立てた表を含め、Markdownに出力した表の件数も確認できます。件数は本文の意味や読み順の正しさを保証するものではありません。
+
+AIへの依頼ごとに`document.md`と`source-index.json`の両方を渡す必要はありません。収まる場合は`document.md`、収まらない場合は分割を順に渡します（各分割に元ファイルと位置が書かれています）。`source-index.json`は手元に置き、回答をノードIDやExcelのセルへ戻すときだけ読み込みます。詳しくは[形式仕様](../reference/ai-package.md#giving-a-package-to-a-model)を参照してください。
 
 画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換には引き続き実験機能の環境変数が必要です。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
 
@@ -123,7 +128,7 @@ CFF／CFF2、グリフ不足、不正なcollection、埋め込み禁止フォン
     docredock doctor [--strict]
     docredock doctor --json
 
-ready は依存関係を実測して利用可能、partial は一部の機能または OCR 言語だけ利用可能、unavailable は不足または無効化された状態です。ネイティブPDF OCRも内容によってpartialになる場合があります。画像PDFの OCR には OCR engine と PDF rasterizer の両方が必要です。rasterizer は明示パス（DOCREDOCK_PDF_RASTERIZER）、次に PATH 上の pdftoppm、mutool の順で探索します。探索を無効化する場合は DOCREDOCK_DISABLE_PDF_RASTERIZER=1 を設定します。未検出時は pdftoppm または mutool をインストールするか、実行ファイルのパスを設定してください。fallbackはページあたり最大100 path・32,768文字で、圧縮時もネイティブテキストを保持します。
+ready は依存関係を実測して利用可能、partial は一部の機能または OCR 言語だけ利用可能、unavailable は不足または無効化された状態です。ネイティブPDF OCRも内容によってpartialになる場合があります。画像PDFの OCR には OCR engine と PDF rasterizer の両方が必要です。rasterizer は明示パス（DOCREDOCK_PDF_RASTERIZER）、次に PATH 上の pdftoppm、mutool の順で探索します。探索を無効化する場合は DOCREDOCK_DISABLE_PDF_RASTERIZER=1 を設定します。未検出時は pdftoppm または mutool をインストールするか、実行ファイルのパスを設定してください。fallbackはページあたり最大100 path・32,768文字で、圧縮時もネイティブテキストを保持します。幅または高さが3ピクセル未満の画像（スペーサーの点や細い罫線の画像）は文字を含められないためOCRに渡さず、`OcrImageTooSmall`の情報として表示します。
 
 **Windows で OCR を有効にする。** Windows Media OCR（ネイティブ provider。`ocr-native`／`windows-media`として報告されます）を使うには、言語ごとの OCR 言語機能が必要です。これは表示言語とは別の、任意インストールの Windows コンポーネントです。日本語を表示言語として追加しただけでは、日本語 OCR は有効になりません。実際に何がインストールされているかは `docredock doctor`（または `docredock doctor --json`）で確認できます。利用可能な言語パックが見つかると `ocr-native` は `ready` になり、`action` に不足している言語と追加方法が具体的に示されます。言語パックを追加するには、設定 > 時刻と言語 > 言語と地域 > 言語を追加 > (言語) > オプション > 「光学式文字認識 (OCR)」を使うか、管理者権限の PowerShell で `Add-WindowsCapability -Online -Name Language.OCR~~~ja-JP~0.0.1.0`（日本語）／`Language.OCR~~~en-US~0.0.1.0`（英語）を実行します。PDF rasterizer（pdftoppm／mutool）はこれとは無関係です。rasterizer が必要になるのは画像のみの PDF ページを OCR する場合だけで、DOCX/XLSX/PPTX に埋め込まれた画像の OCR や、すでにネイティブテキストを持つ PDF ページには影響しません。そのため rasterizer が未検出でも OCR トグルは無効化されなくなりました。Windows Media OCR が利用できない場合は、可搬な代替として Tesseract を導入してください（[対応状況](supported-features.md)を参照）。
 
@@ -149,9 +154,11 @@ OCR照合情報は本文と同じ行順・行内の左右順で表示し、行�
 
 書き出し集計の`Fallback pages`はベクターパスのフォールバックがあるページ数です。`Pages requiring review`（要確認ページ数）、`Review image pages`（照合画像添付ページ数）、`Unresolved visual elements`（未解決の図形・接続・ラベルの数）を別に表示します。画像を添付しても要確認の件数は減りません。未解決要素は同じパスとその接続を重複して数えません。
 
-書き出し集計の先頭には、性質の異なる3つの結果を別々の行で表示します。`Output written`はMarkdownを保存できたこと、`Visual elements converted`は認識した図形・線・ラベルをすべてMarkdownで表現できたか（`all`）、一部が未解決か（`partial`）、`Human review`は人による確認が必要な理由（図の要確認ページ数、解析できなかった内容のあるページ数、OCRの確認件数）です。`all`は色や線の太さなどDocRedockが扱わない属性の保持までは意味しません。2行目の`Unanalyzed content`は、ページが描いているのに中身を解析できなかった部品（PDFのForm XObjectなど）の件数とページ数です。`Visual elements converted: all`は認識できた要素についての結果なので、`Unanalyzed content`が`none`以外ならページ全体の解析は完了していません。続けて要確認ページごとに`Review page 1: 1 diagonal line(s) across a table …; review image: …`のように、何を確認するか（斜めの線・矢印、接続先が未確定の線、どの線の説明か確定できない文字、図として再構成できない図形、解析できなかった描画部品）と照合画像の場所を1行で表示します。件数は診断レコード数ではなく、確認する要素とページの数です。
+書き出し集計の先頭には、性質の異なる結果を別々の行で表示します。`Output written`はMarkdownを保存できたこと、`Visual elements converted`は認識した図形・線・ラベルをすべてMarkdownで表現できたか（`all`）、一部が未解決か（`partial`）、`Detected review items`は検出された要確認事項（図の要確認ページ数、解析できなかった内容のあるページ数、OCRの確認件数、Excelの表の区切り）で、なければ`none`です。`none`は「検出された事項がない」という意味で、変換結果を検証したことを意味しません。読み順と表の構造をどう得たかは`Reading order`と`Table structure`の行に示します。原本の構造をそのまま使った場合（Wordの本文順、Word・PowerPoint・グラフの表、タグ付きPDFの表）は`source order`／`source tables`、DocRedockが位置やセル配置から組み立てた場合（PDF・スライドの読み順、Excelの表、罫線から組み立てたPDFの表）は`inferred from layout (not compared with the source)`、表の構造の一部を判断できなかった場合は`… boundary(ies) need source comparison`、表がない場合は`no tables`、編集用（往復）の書き出しでは`not evaluated`です。GUIでは「検出された要確認事項: なし／読み順: 原本の順序／表構造: 配置から推定（原本とは未照合）」のように1行で表示します。`all`は色や線の太さなどDocRedockが扱わない属性の保持までは意味しません。2行目の`Unanalyzed content`は、ページが描いているのに中身を解析できなかった部品（PDFのForm XObjectなど）の件数とページ数です。`Visual elements converted: all`は認識できた要素についての結果なので、`Unanalyzed content`が`none`以外ならページ全体の解析は完了していません。続けて要確認ページごとに`Review page 1: 1 diagonal line(s) across a table …; review image: …`のように、何を確認するか（斜めの線・矢印、接続先が未確定の線、どの線の説明か確定できない文字、図として再構成できない図形、解析できなかった描画部品）と照合画像の場所を1行で表示します。件数は診断レコード数ではなく、確認する要素とページの数です。
 
-`complete`で非表示内容を含めた場合は、`Human review`に`hidden content included - review before sharing`（共有前に内容を確認）も表示します。原本やOCRとの照合が不要な場合は、行の先頭を`source comparison not required`とし、共有前の確認と区別します。この確認によって要確認ページや照合画像の件数は増えません。`HiddenContentIncluded`警告による終了コード1は従来どおりです。
+`complete`で非表示内容を含めた場合は、`Detected review items`に`hidden content included - review before sharing`（共有前に内容を確認）も表示します。原本との照合事項がある場合はその後に続けます。この確認によって要確認ページや照合画像の件数は増えません。`HiddenContentIncluded`警告による終了コード1は従来どおりです。
+
+Excelの1列の空白は、1つの表の中の区切りのこともあれば、2つの表の境界のこともあります。片側が値だけ（IDと数量、行見出しと数値）か備考の列なら1つの表として保ち、両側がそれぞれ自分の見出し・ラベルを持つ場合は、一方の行を他方の行として見せないよう別の表に分けます。Excelのテーブル（ListObject）として定義された範囲がある場合はその範囲に従います。両側がまったく同じ行を占め、配置から判断できない場合は、分けたうえで照合の対象として示します。CLIの`Review sheet 'Data': cells on either side of blank column C (A1:B3, D1:D3) were output as separate tables; …`、情報診断`XlsxTableBoundaryAmbiguous`、`Detected review items`の`table boundaries N`、Markdownの`<!-- inferred: … -->`注記、GUIの「表の区切りの確認 N件」です。OCRの確認と同じく、終了コードは変わりません。
 
 OCRの確認件数（信頼度80%未満または信頼度不明の認識結果の数）は警告とは別に`OCR summary: images=…; regions=…; review_items=…; review_required=true|false`と表示します。OCRの確認が必要でも、それだけでは警告にならず終了コードは変わりません。GUIでも「OCR確認 N件」を警告とは別の行に表示します。
 

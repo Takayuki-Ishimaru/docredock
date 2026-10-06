@@ -50,6 +50,8 @@ public sealed class CliAiPackageTests : IDisposable
     [InlineData("--ai-package", "zip", "--chunk-chars", "1000001")]
     [InlineData("--ai-package", "zip", "--embed-images")]
     [InlineData("--ai-package", "dir", "--profile", "roundtrip")]
+    [InlineData("--table-row-blocks")]
+    [InlineData("--table-row-blocks=yes", "--ai-package", "dir")]
     public async Task Invalid_package_options_do_not_write_outputs(params string[] options)
     {
         var source = AiPackageExportTests.WriteSource(root, "docx");
@@ -58,6 +60,36 @@ public sealed class CliAiPackageTests : IDisposable
         Assert.True(exit is 2 or 4);
         Assert.False(File.Exists(target)); Assert.False(Directory.Exists(target));
         Assert.Empty(Directory.GetFileSystemEntries(root, ".docredock-*"));
+    }
+
+    [Fact]
+    public async Task Table_row_blocks_cut_a_large_sheet_and_are_recorded_in_the_manifest()
+    {
+        var source = V031EvaluationRegressionTests.Fixture("scale500.xlsx", "V030");
+        foreach (var rowBlocks in new[] { false, true })
+        {
+            var target = Path.Combine(root, rowBlocks ? "blocks" : "whole");
+            var output = new StringWriter();
+            string[] options = ["export", source, "--ai-package", "dir", "--output", target, "--chunk-chars", "3000", "--ocr", "off"];
+            var exit = await App(output, new StringWriter()).RunAsync(rowBlocks ? [.. options, "--table-row-blocks"] : options);
+            Assert.Equal(0, exit);
+            using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(target, "manifest.json")));
+            var parts = manifest.RootElement.GetProperty("parts").EnumerateArray().ToArray();
+            Assert.Equal("2.1", manifest.RootElement.GetProperty("schema_version").GetString());
+            Assert.Equal(rowBlocks, manifest.RootElement.GetProperty("table_row_blocks").GetBoolean());
+            Assert.All(parts, part => Assert.True(part.GetProperty("estimated_tokens").GetInt32() > 0));
+            if (!rowBlocks)
+            {
+                var whole = Assert.Single(parts);
+                Assert.True(whole.GetProperty("exceeds_target").GetBoolean());
+                Assert.False(whole.TryGetProperty("table_block", out _));
+                continue;
+            }
+            Assert.True(parts.Length > 5);
+            Assert.All(parts, part => Assert.False(part.GetProperty("exceeds_target").GetBoolean()));
+            Assert.All(parts, part => Assert.Equal("A1:F1", part.GetProperty("table_block").GetProperty("header_range").GetString()));
+            Assert.Contains($"AI package: {target} (dir; {parts.Length} part(s))", output.ToString());
+        }
     }
 
     [Theory]

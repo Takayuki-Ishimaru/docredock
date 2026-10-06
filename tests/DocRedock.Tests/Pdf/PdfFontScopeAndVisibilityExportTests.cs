@@ -28,7 +28,7 @@ public sealed class PdfFontScopeAndVisibilityExportTests
             Assert.DoesNotContain("AAA", export.Markdown, StringComparison.Ordinal);
             var summary = ExportSummaryBuilder.Build(export.Result.Graph, export.Result.Diagnostics);
             Assert.Equal((0, 0, 0), (summary.ReviewPages, summary.UnanalyzedContent, summary.Warnings));
-            Assert.Contains("Human review: not required", summary.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Detected review items: none", summary.ToString(), StringComparison.Ordinal);
         }
         finally { Directory.Delete(root, true); }
     }
@@ -109,7 +109,7 @@ public sealed class PdfFontScopeAndVisibilityExportTests
             Assert.Contains("could not be determined - compare with the source page", text, StringComparison.Ordinal);
             Assert.Contains(result.Diagnostics, d => d.Code == "PdfFontResourceAmbiguous" && d.Severity == DiagnosticSeverity.Warning);
             Assert.Equal((1, 1, 1), (summary.ReviewPages, summary.UnanalyzedContent, summary.UnanalyzedContentPages));
-            Assert.Contains("Human review: required (unanalyzed content 1 page(s))", summary.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Detected review items: unanalyzed content 1 page(s)", summary.ToString(), StringComparison.Ordinal);
             var element = Assert.Single(page.Elements);
             Assert.Equal(ReviewElementKind.UncertainText, element.Kind);
             Assert.EndsWith(":F9", element.SourceId, StringComparison.Ordinal);

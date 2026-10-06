@@ -50,6 +50,10 @@ public sealed record ReadableDocumentExportOptions(
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
+
+    /// <summary>What the readable projection reconstructed from layout; pass it to
+    /// <see cref="ExportSummaryBuilder"/> and <see cref="ExportReviewBuilder"/>.</summary>
+    public ReadableProjectionReport Projection { get; init; } = ReadableProjectionReport.Empty;
 }
 public sealed record DocumentPreflightResult(bool WorkspaceValid, bool ProjectionChanged, bool CanRestore, string Fidelity, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
@@ -83,6 +87,7 @@ public sealed partial class DocumentService
     // from allocating an unbounded byte array.
     private const long MaxOfficeMediaEntryBytes = 32L * 1024 * 1024;
     private const long MaxTotalOfficeMediaBytes = 128L * 1024 * 1024;
+    private const int MinimumOcrImageSide = 3;
     // Apply package-wide limits before handing a ZIP entry to an adapter.  Media
     // limits alone do not protect against oversized worksheet/XML payloads.
     private const long MaxOfficePackageEntryBytes = 32L * 1024 * 1024;
@@ -344,7 +349,7 @@ public sealed partial class DocumentService
             diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
             await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
             return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode)
-                { RenderedTables = serializer.RenderedTables };
+                { RenderedTables = serializer.RenderedTables, Projection = serializer.Report };
         }
         catch
         {
@@ -849,6 +854,14 @@ public sealed partial class DocumentService
             else if (!asset.MediaType.StartsWith("image/", StringComparison.Ordinal))
                 attempt = new(OcrProcessingStatus.Unavailable, null,
                     [new OcrDiagnostic("RasterizerUnavailable", "The embedded media requires a rasterizer that is not configured.", DiagnosticSeverity.Warning)]);
+            // Spacer pixels and hairline rules hold no text, and Vision and Tesseract both reject an
+            // image under three pixels across or high.
+            else if (ImageDimensions.TryRead(asset.Content.Span, out var width, out var height) &&
+                     Math.Min(width, height) < MinimumOcrImageSide)
+                attempt = new(OcrProcessingStatus.NotRequired, null,
+                    [new OcrDiagnostic("OcrImageTooSmall",
+                        $"OCR was not run on a {width}x{height}-pixel image; OCR needs at least {MinimumOcrImageSide} pixels in each direction.",
+                        DiagnosticSeverity.Information)]);
             else if (ocr is null)
                 attempt = new(OcrProcessingStatus.Unavailable, null, [new OcrDiagnostic("OcrProviderUnavailable", "No OCR provider was explicitly configured.", DiagnosticSeverity.Warning)]);
             else
