@@ -6,14 +6,21 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.2 Public Beta
+
+- [v0.3.2 release notes](RELEASE_NOTES_v0.3.2.en.md)
+- Improved Excel table boundaries, headings and conversion review guidance
+- Added optional row blocks for large Excel tables in AI packages
+- Updated to manifest schema 2.1 and report schema 1.1; release notes describe compatibility and limitations
+
+## Published releases
+
 ### v0.3.1 Public Beta
 
 - [v0.3.1 release notes](RELEASE_NOTES_v0.3.1.en.md)
 - Fixed Excel table separation, PDF column order and experimental Word round-trip editing
 - Compacted AI-package source metadata and added section context to individual parts
 - Updated the manifest to schema 2.0; release notes describe integration changes
-
-## Published releases
 
 ### v0.3.0 Public Beta
 

@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.3.1
+        default: v0.3.2
 
 permissions:
   contents: read
@@ -209,6 +209,8 @@ jobs:
           Copy-Item "docs/FORMAT_CAPABILITY_MATRIX.md" "$staging/docs/FORMAT_CAPABILITY_MATRIX.md"
           New-Item -ItemType Directory -Force -Path "$staging/docs/reference" | Out-Null
           Copy-Item "docs/reference/ai-package.md" "$staging/docs/reference/ai-package.md"
+          New-Item -ItemType Directory -Force -Path "$staging/docs/examples" | Out-Null
+          Copy-Item "docs/examples/ai_package_reader.py" "$staging/docs/examples/ai_package_reader.py"
           Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
           Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
           New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
@@ -265,6 +267,8 @@ jobs:
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
           mkdir -p "$staging/docs/reference"
           cp docs/reference/ai-package.md "$staging/docs/reference/"
+          mkdir -p "$staging/docs/examples"
+          cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
@@ -363,6 +367,8 @@ jobs:
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
           mkdir -p "$staging/docs/reference"
           cp docs/reference/ai-package.md "$staging/docs/reference/"
+          mkdir -p "$staging/docs/examples"
+          cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
