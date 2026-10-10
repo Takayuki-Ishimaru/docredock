@@ -8,9 +8,10 @@ namespace DocRedock.Formats.Pdf;
 /// producer paints a thin horizontal line or bar across the glyphs (Word and LibreOffice a filled bar,
 /// others a stroked line). Such a line is text formatting, not a drawing, so it is taken out of the
 /// visual graph before tables are inferred from its lines, and a strikethrough marks the text it covers
-/// as struck. Glyph widths are not read, so only text a strikethrough covers as a whole show (one
-/// Tj/TJ string, which is how most producers write a run of one format) is marked; a strikethrough
-/// over part of a show is reported instead of guessed.
+/// as struck. When the font gives its glyph widths, each character's place is known and a strikethrough
+/// marks exactly the characters it crosses. Otherwise only text a strikethrough covers as a whole show
+/// (one Tj/TJ string, which is how most producers write a run of one format) is marked, and a
+/// strikethrough over part of a show is reported instead of guessed.
 /// </summary>
 internal static class PdfTextDecorations
 {
@@ -90,9 +91,11 @@ internal static class PdfTextDecorations
         return result;
     }
 
-    /// <summary>Marks the fragments the strikethroughs cover as struck, each as a whole. Returns the
-    /// fragments and, once per set of fragments, those a strikethrough crosses only part of: their
-    /// struck characters cannot be told apart without glyph widths.</summary>
+    /// <summary>Marks the text the strikethroughs cover as struck. A fragment whose characters are
+    /// placed (its font gives glyph widths) gets exactly the characters a line crosses the middle of.
+    /// Any other fragment is struck as a whole when a line covers it; those a line crosses only part
+    /// of are returned, once per set of fragments: their struck characters cannot be told apart
+    /// without glyph widths.</summary>
     public static (List<PdfTextRegion> Fragments, List<IReadOnlyList<PdfTextRegion>> Unplaced) ApplyStrikes(
         IReadOnlyList<PdfTextRegion> fragments, IEnumerable<(double Left, double Right, double Y)> strikes)
     {
@@ -105,6 +108,8 @@ internal static class PdfTextDecorations
         var largest = sized.Length == 0 ? 0 : sized.Max(index => fragments[index].FontSize!.Value);
         var rows = new Rows<int>(sized, index => fragments[index].BoundingBox.Y);
         var whole = new bool[fragments.Count];
+        // The struck characters of each placed fragment a line crosses.
+        var struckCharacters = new bool[]?[fragments.Count];
         var crossings = new List<int[]>();
         foreach (var (left, right, y) in strikes)
         {
@@ -116,11 +121,18 @@ internal static class PdfTextDecorations
                 var em = (y - fragment.BoundingBox.Y) / size;
                 if (em < StrikeFromEm - 0.05 || em > StrikeToEm) continue;
                 var start = fragment.BoundingBox.X;
-                var width = EstimatedWidth(fragment);
                 var overlap = Overlap(left, right, start, limits[fragment]);
                 if (overlap < 0.3 * size) continue;
-                // The line starts at the show and runs through most of its estimated width.
-                if (left <= start + 0.35 * size && right >= start + 0.7 * width) whole[index] = true;
+                if (Placed(fragment) is { } glyphs)
+                {
+                    var struck = struckCharacters[index] ??= new bool[glyphs.Count];
+                    for (var character = 0; character < glyphs.Count; character++)
+                        if ((glyphs[character].Left + glyphs[character].Right) / 2 is var middle && middle >= left && middle <= right)
+                            struck[character] = true;
+                    continue;
+                }
+                // The line starts at the show and runs through most of its width.
+                if (left <= start + 0.35 * size && right >= start + 0.7 * Width(fragment)) whole[index] = true;
                 else partial.Add(index);
             }
             partial.Sort();
@@ -136,8 +148,35 @@ internal static class PdfTextDecorations
                 unplaced.Add(open.Select(index => fragments[index]).ToArray());
         }
         var result = fragments.Select((fragment, index) =>
-            whole[index] ? fragment with { Struck = [new TextRange(0, fragment.Text.Length)] } : fragment).ToList();
+            whole[index] ? fragment with { Struck = [new TextRange(0, fragment.Text.Length)] }
+            : struckCharacters[index] is { } struck && Ranges(fragment.Text, struck) is { } ranges ? fragment with { Struck = ranges }
+            : fragment).ToList();
         return (result, unplaced);
+    }
+
+    /// <summary>The placed characters of a fragment: one edge pair per character of its text.</summary>
+    private static IReadOnlyList<(double Left, double Right)>? Placed(PdfTextRegion fragment) =>
+        fragment.Glyphs is { } glyphs && glyphs.Count == fragment.Text.Length ? glyphs : null;
+
+    /// <summary>A placed fragment's struck characters as ranges: the whole text when every character
+    /// but white space is struck, as a strikethrough over a whole show marks it; null when no character
+    /// but white space is.</summary>
+    private static IReadOnlyList<TextRange>? Ranges(string text, bool[] struck)
+    {
+        var ranges = new List<TextRange>();
+        for (var index = 0; index < text.Length;)
+        {
+            if (!struck[index]) { index++; continue; }
+            var end = index;
+            while (end < text.Length && struck[end]) end++;
+            // A line over nothing but a space strikes nothing.
+            if (!text.AsSpan(index, end - index).IsWhiteSpace()) ranges.Add(new TextRange(index, end));
+            index = end;
+        }
+        if (ranges.Count == 0) return null;
+        return Enumerable.Range(0, text.Length).All(index => struck[index] || char.IsWhiteSpace(text[index]))
+            ? [new TextRange(0, text.Length)]
+            : ranges;
     }
 
     /// <summary>Struck ranges of a merged line or cell: each part's own ranges, shifted by where the
@@ -170,14 +209,20 @@ internal static class PdfTextDecorations
         return em >= LowestEm && em <= HighestEm && thickness <= MaxThicknessEm * size;
     }
 
-    /// <summary>How far right each show's glyphs may reach: its typical width with a quarter to spare,
-    /// but never past the next show on its line, which starts where this one's glyphs end.</summary>
+    /// <summary>How far right each show's glyphs reach: where they end when the font gives its glyph
+    /// widths; otherwise its typical width with a quarter to spare, but never past the next show on its
+    /// line, which starts where this one's glyphs end.</summary>
     private static Dictionary<PdfTextRegion, double> Limits(IReadOnlyList<PdfTextRegion> fragments)
     {
         var limits = new Dictionary<PdfTextRegion, double>(ReferenceEqualityComparer.Instance);
         var lines = fragments.GroupBy(fragment => Math.Round(fragment.BoundingBox.Y)).ToDictionary(group => group.Key, group => group.ToArray());
         foreach (var fragment in fragments)
         {
+            if (fragment.MeasuredWidth)
+            {
+                limits[fragment] = fragment.BoundingBox.X + fragment.BoundingBox.Width;
+                continue;
+            }
             var start = fragment.BoundingBox.X;
             var limit = start + 1.25 * EstimatedWidth(fragment);
             var key = Math.Round(fragment.BoundingBox.Y);
@@ -331,6 +376,9 @@ internal static class PdfTextDecorations
         var t = length <= 0 ? 0 : Math.Clamp(((x - segment.X1) * dx + (y - segment.Y1) * dy) / length, 0, 1);
         return Math.Sqrt(Math.Pow(x - (segment.X1 + t * dx), 2) + Math.Pow(y - (segment.Y1 + t * dy), 2));
     }
+
+    // A show's width: measured with its font's glyph widths when known, else estimated.
+    private static double Width(PdfTextRegion fragment) => fragment.MeasuredWidth ? fragment.BoundingBox.Width : EstimatedWidth(fragment);
 
     // A typical width: full-width characters an em, others a little over half an em.
     private static double EstimatedWidth(PdfTextRegion fragment) =>
