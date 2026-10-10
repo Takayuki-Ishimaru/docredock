@@ -21,6 +21,15 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
 
     /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Struck { get; init; }
+
+    /// <summary>Whether the width of <see cref="BoundingBox"/> was measured with the font's glyph
+    /// widths; otherwise it is estimated at 6 units a character.</summary>
+    internal bool MeasuredWidth { get; init; }
+
+    /// <summary>Where each character of <see cref="Text"/> is drawn along the baseline of upright
+    /// text - its left and right edge in page units - when the font's glyph widths are known; null
+    /// otherwise. A strikethrough over part of the text strikes the characters under it.</summary>
+    internal IReadOnlyList<(double Left, double Right)>? Glyphs { get; init; }
 }
 
 /// <summary>Why a Form XObject that a page really draws could not be analyzed.</summary>
@@ -68,8 +77,8 @@ public enum PdfUncertainTextReason
     /// <summary>The text is optional content (a layer) whose visibility could not be evaluated; it
     /// may be hidden in the original.</summary>
     LayerVisibilityUnknown,
-    /// <summary>A strikethrough crosses part of the text; without glyph widths it cannot be told which
-    /// characters it strikes, so the text is kept without the mark.</summary>
+    /// <summary>A strikethrough crosses part of text whose font gives no glyph widths; without them it
+    /// cannot be told which characters it strikes, so the text is kept without the mark.</summary>
     StrikethroughUnplaced,
 }
 
@@ -3272,10 +3281,12 @@ public static partial class PdfTextExtractor
         var textMatrix = PdfMatrix.Identity;
         Regex textString;
         Regex showOperator;
+        Regex showParts;
         try
         {
             textString = new Regex(TextStringPattern, RegexOptions.Compiled | RegexOptions.NonBacktracking, options.EffectiveRegexTimeout);
             showOperator = new Regex(@"\G\s*(?<op>Tj|TJ)\b", RegexOptions.None, options.EffectiveRegexTimeout);
+            showParts = new Regex(ShowPartPattern, RegexOptions.None, options.EffectiveRegexTimeout);
         }
         catch (ArgumentOutOfRangeException exception) { throw new PdfExtractionException("Invalid PDF regex timeout.", exception); }
         try
@@ -3318,20 +3329,42 @@ public static partial class PdfTextExtractor
                     ? string.Join("", Regex.Matches(match.Value, LiteralPattern + @"|<[0-9A-Fa-f\s]+>", RegexOptions.None, options.EffectiveRegexTimeout)
                         .Select(item => DecodeString(item.Value, font?.Map)))
                     : DecodeString(match.Value, font?.Map));
+                // A font that gives its glyph widths measures the show with the text state the ordered
+                // pass followed: its width, where the text after it continues, and where each of its
+                // characters is drawn. Any other font keeps the estimate of 6 units a character, and so
+                // does text whose text matrix turns it: lines and reading order are built for text
+                // running across the page, and the estimate keeps a turned run's shows on one line.
+                var measured = font is { Widths: { } widths, Vertical: false } && show is { FontSize: { } size } state &&
+                    size > 0 && double.IsFinite(size) && state.HorizontalScale > 0 && double.IsFinite(state.HorizontalScale) &&
+                    IsAxisAligned(textMatrix)
+                        ? MeasureShow(match.Value, widths, font.Map, state, size, showParts)
+                        : null;
                 if (text.Length > 0)
                 {
-                    var point = transform.Apply(x, y);
-                    var right = transform.Apply(x + text.Length * 6, y);
+                    var origin = transform.Apply(x, y);
+                    var (start, end) = measured is null
+                        ? (origin, transform.Apply(x + text.Length * 6, y))
+                        : (AlongBaseline(transform, textMatrix, x, y, measured.Left), AlongBaseline(transform, textMatrix, x, y, measured.Right));
                     var top = transform.Apply(x, y + 12);
-                    var width = Math.Max(1, Math.Sqrt(Math.Pow(right.X - point.X, 2) + Math.Pow(right.Y - point.Y, 2)));
-                    var height = Math.Max(1, Math.Sqrt(Math.Pow(top.X - point.X, 2) + Math.Pow(top.Y - point.Y, 2)));
+                    var width = Math.Max(1, Math.Sqrt(Math.Pow(end.X - start.X, 2) + Math.Pow(end.Y - start.Y, 2)));
+                    var height = Math.Max(1, Math.Sqrt(Math.Pow(top.X - origin.X, 2) + Math.Pow(top.Y - origin.Y, 2)));
+                    var fontSize = UprightFontSize(currentFontSize, textMatrix, transform);
                     regions.Add(new PdfParsedText(new PdfTextRegion(text,
-                            new Geometry("pdf-user-space", point.X, point.Y, width, height), regions.Count, [regions.Count])
-                            { FontSize = UprightFontSize(currentFontSize, textMatrix, transform) },
+                            new Geometry("pdf-user-space", start.X, start.Y, width, height), regions.Count, [regions.Count])
+                            {
+                                FontSize = fontSize,
+                                MeasuredWidth = measured is not null,
+                                // Characters are placed on upright text, and only when the measured
+                                // characters are the shown ones (not an /ActualText replacement).
+                                Glyphs = measured is not null && fontSize is not null && measured.Text == text
+                                    ? PlaceGlyphs(measured, transform, textMatrix, x, y)
+                                    : null,
+                            },
                         show?.Visibility ?? PdfTextVisibility.Visible,
                         actualText is null && font is { Ambiguous: true } ? font.ResourceName : null));
                 }
-                x += text.Length * 6;
+                if (measured is null) x += text.Length * 6;
+                else (x, y) = (x + textMatrix.A * measured.Advance, y + textMatrix.B * measured.Advance);
                 actualTextCursor = match.Index + match.Length;
             }
         }
@@ -3344,6 +3377,28 @@ public static partial class PdfTextExtractor
 
     private static double? InvariantNumber(string value) =>
         double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : null;
+
+    /// <summary>Whether a text matrix only scales or flips the text, without turning or skewing it.</summary>
+    private static bool IsAxisAligned(PdfMatrix matrix) =>
+        Math.Abs(matrix.B) <= Math.Abs(matrix.A) * 1e-3 && Math.Abs(matrix.C) <= Math.Abs(matrix.D) * 1e-3;
+
+    /// <summary>Where the point <paramref name="offset"/> text space units along the baseline from the
+    /// text position (<paramref name="x"/>, <paramref name="y"/>) is drawn on the page.</summary>
+    private static (double X, double Y) AlongBaseline(PdfMatrix transform, PdfMatrix textMatrix, double x, double y, double offset) =>
+        transform.Apply(x + textMatrix.A * offset, y + textMatrix.B * offset);
+
+    /// <summary>The left and right page edge of each measured character of a show drawn from (x, y).</summary>
+    private static (double Left, double Right)[] PlaceGlyphs(PdfMeasuredShow measured, PdfMatrix transform, PdfMatrix textMatrix, double x, double y)
+    {
+        var glyphs = new (double Left, double Right)[measured.Characters.Length];
+        for (var index = 0; index < glyphs.Length; index++)
+        {
+            var from = AlongBaseline(transform, textMatrix, x, y, measured.Characters[index].Start).X;
+            var to = AlongBaseline(transform, textMatrix, x, y, measured.Characters[index].End).X;
+            glyphs[index] = (Math.Min(from, to), Math.Max(from, to));
+        }
+        return glyphs;
+    }
 
     // How tall upright, unrotated, unmirrored text is drawn in page units: the Tf size scaled by the
     // text matrix and then the CTM. Null when the two together rotate, skew or mirror it; each alone
@@ -3725,7 +3780,21 @@ public static partial class PdfTextExtractor
         return result.ToArray();
     }
 
-    private static string DecodeString(string value, PdfToUnicodeMap? map = null)
+    private static string DecodeString(string value, PdfToUnicodeMap? map = null) => Decode(StringBytes(value), map, null);
+
+    /// <summary>The characters <paramref name="bytes"/> stand for in a font with <paramref name="map"/>
+    /// (Latin-1 without one). <paramref name="sources"/>, when given, receives for every character the
+    /// bytes [Start, End) it was decoded from.</summary>
+    private static string Decode(byte[] bytes, PdfToUnicodeMap? map, List<(int Start, int End)>? sources)
+    {
+        if (map is not null) return map.Decode(bytes, sources);
+        if (sources is not null)
+            for (var index = 0; index < bytes.Length; index++) sources.Add((index, index + 1));
+        return Encoding.Latin1.GetString(bytes);
+    }
+
+    /// <summary>The bytes a literal <c>( )</c> or hexadecimal <c>&lt; &gt;</c> string operand holds.</summary>
+    private static byte[] StringBytes(string value)
     {
         if (value.StartsWith("<", StringComparison.Ordinal))
         {
@@ -3733,7 +3802,7 @@ public static partial class PdfTextExtractor
             if (hex.Length % 2 != 0) hex += "0";
             var hexBytes = new byte[hex.Length / 2];
             for (var i = 0; i < hexBytes.Length; i++) if (byte.TryParse(hex.AsSpan(i * 2, 2), System.Globalization.NumberStyles.HexNumber, null, out var item)) hexBytes[i] = item;
-            return map?.Decode(hexBytes) ?? Encoding.Latin1.GetString(hexBytes);
+            return hexBytes;
         }
         var inner = value.Length >= 2 ? value[1..^1] : value;
         var raw = new List<byte>(inner.Length);
@@ -3751,8 +3820,7 @@ public static partial class PdfTextExtractor
             }
             raw.Add((byte)(escaped switch { 'n' => (char)10, 'r' => (char)13, 't' => (char)9, 'b' => (char)8, 'f' => (char)12, '(' => (char)40, ')' => (char)41, _ => escaped }));
         }
-        var bytes = raw.ToArray();
-        return map?.Decode(bytes) ?? Encoding.Latin1.GetString(bytes);
+        return raw.ToArray();
     }
 
     /// <summary>Decodes the streams of the objects in <paramref name="objectIds"/>. Everything else
@@ -3823,7 +3891,9 @@ public static partial class PdfTextExtractor
 
         private string? _signature;
 
-        public string Decode(ReadOnlySpan<byte> bytes)
+        /// <summary>The characters <paramref name="bytes"/> decode to. <paramref name="sources"/>, when
+        /// given, receives for every character the bytes [Start, End) it was decoded from.</summary>
+        public string Decode(ReadOnlySpan<byte> bytes, List<(int Start, int End)>? sources = null)
         {
             var output = new StringBuilder();
             for (var index = 0; index < bytes.Length;)
@@ -3835,8 +3905,15 @@ public static partial class PdfTextExtractor
                     var key = Convert.ToHexString(bytes.Slice(index, width));
                     if (_entries.TryGetValue(key, out mapped)) { consumed = width; break; }
                 }
-                if (consumed == 0) { output.Append((char)bytes[index++]); continue; }
+                if (consumed == 0)
+                {
+                    sources?.Add((index, index + 1));
+                    output.Append((char)bytes[index++]);
+                    continue;
+                }
                 output.Append(mapped);
+                if (sources is not null)
+                    for (var character = 0; character < mapped!.Length; character++) sources.Add((index, index + consumed));
                 index += consumed;
             }
             return output.ToString();

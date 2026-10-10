@@ -3,15 +3,17 @@ using System.IO.Compression;
 using System.Text;
 using DocRedock.Api;
 using DocRedock.Formats.Pdf;
+using DocRedock.Tests.Pdf;
 
 namespace DocRedock.Tests.Api;
 
 /// <summary>
 /// Struck-through text reads as struck through (GFM ~~) in every format, tables included, so a model
 /// is not handed a cancelled value as a valid one: Excel cell fonts and rich-text runs, Word single and
-/// double strikethrough, PowerPoint runs, and in PDF a strikethrough drawn over a whole text show or a
-/// StrikeOut annotation. PDF has no glyph widths here, so a strikethrough over part of a show is
-/// reported instead of guessed, and underlines and strikethroughs never turn into drawings.
+/// double strikethrough, PowerPoint runs, and in PDF a strikethrough drawn over text or a StrikeOut
+/// annotation. A PDF strikethrough over part of a show strikes the characters under it when the font
+/// gives its glyph widths; when it gives none, it is reported instead of guessed. Underlines and
+/// strikethroughs never turn into drawings.
 /// </summary>
 public sealed class StrikethroughRecognitionTests : IDisposable
 {
@@ -450,6 +452,128 @@ public sealed class StrikethroughRecognitionTests : IDisposable
         var region = Assert.Single(result.Pages[0].Regions);
         Assert.Equal(12, region.FontSize);
         Assert.Equal([new DocRedock.Core.Documents.TextRange(0, 12)], region.Struck);
+    }
+
+    // A show in a font that gives its glyph widths (Helvetica's), and the page x where a part of it starts and ends.
+    private static string MeasuredText(double x, double y, string text, double size = 12) =>
+        $"BT /F1 {MeasuredPdf.N(size)} Tf 1 0 0 1 {MeasuredPdf.N(x)} {MeasuredPdf.N(y)} Tm ({text}) Tj ET";
+
+    private static (string Left, string Right) Span(double x, string text, string part, double size = 12)
+    {
+        var start = x + MeasuredPdf.Width(text[..text.IndexOf(part, StringComparison.Ordinal)], size);
+        return (MeasuredPdf.N(start), MeasuredPdf.N(start + MeasuredPdf.Width(part, size)));
+    }
+
+    [Fact]
+    public void Pdf_a_strikethrough_over_part_of_a_measured_show_strikes_the_characters_under_it()
+    {
+        var (barLeft, barRight) = Span(72, "Old price 1000 yen", "1000 yen");
+        var (lineLeft, lineRight) = Span(72, "Keep the word price here", "price");
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(string.Join("\n",
+            MeasuredText(72, 720, "Old price 1000 yen"),
+            $"{barLeft} 723.6 {MeasuredPdf.N(MeasuredPdf.Width("1000 yen", 12))} 0.8 re f",   // Word: a filled bar
+            MeasuredText(72, 690, "Keep the word price here"), $"0.6 w {lineLeft} 693.6 m {lineRight} 693.6 l S")));
+        var regions = result.Pages[0].Regions;
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(10, 18)], regions.Single(region => region.Text == "Old price 1000 yen").Struck);
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(14, 19)], regions.Single(region => region.Text == "Keep the word price here").Struck);
+        // Placed, so nothing asks for source comparison.
+        Assert.DoesNotContain(result.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("PdfStrikethroughUnplaced", StringComparison.Ordinal));
+        Assert.Null(result.Pages[0].UncertainText);
+        Assert.True(result.VisualGraphs is null || !result.VisualGraphs.ContainsKey(1));
+    }
+
+    [Fact]
+    public async Task Pdf_part_struck_measured_text_is_written_struck_and_needs_no_review()
+    {
+        var source = Path.Combine(root, "measured.pdf");
+        var (left, _) = Span(72, "Old price 1000 yen", "1000 yen");
+        await File.WriteAllBytesAsync(source, MeasuredPdf.Page(string.Join("\n", MeasuredText(72, 720, "Old price 1000 yen"),
+            $"{left} 723.6 {MeasuredPdf.N(MeasuredPdf.Width("1000 yen", 12))} 0.8 re f")));
+        var output = Path.Combine(root, "measured.md");
+        var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false));
+        Assert.Contains("\nOld price ~~1000 yen~~\n", (await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "PdfStrikethroughUnplaced");
+        Assert.Equal(0, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ReviewPages);
+    }
+
+    [Fact]
+    public void Pdf_double_strikethroughs_and_strikeout_annotations_over_part_of_a_measured_show_mark_its_characters()
+    {
+        var (doubleLeft, doubleRight) = Span(72, "Old price 1000 yen", "1000 yen");
+        var (noteLeft, noteRight) = Span(72, "Keep this. Delete this. Keep that.", "Delete this.");
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(string.Join("\n",
+                MeasuredText(72, 640, "Old price 1000 yen"),
+                $"0.4 w {doubleLeft} 643.6 m {doubleRight} 643.6 l S {doubleLeft} 642.3 m {doubleRight} 642.3 l S",
+                MeasuredText(72, 720, "Keep this. Delete this. Keep that.")),
+            annotation: $"<< /Type /Annot /Subtype /StrikeOut /Rect [{noteLeft} 716 {noteRight} 732] " +
+                $"/QuadPoints [{noteLeft} 732 {noteRight} 732 {noteLeft} 716 {noteRight} 716] >>"));
+        var regions = result.Pages[0].Regions;
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(10, 18)], regions.Single(region => region.Text == "Old price 1000 yen").Struck);
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(11, 23)], regions.Single(region => region.Text.StartsWith("Keep this.", StringComparison.Ordinal)).Struck);
+        Assert.DoesNotContain(result.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("PdfStrikethroughUnplaced", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Pdf_part_struck_measured_table_cells_carry_their_ranges_into_the_table()
+    {
+        var grid = "0.8 w 72 610 390 90 re S\n72 670 m 462 670 l S\n72 640 m 462 640 l S\n202 610 m 202 700 l S\n332 610 m 332 700 l S";
+        var (left, _) = Span(208, "1,000 1,200", "1,000", 11);
+        var cells = string.Join("\n", MeasuredText(78, 680, "Name", 11), MeasuredText(208, 680, "Price", 11), MeasuredText(338, 680, "Note", 11),
+            MeasuredText(78, 650, "Apple", 11), MeasuredText(208, 650, "120", 11), MeasuredText(338, 650, "ok", 11),
+            MeasuredText(78, 620, "Grape", 11), MeasuredText(208, 620, "1,000 1,200", 11), MeasuredText(338, 620, "raised", 11),
+            $"{left} 623.5 {MeasuredPdf.N(MeasuredPdf.Width("1,000", 11))} 0.7 re f");   // "1,000" struck
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(grid + "\n" + cells));
+        var table = Assert.Single(result.Tables![1]);
+        var struck = table.Rows.SelectMany(row => row.Cells).Single(cell => cell.Struck is not null);
+        Assert.Equal(("1,000 1,200", 0, 5), (struck.Text, struck.Struck![0].Start, struck.Struck[0].End));
+    }
+
+    [Fact]
+    public void Pdf_the_characters_one_glyph_draws_are_struck_together()
+    {
+        // Code 1 draws the "ffi" ligature and code 2 a supplementary character (two UTF-16 units). A
+        // strikethrough ending part way over either glyph takes every character it draws, never half
+        // of them (a mark between the two halves of a surrogate pair would break the text).
+        var widths = Enumerable.Range(1, 126).Select(code => code switch { 1 => 800, 2 => 1000, < 32 => 0, _ => MeasuredPdf.Advance((char)code) });
+        var objects = new Dictionary<int, string>
+        {
+            [4] = "<< /Type /Font /Subtype /TrueType /BaseFont /Ligatures /FirstChar 1 /Widths [" + string.Join(" ", widths) + "] /ToUnicode 5 0 R >>",
+            [5] = MeasuredPdf.Stream("1 begincodespacerange <00> <FF> endcodespacerange\n2 beginbfchar <01> <006600660069> <02> <D840DC0B> endbfchar"),
+        };
+        // At 10 points "o" is 5.56 wide, the ligature 8, "ce " 13.34 and the supplementary character 10.
+        var ligature = 72 + 5.56;
+        var supplementary = ligature + 8 + 13.34;
+        string Quad(double left, double right) => $"{MeasuredPdf.N(left)} 708 {MeasuredPdf.N(right)} 708 {MeasuredPdf.N(left)} 698 {MeasuredPdf.N(right)} 698";
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page("BT /F1 10 Tf 1 0 0 1 72 700 Tm (o\\001ce \\002 end) Tj ET", objects: objects,
+            annotation: $"<< /Type /Annot /Subtype /StrikeOut /Rect [72 698 140 708] /QuadPoints [{Quad(72, ligature + 4.8)} {Quad(supplementary, supplementary + 6)}] >>"));
+        var region = Assert.Single(result.Pages[0].Regions);
+        Assert.Equal("office \U0002000B end", region.Text);
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(0, 4), new DocRedock.Core.Documents.TextRange(7, 9)], region.Struck);
+    }
+
+    [Fact]
+    public void Pdf_a_strikethrough_over_nothing_but_a_space_strikes_nothing()
+    {
+        // Word spacing widens the space after "Keep" to 22.78 points; the StrikeOut covers its middle only.
+        var space = 72 + MeasuredPdf.Width("Keep", 10);
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page("BT /F1 10 Tf 20 Tw 1 0 0 1 72 700 Tm (Keep both) Tj ET",
+            annotation: $"<< /Type /Annot /Subtype /StrikeOut /QuadPoints [{MeasuredPdf.N(space + 5)} 708 {MeasuredPdf.N(space + 17)} 708 " +
+                $"{MeasuredPdf.N(space + 5)} 698 {MeasuredPdf.N(space + 17)} 698] >>"));
+        var region = Assert.Single(result.Pages[0].Regions);
+        Assert.Equal("Keep both", region.Text);
+        Assert.Null(region.Struck);
+        Assert.DoesNotContain(result.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("PdfStrikethroughUnplaced", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Pdf_measured_text_drawn_upright_through_two_flips_is_struck_where_the_line_crosses_it()
+    {
+        // As Chrome writes pages: the CTM turns the page upside down and the text matrix turns the text back.
+        var (left, right) = Span(72, "Old price 1000 yen", "1000 yen");
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(string.Join("\n", "1 0 0 -1 0 842 cm",
+            "BT /F1 12 Tf 1 0 0 -1 72 122 Tm (Old price 1000 yen) Tj ET", $"0.8 w {left} 118.4 m {right} 118.4 l S")));
+        var region = Assert.Single(result.Pages[0].Regions);
+        Assert.Equal([new DocRedock.Core.Documents.TextRange(10, 18)], region.Struck);
     }
 
     [Fact]

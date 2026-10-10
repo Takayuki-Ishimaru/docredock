@@ -202,8 +202,9 @@ public static partial class PdfTextExtractor
     /// <summary>What decoding one font needs. <see cref="Identity"/> is shared by every resource name
     /// that points at the same font object; <see cref="ToUnicodeObject"/> is the object of its
     /// <c>/ToUnicode</c> CMap; <see cref="Vertical"/> marks a font whose encoding is a <c>-V</c> CMap
-    /// (or declares <c>/WMode 1</c>), so its glyphs advance down the page, not across it.</summary>
-    private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical);
+    /// (or declares <c>/WMode 1</c>), so its glyphs advance down the page, not across it;
+    /// <see cref="Widths"/> are its glyph widths, null when it gives none the extractor follows.</summary>
+    private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical, PdfGlyphWidths? Widths = null);
 
     /// <summary>Reads each font a resource dictionary names once, and remembers under which names
     /// the document's resource dictionaries offer it - the evidence a name that cannot be resolved
@@ -261,7 +262,7 @@ public static partial class PdfTextExtractor
                 ? name.EndsWith("-V", StringComparison.Ordinal)
                 : encoding is not null && TryReadReference(encoding, out var embedded) && objects.TryGetValue(embedded, out var cmapBody) &&
                   Regex.IsMatch(cmapBody, @"/WMode\s+1\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-            return new PdfFontResource(identity, toUnicode, vertical);
+            return new PdfFontResource(identity, toUnicode, vertical, vertical ? null : ReadGlyphWidths(entries, objects));
         }
     }
 
@@ -279,8 +280,9 @@ public static partial class PdfTextExtractor
 
     /// <summary>A font as the rewritten content names it: <see cref="Ambiguous"/> marks a name that
     /// could not be resolved where it is used and that the document gives to fonts decoding
-    /// differently, so its text is left undecoded instead of being read with one of them.</summary>
-    private sealed record PdfFontBinding(string ResourceName, PdfToUnicodeMap? Map, bool Vertical, bool Ambiguous);
+    /// differently, so its text is left undecoded instead of being read with one of them.
+    /// <see cref="Widths"/> are known only for a font resolved where it is used.</summary>
+    private sealed record PdfFontBinding(string ResourceName, PdfToUnicodeMap? Map, bool Vertical, bool Ambiguous, PdfGlyphWidths? Widths = null);
 
     /// <summary>Gives every font a page or form really uses its own name in the expanded content.
     /// Inlining forms merges several resource scopes into one stream; after the rewrite, a
@@ -300,7 +302,7 @@ public static partial class PdfTextExtractor
             if (scope?.Fonts is { } fonts && fonts.TryGetValue(name, out var font))
             {
                 identity = font.Identity;
-                binding = new PdfFontBinding(name, table.MapFor(font.ToUnicodeObject), font.Vertical, false);
+                binding = new PdfFontBinding(name, table.MapFor(font.ToUnicodeObject), font.Vertical, false, font.Widths);
             }
             else
             {

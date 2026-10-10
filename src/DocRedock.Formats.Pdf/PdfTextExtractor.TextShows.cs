@@ -4,11 +4,12 @@ namespace DocRedock.Formats.Pdf;
 
 // One ordered pass over a page's expanded content that follows the graphics and text state the way
 // a renderer does - q/Q, cm, the text matrices, the font, clipping, and optional content - and
-// records, for every text-showing operator, which font it draws with and whether its glyphs can be
-// seen at all. The regular-expression text parser keeps producing the text and its reading-order
-// geometry; this pass answers only the two questions that parser cannot: a font set inside a form
-// ends with the form, and text entirely outside a form's /BBox, a clipping path, or the page is not
-// visible even though it is in the content stream.
+// records, for every text-showing operator, which font it draws with, whether its glyphs can be
+// seen at all, and the spacing they advance by. The regular-expression text parser keeps producing
+// the text and its reading-order geometry; this pass answers the questions that parser cannot: a
+// font set inside a form ends with the form, text entirely outside a form's /BBox, a clipping path,
+// or the page is not visible even though it is in the content stream, and the size, spacing and
+// scaling in force (all part of the graphics state that q/Q save and restore) measure the glyphs.
 public static partial class PdfTextExtractor
 {
     /// <summary>Whether the glyphs of one text-showing operator can be visible.</summary>
@@ -25,8 +26,11 @@ public static partial class PdfTextExtractor
     }
 
     /// <summary>What the text-showing operator whose string operand starts at a given offset draws
-    /// with: the font token in force (see <see cref="PdfFontRegistry"/>) and its visibility.</summary>
-    private readonly record struct PdfTextShow(string? Font, PdfTextVisibility Visibility);
+    /// with: the font token in force (see <see cref="PdfFontRegistry"/>), its visibility, and the text
+    /// state its glyphs advance by - the font size (Tf), character and word spacing (Tc, Tw) and
+    /// horizontal scaling (Tz, as a fraction).</summary>
+    private readonly record struct PdfTextShow(string? Font, PdfTextVisibility Visibility, double? FontSize = null,
+        double CharSpacing = 0, double WordSpacing = 0, double HorizontalScale = 1);
 
     private enum PdfContentEventKind { FormBegin, FormEnd }
 
@@ -120,7 +124,8 @@ public static partial class PdfTextExtractor
         var textMatrix = PdfMatrix.Identity;
         var lineMatrix = PdfMatrix.Identity;
         // How far along the writing direction the next glyph may be from textMatrix's origin: every
-        // shown string moves it by an amount only bounded here, since glyph widths are not read.
+        // shown string moves it by an amount only bounded here (see MaxGlyphAdvanceEm); the text
+        // parser measures glyphs where the font gives their widths.
         double advanceLow = 0, advanceHigh = 0;
         PdfBox? path = null;
         var clipPending = false;
@@ -160,7 +165,7 @@ public static partial class PdfTextExtractor
                   !glyphs.Intersects(clip) ? PdfTextVisibility.Clipped
                 : layer == PdfLayerVisibility.Unknown ? PdfTextVisibility.UnknownLayer
                 : PdfTextVisibility.Visible;
-            shows[operand.Start] = new PdfTextShow(state.Font, visibility);
+            shows[operand.Start] = new PdfTextShow(state.Font, visibility, state.FontSize, state.CharSpacing, state.WordSpacing, state.HorizontalScale);
             if (run is { } advance)
             {
                 advanceLow += advance.Low;

@@ -30,7 +30,7 @@ public enum ReviewElementKind
     /// not be evaluated). Counted with unanalyzed content: its analysis is not complete either.</summary>
     UncertainText,
     /// <summary>Text that is in the Markdown without the strikethrough the original draws over part of
-    /// it: which characters it strikes could not be determined (a PDF read without glyph widths).
+    /// it: which characters it strikes could not be determined (PDF text in a font that gives no glyph widths).
     /// Counted with unanalyzed content, like <see cref="UncertainText"/>.</summary>
     StrikethroughUnplaced,
 }

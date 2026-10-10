@@ -113,7 +113,8 @@ public static class PdfTableInference
         for (var column = 0; column < xs.Length - 1; column++)
         {
             var cell = new Geometry("pdf-user-space", xs[column], ys[row], xs[column + 1] - xs[column], ys[row + 1] - ys[row]);
-            var inside = regions.Where(region => IsInside(cell, region.BoundingBox)).ToArray();
+            var inside = regions.Where(region => IsInside(cell, region.BoundingBox) ||
+                region.MeasuredWidth && IsCentredOnRightEdge(cell, region.BoundingBox, right)).ToArray();
             var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
             if (ids.Any(id => !assigned.Add(id))) return [];
             var parts = inside.Where(region => !string.IsNullOrWhiteSpace(region.Text)).ToArray();
@@ -382,6 +383,17 @@ public static class PdfTableInference
     {
         var x = text.X + text.Width / 2; var y = text.Y + text.Height / 2;
         return x > cell.X + .01 && x < cell.X + cell.Width - .01 && y > cell.Y + .01 && y < cell.Y + cell.Height - .01;
+    }
+
+    // Text measured with its glyph widths whose middle is exactly on a column line inside the table
+    // was centred across the two columns - the label of a bar or arrow drawn over both. It belongs to
+    // the cell it starts in, rather than to neither (which would discard the whole table). The middle
+    // of text whose width is only estimated is too uncertain to place, and still rules the table out.
+    private static bool IsCentredOnRightEdge(Geometry cell, Geometry text, double tableRight)
+    {
+        var x = text.X + text.Width / 2; var y = text.Y + text.Height / 2;
+        var edge = cell.X + cell.Width;
+        return Math.Abs(x - edge) <= .01 && edge < tableRight - .01 && y > cell.Y + .01 && y < cell.Y + cell.Height - .01;
     }
     private static bool Covers(AxisLine line, double minimum, double maximum) => line.Minimum <= minimum + 1.5 && line.Maximum >= maximum - 1.5;
     private static bool CoversLevel(IEnumerable<AxisLine> lines, double minimum, double maximum)
