@@ -1735,6 +1735,8 @@ public sealed class DocxAdapter : IFormatProbe
         var anchor = new SourceAnchor("docx", partUri, [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
         var grid = new List<List<TableCell>>();
+        // Struck-through text per cell, for the readable projection: (row, cell, [start, end) ranges).
+        var struckCells = new List<object[]>();
         // Tracks, per logical grid column, which (row, cell) in `grid` is the still-open vMerge
         // origin so a later continuation cell can add itself to that origin's RowSpan count.
         var openVerticalMerges = new Dictionary<int, (int RowIndex, int CellIndex)>();
@@ -1757,6 +1759,8 @@ public sealed class DocxAdapter : IFormatProbe
                 // that inherits the cell above; only w:val="restart" starts a new merge region.
                 var isContinuation = vMerge is not null && !StringComparer.OrdinalIgnoreCase.Equals((string?)vMerge.Attribute(W + "val"), "restart");
                 var text = CellText(tc, hiddenStyles);
+                if (!isContinuation && StruckCellText(tc, hiddenStyles) is { Struck.Count: > 0 } struck && struck.Text == text)
+                    struckCells.Add([grid.Count, rowCells.Count, struck.Struck.Select(range => new[] { range.Start, range.End }).ToArray()]);
                 if (isContinuation)
                 {
                     if (openVerticalMerges.TryGetValue(gridColumn, out var origin))
@@ -1787,6 +1791,8 @@ public sealed class DocxAdapter : IFormatProbe
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
+        // Table cells are plain text; the readable projection marks these ranges as struck through.
+        if (struckCells.Count > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
         // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already shared with PPTX/XLSX
         // and reads this same "table_overlays" extension key off any NodeKind.Table node -- see
         // DetectDocxTableOverlays below for how the DOCX port populates it.
@@ -2577,6 +2583,54 @@ public sealed class DocxAdapter : IFormatProbe
     // w:t in the subtree instead — the previous behaviour — silently glued "A", "B", "C" into
     // "ABC". Leading and trailing empty paragraphs are dropped because Word always leaves one
     // after a nested table, and they would otherwise show up as stray blank lines.
+    // CellText with the characters its struck-through runs hold, as [start, end) offsets into it.
+    private static (string Text, IReadOnlyList<(int Start, int End)> Struck) StruckCellText(XElement cell, DocxHiddenStyles hiddenStyles)
+    {
+        var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").Select(block => StruckParagraphText(block, hiddenStyles)).ToList();
+        while (paragraphs.Count > 0 && paragraphs[0].Text.Length == 0) paragraphs.RemoveAt(0);
+        while (paragraphs.Count > 0 && paragraphs[^1].Text.Length == 0) paragraphs.RemoveAt(paragraphs.Count - 1);
+        var text = new StringBuilder();
+        var struck = new List<(int Start, int End)>();
+        for (var index = 0; index < paragraphs.Count; index++)
+        {
+            if (index > 0) text.Append('\n');
+            var offset = text.Length;
+            struck.AddRange(paragraphs[index].Struck.Select(range => (range.Start + offset, range.End + offset)));
+            text.Append(paragraphs[index].Text);
+        }
+        return (text.ToString(), struck);
+    }
+
+    // ParagraphText with the characters of struck-through runs (w:strike, w:dstrike): the same walk,
+    // so the offsets fall on its text.
+    private static (string Text, List<(int Start, int End)> Struck) StruckParagraphText(XContainer container, DocxHiddenStyles hiddenStyles)
+    {
+        var output = new StringBuilder();
+        var struck = new List<(int Start, int End)>();
+        foreach (var element in RelevantDescendants(container))
+        {
+            if (IsHiddenContentElement(element, hiddenStyles)) continue;
+            if (IsMathRoot(element)) output.Append(LinearizeMath(element));
+            else if (element.Name == W + "t")
+            {
+                var start = output.Length;
+                output.Append(element.Value);
+                if (output.Length > start && element.Parent is { } run && run.Name == W + "r" && ReadRunProperties(run).Strike)
+                {
+                    if (struck.Count > 0 && struck[^1].End == start) struck[^1] = (struck[^1].Start, output.Length);
+                    else struck.Add((start, output.Length));
+                }
+            }
+            else if (element.Name is var name && (name == W + "br" || name == W + "cr"))
+            {
+                if (IsPageBreakElement(element)) continue;
+                output.Append('\n');
+            }
+            else if (element.Name == W + "tab") output.Append('\t');
+        }
+        return (output.ToString(), struck);
+    }
+
     private static string CellText(XElement cell, DocxHiddenStyles hiddenStyles)
     {
         var texts = CellBlocks(cell).Where(block => block.Name == W + "p")
@@ -3065,7 +3119,8 @@ public sealed class DocxAdapter : IFormatProbe
         var bold = IsEnabled(properties?.Element(W + "b"));
         var italic = IsEnabled(properties?.Element(W + "i"));
         var underline = IsEnabled(properties?.Element(W + "u"), "none");
-        var strike = IsEnabled(properties?.Element(W + "strike"));
+        // A double strikethrough (w:dstrike) strikes the text as surely as a single one.
+        var strike = IsEnabled(properties?.Element(W + "strike")) || IsEnabled(properties?.Element(W + "dstrike"));
         var fonts = properties?.Element(W + "rFonts");
         var fontNames = new[] { (string?)fonts?.Attribute(W + "ascii"), (string?)fonts?.Attribute(W + "hAnsi"), (string?)fonts?.Attribute(W + "eastAsia") };
         var code = styleId?.Contains("code", StringComparison.OrdinalIgnoreCase) == true ||
@@ -3079,12 +3134,15 @@ public sealed class DocxAdapter : IFormatProbe
         return (styleId, bold, italic, underline, strike, code, color, highlight);
     }
 
+    // An on/off property (ST_OnOff): absent val, "1", "true" or "on" turn it on; "0", "false" and
+    // "off" turn it off. A property with values of its own (w:u) names its own off value.
     private static bool IsEnabled(XElement? element, string disabledValue = "0")
     {
         if (element is null) return false;
         var value = (string?)element.Attribute(W + "val");
         return !StringComparer.OrdinalIgnoreCase.Equals(value, disabledValue) &&
-               !StringComparer.OrdinalIgnoreCase.Equals(value, "false");
+               !StringComparer.OrdinalIgnoreCase.Equals(value, "false") &&
+               !StringComparer.OrdinalIgnoreCase.Equals(value, "off");
     }
 
     /// <summary>Reads one level's <c>w:vanish</c> as a tri-state: <c>null</c> means "says nothing,
@@ -3094,7 +3152,7 @@ public sealed class DocxAdapter : IFormatProbe
     {
         var vanish = runProperties?.Element(W + "vanish");
         if (vanish is null) return null;
-        return !StringComparer.OrdinalIgnoreCase.Equals((string?)vanish.Attribute(W + "val"), "off") && IsEnabled(vanish);
+        return IsEnabled(vanish);
     }
 
     /// <summary>
@@ -3625,6 +3683,8 @@ public sealed class DocxAdapter : IFormatProbe
     private static XElement? CreateRunProperties(TextRun run, XElement? originalProperties = null)
     {
         var properties = originalProperties is null ? new XElement(W + "rPr") : new XElement(originalProperties);
+        // A run that was struck twice stays struck twice when it is written back.
+        var doubleStrike = IsEnabled(originalProperties?.Element(W + "dstrike")) && !IsEnabled(originalProperties?.Element(W + "strike"));
         properties.Elements(W + "rStyle").Remove();
         properties.Elements(W + "b").Remove();
         properties.Elements(W + "bCs").Remove();
@@ -3637,7 +3697,7 @@ public sealed class DocxAdapter : IFormatProbe
         if (run.Bold) properties.Add(new XElement(W + "b"));
         if (run.Italic) properties.Add(new XElement(W + "i"));
         if (run.Underline) properties.Add(new XElement(W + "u", new XAttribute(W + "val", "single")));
-        if (run.Strike) properties.Add(new XElement(W + "strike"));
+        if (run.Strike) properties.Add(new XElement(W + (doubleStrike ? "dstrike" : "strike")));
         // Word has no semantic inline-code element.  Preserve a code character style when
         // supplied; otherwise emit the conservative portable monospace equivalent.
         if (run.Code && (run.StyleId is null || !run.StyleId.Contains("code", StringComparison.OrdinalIgnoreCase)))

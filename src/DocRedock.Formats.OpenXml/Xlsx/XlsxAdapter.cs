@@ -33,6 +33,10 @@ public sealed record XlsxCellRecord(
     string? TableName = null)
 {
     public bool IsBlank => string.IsNullOrEmpty(Value) && string.IsNullOrEmpty(Formula);
+
+    /// <summary>The parts of <see cref="Value"/> drawn struck through: the whole value when the cell's
+    /// font strikes it, or the struck runs of rich text. Null when nothing is struck.</summary>
+    public IReadOnlyList<TextRange>? StruckRanges { get; init; }
 }
 
 /// <summary>An Excel table (ListObject) that a worksheet declares through a tablePart relationship.
@@ -55,7 +59,8 @@ public sealed record XlsxCellStyle(
     bool IsCentered = false,
     double? FontSize = null,
     string? NumberFormat = null,
-    bool IsCenterAcross = false);
+    bool IsCenterAcross = false,
+    bool IsStrike = false);
 
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
@@ -303,7 +308,8 @@ public sealed class XlsxAdapter
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = ReadAll(source);
         var package = Open(bytes);
-        var shared = ReadSharedStrings(package);
+        var richShared = ReadSharedStrings(package);
+        var shared = richShared.ToDictionary(item => item.Key, item => item.Value.Text, StringComparer.Ordinal);
         var styles = ReadStyles(package);
         var relationships = ReadRelationships(package, "xl/_rels/workbook.xml.rels");
         var workbook = ReadWorkbook(package, relationships);
@@ -331,7 +337,7 @@ public sealed class XlsxAdapter
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml);
             var tables = ReadTables(package, sheet.PartUri, xml);
-            var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, shared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
+            var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
@@ -575,6 +581,12 @@ public sealed class XlsxAdapter
             if (cell.DisplayStyle.FontSize is not null) extension["font_size"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.FontSize.Value);
             if (cell.DisplayStyle.NumberFormat is not null) extension["number_format"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.NumberFormat);
         }
+        // Struck-through text: "strike" when the whole value is struck (it holds for the displayed
+        // value too), else the struck character ranges [start, end) of the value.
+        if (cell.StruckRanges is [{ Start: 0 } whole] && whole.End >= (cell.Value?.Length ?? 0))
+            extension["strike"] = JsonSerializer.SerializeToElement(true);
+        else if (cell.StruckRanges is { Count: > 0 } struck)
+            extension["strike_ranges"] = JsonSerializer.SerializeToElement(struck.Select(range => new[] { range.Start, range.End }).ToArray());
         var layer = cell.IsHiddenRow || cell.IsHiddenColumn || !string.Equals(cell.SheetState, "visible", StringComparison.OrdinalIgnoreCase)
             ? ContentLayer.Hidden
             : ContentLayer.Body;
@@ -1042,29 +1054,97 @@ public sealed class XlsxAdapter
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     private static string Hash(string text) => Hash(Encoding.UTF8.GetBytes(text));
 
-    private static Dictionary<string, string> ReadSharedStrings(Dictionary<string, byte[]> package)
+    private static Dictionary<string, XlsxString> ReadSharedStrings(Dictionary<string, byte[]> package)
     {
-        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        var result = new Dictionary<string, XlsxString>(StringComparer.Ordinal);
         if (!package.TryGetValue("xl/sharedStrings.xml", out var bytes)) return result;
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        var index = 0; var text = new StringBuilder();
+        var index = 0;
         while (reader.Read())
-        {
             if (reader is { NodeType: XmlNodeType.Element, LocalName: "si" })
+                result[index++.ToString(CultureInfo.InvariantCulture)] = ReadRichString(reader);
+        return result;
+    }
+
+    /// <summary>A worksheet string, shared (si) or inline (is): its text and, for rich text, each run's
+    /// place in it and whether the run is struck through (null for a run without properties of its own,
+    /// which takes the cell's font).</summary>
+    private sealed record XlsxString(string Text, IReadOnlyList<(int Start, int End, bool? Strike)> Runs);
+
+    // Reads the si or is element the reader is on. The text is every t outside the phonetic guide
+    // (rPh), whitespace-only runs included: a run that is just a space separates the words around it.
+    private static XlsxString ReadRichString(XmlReader reader)
+    {
+        var text = new StringBuilder();
+        var runs = new List<(int Start, int End, bool? Strike)>();
+        using var sub = reader.ReadSubtree();
+        var phoneticDepth = -1;
+        var inText = false;
+        var inRunProperties = false;
+        int? runStart = null;
+        bool? runStrike = null;
+        while (sub.Read())
+        {
+            if (phoneticDepth >= 0)
             {
-                text.Clear();
-                using var sub = reader.ReadSubtree();
-                var phoneticDepth = -1;
-                while (sub.Read())
-                {
-                    if (sub.NodeType == XmlNodeType.Element && sub.LocalName == "rPh") phoneticDepth = sub.Depth;
-                    else if (sub.NodeType == XmlNodeType.EndElement && sub.LocalName == "rPh") phoneticDepth = -1;
-                    else if (sub.NodeType == XmlNodeType.Text && phoneticDepth < 0) text.Append(sub.Value);
-                }
-                result[index++.ToString(CultureInfo.InvariantCulture)] = text.ToString();
+                if (sub.NodeType == XmlNodeType.EndElement && sub.Depth == phoneticDepth) phoneticDepth = -1;
+                continue;
+            }
+            switch (sub.NodeType)
+            {
+                case XmlNodeType.Element when sub.LocalName == "rPh":
+                    if (!sub.IsEmptyElement) phoneticDepth = sub.Depth;
+                    break;
+                case XmlNodeType.Element when sub.LocalName == "r":
+                    runStart = text.Length;
+                    runStrike = null;
+                    break;
+                case XmlNodeType.Element when sub.LocalName == "rPr" && runStart is not null:
+                    // A run's own properties replace the cell's font: struck only if they say so.
+                    runStrike = false;
+                    inRunProperties = !sub.IsEmptyElement;
+                    break;
+                case XmlNodeType.Element when sub.LocalName == "strike" && inRunProperties:
+                    runStrike = IsOn(sub.GetAttribute("val"));
+                    break;
+                case XmlNodeType.Element when sub.LocalName == "t":
+                    inText = !sub.IsEmptyElement;
+                    break;
+                case XmlNodeType.EndElement when sub.LocalName == "t":
+                    inText = false;
+                    break;
+                case XmlNodeType.EndElement when sub.LocalName == "rPr":
+                    inRunProperties = false;
+                    break;
+                case XmlNodeType.EndElement when sub.LocalName == "r" && runStart is { } start:
+                    runs.Add((start, text.Length, runStrike));
+                    runStart = null;
+                    break;
+                case XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.SignificantWhitespace or XmlNodeType.Whitespace when inText:
+                    text.Append(sub.Value);
+                    break;
             }
         }
-        return result;
+        return new(text.ToString(), runs);
+    }
+
+    // A SpreadsheetML boolean property such as <strike/>: on unless val says 0 or false.
+    private static bool IsOn(string? value) => value is null || !(value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase));
+
+    // What is struck in a cell's value: its runs where they say so, else the whole value when the
+    // cell's font strikes it. Overlapping or touching ranges are merged.
+    private static IReadOnlyList<TextRange>? StruckRanges(string? value, IReadOnlyList<(int Start, int End, bool? Strike)>? runs, bool fontStrike)
+    {
+        if (string.IsNullOrEmpty(value)) return null;
+        if (runs is not { Count: > 0 }) return fontStrike ? [new TextRange(0, value.Length)] : null;
+        var ranges = new List<TextRange>();
+        foreach (var (start, end, strike) in runs)
+        {
+            if (!(strike ?? fontStrike) || end <= start) continue;
+            if (ranges.Count > 0 && ranges[^1].End >= start) ranges[^1] = ranges[^1] with { End = Math.Max(ranges[^1].End, end) };
+            else ranges.Add(new TextRange(start, end));
+        }
+        return ranges.Count == 0 ? null : ranges;
     }
     private sealed record SheetInfo(string Name, string PartUri, string State)
     {
@@ -1160,17 +1240,25 @@ public sealed class XlsxAdapter
 
     private static bool IsHiddenFlag(string? value) => value is "1" || bool.TryParse(value, out var parsed) && parsed;
 
-    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, string> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
+    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, XlsxString> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
     {
         var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
         {
             var reference = reader.GetAttribute("r") ?? ""; var type = reader.GetAttribute("t"); var style = reader.GetAttribute("s"); string? formula = null; string? value = null;
+            IReadOnlyList<(int Start, int End, bool? Strike)>? runs = null;
             using var sub = reader.ReadSubtree();
             sub.Read();
             while (!sub.EOF)
             {
-                if (sub.NodeType == XmlNodeType.Element && sub.LocalName is "f" or "v" or "t")
+                if (sub.NodeType == XmlNodeType.Element && sub.LocalName == "is")
+                {
+                    // An inline string is read like a shared one: every run, never only the last t,
+                    // and never the phonetic guide in place of the text.
+                    var inline = ReadRichString(sub);
+                    (value, runs) = (inline.Text, inline.Runs);
+                }
+                else if (sub.NodeType == XmlNodeType.Element && sub.LocalName is "f" or "v" or "t")
                 {
                     var local = sub.LocalName;
                     var content = sub.ReadElementContentAsString();
@@ -1183,7 +1271,7 @@ public sealed class XlsxAdapter
             }
             var (row, column) = ParseCellReference(reference);
             if (row == 0 || column == 0) continue;
-            if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) value = sharedValue;
+            if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) (value, runs) = (sharedValue.Text, sharedValue.Runs);
             if (formula is not null)
             {
                 diagnostics.Add(ClassifyFormula(reference, formula) with { SheetName = sheet });
@@ -1195,7 +1283,10 @@ public sealed class XlsxAdapter
                 : null;
             var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
             result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
-                IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState));
+                IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState)
+            {
+                StruckRanges = StruckRanges(value, type is "s" or "inlineStr" ? runs : null, displayStyle?.IsStrike == true),
+            });
         }
         return result;
     }
@@ -1213,6 +1304,7 @@ public sealed class XlsxAdapter
             .Select(font => new
             {
                 Bold = DirectChild(font, "b") is not null,
+                Strike = DirectChild(font, "strike") is { } strike && IsOn(strike.GetAttribute("val") is { Length: > 0 } val ? val : null),
                 Size = double.TryParse(DirectChild(font, "sz")?.GetAttribute("val"), NumberStyles.Float, CultureInfo.InvariantCulture, out var size) ? size : (double?)null
             }).ToArray() ?? [];
         var fills = DirectChild(root, "fills")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "fill")
@@ -1238,7 +1330,8 @@ public sealed class XlsxAdapter
                 alignment is "center" or "centerContinuous" or "distributed",
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length ? fonts[fontId.Value].Size : null,
                 numberFormatId is null ? null : ResolveNumberFormat(numberFormatId.Value, formats),
-                alignment == "centerContinuous");
+                alignment == "centerContinuous",
+                fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Strike);
         }).ToArray();
     }
 

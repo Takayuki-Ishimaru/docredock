@@ -140,7 +140,7 @@ public partial class ReviewWindow : Window
                 // not by what it painted, and text kept with a doubt by where the text sits; both
                 // get a dashed outline without a tint over the page. A traced element needs no tint
                 // either: its trace already points at it, and a tint would cover the zoomed detail.
-                var bounded = element.Kind is ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText;
+                var bounded = element.Kind is ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText or ReviewElementKind.StrikethroughUnplaced;
                 var frame = new Rectangle
                 {
                     Width = Math.Max(thickness * 3, region.Width * width),
@@ -180,12 +180,14 @@ public partial class ReviewWindow : Window
     private static string LegendSubject(ReviewPage page)
     {
         var subjects = new List<string>();
-        if (page.Elements.Any(element => element.Kind is not (ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText)))
+        if (page.Elements.Any(element => element.Kind is not (ReviewElementKind.UnanalyzedContent or ReviewElementKind.UncertainText or ReviewElementKind.StrikethroughUnplaced)))
             subjects.Add("変換できなかった線や図形の位置");
         if (page.Elements.Any(element => element.Kind == ReviewElementKind.UnanalyzedContent))
             subjects.Add("解析できなかった描画部品が描かれる範囲");
         if (page.Elements.Any(element => element.Kind == ReviewElementKind.UncertainText))
             subjects.Add("文字の対応や表示の有無を確定できなかった文字の位置");
+        if (page.Elements.Any(element => element.Kind == ReviewElementKind.StrikethroughUnplaced))
+            subjects.Add("一部に取り消し線があり、どの文字が取り消されているかを確定できなかった文字の位置");
         return string.Join("、または", subjects);
     }
 

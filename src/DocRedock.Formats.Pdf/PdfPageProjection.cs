@@ -8,6 +8,12 @@ namespace DocRedock.Formats.Pdf;
 /// extractor result, so failed downstream rendering cannot lose native text evidence.</summary>
 public static class PdfPageProjection
 {
+    /// <summary>The "strike_ranges" extension of a line: its struck-through characters as [start, end)
+    /// offsets into its text; null when nothing is struck.</summary>
+    public static JsonElement? StrikeRanges(PdfTextRegion region) => region.Struck is { Count: > 0 } struck
+        ? JsonSerializer.SerializeToElement(struck.Select(range => new[] { range.Start, range.End }).ToArray())
+        : null;
+
     public static IReadOnlyList<DocumentNode> ToDocumentNodes(PdfPageText page,
         IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0)
     {
@@ -42,9 +48,10 @@ public static class PdfPageProjection
             {
                 var region = flow[flowIndex++];
                 var order = startingOrder + nodes.Count;
+                var extensions = StrikeRanges(region) is { } ranges ? new Dictionary<string, JsonElement> { ["strike_ranges"] = ranges } : null;
                 nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", NodeKind.Paragraph, null, order,
                     ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
-                    Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")]));
+                    Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));
             }
         }
         foreach (var (table, position) in placements)
@@ -63,6 +70,13 @@ public static class PdfPageProjection
             // text folded with glyphs, no PDF-specific serializer change needed.
             if (table.Overlays is { Count: > 0 } overlays)
                 extensions["table_overlays"] = JsonSerializer.SerializeToElement(overlays);
+            // Struck-through cell text, as Word and PowerPoint tables name it: [row, cell, [[start, end], ...]].
+            var struckCells = table.Rows.SelectMany((row, rowIndex) => row.Cells.OrderBy(cell => cell.Column)
+                    .Select((cell, cellIndex) => (rowIndex, cellIndex, cell.Struck)))
+                .Where(item => item.Struck is { Count: > 0 })
+                .Select(item => new object[] { item.rowIndex, item.cellIndex, item.Struck!.Select(range => new[] { range.Start, range.End }).ToArray() })
+                .ToArray();
+            if (struckCells.Length > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
             nodes.Add(new DocumentNode(table.Id, NodeKind.Table, null, order, ContentLayer.Body,
                 new TableNodeContent(rows), Geometry: table.Bounds, Editability: NodeEditability.Protected,
                 Provenance: [new ProvenanceItem(EvidenceKind.TableInferred, Engine: "pdf vector grid")], Extensions: extensions));

@@ -138,7 +138,8 @@ public static class PdfVisualOutputCompactor
     /// is whatever PdfTableOverlayDetector used as an overlay's own ShapeId -- a promoted
     /// VisualNode's or VisualEdge's own id, or (for a shape that never resolved into either, e.g.
     /// a filled bar with no matching label) a raw VisualPath id directly.</summary>
-    public static VisualGraph RemoveConsumedOverlayVisuals(VisualGraph graph, IReadOnlyList<string> overlayShapeIds)
+    public static VisualGraph RemoveConsumedOverlayVisuals(VisualGraph graph, IReadOnlyList<string> overlayShapeIds,
+        string reason = "table overlay consumed by table projection")
     {
         ArgumentNullException.ThrowIfNull(graph); ArgumentNullException.ThrowIfNull(overlayShapeIds);
         if (overlayShapeIds.Count == 0) return graph;
@@ -189,7 +190,7 @@ public static class PdfVisualOutputCompactor
         var paths = (graph.Paths ?? []).Where(path => !consumedPathIds.Contains(path.Id)).ToArray();
         var items = source.Select(item => consumedPathIds.Contains(item.Id)
             ? item with { Disposition = VisualDisposition.IgnoredDecorative, ProjectedNodeId = null, ProjectedEdgeId = null,
-                FallbackPathId = null, Reason = "table overlay consumed by table projection" }
+                FallbackPathId = null, Reason = reason }
             : item).ToArray();
         // P2 fix: count unresolved-edge removals from the actual, final removed-edge set (every
         // graph.Edges member not present in the surviving `edges` array above), not merely
