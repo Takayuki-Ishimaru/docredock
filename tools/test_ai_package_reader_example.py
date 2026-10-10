@@ -447,13 +447,19 @@ class ReaderContracts(unittest.TestCase):
         for message, change in cases.items():
             with self.subTest(message=message):
                 path = change_index(change)
-                self.assertEqual((0, 'files ok\n'), self.run_cli(path, '--verify')[:2])
+                # The files match their hashes, but --verify also reads the index it vouches for.
+                self.assert_refused(path, '--verify', says=message)
                 with reader.open_package(path) as package, self.assertRaises(reader.PackageError) as raised:
                     reader.load_source_index(package, reader.load_manifest(package))
                 self.assertIn(message, str(raised.exception))
-        path = self.patched('schema-2.1', lambda m: m.pop('source_index'))
-        with reader.open_package(path) as package, self.assertRaises(reader.PackageError):
-            reader.load_source_index(package, reader.load_manifest(package))
+        # Schema 2.x keeps node identities only in the source index, so it cannot be left out.
+        for change, message in [(lambda m: m.pop('source_index'), 'source_index is missing'),
+                                (lambda m: m.update(source_index=None), 'source_index is null')]:
+            path = self.patched('schema-2.1', change)
+            with reader.open_package(path) as package, self.assertRaises(reader.PackageError) as raised:
+                reader.load_manifest(package)
+            self.assertEqual(message, str(raised.exception))
+            self.assert_refused(path, '--verify', says=message)
 
     def test_fail_on_review_stops_before_anything_is_printed(self):
         path = self.copy_of('schema-2.1', 'review')

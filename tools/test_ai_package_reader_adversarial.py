@@ -412,7 +412,8 @@ class TestZipOddities(PackageFixture):
                                              ('/manifest.json', manifest_bytes)])
         with self.subTest(case='top level manifest plus the odd entry'):
             self.assertEqual('2.1', self.load(archive)['schema_version'])
-            self.assertEqual((0, 'files ok\n'), self.run_cli(archive, '--verify')[:2])
+            # Read as a file of its own, the odd entry is one the manifest does not list.
+            self.assertEqual((1, '/manifest.json: not listed in the manifest\n'), self.run_cli(archive, '--verify')[:2])
 
 
 class TestPackageShapes(PackageFixture):
@@ -450,7 +451,6 @@ class TestPackageShapes(PackageFixture):
             'node_count 2**31-1': lambda m: m['parts'][0].update(node_count=2 ** 31 - 1),
             'page_number 2**31-1': lambda m: m['locations'][0].update(page_number=2 ** 31 - 1),
             'estimated_tokens 2**31-1': lambda m: m['parts'][0].update(estimated_tokens=2 ** 31 - 1),
-            'table_block count 2**31-1': lambda m: m['parts'][0]['table_block'].update(count=2 ** 31 - 1),
         }
         refused = {
             'bytes 2**63': lambda m: m['files'][0].update(bytes=2 ** 63),
@@ -470,6 +470,10 @@ class TestPackageShapes(PackageFixture):
                 path = self.patch_manifest(self.build(), change)
                 self.load(path, reader.PackageError)
                 self.assert_refused(path)
+        # A block count of 2**31-1 is a valid number, refused only because one block cannot make it up.
+        path = self.patch_manifest(self.build(), lambda m: m['parts'][0]['table_block'].update(count=2 ** 31 - 1))
+        self.assertEqual("part part-0001 says table 't1' has 2147483647 blocks, but the manifest lists 1",
+                         str(self.load(path, reader.PackageError)))
 
     def test_unknown_fields_at_every_level_are_ignored(self):
         path = self.build()
