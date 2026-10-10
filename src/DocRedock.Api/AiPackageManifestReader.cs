@@ -61,6 +61,30 @@ public sealed record AiPackageManifest(
 /// <summary>Node identities (and worksheet cell addresses) of one part's source location.</summary>
 public sealed record AiPackageSourceGroup(string SourceId, IReadOnlyList<string> NodeIds, IReadOnlyList<string?>? CellAddresses);
 
+/// <summary>What a package's report.json says about review: whether something needs comparison with
+/// the source (review pages, OCR items, worksheet table boundaries), and the summary's
+/// <c>review_items_detected</c> and <c>hidden_content_included</c> flags (null in a report that predates
+/// them). None of them certifies the conversion.</summary>
+public sealed record AiPackageReview(bool Required, bool? ReviewItemsDetected, bool? HiddenContentIncluded);
+
+/// <summary>One part read by <see cref="AiPackageManifestReader.ReadVerifiedPartAsync"/>: its Markdown,
+/// exactly the bytes that were verified, its source-index groups and the package's review state,
+/// with the manifest the package was checked against.</summary>
+public sealed record AiPackageVerifiedPart(
+    AiPackageManifest Manifest,
+    AiPackageManifestPart Part,
+    string Markdown,
+    IReadOnlyList<AiPackageSourceGroup> Sources,
+    AiPackageReview Review);
+
+/// <summary>A package file is missing, changed, refused or not listed in the manifest.
+/// <see cref="Problems"/> holds the lines <see cref="AiPackageManifestReader.VerifyFilesAsync"/> returns.</summary>
+public sealed class AiPackageVerificationException(IReadOnlyList<string> problems)
+    : Exception("AI package verification failed: " + string.Join("; ", problems))
+{
+    public IReadOnlyList<string> Problems { get; } = problems;
+}
+
 /// <summary>The schema version of a package JSON file (the manifest, the source index or the
 /// report) is missing or not one this reader understands. A file that is not valid JSON, or lacks
 /// a required field, raises <see cref="InvalidDataException"/>.</summary>
@@ -104,6 +128,11 @@ public static class AiPackageManifestReader
     public static async Task<AiPackageManifest> ReadAsync(string packagePath, CancellationToken cancellationToken = default)
     {
         using var files = new PackageFiles(packagePath);
+        return await ReadManifestAsync(files, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<AiPackageManifest> ReadManifestAsync(PackageFiles files, CancellationToken cancellationToken)
+    {
         byte[] bytes;
         try { bytes = await files.ReadAsync("manifest.json", cancellationToken).ConfigureAwait(false); }
         catch (FileNotFoundException exception) when (files.NestedManifest() is { } nested)
@@ -115,27 +144,80 @@ public static class AiPackageManifestReader
         return Parse(Utf8(bytes, "manifest.json"));
     }
 
+    /// <summary>Checks the package and returns one part with what it was checked against, in one call:
+    /// every listed file must match its size and SHA-256 with no other file in the package
+    /// (<see cref="VerifyFilesAsync"/>), and the source index and report must be well formed. The part's
+    /// Markdown is exactly the bytes that were verified. Raises <see cref="AiPackageVerificationException"/>
+    /// when a file is missing, changed, refused or not listed, <see cref="KeyNotFoundException"/> for an
+    /// unknown part id, and what <see cref="ReadAsync"/>, <see cref="ReadSourceIndexAsync"/> and
+    /// <see cref="ReadReviewAsync"/> raise for a malformed package.</summary>
+    public static async Task<AiPackageVerifiedPart> ReadVerifiedPartAsync(string packagePath, string partId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(partId);
+        using var files = new PackageFiles(packagePath);
+        var manifest = await ReadManifestAsync(files, cancellationToken).ConfigureAwait(false);
+        var part = manifest.Parts.FirstOrDefault(item => item.Id == partId) ??
+            throw new KeyNotFoundException($"AI package has no part '{partId}'.");
+        // Each file used after the checks is read once, so the bytes checked are the bytes used. A file
+        // of another size, or one that is missing or refused, is left for verification to report.
+        var listed = manifest.Files.ToDictionary(file => file.Path, file => file.Bytes, StringComparer.Ordinal);
+        var contents = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var path in new[] { part.Path, manifest.Report }.Concat(manifest.SourceIndex is { } index ? [index] : []))
+        {
+            if (contents.ContainsKey(path)) continue;
+            try
+            {
+                if (files.Size(path) == listed[path]) contents[path] = await files.ReadAsync(path, cancellationToken).ConfigureAwait(false);
+            }
+            catch (FileNotFoundException) { }
+            catch (InvalidDataException refused) when (IsRefused(refused)) { }
+        }
+        var problems = await VerifyAsync(files, manifest, contents, cancellationToken).ConfigureAwait(false);
+        if (problems.Count > 0) throw new AiPackageVerificationException(problems);
+        var sources = SourceIndex(manifest, manifest.SourceIndex is { } name ? contents[name] : null);
+        var review = Review(manifest, contents[manifest.Report]);
+        return new AiPackageVerifiedPart(manifest, part, Utf8(contents[part.Path], part.Path), sources[part.Id], review);
+    }
+
     /// <summary>Node identities and cell addresses of every part, keyed by part id. Schema 2.x reads
     /// the source index; schema 1.x groups the inline node identities by location. The index must
     /// agree with the manifest: its schema is 1.x, it lists each manifest part exactly once, a part's
     /// groups name exactly that part's locations, their node identities add up to its node count,
-    /// and cell addresses, when present, have one entry per node identity.</summary>
+    /// and cell addresses, when present, have one entry per node identity. In every schema a part
+    /// lists a node once, and every part that lists a node puts it at the same location and cell.</summary>
     public static async Task<IReadOnlyDictionary<string, IReadOnlyList<AiPackageSourceGroup>>> ReadSourceIndexAsync(
         string packagePath, AiPackageManifest manifest, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(manifest);
+        if (manifest.SourceIndex is null) return SourceIndex(manifest, null);
+        byte[] bytes;
+        using (var files = new PackageFiles(packagePath))
+            bytes = await files.ReadAsync(manifest.SourceIndex, cancellationToken).ConfigureAwait(false);
+        return SourceIndex(manifest, bytes);
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<AiPackageSourceGroup>> SourceIndex(AiPackageManifest manifest, byte[]? bytes)
+    {
+        // Node id -> the first part that listed it and where that part put it.
+        var places = new Dictionary<string, (string Part, string SourceId, string? Cell)>(StringComparer.Ordinal);
         if (manifest.SourceIndex is null)
         {
             if (!manifest.SchemaVersion.StartsWith("1.", StringComparison.Ordinal))
                 throw new InvalidDataException("AI package manifest has no source_index.");
-            return manifest.Parts.ToDictionary(part => part.Id, part => (IReadOnlyList<AiPackageSourceGroup>)part.Locations
-                .Select(location => LegacyGroup(part, location.Id)).ToArray(), StringComparer.Ordinal);
+            var legacy = new Dictionary<string, IReadOnlyList<AiPackageSourceGroup>>(StringComparer.Ordinal);
+            var manifestFields = new Fields("manifest.json");
+            var partPosition = 0;
+            foreach (var part in manifest.Parts)
+            {
+                var groups = part.Locations.Select(location => LegacyGroup(part, location.Id)).ToArray();
+                CheckNodes(manifestFields, $"parts[{partPosition++}]", part.Id, groups, places);
+                legacy[part.Id] = groups;
+            }
+            return legacy;
         }
         var name = manifest.SourceIndex;
-        byte[] bytes;
-        using (var files = new PackageFiles(packagePath))
-            bytes = await files.ReadAsync(name, cancellationToken).ConfigureAwait(false);
-        using var index = ParseJson(Utf8(bytes, name), name);
+        using var index = ParseJson(Utf8(bytes!, name), name);
         var fields = new Fields(name);
         var root = fields.Object(index.RootElement, "the index");
         var version = fields.Text(root, "", "schema_version");
@@ -175,6 +257,7 @@ public static class AiPackageManifestReader
                 throw fields.Invalid($"{where} groups name the locations [{string.Join(", ", named)}], but the manifest part lists [{string.Join(", ", expected)}]");
             var total = groups.Sum(group => group.NodeIds.Count);
             if (total != part.NodeCount) throw fields.Invalid($"{where} lists {total} node ids, but the manifest part counts {part.NodeCount}");
+            CheckNodes(fields, where, id, groups, places);
             result[id] = groups;
         }
         var absent = manifest.Parts.Select(part => part.Id).Where(id => !result.ContainsKey(id)).ToArray();
@@ -182,54 +265,118 @@ public static class AiPackageManifestReader
         return result;
     }
 
-    /// <summary>Checks every file the manifest lists against its size and SHA-256. Returns one
-    /// message per listed file that is missing, changed or refused (a link, pipe or device in a
-    /// package folder, an encrypted or unreadable ZIP entry), in the same words as
-    /// docs/examples/ai_package_reader.py; an empty list means the package is intact. The manifest read
-    /// by <see cref="Parse(string)"/> already lists every file it refers to. A package that cannot be
-    /// opened at all (not a folder or a plain ZIP) raises <see cref="InvalidDataException"/>.</summary>
+    // A part lists a node once, and every part that lists a node puts it at the same location and
+    // cell: joining text to its source by node id must have one answer.
+    private static void CheckNodes(Fields fields, string where, string partId, IReadOnlyList<AiPackageSourceGroup> groups,
+        Dictionary<string, (string Part, string SourceId, string? Cell)> places)
+    {
+        static string Place(string sourceId, string? cell) => sourceId + " " + (cell is null ? "without a cell" : "cell " + Python.Repr(cell));
+        var listed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in groups)
+            for (var index = 0; index < group.NodeIds.Count; index++)
+            {
+                var node = group.NodeIds[index];
+                var cell = group.CellAddresses?[index];
+                if (!listed.Add(node)) throw fields.Invalid($"{where} lists node {Python.Repr(node)} twice");
+                if (!places.TryAdd(node, (partId, group.SourceId, cell)) && places[node] is var first &&
+                    (first.SourceId != group.SourceId || first.Cell != cell))
+                    throw fields.Invalid($"{where} puts node {Python.Repr(node)} at {Place(group.SourceId, cell)}, but part {first.Part} puts it at {Place(first.SourceId, first.Cell)}");
+            }
+    }
+
+    /// <summary>Checks the package against its manifest's file list. Returns one message per listed file
+    /// that is missing, changed or refused (a link, pipe or device in a package folder, an encrypted or
+    /// unreadable ZIP entry) and per other file in the package, in the same words as
+    /// docs/examples/ai_package_reader.py; an empty list means the package holds exactly the listed files
+    /// (and manifest.json), each matching its size and SHA-256. Files an operating system leaves behind
+    /// (.DS_Store, Thumbs.db, desktop.ini, AppleDouble "._" files, __MACOSX folders) are not reported.
+    /// The manifest read by <see cref="Parse(string)"/> already lists every file it refers to. A package
+    /// that cannot be opened at all (not a folder or a plain ZIP) raises <see cref="InvalidDataException"/>.</summary>
     public static async Task<IReadOnlyList<string>> VerifyFilesAsync(string packagePath, AiPackageManifest manifest,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         using var files = new PackageFiles(packagePath);
+        return await VerifyAsync(files, manifest, new Dictionary<string, byte[]>(StringComparer.Ordinal), cancellationToken).ConfigureAwait(false);
+    }
+
+    // contents holds bytes the caller already read; they are checked instead of reading the file again,
+    // so the caller uses exactly the bytes that were verified.
+    private static async Task<List<string>> VerifyAsync(PackageFiles files, AiPackageManifest manifest,
+        IReadOnlyDictionary<string, byte[]> contents, CancellationToken cancellationToken)
+    {
         var problems = new List<string>();
         foreach (var file in manifest.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            byte[] bytes;
-            try
-            {
-                // A different size already says the content changed; it is found without reading the file.
-                var size = files.Size(file.Path);
-                if (size != file.Bytes)
+            if (!contents.TryGetValue(file.Path, out var bytes))
+                try
                 {
-                    problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {size})");
-                    continue;
+                    // A different size already says the content changed; it is found without reading the file.
+                    var size = files.Size(file.Path);
+                    if (size != file.Bytes)
+                    {
+                        problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {size})");
+                        continue;
+                    }
+                    bytes = await files.ReadAsync(file.Path, cancellationToken).ConfigureAwait(false);
                 }
-                bytes = await files.ReadAsync(file.Path, cancellationToken).ConfigureAwait(false);
-            }
-            catch (FileNotFoundException) { problems.Add($"{file.Path}: missing"); continue; }
-            catch (InvalidDataException refused) when (IsRefused(refused)) { problems.Add($"{file.Path}: refused ({refused.Message})"); continue; }
+                catch (FileNotFoundException) { problems.Add($"{file.Path}: missing"); continue; }
+                catch (InvalidDataException refused) when (IsRefused(refused)) { problems.Add($"{file.Path}: refused ({refused.Message})"); continue; }
             var expected = file.Sha256.ToLowerInvariant();
             var actual = Convert.ToHexStringLower(SHA256.HashData(bytes));
             if (bytes.LongLength != file.Bytes) problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {bytes.LongLength})");
             else if (actual != expected) problems.Add($"{file.Path}: sha256 mismatch (expected {expected}, got {actual})");
         }
+        // Anything else in the package is not covered by the manifest, whatever refers to it. A link
+        // where a folder of listed files belongs has already made those files refused.
+        var listed = manifest.Files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
+        var folders = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var path in listed)
+            for (var end = path.IndexOf('/'); end >= 0; end = path.IndexOf('/', end + 1))
+                folders.Add(path[..end]);
+        foreach (var name in files.Files().Order(Utf8Order))
+            if (name != "manifest.json" && !listed.Contains(name) && !folders.Contains(name) && !LeftBySystem(name))
+                problems.Add($"{Shown(name)}: not listed in the manifest");
         return problems;
     }
 
-    /// <summary>Whether the package's report.json says something needs comparison with the source
-    /// (review pages, OCR items, worksheet table boundaries). Read review.md before giving such a
-    /// package to a model. A report whose schema is not 1.x raises <see cref="AiPackageSchemaException"/>;
-    /// one without a boolean <c>review.required</c> raises <see cref="InvalidDataException"/>.</summary>
+    // Files operating systems leave in folders and archives (Finder, Explorer); never part of a package.
+    private static bool LeftBySystem(string name)
+    {
+        var start = name.LastIndexOf('/') + 1;
+        var baseName = name[start..];
+        return baseName is ".DS_Store" or "Thumbs.db" or "desktop.ini" || baseName.StartsWith("._", StringComparison.Ordinal) ||
+            name.Split('/')[0] == "__MACOSX";
+    }
+
+    // Names sorted as Python sorts them: by code point, which is the order of their UTF-8 bytes.
+    private static readonly Comparer<string> Utf8Order = Comparer<string>.Create((left, right) =>
+        Encoding.UTF8.GetBytes(left).AsSpan().SequenceCompareTo(Encoding.UTF8.GetBytes(right)));
+
+    /// <summary>Whether the package's report.json says something needs comparison with the source;
+    /// <see cref="ReadReviewAsync"/>'s <see cref="AiPackageReview.Required"/>.</summary>
     public static async Task<bool> ReadReviewRequiredAsync(string packagePath, AiPackageManifest manifest,
+        CancellationToken cancellationToken = default) =>
+        (await ReadReviewAsync(packagePath, manifest, cancellationToken).ConfigureAwait(false)).Required;
+
+    /// <summary>What the package's report.json says about review: whether something needs comparison
+    /// with the source (review pages, OCR items, worksheet table boundaries) and the summary's flags.
+    /// Read review.md before giving a package that requires review to a model. A report whose schema is
+    /// not 1.x raises <see cref="AiPackageSchemaException"/>; one without a boolean <c>review.required</c>,
+    /// or with a summary flag that is not a boolean, raises <see cref="InvalidDataException"/>.</summary>
+    public static async Task<AiPackageReview> ReadReviewAsync(string packagePath, AiPackageManifest manifest,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(manifest);
         byte[] bytes;
         using (var files = new PackageFiles(packagePath))
             bytes = await files.ReadAsync(manifest.Report, cancellationToken).ConfigureAwait(false);
+        return Review(manifest, bytes);
+    }
+
+    private static AiPackageReview Review(AiPackageManifest manifest, byte[] bytes)
+    {
         using var report = ParseJson(Utf8(bytes, manifest.Report), manifest.Report);
         var fields = new Fields(manifest.Report);
         var root = fields.Object(report.RootElement, "the report");
@@ -238,12 +385,12 @@ public static class AiPackageManifestReader
             throw new AiPackageSchemaException(version, $"AI package {manifest.Report} schema_version '{version}' is unsupported (supported: 1.x).");
         var review = fields.Object(fields.Required(root, "", "review"), "review");
         var required = fields.Required(review, "review", "required");
-        return required.ValueKind switch
-        {
-            JsonValueKind.True => true,
-            JsonValueKind.False => false,
-            _ => throw fields.Invalid($"review.required must be true or false, got {Fields.Kind(required)}"),
-        };
+        if (required.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+            throw fields.Invalid($"review.required must be true or false, got {Fields.Kind(required)}");
+        var summary = Fields.Optional(root, "summary") is { } value ? fields.Object(value, "summary") : (JsonElement?)null;
+        return new AiPackageReview(required.ValueKind == JsonValueKind.True,
+            summary is { } flags ? fields.OptionalFlag(flags, "summary", "review_items_detected") : null,
+            summary is { } other ? fields.OptionalFlag(other, "summary", "hidden_content_included") : null);
     }
 
     private static AiPackageManifest Parse(JsonElement root)
@@ -261,7 +408,8 @@ public static class AiPackageManifestReader
         var legacy = version.StartsWith("1.", StringComparison.Ordinal);
         var (locations, parts) = legacy ? LegacyParts(fields, root) : CurrentParts(fields, root);
         CheckParts(fields, parts);
-        var sourceIndex = legacy ? null : fields.OptionalPath(root, "", "source_index");
+        // 2.x keeps node identities only in the source index, so a 2.x package always has one.
+        var sourceIndex = legacy ? null : fields.Path(root, "", "source_index");
         var manifest = new AiPackageManifest(version, fields.OptionalText(root, "", "generator_version"),
             fields.Text(source, "source", "file_name"), fields.Sha256(source, "source", "sha256"), fields.Text(source, "source", "format"),
             fields.Text(root, "", "content_policy"), fields.OptionalCount(root, "", "target_characters") ?? 0,
@@ -289,6 +437,7 @@ public static class AiPackageManifestReader
             var where = $"files[{position++}]";
             fields.Object(item, where);
             var path = fields.Path(item, where, "path");
+            if (path == "manifest.json") throw fields.Invalid($"{where}.path is manifest.json, which cannot hold its own size and SHA-256");
             if (!seen.Add(path)) throw fields.Invalid($"files list '{path}' twice");
             files.Add(new AiPackageManifestFile(path, fields.Bytes(item, where, "bytes"), fields.Sha256(item, where, "sha256")));
         }
@@ -378,10 +527,49 @@ public static class AiPackageManifestReader
             if (!ids.Add(part.Id)) throw fields.Invalid($"parts list the id '{part.Id}' twice");
             if (!paths.Add(part.Path)) throw fields.Invalid($"parts list the path '{part.Path}' twice");
         }
+        var tables = new Dictionary<string, List<AiPackageManifestPart>>(StringComparer.Ordinal);
+        var order = new List<string>();
         foreach (var part in parts)
+        {
             foreach (var (key, neighbour) in new[] { ("previous_part", part.TableBlock?.PreviousPart), ("next_part", part.TableBlock?.NextPart) })
                 if (neighbour is not null && !ids.Contains(neighbour))
                     throw fields.Invalid($"part {part.Id} {key} names an unknown part '{neighbour}'");
+            if (part.TableBlock is not { } block) continue;
+            if (!tables.TryGetValue(block.TableId, out var blocks))
+            {
+                tables.Add(block.TableId, blocks = []);
+                order.Add(block.TableId);
+            }
+            blocks.Add(part);
+        }
+        // The blocks of a cut table form one chain, 1 to count, each naming its neighbours, so a reader
+        // following next_part reaches every block once and never runs into another table or in a circle.
+        foreach (var tableId in order)
+        {
+            var blocks = tables[tableId];
+            var byIndex = new Dictionary<int, AiPackageManifestPart>();
+            foreach (var part in blocks)
+            {
+                var block = part.TableBlock!;
+                if (block.Count != blocks.Count)
+                    throw fields.Invalid($"part {part.Id} says table {Python.Repr(tableId)} has {block.Count} blocks, but the manifest lists {blocks.Count}");
+                if (!byIndex.TryAdd(block.Index, part))
+                    throw fields.Invalid($"table {Python.Repr(tableId)} gives index {block.Index} to parts {byIndex[block.Index].Id} and {part.Id}");
+            }
+            for (var index = 1; index <= blocks.Count; index++)
+            {
+                var part = byIndex[index];
+                foreach (var (key, neighbour, actual) in new[]
+                         { ("previous_part", index - 1, part.TableBlock!.PreviousPart), ("next_part", index + 1, part.TableBlock.NextPart) })
+                {
+                    var expected = byIndex.TryGetValue(neighbour, out var other) ? other.Id : null;
+                    if (actual == expected) continue;
+                    throw fields.Invalid($"part {part.Id} table_block.{key} is {(actual is null ? "null" : Python.Repr(actual))}, but " +
+                        (expected is null ? $"it is the {(neighbour < index ? "first" : "last")} block of table {Python.Repr(tableId)}"
+                            : $"block {neighbour}/{blocks.Count} of table {Python.Repr(tableId)} is {expected}"));
+                }
+            }
+        }
     }
 
     // A 1.x part listed its nodes inline; group them by location like a source index does.
@@ -463,10 +651,33 @@ public static class AiPackageManifestReader
     }
 
     // Names come from the manifest, so a name that would leave the package is refused rather than
-    // followed: absolute, drive and ".." paths, backslashes, colons (C:x, alternate data streams) and NUL.
+    // followed: absolute, drive and ".." paths, backslashes, colons (C:x, alternate data streams), NUL and
+    // the other characters IsUnshown names, which package names never contain.
     private static bool IsPackagePath(string path) =>
-        path.Length > 0 && path.IndexOfAny(['\\', ':', '\0']) < 0 && !path.StartsWith('/') && !System.IO.Path.IsPathRooted(path) &&
-        path.Split('/').All(segment => segment is not ("" or "." or ".."));
+        path.Length > 0 && path.IndexOfAny(['\\', ':']) < 0 && !path.Any(IsUnshown) && !path.StartsWith('/') &&
+        !System.IO.Path.IsPathRooted(path) && path.Split('/').All(segment => segment is not ("" or "." or ".."));
+
+    // Characters that move the cursor, start a terminal escape sequence, break a line or reorder the text
+    // around them when printed: C0 and C1 controls, DEL, line and paragraph separators and bidirectional
+    // formatting characters (the Python reader's UNSHOWN_RE, which also names lone surrogates).
+    private static bool IsUnshown(char character) => character is <= '\u001f' or (>= '\u007f' and <= '\u009f') or '\u061c' or
+        '\u200e' or '\u200f' or '\u2028' or '\u2029' or (>= '\u202a' and <= '\u202e') or (>= '\u2066' and <= '\u2069');
+
+    // A name as both readers print it: the characters IsUnshown names, and lone surrogates, as \xNN or \uNNNN.
+    private static string Shown(string text)
+    {
+        var shown = new StringBuilder(text.Length);
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (char.IsHighSurrogate(character) && index + 1 < text.Length && char.IsLowSurrogate(text[index + 1]))
+                shown.Append(character).Append(text[++index]);
+            else if (IsUnshown(character) || char.IsSurrogate(character))
+                shown.Append(character < 0x100 ? "\\x" : "\\u").Append(((int)character).ToString(character < 0x100 ? "x2" : "x4", CultureInfo.InvariantCulture));
+            else shown.Append(character);
+        }
+        return shown.ToString();
+    }
 
     // Field checks for one JSON file. Messages name the file and the field, e.g.
     // "AI package manifest.json: parts[2].table_block.index must be from 1 to count (3), got 4."
@@ -519,9 +730,11 @@ public static class AiPackageManifestReader
                 : throw Invalid($"{Name(where, key)} must be a whole number from 0 to {long.MaxValue}, got {value.GetRawText()}");
         }
 
-        public bool Flag(JsonElement element, string where, string key) => Optional(element, key) switch
+        public bool Flag(JsonElement element, string where, string key) => OptionalFlag(element, where, key) ?? false;
+
+        public bool? OptionalFlag(JsonElement element, string where, string key) => Optional(element, key) switch
         {
-            null => false,
+            null => null,
             { ValueKind: JsonValueKind.True } => true,
             { ValueKind: JsonValueKind.False } => false,
             { } value => throw Invalid($"{Name(where, key)} must be true or false, got {Kind(value)}"),
@@ -581,6 +794,7 @@ public static class AiPackageManifestReader
         private readonly string? archive;
         private readonly ZipArchive? zip;
         private readonly Dictionary<string, ZipItem> entries = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, HashSet<string>> listings = new(StringComparer.Ordinal);
 
         // Files larger than this are refused rather than read into memory (both readers use the limit).
         private const long MaxFileBytes = 2_147_483_520;
@@ -732,6 +946,28 @@ public static class AiPackageManifestReader
                 .Where(folder => File.Exists(System.IO.Path.Combine(folder, "manifest.json")))
                 .Select(folder => System.IO.Path.GetFileName(folder) + "/manifest.json").FirstOrDefault();
 
+        /// <summary>Every file in the package as a package path: the ZIP entries that are not folders, or
+        /// everything in the folder that is not a folder (links, pipes and devices included), without
+        /// following links.</summary>
+        public IEnumerable<string> Files()
+        {
+            if (zip is not null) return entries.Keys.Where(name => !name.EndsWith('/'));
+            var names = new List<string>();
+            Walk(directory!, string.Empty);
+            return names;
+
+            void Walk(string folder, string prefix)
+            {
+                foreach (var path in Directory.EnumerateFileSystemEntries(folder))
+                {
+                    var name = prefix + System.IO.Path.GetFileName(path);
+                    var item = new DirectoryInfo(path);
+                    if (item.Exists && item.LinkTarget is null) Walk(path, name + "/");
+                    else names.Add(name);
+                }
+            }
+        }
+
         public void Dispose() => zip?.Dispose();
 
         private static void CheckPath(string relativePath)
@@ -757,6 +993,7 @@ public static class AiPackageManifestReader
             var path = directory!;
             foreach (var segment in relativePath.Split('/'))
             {
+                if (!Names(path).Contains(segment)) throw new FileNotFoundException("AI package file not found.", relativePath);
                 path = System.IO.Path.Combine(path, segment);
                 var item = Directory.Exists(path) ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
                 if (item.LinkTarget is not null) throw Refused($"package path is a link: {Python.Repr(relativePath)}");
@@ -764,6 +1001,21 @@ public static class AiPackageManifestReader
             }
             if (!File.Exists(path)) throw new FileNotFoundException("AI package file not found.", relativePath);
             return FileKind.IsRegular(path) ? path : throw Refused($"package path is not a regular file: {Python.Repr(relativePath)}");
+        }
+
+        // The exact names in a package folder. A name differing in letter case or Unicode form is a
+        // missing file everywhere, as in a ZIP, not only where the file system tells the names apart.
+        private HashSet<string> Names(string folder)
+        {
+            if (listings.TryGetValue(folder, out var names)) return names;
+            try
+            {
+                names = Directory.EnumerateFileSystemEntries(folder).Select(System.IO.Path.GetFileName).OfType<string>()
+                    .ToHashSet(StringComparer.Ordinal);
+            }
+            catch (IOException) { names = []; }   // not a folder (a file, or nothing)
+            listings.Add(folder, names);
+            return names;
         }
     }
 
@@ -820,25 +1072,32 @@ public static class AiPackageManifestReader
                 stream.ReadExactly(locator);
                 if (locator.AsSpan(0, 4).SequenceEqual("PK\u0006\u0007"u8))
                 {
-                    var record = (long)BinaryPrimitives.ReadUInt64LittleEndian(locator.AsSpan(8));
+                    // The Zip64 end record ends where its locator begins, as Python 3.12's zipfile requires.
+                    var locatorStart = location - 20;
+                    if (BinaryPrimitives.ReadUInt32LittleEndian(locator.AsSpan(4)) != 0 || BinaryPrimitives.ReadUInt32LittleEndian(locator.AsSpan(16)) > 1)
+                        throw new InvalidDataException("the ZIP spans several disks");
+                    var record = BinaryPrimitives.ReadUInt64LittleEndian(locator.AsSpan(8));
+                    if (locatorStart - 56 < 0 || record > (ulong)(locatorStart - 56))
+                        throw new InvalidDataException("the ZIP's Zip64 end record locator points past the record");
                     var data = new byte[56];
-                    if (record >= 0 && record + 56 <= length)
-                    {
-                        stream.Position = record;
-                        stream.ReadExactly(data);
-                        if (data.AsSpan(0, 4).SequenceEqual("PK\u0006\u0006"u8))
-                        {
-                            disk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(16));
-                            directoryDisk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(20));
-                            count = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(32));
-                            size = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(40));
-                            offset = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(48));
-                            location = record;
-                        }
-                    }
+                    stream.Position = (long)record;
+                    stream.ReadExactly(data);
+                    if (!data.AsSpan(0, 4).SequenceEqual("PK\u0006\u0006"u8))
+                        throw new InvalidDataException("the ZIP's Zip64 end record is not where its locator points");
+                    if (BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(4)) != (ulong)(locatorStart - (long)record - 12))
+                        throw new InvalidDataException("the ZIP's Zip64 end record does not end where its locator begins");
+                    disk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(16));
+                    directoryDisk = BinaryPrimitives.ReadUInt32LittleEndian(data.AsSpan(20));
+                    count = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(32));
+                    size = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(40));
+                    offset = (long)BinaryPrimitives.ReadUInt64LittleEndian(data.AsSpan(48));
+                    location = (long)record;
                 }
             }
-            if (size < 0 || offset < 0 || offset + size > length) throw NotZip("Bad offset for central directory");
+            // Checked before the directory is read, in the Python reader's order (which checks before zipfile reads).
+            if (disk != 0 || directoryDisk != 0) throw new InvalidDataException("the ZIP spans several disks");
+            if (size < 0 || offset < 0 || offset != location - size)
+                throw new InvalidDataException("the ZIP's central directory does not end where its end record begins");
             var directory = new byte[size];
             stream.Position = offset;
             stream.ReadExactly(directory);
@@ -882,8 +1141,6 @@ public static class AiPackageManifestReader
                     BinaryPrimitives.ReadUInt32LittleEndian(header[16..]), unicodePath));
                 position += 46 + nameLength + extraLength + commentLength;
             }
-            if (disk != 0 || directoryDisk != 0) throw new InvalidDataException("the ZIP spans several disks");
-            if (offset + size != location) throw new InvalidDataException("the ZIP's central directory does not end where its end record begins");
             if (count != layout.Count)
                 throw new InvalidDataException($"the ZIP's end record counts {count} entries, but its central directory holds {layout.Count}");
             return layout;

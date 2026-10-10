@@ -235,8 +235,8 @@ public sealed class AiPackageManifestReaderTests : IDisposable
         Assert.Contains(problems, problem => problem == "parts/0003.md: missing");
         Assert.Equal($"parts/0002.md: sha256 mismatch (expected {manifest.Files.Single(file => file.Path == "parts/0002.md").Sha256}, got " +
             $"{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(changed)))})", problems[0]);
-        var escaping = manifest with { Files = [new AiPackageManifestFile("../outside.txt", 1, new string('0', 64))] };
-        Assert.Equal(["../outside.txt: refused (unsafe package path: '../outside.txt')"],
+        var escaping = manifest with { Files = [.. manifest.Files, new AiPackageManifestFile("../outside.txt", 1, new string('0', 64))] };
+        Assert.Equal([.. problems, "../outside.txt: refused (unsafe package path: '../outside.txt')"],
             await AiPackageManifestReader.VerifyFilesAsync(copy, escaping));
         Assert.Throws<InvalidDataException>(() => AiPackageManifestReader.Parse("{ not json"));
     }

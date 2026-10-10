@@ -34,6 +34,12 @@ public sealed class AiPackageReaderParityTests : IDisposable
             {
                 var manifest = await AiPackageManifestReader.ReadAsync(path).WaitAsync(TimeSpan.FromSeconds(30));
                 var problems = await AiPackageManifestReader.VerifyFilesAsync(path, manifest).WaitAsync(TimeSpan.FromSeconds(30));
+                if (problems.Count == 0)
+                {
+                    // As --verify does: intact files must also hold a readable source index and report.
+                    await AiPackageManifestReader.ReadSourceIndexAsync(path, manifest).WaitAsync(TimeSpan.FromSeconds(30));
+                    await AiPackageManifestReader.ReadReviewAsync(path, manifest).WaitAsync(TimeSpan.FromSeconds(30));
+                }
                 (expectedCode, expected) = problems.Count == 0 ? (0, "files ok") : (1, string.Join("\n", problems));
             }
             catch (Exception exception) when (exception is InvalidDataException or AiPackageSchemaException or FileNotFoundException)
@@ -198,7 +204,7 @@ public sealed class AiPackageReaderParityTests : IDisposable
         yield return ("larger than the limit", hugeZip);
     }
 
-    private static string? Python()
+    internal static string? Python()
     {
         foreach (var name in new[] { "python3", "python" })
             try
@@ -210,7 +216,7 @@ public sealed class AiPackageReaderParityTests : IDisposable
         return null;
     }
 
-    private static (int Code, string Output) RunPython(string python, string package)
+    internal static (int Code, string Output) RunPython(string python, string package)
     {
         var start = new ProcessStartInfo(python) { RedirectStandardOutput = true, RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8 };

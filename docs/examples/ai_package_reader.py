@@ -6,36 +6,50 @@ source-index.json and shares locations across parts.
 
 load_manifest checks the manifest before anything is read through it: every
 field this reader uses must be present with its documented type, ids and paths
-must be unique, and every file the manifest refers to (document, review,
-report, source index, parts) must be listed in "files" with its size and
-SHA-256, so verification can never pass without checking it. A manifest that
-fails a check raises PackageError (UnsupportedSchemaError for a schema version
-this reader does not know) instead of being read in part.
+must be unique, the blocks of a cut table must form one chain, and every file
+the manifest refers to (document, review, report, source index, parts) must be
+listed in "files" with its size and SHA-256, so verification can never pass
+without checking it. load_source_index checks that the source index agrees with
+the manifest and puts every node at one location and cell. A package that fails
+a check raises PackageError (UnsupportedSchemaError for a schema version this
+reader does not know) instead of being read in part.
 
 Usage:
-    python3 docs/examples/ai_package_reader.py PACKAGE [--verify] [--part PART_ID] [--fail-on-review]
+    python3 docs/examples/ai_package_reader.py PACKAGE [--verify] [--part PART_ID | --search TEXT]
+                                               [--fail-on-review] [--json]
 
-Checks run before anything is printed. --verify prints "files ok" or one line
-per listed file that is missing, changed or refused (a link, a pipe or device,
-an encrypted or unreadable ZIP entry); with --part those lines go to stderr and
-the part is printed, as the exact bytes that were verified, only when every
-listed file matches. The .NET AiPackageManifestReader reports the same lines.
-Exit codes: 0 success; 1 --verify found a listed file missing, changed
-or refused; 2 the package cannot be read (not a package directory or ZIP, an
-ambiguous ZIP, unsupported schema, malformed JSON or manifest, a manifest path
-that would leave the package, unknown part id); 3 --fail-on-review and
-report.json says the conversion needs review.
+Checks run before anything is printed. --verify prints "files ok" when every
+listed file matches its size and SHA-256, the package holds no other file and
+its source index and report are well formed; otherwise it prints one line per
+file that is missing, changed, refused (a link, a pipe or device, an encrypted
+or unreadable ZIP entry) or not listed. With --part or --search those lines go
+to stderr, and the part (as the exact bytes that were verified) or the matches
+are printed only when every file matches. The .NET AiPackageManifestReader
+reports the same lines. --json prints one JSON object instead: the source,
+whether the files were verified, the review state from report.json, and the
+part with its locations, table block and source-index entries, every part, or
+the matches.
+
+Exit codes: 0 success; 1 --verify found a file missing, changed, refused or not
+listed; 2 the package cannot be read (not a package directory or ZIP, an
+ambiguous ZIP, unsupported schema, malformed JSON, manifest, source index or
+report, a manifest path that would leave the package, unknown part id); 3
+--fail-on-review and report.json says the conversion needs review; 141 the
+output pipe was closed early (as by head).
 """
 
 import argparse
 import errno
 import hashlib
+import html
 import json
+import os
 import posixpath
 import re
 import stat
 import struct
 import sys
+import unicodedata
 import zipfile
 import zlib
 from pathlib import Path
@@ -52,22 +66,50 @@ MAX_COUNT = 2 ** 31 - 1
 MAX_BYTES = 2 ** 63 - 1
 # Files larger than this are refused rather than read into memory (the .NET reader uses the same limit).
 MAX_FILE_BYTES = 2147483520
+# Characters that move the cursor, start a terminal escape sequence, break a line or reorder the text
+# around them when printed: C0 and C1 controls, DEL, line and paragraph separators, bidirectional
+# formatting characters, and lone surrogates (file names that are not UTF-8). Package paths never
+# contain them, and printed text shows them as \xNN or \uNNNN.
+UNSHOWN_RE = re.compile("[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ud800-\udfff]")
+# The same characters except C0 controls, which JSON escapes by itself.
+UNSHOWN_IN_JSON_RE = re.compile("[\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+# Files operating systems leave in folders and archives (Finder, Explorer); never part of a package.
+SYSTEM_FILES = (".DS_Store", "Thumbs.db", "desktop.ini")
+# A Markdown backslash escape (DocRedock escapes literal text this way), undone before searching.
+MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 
 class PackageError(ValueError):
     """The package cannot be read safely: it is not a package directory or ZIP, a JSON file is
     malformed or lacks a field this reader relies on, an id, path or ZIP entry appears twice, a
-    path would leave the package, or a referenced file is missing from the manifest's file list."""
+    path would leave the package, a referenced file is missing from the manifest's file list, or
+    the source index does not agree with the manifest."""
 
 
 class UnsupportedSchemaError(PackageError):
     """Raised when a manifest schema_version is absent, malformed or unsupported."""
 
 
+class PackageVerificationError(Exception):
+    """verify_files found a file missing, changed, refused or not listed; problems holds its lines."""
+
+    def __init__(self, problems):
+        super().__init__("; ".join(problems))
+        self.problems = list(problems)
+
+
+def _shown(text):
+    """text with the characters UNSHOWN_RE matches written as escapes, safe to print on one line."""
+    return UNSHOWN_RE.sub(lambda match: ("\\x%02x" if ord(match.group()) < 0x100 else "\\u%04x") % ord(match.group()),
+                          text)
+
+
 def _safe_rel(rel):
     """Return a relative package path, rejecting absolute or drive paths, "." and ".." segments,
-    backslashes, colons (C:x, C:/..., ADS names) and NUL: package names never contain them."""
-    if not isinstance(rel, str) or not rel or any(c in rel for c in "\\:\0") or posixpath.isabs(rel):
+    backslashes, colons (C:x, C:/..., ADS names), NUL and the other characters UNSHOWN_RE matches:
+    package names never contain them."""
+    if (not isinstance(rel, str) or not rel or "\\" in rel or ":" in rel or UNSHOWN_RE.search(rel)
+            or posixpath.isabs(rel)):
         raise PackageError("unsafe package path: " + repr(rel))
     if any(segment in ("", ".", "..") for segment in rel.split("/")):
         raise PackageError("unsafe package path: " + repr(rel))
@@ -100,9 +142,12 @@ def _decode(data, name):
 
 
 def _zip_end(path):
-    """Start, size and entry count of the central directory and the position of the end record that
-    describes it, found as Python's zipfile finds them: the last 22 bytes, else the last signature in
-    the final 64 KiB, then the Zip64 records its locator points to."""
+    """The entry count of a plain ZIP's central directory. The end record is found as Python's zipfile
+    finds it (the last 22 bytes, else the last signature in the final 64 KiB), then the Zip64 records
+    its locator points to. The archive must be on one disk, a Zip64 end record must end where its
+    locator begins, and the central directory must end where the (Zip64) end record begins. Python
+    3.12's zipfile checks the Zip64 records this way and earlier versions do not, so every version
+    checks here, before zipfile reads the archive."""
     with open(path, "rb") as fp:
         fp.seek(0, 2)
         size = fp.tell()
@@ -119,13 +164,24 @@ def _zip_end(path):
             fp.seek(location - 20)
             locator = fp.read(20)
             if locator[:4] == b"PK\x06\x07":
-                record = struct.unpack_from("<Q", locator, 8)[0]
+                locator_disk, record, disks = struct.unpack_from("<IQI", locator, 4)
+                if locator_disk or disks > 1:
+                    raise PackageError("the ZIP spans several disks")
+                if record > location - 20 - 56:
+                    raise PackageError("the ZIP's Zip64 end record locator points past the record")
                 fp.seek(record)
                 data = fp.read(56)
-                if len(data) == 56 and data[:4] == b"PK\x06\x06":
-                    disk, directory_disk, _, count, directory_size, directory_offset = struct.unpack_from("<IIQQQQ", data, 16)
-                    location = record
-    return disk, directory_disk, directory_offset, directory_size, count, location
+                if len(data) != 56 or data[:4] != b"PK\x06\x06":
+                    raise PackageError("the ZIP's Zip64 end record is not where its locator points")
+                if record + 12 + struct.unpack_from("<Q", data, 4)[0] != location - 20:
+                    raise PackageError("the ZIP's Zip64 end record does not end where its locator begins")
+                disk, directory_disk, _, count, directory_size, directory_offset = struct.unpack_from("<IIQQQQ", data, 16)
+                location = record
+    if disk or directory_disk:
+        raise PackageError("the ZIP spans several disks")
+    if directory_offset + directory_size != location:
+        raise PackageError("the ZIP's central directory does not end where its end record begins")
+    return count
 
 
 def _entry_name(info):
@@ -140,6 +196,13 @@ def _entry_name(info):
     return name
 
 
+def _left_by_system(name):
+    """Whether a file is one an operating system leaves behind: .DS_Store, Thumbs.db, desktop.ini,
+    an AppleDouble "._" file or anything in a __MACOSX folder (Finder's archives)."""
+    base = name.rsplit("/", 1)[-1]
+    return base in SYSTEM_FILES or base.startswith("._") or name.split("/", 1)[0] == "__MACOSX"
+
+
 class Package:
     """Read-only view of an AI package directory or ZIP archive."""
 
@@ -147,9 +210,11 @@ class Package:
         self.path = Path(path)
         self._zip = None
         self._entries = {}
+        self._listings = {}
         if self.path.is_dir():
             self._kind = "dir"
         elif self.path.is_file():
+            count = _zip_end(self.path)
             try:
                 self._zip = zipfile.ZipFile(self.path)
             except NotImplementedError as exc:
@@ -158,14 +223,14 @@ class Package:
                 raise PackageError("not a package folder or ZIP archive: %s (%s)" % (self.path, exc))
             self._kind = "zip"
             try:
-                self._index_entries()
+                self._index_entries(count)
             except PackageError:
                 self.close()
                 raise
         else:
             raise FileNotFoundError(errno.ENOENT, "package not found", str(self.path))
 
-    def _index_entries(self):
+    def _index_entries(self, count):
         # A package ZIP is read only when it is plain, so that every reader reads it the same way: the
         # .NET AiPackageManifestReader makes the same checks in the same order with the same messages.
         # Readers disagree on which of two equal names they return (Python the last, .NET the first),
@@ -173,11 +238,6 @@ class Package:
         # "/"), on a Unicode Path extra field (Python 3.12 renames the entry by it), and on end records
         # that do not describe the directory they end.
         infos = self._zip.infolist()
-        disk, directory_disk, offset, size, count, location = _zip_end(self.path)
-        if disk or directory_disk:
-            raise PackageError("the ZIP spans several disks")
-        if offset + size != location:
-            raise PackageError("the ZIP's central directory does not end where its end record begins")
         if count != len(infos):
             raise PackageError("the ZIP's end record counts %d entries, but its central directory holds %d"
                                % (count, len(infos)))
@@ -201,11 +261,25 @@ class Package:
             self._ends[id(info)] = end
             end = info.header_offset
 
+    def _names(self, folder):
+        """The exact names in a package folder. A name differing in letter case or Unicode form is a
+        missing file everywhere, as in a ZIP, not only where the file system tells the names apart."""
+        names = self._listings.get(folder)
+        if names is None:
+            try:
+                names = set(os.listdir(folder))
+            except (FileNotFoundError, NotADirectoryError):
+                names = set()
+            self._listings[folder] = names
+        return names
+
     def _dir_file(self, rel):
         # A link inside a package folder could point anywhere, and a pipe or device could block or
         # never end; DocRedock writes neither. A folder where a file should be is a missing file.
         current = self.path
         for segment in rel.split("/"):
+            if segment not in self._names(current):
+                raise _missing(rel)
             current = current / segment
             if current.is_symlink() or getattr(current, "is_junction", lambda: False)():
                 raise PackageError("package path is a link: " + repr(rel))
@@ -235,6 +309,24 @@ class Package:
         if self._kind == "dir":
             return self._dir_file(rel).stat().st_size
         return self._entry(rel).file_size
+
+    def files(self):
+        """Every file in the package as a package path, sorted: the ZIP entries that are not folders,
+        or everything in the folder that is not a folder (links, pipes and devices included), without
+        following links."""
+        if self._kind == "zip":
+            return sorted(name for name, info in self._entries.items() if not info.is_dir())
+        names = []
+
+        def walk(folder, prefix):
+            with os.scandir(folder) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False) and not getattr(entry, "is_junction", lambda: False)():
+                        walk(entry.path, prefix + entry.name + "/")
+                    else:
+                        names.append(prefix + entry.name)
+        walk(self.path, "")
+        return sorted(names)
 
     def _open_checks(self, rel, info):
         # What zipfile checks when it opens an entry, in its order and with its messages, including
@@ -295,7 +387,7 @@ class Package:
     def exists(self, rel):
         try:
             self.size(rel)
-        except (FileNotFoundError, ValueError):
+        except (FileNotFoundError, PackageError):
             return False
         return True
 
@@ -411,11 +503,16 @@ def _count(obj, key, where="", optional=False, maximum=MAX_COUNT):
     return value
 
 
-def _flag(obj, key, where=""):
+def _boolean(obj, key, where=""):
+    """An optional true/false field: None when it is absent or null."""
     name, value = _get(obj, key, where, True)
     if value is not None and not isinstance(value, bool):
         raise PackageError("%s must be true or false, got %s" % (name, _kind_of(value)))
-    return bool(value)
+    return value
+
+
+def _flag(obj, key, where=""):
+    return bool(_boolean(obj, key, where))
 
 
 def _array(obj, key, where="", optional=False):
@@ -595,11 +692,37 @@ def _check_parts(parts, locations):
         ids.add(part["id"])
         paths.add(part["path"])
         part["locations"] = [by_id[location_id] for location_id in part["location_ids"]]
+    tables = {}
     for part in parts:
         block = part["table_block"]
         for key in ("previous_part", "next_part"):
             if block and block[key] is not None and block[key] not in ids:
                 raise PackageError("part %s %s names an unknown part %r" % (part["id"], key, block[key]))
+        if block:
+            tables.setdefault(block["table_id"], []).append(part)
+    # The blocks of a cut table form one chain, 1 to count, each naming its neighbours, so a reader
+    # following next_part reaches every block once and never runs into another table or in a circle.
+    for table_id, blocks in tables.items():
+        by_index = {}
+        for part in blocks:
+            block = part["table_block"]
+            if block["count"] != len(blocks):
+                raise PackageError("part %s says table %r has %d blocks, but the manifest lists %d"
+                                   % (part["id"], table_id, block["count"], len(blocks)))
+            if block["index"] in by_index:
+                raise PackageError("table %r gives index %d to parts %s and %s"
+                                   % (table_id, block["index"], by_index[block["index"]]["id"], part["id"]))
+            by_index[block["index"]] = part
+        for index in range(1, len(blocks) + 1):
+            part = by_index[index]
+            for key, neighbour in (("previous_part", index - 1), ("next_part", index + 1)):
+                expected = by_index[neighbour]["id"] if neighbour in by_index else None
+                actual = part["table_block"][key]
+                if actual != expected:
+                    raise PackageError("part %s table_block.%s is %s, but %s" % (
+                        part["id"], key, "null" if actual is None else repr(actual),
+                        "it is the %s block of table %r" % ("first" if neighbour < index else "last", table_id)
+                        if expected is None else "block %d/%d of table %r is %s" % (neighbour, len(blocks), table_id, expected)))
 
 
 def _files(manifest):
@@ -609,6 +732,8 @@ def _files(manifest):
         where = "files[%d]" % position
         _object(raw, where)
         path = _path(raw, "path", where)
+        if path == "manifest.json":
+            raise PackageError("%s.path is manifest.json, which cannot hold its own size and SHA-256" % where)
         if path in seen:
             raise PackageError("files list %r twice" % path)
         seen.add(path)
@@ -622,8 +747,9 @@ def load_manifest(package):
 
     Raises UnsupportedSchemaError for a missing or unknown schema_version and PackageError for
     every other problem: a missing field or one of the wrong type, an id or path listed twice, a
-    part naming an unknown location or part, a 1.x part whose node_ids and sources differ in
-    length, or a referenced file that "files" does not list with a size and SHA-256."""
+    part naming an unknown location or part, table blocks that do not form one chain per table, a
+    1.x part whose node_ids and sources differ in length, a 2.x manifest without source_index, or a
+    referenced file that "files" does not list with a size and SHA-256."""
     try:
         data = package.read_bytes("manifest.json")
     except FileNotFoundError:
@@ -638,13 +764,10 @@ def load_manifest(package):
     major, minor = _parse_version(manifest["schema_version"])
     source = _object(_get(manifest, "source", "", False)[1], "source")
     files = _files(manifest)
-    if major == 1:
-        locations, parts = _normalize_v1(manifest)
-        source_index = None
-    else:
-        locations, parts = _normalize_v2(manifest)
-        source_index = _path(manifest, "source_index", optional=True)
+    locations, parts = (_normalize_v1 if major == 1 else _normalize_v2)(manifest)
     _check_parts(parts, locations)
+    # 2.x keeps node identities only in the source index, so a 2.x package always has one.
+    source_index = None if major == 1 else _path(manifest, "source_index")
     result = {
         "schema_version": manifest["schema_version"],
         "major": major,
@@ -697,15 +820,42 @@ def _source_index_v1(manifest):
     return index
 
 
+def _place(place):
+    return "%s %s" % (place[0], "without a cell" if place[1] is None else "cell %r" % place[1])
+
+
+def _check_nodes(where, part_id, groups, places):
+    """A part lists a node once, and every part that lists a node puts it at the same location and
+    cell: joining text to its source by node id must have one answer. places maps the nodes of the
+    parts checked so far to (part id, (location id, cell address))."""
+    listed = set()
+    for group in groups:
+        cells = group["cell_addresses"] or [None] * len(group["node_ids"])
+        for node, cell in zip(group["node_ids"], cells):
+            if node in listed:
+                raise PackageError("%s lists node %r twice" % (where, node))
+            listed.add(node)
+            place = (group["source_id"], cell)
+            first_part, first_place = places.setdefault(node, (part_id, place))
+            if first_place != place:
+                raise PackageError("%s puts node %r at %s, but part %s puts it at %s"
+                                   % (where, node, _place(place), first_part, _place(first_place)))
+
+
 def load_source_index(package, manifest, data=None):
     """Return part id -> [{"source_id", "node_ids", "cell_addresses"}] for every manifest part.
 
     Schema 1.x groups the inline node ids. For 2.x the index must agree with the manifest: its
     schema_version is 1.x, it lists each manifest part exactly once, a part's groups name exactly
     that part's locations, their node ids add up to its node_count, and cell_addresses, when
-    present, has one entry per node id. data, when given, is the index's bytes already read."""
+    present, has one entry per node id. In every schema a part lists a node once, and all parts
+    put a node at the same location and cell. data, when given, is the index's bytes already read."""
+    places = {}
     if manifest["major"] == 1:
-        return _source_index_v1(manifest)
+        index = _source_index_v1(manifest)
+        for position, part in enumerate(manifest["parts"]):
+            _check_nodes("manifest.json parts[%d]" % position, part["id"], index[part["id"]], places)
+        return index
     if manifest["source_index"] is None:
         raise PackageError("manifest has no source_index")
     name = manifest["source_index"]
@@ -743,6 +893,7 @@ def load_source_index(package, manifest, data=None):
         if total != parts[part_id]["node_count"]:
             raise PackageError("%s lists %d node ids, but the manifest part counts %d"
                                % (where, total, parts[part_id]["node_count"]))
+        _check_nodes(where, part_id, groups, places)
         index[part_id] = groups
     absent = [part_id for part_id in parts if part_id not in index]
     if absent:
@@ -750,33 +901,46 @@ def load_source_index(package, manifest, data=None):
     return index
 
 
-def review_required(package, manifest, data=None):
-    """True when report.json says something needs comparison with the source (review pages, OCR
-    items, worksheet table boundaries). Read review.md before giving such a package to a model.
-    data, when given, is the report's bytes already read."""
+def read_review(package, manifest, data=None):
+    """What report.json says about review: {"required": whether something needs comparison with the
+    source (review pages, OCR items, worksheet table boundaries), "review_items_detected" and
+    "hidden_content_included": the summary's flags, None where the report predates them}. Read
+    review.md before giving a package that requires review to a model. data, when given, is the
+    report's bytes already read."""
     name = manifest["report"]
     report = _object(_parse_json(package.read_bytes(name) if data is None else data, name), name)
     version = _text(report, "schema_version", name)
     if not SUBSCHEMA_RE.fullmatch(version):
         raise UnsupportedSchemaError("%s schema_version %r is unsupported (supported: 1.x)" % (name, version))
     review = _object(_get(report, "review", name, False)[1], name + ".review")
-    name, value = _get(review, "required", name + ".review", False)
+    field, value = _get(review, "required", name + ".review", False)
     if not isinstance(value, bool):
-        raise PackageError("%s must be true or false, got %s" % (name, _kind_of(value)))
-    return value
+        raise PackageError("%s must be true or false, got %s" % (field, _kind_of(value)))
+    summary = _get(report, "summary", name, True)[1]
+    summary = {} if summary is None else _object(summary, name + ".summary")
+    return {"required": value,
+            "review_items_detected": _boolean(summary, "review_items_detected", name + ".summary"),
+            "hidden_content_included": _boolean(summary, "hidden_content_included", name + ".summary")}
+
+
+def review_required(package, manifest, data=None):
+    """True when report.json says something needs comparison with the source (see read_review)."""
+    return read_review(package, manifest, data)["required"]
 
 
 def read_part(package, part):
-    """Return the Markdown text of one manifest part."""
+    """Return the Markdown text of one manifest part, unverified (see read_verified_part)."""
     return package.read_text(part["path"])
 
 
 def verify_files(package, manifest, contents=None):
-    """Return one human-readable problem per listed file that is missing, refused or changed; an
-    empty list means every file matches its size and SHA-256. load_manifest has already made sure
-    that every file the manifest refers to is listed. contents maps package paths to bytes the
-    caller already read; those bytes are checked instead of reading the file again, so a caller
-    can use exactly the bytes that were verified."""
+    """Return one human-readable problem per file that is missing, refused, changed or not listed;
+    an empty list means the package holds exactly the files the manifest lists (and manifest.json),
+    each matching its size and SHA-256. load_manifest has already made sure that every file the
+    manifest refers to is listed. Files an operating system leaves behind (.DS_Store, Thumbs.db,
+    desktop.ini, AppleDouble "._" files, __MACOSX folders) are not reported. contents maps package
+    paths to bytes the caller already read; those bytes are checked instead of reading the file
+    again, so a caller can use exactly the bytes that were verified."""
     contents = contents or {}
     problems = []
     for entry in manifest["files"]:
@@ -793,7 +957,7 @@ def verify_files(package, manifest, contents=None):
         except FileNotFoundError:
             problems.append(path + ": missing")
             continue
-        except ValueError as error:
+        except PackageError as error:
             problems.append(path + ": refused (" + str(error) + ")")
             continue
         if len(data) != entry["bytes"]:
@@ -802,7 +966,101 @@ def verify_files(package, manifest, contents=None):
         actual = hashlib.sha256(data).hexdigest()
         if actual != entry["sha256"]:
             problems.append("%s: sha256 mismatch (expected %s, got %s)" % (path, entry["sha256"], actual))
+    # Anything else in the package is not covered by the manifest, whatever refers to it. A link
+    # where a folder of listed files belongs has already made those files refused.
+    listed = {entry["path"] for entry in manifest["files"]}
+    folders = {path.rsplit("/", 1)[0] for path in listed if "/" in path}
+    folders |= {folder[:end] for folder in folders for end in range(len(folder)) if folder[end] == "/"}
+    for name in package.files():
+        if name != "manifest.json" and name not in listed and name not in folders and not _left_by_system(name):
+            problems.append(_shown(name) + ": not listed in the manifest")
     return problems
+
+
+def _read_files(package, manifest, paths, verify):
+    """Read each listed path once, so the bytes checked are the bytes used. With verify a file whose
+    size differs from its listed size is not read, and a missing or refused file is left for
+    verify_files to report; without it the error is raised."""
+    listed = {entry["path"]: entry["bytes"] for entry in manifest["files"]}
+    contents = {}
+    for rel in paths:
+        if rel in contents:
+            continue
+        try:
+            if not verify or package.size(rel) == listed[rel]:
+                contents[rel] = package.read_bytes(rel)
+        except (FileNotFoundError, PackageError):
+            if not verify:
+                raise
+    return contents
+
+
+def _check_contents(package, manifest, contents):
+    """The source index and review state, from bytes already read and verified."""
+    index_name = manifest["source_index"]
+    index = load_source_index(package, manifest, contents.get(index_name) if index_name else None)
+    return index, read_review(package, manifest, contents.get(manifest["report"]))
+
+
+def _find_part(manifest, part_id):
+    part = next((item for item in manifest["parts"] if item["id"] == part_id), None)
+    if part is None:
+        raise KeyError(part_id)
+    return part
+
+
+def _verified_contents(package, manifest, paths):
+    """Read paths with the report and source index, verify the whole package and check its source
+    index and report: (contents, index, review)."""
+    paths = list(paths) + [manifest["report"]] + ([manifest["source_index"]] if manifest["source_index"] else [])
+    contents = _read_files(package, manifest, paths, True)
+    problems = verify_files(package, manifest, contents)
+    if problems:
+        raise PackageVerificationError(problems)
+    index, review = _check_contents(package, manifest, contents)
+    return contents, index, review
+
+
+def read_verified_part(package, manifest, part_id):
+    """Check the package and return one part with what it was checked against, in one call:
+    {"part": the manifest part, "markdown": its text, exactly the bytes verified, "sources": its
+    source-index groups, "review": read_review's result}. Every file must pass verify_files and the
+    source index and report must be well formed. Raises KeyError for an unknown part id,
+    PackageVerificationError when a file is missing, changed, refused or not listed, and PackageError
+    when the package is malformed."""
+    part = _find_part(manifest, part_id)
+    contents, index, review = _verified_contents(package, manifest, [part["path"]])
+    return {"part": part, "markdown": _decode(contents[part["path"]], part["path"]), "sources": index[part["id"]],
+            "review": review}
+
+
+def _searchable(text):
+    """text as search compares it: Markdown escapes and character references undone, then NFKC
+    (full-width letters and digits as ASCII) and case folded."""
+    return unicodedata.normalize("NFKC", html.unescape(MARKDOWN_ESCAPE_RE.sub(r"\1", text))).casefold()
+
+
+def _lines(text):
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
+def search_parts(package, manifest, text, contents=None):
+    """The parts whose Markdown contains text, compared after _searchable (case, width and Markdown
+    escapes do not matter): [(part, [(line number, line), ...]), ...] in manifest order. contents
+    maps package paths to bytes already read (and verified)."""
+    query = _searchable(text)
+    contents = contents or {}
+    matches = []
+    for part in manifest["parts"]:
+        data = contents.get(part["path"])
+        markdown = _decode(package.read_bytes(part["path"]) if data is None else data, part["path"])
+        lines = [(number, line) for number, line in enumerate(_lines(markdown), 1) if query in _searchable(line)]
+        if lines:
+            matches.append((part, lines))
+    return matches
 
 
 def _part_line(part):
@@ -814,20 +1072,73 @@ def _part_line(part):
         line += " block %d/%d rows %s" % (block["index"], block["count"], block["row_range"])
         if block["context_range"]:
             line += " context " + block["context_range"]
-    return line
+    return _shown(line)
+
+
+def _excerpt(line, text, width=160):
+    """At most width characters of line, around the first place text appears in it."""
+    if len(line) <= width:
+        return line
+    at = max(line.casefold().find(text.casefold()), 0)
+    begin = max(min(at - width // 3, len(line) - width), 0)
+    return ("..." if begin else "") + line[begin:begin + width] + ("..." if begin + width < len(line) else "")
+
+
+def _to_stdout(write):
+    """Run a write to stdout. Windows reports a pipe whose reader went away as EINVAL, not EPIPE;
+    either way it raises BrokenPipeError, so the CLI stops quietly."""
+    try:
+        write()
+    except OSError as exc:
+        if not isinstance(exc, BrokenPipeError) and os.name == "nt" and exc.errno == errno.EINVAL:
+            raise BrokenPipeError(errno.EPIPE, "the output pipe was closed")
+        raise
+
+
+def _say(line):
+    """Print one line on stdout."""
+    _to_stdout(lambda: print(line))
+
+
+def _write_bytes(data):
+    """Write UTF-8 bytes to stdout as they are, whatever the console encoding."""
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        _to_stdout(lambda: sys.stdout.write(data.decode("utf-8")))
+        return
+
+    def write():
+        sys.stdout.flush()
+        buffer.write(data)
+        buffer.flush()
+    _to_stdout(write)
 
 
 def _write_part(data, name):
-    """Print a part's Markdown as the exact bytes that were read (and verified), whatever the console
-    encoding; the bytes must still be UTF-8 text."""
-    text = _decode(data, name)
-    buffer = getattr(sys.stdout, "buffer", None)
-    if buffer is None:
-        sys.stdout.write(text)
-        return
-    sys.stdout.flush()
-    buffer.write(data)
-    buffer.flush()
+    """Print a part's Markdown as the exact bytes that were read (and verified); they must be UTF-8."""
+    _decode(data, name)
+    _write_bytes(data)
+
+
+def _print_json(value):
+    """One JSON object in UTF-8; the characters UNSHOWN_RE matches are \\u escapes, as JSON allows."""
+    text = json.dumps(value, ensure_ascii=False, indent=2) + "\n"
+    _write_bytes(UNSHOWN_IN_JSON_RE.sub(lambda match: "\\u%04x" % ord(match.group()), text).encode("utf-8"))
+
+
+def _part_json(part):
+    return {"id": part["id"], "path": part["path"], "node_count": part["node_count"],
+            "estimated_tokens": part["estimated_tokens"], "exceeds_target": part["exceeds_target"],
+            "locations": [dict(location) for location in part["locations"]], "table_block": part["table_block"]}
+
+
+def _document_json(manifest, verified, review=None):
+    document = {"schema_version": manifest["schema_version"], "generator_version": manifest["generator_version"],
+                "source": dict(manifest["source"]), "content_policy": manifest["content_policy"],
+                "verified": verified}
+    if review is not None:
+        document["review"] = dict(review, file=manifest["review"])
+    return document
 
 
 def _describe(exc):
@@ -836,66 +1147,146 @@ def _describe(exc):
     return str(exc)
 
 
+def _silence_stdout():
+    """Point stdout at the null device, so the interpreter's final flush cannot fail again."""
+    try:
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+    try:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _run(package, args):
+    manifest = load_manifest(package)
+    part = None
+    if args.part is not None:
+        part = next((item for item in manifest["parts"] if item["id"] == args.part), None)
+        if part is None:
+            print(_shown("unknown part id: " + args.part), file=sys.stderr)
+            return 2
+    # Files used after the checks are read once, so the bytes checked are the bytes used.
+    paths = [part["path"]] if part else []
+    if args.search is not None:
+        paths += [item["path"] for item in manifest["parts"]]
+    if args.verify or args.json or args.fail_on_review:
+        paths.append(manifest["report"])
+    if manifest["source_index"] and (args.verify or (args.json and part)):
+        paths.append(manifest["source_index"])
+    contents = _read_files(package, manifest, paths, args.verify)
+    index = review = None
+    if args.verify:
+        problems = verify_files(package, manifest, contents)
+        if problems:
+            if args.json:
+                _print_json(dict(_document_json(manifest, False), problems=problems))
+            else:
+                # With --part or --search, stdout carries only what was asked for.
+                for problem in problems:
+                    if part is None and args.search is None:
+                        _say(problem)
+                    else:
+                        print(problem, file=sys.stderr)
+            return 1
+        # Intact files must also be readable: the source index and report agree with the manifest.
+        index, review = _check_contents(package, manifest, contents)
+        if part is None and args.search is None and not args.json:
+            _say("files ok")
+    elif args.json or args.fail_on_review:
+        review = read_review(package, manifest, contents.get(manifest["report"]))
+    if args.fail_on_review and review["required"]:
+        if args.json:
+            _print_json(_document_json(manifest, args.verify, review))
+        print("review required: read %s before giving this package to a model" % manifest["review"], file=sys.stderr)
+        return 3
+    if part is not None:
+        data = contents.get(part["path"])
+        if data is None:
+            data = package.read_bytes(part["path"])
+        if not args.json:
+            _write_part(data, part["path"])
+            return 0
+        if index is None:
+            index_name = manifest["source_index"]
+            index = load_source_index(package, manifest, contents.get(index_name) if index_name else None)
+        document = _document_json(manifest, args.verify, review)
+        document["part"] = dict(_part_json(part), sources=index[part["id"]], markdown=_decode(data, part["path"]))
+        _print_json(document)
+        return 0
+    if args.search is not None:
+        matches = search_parts(package, manifest, args.search, contents)
+        if args.json:
+            document = _document_json(manifest, args.verify, review)
+            document["search"] = {"text": args.search, "parts": [
+                dict(_part_json(item), lines=[{"number": number, "text": line} for number, line in lines])
+                for item, lines in matches]}
+            _print_json(document)
+            return 0
+        if not matches:
+            print(_shown("no part contains %r" % args.search), file=sys.stderr)
+        for item, lines in matches:
+            _say(_part_line(item))
+            for number, line in lines[:3]:
+                _say(_shown("  %d: %s" % (number, _excerpt(line, args.search))))
+            if len(lines) > 3:
+                _say("  ... %d more matching lines" % (len(lines) - 3))
+        return 0
+    if args.json:
+        document = _document_json(manifest, args.verify, review)
+        document["parts"] = [_part_json(item) for item in manifest["parts"]]
+        _print_json(document)
+    elif not args.verify:
+        _say(_shown("schema " + manifest["schema_version"]))
+        _say(_shown("source " + manifest["source"]["file_name"]))
+        for item in manifest["parts"]:
+            _say(_part_line(item))
+    return 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="ai_package_reader.py", description="Inspect a DocRedock AI package.",
-        epilog="exit codes: 0 ok, 1 --verify found a listed file missing, changed or refused, "
-               "2 the package cannot be read, 3 review required (--fail-on-review)")
+        epilog="exit codes: 0 ok, 1 --verify found a file missing, changed, refused or not listed, "
+               "2 the package cannot be read, 3 review required (--fail-on-review), "
+               "141 the output pipe was closed early")
     parser.add_argument("package", help="package directory or .zip file")
     parser.add_argument("--verify", action="store_true",
-                        help="check every listed file's size and SHA-256 before printing anything else")
-    parser.add_argument("--part", metavar="PART_ID", help="print one part's Markdown")
+                        help="check every listed file's size and SHA-256, that no other file is in the package, "
+                             "and the source index and report, before printing anything else")
+    shown = parser.add_mutually_exclusive_group()
+    shown.add_argument("--part", metavar="PART_ID", help="print one part's Markdown")
+    shown.add_argument("--search", metavar="TEXT",
+                       help="list the parts containing TEXT (ignoring case, full-width forms and Markdown "
+                            "escapes) with their matching lines")
     parser.add_argument("--fail-on-review", action="store_true",
                         help="exit 3 instead of printing when report.json says the conversion needs review")
+    parser.add_argument("--json", action="store_true",
+                        help="print one JSON object: source, verification, review state, and the part "
+                             "(Markdown, locations, table block, source-index entries), every part or the matches")
     args = parser.parse_args(argv)
-
+    if args.search is not None and not args.search.strip():
+        parser.error("--search needs text to look for")
+    # Names and labels come from documents: a console that cannot show a character gets an escape
+    # rather than an error.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(errors="backslashreplace")
+            except (OSError, ValueError):
+                pass
     try:
         with open_package(args.package) as package:
-            manifest = load_manifest(package)
-            part = None
-            if args.part is not None:
-                part = next((item for item in manifest["parts"] if item["id"] == args.part), None)
-                if part is None:
-                    print("unknown part id: " + args.part, file=sys.stderr)
-                    return 2
-            # Files used after the checks are read once, so the bytes checked are the bytes used.
-            listed = {entry["path"]: entry["bytes"] for entry in manifest["files"]}
-            contents = {}
-            for rel in ([part["path"]] if part else []) + ([manifest["report"]] if args.fail_on_review else []):
-                try:
-                    # A file of another size is reported by --verify below without being read.
-                    if not args.verify or package.size(rel) == listed[rel]:
-                        contents[rel] = package.read_bytes(rel)
-                except (FileNotFoundError, ValueError):
-                    if not args.verify:
-                        raise  # with --verify the problem is reported below
-            if args.verify:
-                problems = verify_files(package, manifest, contents)
-                # With --part, stdout carries only the part's Markdown.
-                for problem in problems:
-                    print(problem, file=sys.stderr if part else sys.stdout)
-                if problems:
-                    return 1
-                if part is None:
-                    print("files ok")
-            if args.fail_on_review and review_required(package, manifest, contents.get(manifest["report"])):
-                print("review required: read %s before giving this package to a model" % manifest["review"],
-                      file=sys.stderr)
-                return 3
-            if part is not None:
-                data = contents.get(part["path"])
-                _write_part(package.read_bytes(part["path"]) if data is None else data, part["path"])
-                return 0
-            if not args.verify:
-                print("schema " + manifest["schema_version"])
-                print("source " + manifest["source"]["file_name"])
-                for item in manifest["parts"]:
-                    print(_part_line(item))
-            return 0
-    except (OSError, ValueError) as exc:
-        # PackageError and UnsupportedSchemaError are ValueErrors; FileNotFoundError is an OSError.
+            return _run(package, args)
+    except BrokenPipeError:
+        # Whatever read our output stopped (head, a closed pager): stop quietly, as cat does.
+        _silence_stdout()
+        return 141
+    except (OSError, PackageError) as exc:
+        # PackageError and UnsupportedSchemaError are PackageErrors; FileNotFoundError is an OSError.
         named = isinstance(exc, (UnsupportedSchemaError, FileNotFoundError))
-        print(("" if named else "cannot read package: ") + _describe(exc), file=sys.stderr)
+        print(_shown(("" if named else "cannot read package: ") + _describe(exc)), file=sys.stderr)
         return 2
 
 

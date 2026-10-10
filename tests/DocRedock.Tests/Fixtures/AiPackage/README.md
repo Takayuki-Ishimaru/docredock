@@ -11,4 +11,6 @@ Real AI packages written by DocRedock itself, one per manifest schema, so that r
 
 The `schema-2.1` manifest says `generator_version: "0.3.1"` and the `schema-2.2` manifest `"0.3.2"` because each was written by a development build before the version number was raised; readers must dispatch on `schema_version`, never on `generator_version`.
 
+`reader-cases.json` is not a package: it lists packages derived from these samples (a changed part, a missing field, a broken table-block chain, an unlisted file, …), each with the result both readers must give for `--verify`. `tools/test_ai_package_reader_cases.py` (Python) and `tests/DocRedock.Tests/Api/AiPackageReaderCaseTests.cs` (.NET, which also runs the Python reader when it is installed) apply it; add a case there when a reader rule changes.
+
 All text is generic synthetic content covered by the repository MIT license (`LICENSE`). The packages contain no original documents, author properties or absolute paths.
