@@ -29,6 +29,10 @@ public enum ReviewElementKind
     /// determined (a PDF font resource that could not be resolved, or a layer whose visibility could
     /// not be evaluated). Counted with unanalyzed content: its analysis is not complete either.</summary>
     UncertainText,
+    /// <summary>Text that is in the Markdown without the strikethrough the original draws over part of
+    /// it: which characters it strikes could not be determined (a PDF read without glyph widths).
+    /// Counted with unanalyzed content, like <see cref="UncertainText"/>.</summary>
+    StrikethroughUnplaced,
 }
 
 /// <summary>A rectangle on the review image, normalized to 0..1 with the origin at the top left.</summary>
@@ -229,7 +233,8 @@ public static class ExportReviewBuilder
                 try { record = item.Deserialize<PdfDocumentGraphProjection.PdfUncertainTextRecord>(); }
                 catch (JsonException) { record = null; }
                 var sourceId = $"{node.Id}#{index++}";
-                yield return new ReviewElement(ReviewElementKind.UncertainText,
+                yield return new ReviewElement(record?.Reason == PdfDocumentGraphProjection.StrikethroughUnplacedReason
+                        ? ReviewElementKind.StrikethroughUnplaced : ReviewElementKind.UncertainText,
                     record?.ResourceName is { Length: > 0 } name ? $"{sourceId}:{name}" : sourceId,
                     record?.Bounds is { } bounds ? mapping?.Map(bounds) : null);
             }

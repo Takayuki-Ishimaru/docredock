@@ -821,7 +821,7 @@ public partial class MainWindow : Window
             parts.Add($"要確認 {review.Count}ページ");
             parts.Add($"照合画像 {review.Count(item => item.Page.ReviewImageReference is not null)}ページ添付");
             var unanalyzed = review.Sum(item => item.Page.CountOf(ReviewElementKind.UnanalyzedContent));
-            var uncertain = review.Sum(item => item.Page.CountOf(ReviewElementKind.UncertainText));
+            var uncertain = review.Sum(item => item.Page.CountOf(ReviewElementKind.UncertainText) + item.Page.CountOf(ReviewElementKind.StrikethroughUnplaced));
             var elements = review.Sum(item => item.Page.Elements.Count) - unanalyzed - uncertain;
             if (elements > 0) parts.Add($"未解決の図形 {elements}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
@@ -974,6 +974,7 @@ public partial class MainWindow : Window
         "PdfFormXObjectUnparsed" => ("PDFの描画部品（Form XObject）の中身を解析できず、その文字・図はMarkdownに含まれていません。", "「該当ページを確認」または照合画像で、原本の該当箇所を確認してください。"),
         "PdfFontResourceAmbiguous" => ("PDFの文字が使うフォントを特定できず、文字が正しく変換されていない可能性があります（Markdownには含めています）。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
         "PdfLayerVisibilityUnknown" => ("PDFのレイヤー（Optional Content）の表示状態を判定できなかった文字を、Markdownに含めました。", "原本PDFで、その文字が画面に表示されているかを確認してください。"),
+        "PdfStrikethroughUnplaced" => ("PDFの行の一部に取り消し線があり、どの文字が取り消されているかを判定できなかったため、取り消し線の印を付けずに出力しました。", "原本PDFの該当ページで、取り消された文字を確認してください。"),
         "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
         "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
         _ => ("変換時の注意事項があります。", $"原文: {originalMessage}{Environment.NewLine}元文書と生成結果を確認し、必要なら診断コードを添えて報告してください。"),

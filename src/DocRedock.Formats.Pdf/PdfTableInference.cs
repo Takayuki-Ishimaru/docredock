@@ -33,6 +33,10 @@ public static class PdfTableInference
         var arrowShaftPathIds = FindArrowShaftMatches(rawPaths).Select(match => match.ShaftPathId).ToHashSet(StringComparer.Ordinal);
         var lines = rawPaths.Where(path => !arrowShaftPathIds.Contains(path.Id)).SelectMany(AxisLine.CreateAll).ToArray();
         if (lines.Length > MaxGridLines) return [];
+        // A dashed rule drawn as separate short strokes (rather than one stroke with a dash pattern)
+        // is one rule: without this its gaps break the grid apart and every dash is left as fallback.
+        // A dash is a line or a thin bar; the edges of small boxes set side by side are not.
+        lines = MergeDashedRuns(lines, rawPaths.Where(CanBeDash).Select(path => path.Id).ToHashSet(StringComparer.Ordinal));
         // P3 fix: a filled overlay bar/rectangle drawn ON a table (see PdfTableOverlayDetector) is
         // itself a closed `re`-painted path, which AxisLine.CreateAll -- correctly, for a genuine
         // rectangular cell border -- decomposes into 4 straight segments sharing that one path's
@@ -50,9 +54,9 @@ public static class PdfTableInference
         var rectangleSourcedPathIds = rawPaths.Where(IsRectangleSourced).Select(path => path.Id).ToHashSet(StringComparer.Ordinal);
         lines = SeparateGridComponents(lines).SelectMany(component =>
         {
-            var plainCoordinatesByAxis = component.Where(line => !rectangleSourcedPathIds.Contains(line.PathId))
+            var plainCoordinatesByAxis = component.Where(line => line.MergedPathIds is not null || !rectangleSourcedPathIds.Contains(line.PathId))
                 .GroupBy(line => line.Horizontal).ToDictionary(group => group.Key, group => group.Select(line => line.Fixed).ToArray());
-            return component.Where(line => !rectangleSourcedPathIds.Contains(line.PathId) ||
+            return component.Where(line => line.MergedPathIds is not null || !rectangleSourcedPathIds.Contains(line.PathId) ||
                 !(plainCoordinatesByAxis.TryGetValue(line.Horizontal, out var coordinates) &&
                   coordinates.Any(coordinate => Math.Abs(coordinate - line.Fixed) <= 1.5)));
         }).ToArray();
@@ -66,7 +70,7 @@ public static class PdfTableInference
             var tables = new List<PdfTable>();
             foreach (var component in components.Take(maxCandidates))
             {
-                var ids = component.Select(line => line.PathId).ToHashSet(StringComparer.Ordinal);
+                var ids = component.SelectMany(line => line.PathIds).ToHashSet(StringComparer.Ordinal);
                 var componentGraph = graph with { Paths = (graph.Paths ?? []).Where(path => ids.Contains(path.Id)).ToArray() };
                 var table = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1).FirstOrDefault();
                 if (table is not null) tables.Add(table with { Id = $"pdf-p{pageNumber}-table-{tables.Count + 1}" });
@@ -112,8 +116,13 @@ public static class PdfTableInference
             var inside = regions.Where(region => IsInside(cell, region.BoundingBox)).ToArray();
             var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
             if (ids.Any(id => !assigned.Add(id))) return [];
-            var text = string.Join(" ", inside.Select(region => region.Text).Where(value => !string.IsNullOrWhiteSpace(value)));
-            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text, ids));
+            var parts = inside.Where(region => !string.IsNullOrWhiteSpace(region.Text)).ToArray();
+            var text = string.Join(" ", parts.Select(region => region.Text));
+            // Each part's struck characters, placed where the part starts in the joined text.
+            IReadOnlyList<TextRange>? struck = null;
+            for (int part = 0, offset = 0; part < parts.Length; offset += parts[part].Text.Length + 1, part++)
+                struck = PdfTextDecorations.Join(struck, PdfTextDecorations.Shift(parts[part].Struck, offset));
+            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text, ids) { Struck = struck });
         }
         var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
         // Text touching a cell boundary has no unique owner. Do not silently leave it in
@@ -130,7 +139,7 @@ public static class PdfTableInference
         var sourceIds = lines.Where(line => line.Horizontal
                 ? line.Fixed >= bottom - 1.5 && line.Fixed <= top + 1.5 && line.Maximum >= left - 1.5 && line.Minimum <= right + 1.5
                 : line.Fixed >= left - 1.5 && line.Fixed <= right + 1.5 && line.Maximum >= bottom - 1.5 && line.Minimum <= top + 1.5)
-            .Select(line => line.PathId).Distinct()
+            .SelectMany(line => line.PathIds).Distinct()
             // P-Overlay: a rectangle-sourced path excluded from grid-building above (e.g. a
             // header-row background fill sitting exactly behind the header, whose own left/right
             // edges duplicate the table's outer boundary and whose top/bottom duplicate a row
@@ -379,7 +388,7 @@ public static class PdfTableInference
     {
         // Adjacent rectangle edges are allowed to form a rule together. A bent/open path
         // never reaches this code because AxisLine.CreateAll expands only a true rectangle.
-        var spans = lines.OrderBy(line => line.Minimum).Select(line => (line.Minimum, line.Maximum)).ToArray();
+        var spans = lines.OrderBy(line => line.Minimum - line.Reach).Select(line => (Minimum: line.Minimum - line.Reach, Maximum: line.Maximum + line.Reach)).ToArray();
         if (spans.Length == 0 || spans[0].Minimum > minimum + 1.5) return false;
         var covered = spans[0].Maximum;
         foreach (var span in spans.Skip(1))
@@ -420,11 +429,52 @@ public static class PdfTableInference
     {
         if (left.Horizontal == right.Horizontal) return false;
         var horizontal = left.Horizontal ? left : right; var vertical = left.Horizontal ? right : left;
-        return vertical.Fixed >= horizontal.Minimum - 1.5 && vertical.Fixed <= horizontal.Maximum + 1.5 &&
-            horizontal.Fixed >= vertical.Minimum - 1.5 && horizontal.Fixed <= vertical.Maximum + 1.5;
+        return vertical.Fixed >= horizontal.Minimum - 1.5 - horizontal.Reach && vertical.Fixed <= horizontal.Maximum + 1.5 + horizontal.Reach &&
+            horizontal.Fixed >= vertical.Minimum - 1.5 - vertical.Reach && horizontal.Fixed <= vertical.Maximum + 1.5 + vertical.Reach;
     }
+    /// <summary>Replaces each run of collinear short strokes with regular gaps - a dashed rule drawn
+    /// one dash at a time (see <see cref="PdfDashRuns"/>) - by one line over the whole run that keeps
+    /// every dash's path id, where its first dash was; every other line keeps its place.</summary>
+    private static AxisLine[] MergeDashedRuns(AxisLine[] lines, IReadOnlySet<string> dashPathIds)
+    {
+        var strokes = lines.Select(line => new PdfDashRuns.Stroke(line.Horizontal, line.Fixed, line.Minimum, line.Maximum,
+            dashPathIds.Contains(line.PathId))).ToArray();
+        var runs = PdfDashRuns.Find(strokes);
+        if (runs.Count == 0) return lines;
+        var runOf = new Dictionary<int, int[]>();
+        foreach (var run in runs)
+            foreach (var index in run) runOf[index] = run;
+        var result = new List<AxisLine>(lines.Length);
+        for (var index = 0; index < lines.Length; index++)
+        {
+            if (!runOf.TryGetValue(index, out var run)) { result.Add(lines[index]); continue; }
+            if (run.Min() != index) continue;
+            // A dash pattern may stop a gap short of the rule it meets; the rule still runs through
+            // that gap (Reach), while its drawn extent stays what sets the grid's bounds.
+            result.Add(new AxisLine(lines[run[0]].PathId, lines[run[0]].Horizontal, run.Average(member => lines[member].Fixed),
+                lines[run[0]].Minimum, lines[run[^1]].Maximum)
+            {
+                MergedPathIds = run.Select(member => lines[member].PathId).Distinct(StringComparer.Ordinal).ToArray(),
+                Reach = Math.Min(PdfDashRuns.MedianGap(strokes, run), 6),
+            });
+        }
+        return result.ToArray();
+    }
+
+    // A path a dash can be drawn with: a straight line, or a rectangle no thicker than a rule.
+    private static bool CanBeDash(VisualPath path) =>
+        path.Points is { Count: 2 } || IsRectangleSourced(path) && path.Geometry is { } bounds && Math.Min(bounds.Width, bounds.Height) <= 1.5;
+
     private sealed record AxisLine(string PathId, bool Horizontal, double Fixed, double Minimum, double Maximum)
     {
+        /// <summary>The dashes a merged dashed rule was drawn with (see MergeDashedRuns); null for one stroke.</summary>
+        public IReadOnlyList<string>? MergedPathIds { get; init; }
+
+        /// <summary>How far past its drawn ends a merged dashed rule still runs: its usual gap. Zero for a stroke.</summary>
+        public double Reach { get; init; }
+
+        public IReadOnlyList<string> PathIds => MergedPathIds ?? [PathId];
+
         public static IEnumerable<AxisLine> CreateAll(VisualPath path)
         {
             if (path.Points is not { Count: >= 2 } points) return [];

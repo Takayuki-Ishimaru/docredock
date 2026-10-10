@@ -45,7 +45,12 @@ public sealed record PptxShapeRecord(
     bool FlipH = false,
     bool FlipV = false,
     // p:spPr/a:ln dash style ("dashed"/"dotted"), null when solid, absent, or the outline has no fill.
-    string? LineStyle = null);
+    string? LineStyle = null)
+{
+    /// <summary>A table's struck-through cell text: the row and cell of <see cref="TableRows"/> and the
+    /// [start, end) character ranges of that cell's text.</summary>
+    internal IReadOnlyList<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>? StruckCells { get; init; }
+}
 
 /// <summary>
 /// A shape (arrow/bar/marker/line/label) detected as visually overlaying a table's row/column
@@ -204,6 +209,10 @@ public sealed class PptxAdapter
                     if (chartData.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chartData.Series);
                 }
                 if (diagramTexts is { Count: > 0 }) extension["diagram_items"] = JsonSerializer.SerializeToElement(diagramTexts);
+                // Table cells are plain text; the readable projection marks these ranges as struck through.
+                if (shape.IsTable && shape.StruckCells is { Count: > 0 } struckCells)
+                    extension["strike_cells"] = JsonSerializer.SerializeToElement(struckCells
+                        .Select(cell => new object[] { cell.Row, cell.Column, cell.Ranges.Select(range => new[] { range.Start, range.End }).ToArray() }).ToArray());
                 NodeContent content = kind switch
                 {
                     NodeKind.Image => new ReferenceNodeContent(ResolveImageReference(package, slide.PartUri, shape.ImageRelationshipIds[0]), shape.Description ?? shape.Name),
@@ -597,6 +606,10 @@ public sealed class PptxAdapter
             // GFM tables have no native multi-paragraph cell, and ReadableMarkdownSerializer's
             // TableText already turns '\n' into "<br>" for exactly this purpose.
             var tableCellParagraphs = new List<string>(); StringBuilder? tableCellParagraph = null;
+            // Struck-through runs of the cell being read: per paragraph, and per finished cell.
+            var cellRunStrike = false; var tableCellParagraphStruck = new List<(int Start, int End)>();
+            var tableCellParagraphsStruck = new List<List<(int Start, int End)>>();
+            var tableStruckCells = new List<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>();
             var autoNumCounters = new Dictionary<int, int>();
             while (subtree.Read())
             {
@@ -621,7 +634,7 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
-                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null;
+                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null; tableCellParagraphsStruck = [];
                     tcGridSpan = ParseIntOr1(subtree.GetAttribute("gridSpan")); tcRowSpan = ParseIntOr1(subtree.GetAttribute("rowSpan"));
                     tcHMerge = IsOn(subtree.GetAttribute("hMerge")); tcVMerge = IsOn(subtree.GetAttribute("vMerge"));
                 }
@@ -631,8 +644,11 @@ public sealed class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "p" && inTableCell)
                 {
-                    tableCellParagraph = new StringBuilder();
+                    tableCellParagraph = new StringBuilder(); tableCellParagraphStruck = [];
                 }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName is "r" or "fld" && inTableCell) cellRunStrike = false;
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "rPr" && inTableCell)
+                    cellRunStrike = IsStrike(subtree.GetAttribute("strike"));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "pPr" && !inTableCell)
                 {
                     paragraphLevel = ParseInt(subtree.GetAttribute("lvl"));
@@ -677,7 +693,17 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "t")
                 {
                     var value = subtree.ReadElementContentAsString(); text.Append(value);
-                    if (inTableCell) tableCellParagraph?.Append(value);
+                    if (inTableCell && tableCellParagraph is not null)
+                    {
+                        var start = tableCellParagraph.Length;
+                        tableCellParagraph.Append(value);
+                        if (cellRunStrike && value.Length > 0)
+                        {
+                            if (tableCellParagraphStruck.Count > 0 && tableCellParagraphStruck[^1].End == start)
+                                tableCellParagraphStruck[^1] = (tableCellParagraphStruck[^1].Start, tableCellParagraph.Length);
+                            else tableCellParagraphStruck.Add((start, tableCellParagraph.Length));
+                        }
+                    }
                     else
                     {
                         paragraph?.Append(value);
@@ -712,6 +738,8 @@ public sealed class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tc")
                 {
+                    if (!tcHMerge && tableRow is not null && !tcVMerge && JoinCellStruck(tableCellParagraphs, tableCellParagraphsStruck) is { Count: > 0 } struckRanges)
+                        tableStruckCells.Add((tableRows.Count, tableRow.Count, struckRanges));
                     if (!tcHMerge) tableRow?.Add(new TableCell(tcVMerge ? string.Empty : JoinCellParagraphs(tableCellParagraphs), tcGridSpan, tcVMerge ? 0 : tcRowSpan));
                     tableCellParagraph = null; inTableCell = false;
                 }
@@ -719,6 +747,7 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && inTableCell)
                 {
                     tableCellParagraphs.Add(tableCellParagraph?.ToString() ?? string.Empty);
+                    tableCellParagraphsStruck.Add(tableCellParagraph is null ? [] : tableCellParagraphStruck);
                     tableCellParagraph = null;
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && !inTableCell && paragraph is not null)
@@ -756,7 +785,10 @@ public sealed class PptxAdapter
                 connectorHeadArrow, connectorTailArrow, connectorPathPoints, placeholderType is not null, groupHidden,
                 TableColumnWidths: tableColumnWidths.Count > 0 ? tableColumnWidths : null,
                 TableRowHeights: tableRowHeights.Count > 0 ? tableRowHeights : null,
-                IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV, LineStyle: lineNoFill ? null : lineStyle));
+                IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV, LineStyle: lineNoFill ? null : lineStyle)
+            {
+                StruckCells = tableStruckCells.Count > 0 ? tableStruckCells : null,
+            });
         }
         if (inferTitle && !result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
         {
@@ -778,6 +810,22 @@ public sealed class PptxAdapter
     // turns that into "<br>"), but a leading/trailing empty a:p -- a common authoring artifact --
     // must not surface as a spurious blank line at either edge. An empty paragraph sandwiched
     // between real ones is kept: it is a deliberate blank line inside the cell.
+    // The struck ranges of a cell's paragraphs placed in JoinCellParagraphs' text.
+    private static IReadOnlyList<(int Start, int End)> JoinCellStruck(List<string> paragraphs, List<List<(int Start, int End)>> struck)
+    {
+        var start = 0; var end = paragraphs.Count;
+        while (start < end && paragraphs[start].Length == 0) start++;
+        while (end > start && paragraphs[end - 1].Length == 0) end--;
+        var result = new List<(int Start, int End)>();
+        var offset = 0;
+        for (var index = start; index < end; index++)
+        {
+            if (index < struck.Count) result.AddRange(struck[index].Select(range => (range.Start + offset, range.End + offset)));
+            offset += paragraphs[index].Length + 1;
+        }
+        return result;
+    }
+
     private static string JoinCellParagraphs(List<string> paragraphs)
     {
         var start = 0; var end = paragraphs.Count;

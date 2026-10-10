@@ -13,6 +13,14 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
     /// <see cref="PdfPageText.Regions"/> shift when fragments are merged into readable lines, so
     /// table membership must be recorded by these ids and never by a list index.</summary>
     public IReadOnlyList<int> SourceTextIds => SourceIds is { Count: > 0 } ids ? ids : [ReadingOrder];
+
+    /// <summary>The font size in page units of upright horizontal text (its baseline is
+    /// <see cref="Geometry.Y"/> of <see cref="BoundingBox"/>); null for rotated, skewed or mirrored
+    /// text, whose decorations are not looked for.</summary>
+    public double? FontSize { get; init; }
+
+    /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
+    public IReadOnlyList<TextRange>? Struck { get; init; }
 }
 
 /// <summary>Why a Form XObject that a page really draws could not be analyzed.</summary>
@@ -60,6 +68,9 @@ public enum PdfUncertainTextReason
     /// <summary>The text is optional content (a layer) whose visibility could not be evaluated; it
     /// may be hidden in the original.</summary>
     LayerVisibilityUnknown,
+    /// <summary>A strikethrough crosses part of the text; without glyph widths it cannot be told which
+    /// characters it strikes, so the text is kept without the mark.</summary>
+    StrikethroughUnplaced,
 }
 
 /// <summary>Text fragments of one kind of doubt on a page. <see cref="ResourceName"/> names the
@@ -112,7 +123,8 @@ public sealed record PdfPageText(
     /// Null when none.</summary>
     IReadOnlyList<PdfHiddenTextRegion>? HiddenRegions = null,
     /// <summary>Text kept in <see cref="Regions"/> whose characters or visibility could not be
-    /// determined, one entry per kind of doubt. Null when none.</summary>
+    /// determined, one entry per kind of doubt, or that a strikethrough crosses in part, one entry
+    /// per strikethrough. Null when none.</summary>
     IReadOnlyList<PdfUncertainText>? UncertainText = null)
 {
     // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
@@ -344,6 +356,35 @@ public static partial class PdfTextExtractor
                     cancellationToken, out visualLabelNodeIds)
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
+            // Underlines and strikethroughs are formatting of the text they cross, not drawings: they
+            // leave the graph before its lines are read as a table or kept as fallback, and a
+            // strikethrough (drawn, or a StrikeOut annotation) marks the text it covers as struck.
+            var decorations = visualGraph is null ? [] : PdfTextDecorations.Find(visualGraph, regions, cancellationToken);
+            if (visualGraph is not null && decorations.Count > 0)
+            {
+                var earlyCodes = (visualGraph.Diagnostics ?? []).Select(diagnostic => diagnostic.Code).ToHashSet(StringComparer.Ordinal);
+                for (var i = diagnostics.Count - 1; i >= pageDiagnosticStart; i--)
+                    if (earlyCodes.Any(code => diagnostics[i].StartsWith(code + ":", StringComparison.Ordinal)))
+                        diagnostics.RemoveAt(i);
+                visualGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(visualGraph, DecorationIds(visualGraph, decorations),
+                    "text decoration (underline or strikethrough) of the text it crosses");
+                var survivingNodes = visualGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+                visualLabelNodeIds = visualLabelNodeIds.Where(entry => survivingNodes.Contains(entry.Value))
+                    .ToDictionary(entry => entry.Key, entry => entry.Value);
+                diagnostics.AddRange((visualGraph.Diagnostics ?? []).Select(diagnostic => $"{diagnostic.Code}: PDF page {pageNumber}: {diagnostic.Message}"));
+            }
+            var strikes = decorations.Where(decoration => decoration.Kind == PdfTextDecorations.DecorationKind.Strike)
+                .Select(decoration => (decoration.Left, decoration.Right, decoration.Y)).Concat(attributes?.StrikeOuts ?? []).ToArray();
+            if (strikes.Length > 0)
+            {
+                var (struck, unplaced) = PdfTextDecorations.ApplyStrikes(regions, strikes);
+                regions = struck;
+                foreach (var crossed in unplaced) diagnostics.Add(PdfTextDecorations.Describe(pageNumber, crossed));
+                // The text is kept without the mark; like other text that may not match the original,
+                // it asks for source comparison where it sits.
+                uncertainText = [.. uncertainText, .. unplaced.Select(crossed => new PdfUncertainText(PdfUncertainTextReason.StrikethroughUnplaced,
+                    null, crossed.Count, UnionBounds(crossed.Select(fragment => fragment.BoundingBox))))];
+            }
             if (visualGraph is { Nodes.Count: 0, Edges.Count: 0 } &&
                 (visualGraph.Paths?.Count ?? 0) == 0 && !visualGraph.IsPartialProjection)
             {
@@ -499,6 +540,25 @@ public static partial class PdfTextExtractor
         var right = Math.Min(media.X + media.Width, crop.X + crop.Width);
         var top = Math.Min(media.Y + media.Height, crop.Y + crop.Height);
         return right > left && top > bottom ? new Geometry("pdf-user-space", left, bottom, right - left, top - bottom) : media;
+    }
+
+    /// <summary>What to take out of a graph for its text decorations: each decoration's path, and the
+    /// node or edge built from it (by the source ledger, or an edge drawn along the path's own points).</summary>
+    private static IReadOnlyList<string> DecorationIds(VisualGraph graph, IReadOnlyList<PdfTextDecorations.Decoration> decorations)
+    {
+        var pathIds = decorations.SelectMany(decoration => decoration.PathIds).ToHashSet(StringComparer.Ordinal);
+        var ids = new HashSet<string>(pathIds, StringComparer.Ordinal);
+        foreach (var item in graph.SourceItems ?? [])
+        {
+            if (!pathIds.Contains(item.Id)) continue;
+            if (item.ProjectedNodeId is { } node) ids.Add(node);
+            if (item.ProjectedEdgeId is { } edge) ids.Add(edge);
+        }
+        var points = (graph.Paths ?? []).Where(path => pathIds.Contains(path.Id) && path.Points is not null)
+            .Select(path => path.Points!).ToHashSet(ReferenceEqualityComparer.Instance);
+        foreach (var edge in graph.Edges ?? [])
+            if (edge.Path is not null && points.Contains(edge.Path)) ids.Add(edge.Id);
+        return ids.ToArray();
     }
 
     /// <summary>Hidden fragments merged into readable lines, each reason on its own, so that the
@@ -2394,7 +2454,11 @@ public static partial class PdfTextExtractor
 
     /// <summary>Everything a page inherits from its <c>/Pages</c> ancestors plus what it declares
     /// itself. Null members mean the document declares nothing resolvable for that key.</summary>
-    private sealed record PdfPageAttributes(PdfResourceScope? Resources, Geometry? MediaBox, Geometry? CropBox, int Rotation);
+    private sealed record PdfPageAttributes(PdfResourceScope? Resources, Geometry? MediaBox, Geometry? CropBox, int Rotation)
+    {
+        /// <summary>The page's visible StrikeOut annotations, each marked area as the line through its middle.</summary>
+        public IReadOnlyList<(double Left, double Right, double Y)> StrikeOuts { get; init; } = [];
+    }
 
     /// <summary>How many characters of Form XObject content one document may be scanned for
     /// images. Form recursion follows references the page itself controls, so it needs a ceiling
@@ -2878,9 +2942,46 @@ public static partial class PdfTextExtractor
             result[pageNumber] = new PdfPageAttributes(resources,
                 ReadRectangle(InheritedValue(body, "MediaBox", index.ById, timeout), timeout),
                 ReadRectangle(InheritedValue(body, "CropBox", index.ById, timeout), timeout),
-                ReadRotation(InheritedValue(body, "Rotate", index.ById, timeout)));
+                ReadRotation(InheritedValue(body, "Rotate", index.ById, timeout)))
+            {
+                StrikeOuts = ReadStrikeOuts(body, index.ById, timeout),
+            };
         }
         return result;
+    }
+
+    /// <summary>A page's StrikeOut markup annotations (/Annots, never inherited), each quadrilateral of
+    /// /QuadPoints - or the /Rect when there are none - as the horizontal line through its middle. An
+    /// annotation flagged hidden (bit 2 of /F) is one a viewer does not show.</summary>
+    private static IReadOnlyList<(double Left, double Right, double Y)> ReadStrikeOuts(string body,
+        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
+    {
+        if (ResolveKeyValue(body, "Annots", objects, timeout) is not { } annotations) return [];
+        var strikes = new List<(double Left, double Right, double Y)>();
+        foreach (Match reference in Regex.Matches(annotations, @"(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
+        {
+            if (!int.TryParse(reference.Groups["id"].Value, out var id) || !objects.TryGetValue(id, out var annotation) ||
+                !Regex.IsMatch(annotation, @"/Subtype\s*/StrikeOut\b", RegexOptions.None, timeout)) continue;
+            if (Regex.Match(annotation, @"/F\s+(?<flags>\d+)\b", RegexOptions.None, timeout) is { Success: true } flags &&
+                int.TryParse(flags.Groups["flags"].Value, out var value) && (value & 2) != 0) continue;
+            var numbers = Numbers(ResolveKeyValue(annotation, "QuadPoints", objects, timeout));
+            if (numbers.Length >= 8)
+            {
+                for (var start = 0; start + 8 <= numbers.Length; start += 8)
+                {
+                    var xs = new[] { numbers[start], numbers[start + 2], numbers[start + 4], numbers[start + 6] };
+                    var ys = new[] { numbers[start + 1], numbers[start + 3], numbers[start + 5], numbers[start + 7] };
+                    if (xs.Max() > xs.Min()) strikes.Add((xs.Min(), xs.Max(), (ys.Min() + ys.Max()) / 2));
+                }
+            }
+            else if (ReadRectangle(ResolveKeyValue(annotation, "Rect", objects, timeout), timeout) is { } rectangle)
+                strikes.Add((rectangle.X, rectangle.X + rectangle.Width, rectangle.Y + rectangle.Height / 2));
+        }
+        return strikes;
+
+        double[] Numbers(string? declaration) => declaration is null ? [] : Regex.Matches(declaration, NumberPattern, RegexOptions.None, timeout)
+            .Select(item => double.TryParse(item.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : double.NaN)
+            .Where(double.IsFinite).ToArray();
     }
 
     /// <summary>The value of an inheritable page key: the page's own when it declares one, else the
@@ -3165,6 +3266,10 @@ public static partial class PdfTextExtractor
         var transform = PdfMatrix.Identity;
         var graphicsStack = new Stack<PdfMatrix>();
         string? currentFont = null;
+        // The size and text matrix in force, to know how large upright text is drawn (text
+        // decorations are matched against it); the position keeps using only Tm's translation.
+        double? currentFontSize = null;
+        var textMatrix = PdfMatrix.Identity;
         Regex textString;
         Regex showOperator;
         try
@@ -3181,13 +3286,23 @@ public static partial class PdfTextExtractor
                 var actualTextContext = content[actualTextCursor..match.Index];
                 operatorCursor = match.Index + match.Length;
                 UpdateGraphicsTransform(operatorContext, options.EffectiveRegexTimeout, graphicsStack, ref transform);
-                var fontOperators = Regex.Matches(operatorContext, @"/(?<font>[A-Za-z][A-Za-z0-9_.+-]*)\s+(?:[-+]?\d+(?:\.\d*)?|\.\d+)\s+Tf\b", RegexOptions.None, options.EffectiveRegexTimeout);
-                if (fontOperators.Count > 0) currentFont = fontOperators[^1].Groups["font"].Value;
-                if (Regex.IsMatch(operatorContext, @"\bBT\b", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout)) (x, y) = (0, 0);
+                var fontOperators = Regex.Matches(operatorContext, @"/(?<font>[A-Za-z][A-Za-z0-9_.+-]*)\s+(?<size>[-+]?\d+(?:\.\d*)?|\.\d+)\s+Tf\b", RegexOptions.None, options.EffectiveRegexTimeout);
+                if (fontOperators.Count > 0)
+                {
+                    currentFont = fontOperators[^1].Groups["font"].Value;
+                    currentFontSize = double.TryParse(fontOperators[^1].Groups["size"].Value, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var fontSize) ? fontSize : null;
+                }
+                if (Regex.IsMatch(operatorContext, @"\bBT\b", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout)) (x, y, textMatrix) = (0, 0, PdfMatrix.Identity);
                 foreach (Match td in Regex.Matches(operatorContext, $@"({NumberPattern})\s+({NumberPattern})\s+Td", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout))
-                    if (double.TryParse(td.Groups[1].Value, out var dx) && double.TryParse(td.Groups[2].Value, out var dy)) (x, y) = (x + dx, y + dy);
+                    if (InvariantNumber(td.Groups[1].Value) is { } dx && InvariantNumber(td.Groups[2].Value) is { } dy) (x, y) = (x + dx, y + dy);
                 foreach (Match tm in Regex.Matches(operatorContext, $@"({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+Tm", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout))
-                    if (double.TryParse(tm.Groups[5].Value, out var tx) && double.TryParse(tm.Groups[6].Value, out var ty)) (x, y) = (tx, ty);
+                {
+                    if (InvariantNumber(tm.Groups[5].Value) is { } tx && InvariantNumber(tm.Groups[6].Value) is { } ty) (x, y) = (tx, ty);
+                    if (InvariantNumber(tm.Groups[1].Value) is { } ta && InvariantNumber(tm.Groups[2].Value) is { } tb &&
+                        InvariantNumber(tm.Groups[3].Value) is { } tc && InvariantNumber(tm.Groups[4].Value) is { } td)
+                        textMatrix = new PdfMatrix(ta, tb, tc, td, 0, 0);
+                }
                 // Anchored where the string ends instead of run over a copy of the rest of the
                 // stream: that copy made this loop quadratic in the length of the content.
                 var operatorMatch = showOperator.Match(content, match.Index + match.Length);
@@ -3211,7 +3326,8 @@ public static partial class PdfTextExtractor
                     var width = Math.Max(1, Math.Sqrt(Math.Pow(right.X - point.X, 2) + Math.Pow(right.Y - point.Y, 2)));
                     var height = Math.Max(1, Math.Sqrt(Math.Pow(top.X - point.X, 2) + Math.Pow(top.Y - point.Y, 2)));
                     regions.Add(new PdfParsedText(new PdfTextRegion(text,
-                            new Geometry("pdf-user-space", point.X, point.Y, width, height), regions.Count, [regions.Count]),
+                            new Geometry("pdf-user-space", point.X, point.Y, width, height), regions.Count, [regions.Count])
+                            { FontSize = UprightFontSize(currentFontSize, textMatrix, transform) },
                         show?.Visibility ?? PdfTextVisibility.Visible,
                         actualText is null && font is { Ambiguous: true } ? font.ResourceName : null));
                 }
@@ -3224,6 +3340,23 @@ public static partial class PdfTextExtractor
             throw new PdfExtractionException("PDF text operator matching exceeded its time limit.", exception);
         }
         return regions;
+    }
+
+    private static double? InvariantNumber(string value) =>
+        double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : null;
+
+    // How tall upright, unrotated, unmirrored text is drawn in page units: the Tf size scaled by the
+    // text matrix and then the CTM. Null when the two together rotate, skew or mirror it; each alone
+    // may flip, as Chrome's PDFs do (a CTM that turns the page upside down, a text matrix that turns
+    // the text back).
+    private static double? UprightFontSize(double? size, PdfMatrix textMatrix, PdfMatrix ctm)
+    {
+        var drawnBy = ctm.Concat(textMatrix);
+        var upright = drawnBy.A > 0 && drawnBy.D > 0 &&
+            Math.Abs(drawnBy.B) <= drawnBy.A * 1e-3 && Math.Abs(drawnBy.C) <= drawnBy.D * 1e-3;
+        if (size is not { } value || value <= 0 || !upright) return null;
+        var drawn = value * drawnBy.D;
+        return double.IsFinite(drawn) && drawn > 0 ? drawn : null;
     }
 
     private static void UpdateGraphicsTransform(
@@ -3361,7 +3494,10 @@ public static partial class PdfTextExtractor
                 new Geometry(previous.BoundingBox.CoordinateSpace, previous.BoundingBox.X,
                     Math.Max(previous.BoundingBox.Y, region.BoundingBox.Y), right - previous.BoundingBox.X,
                     Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height)), previous.ReadingOrder,
-                [.. previous.SourceTextIds, .. region.SourceTextIds]);
+                [.. previous.SourceTextIds, .. region.SourceTextIds])
+            {
+                Struck = PdfTextDecorations.Join(previous.Struck, PdfTextDecorations.Shift(region.Struck, previous.Text.Length + separator.Length)),
+            };
         }
         return lines;
     }

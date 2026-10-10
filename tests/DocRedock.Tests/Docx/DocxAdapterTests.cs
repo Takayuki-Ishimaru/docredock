@@ -167,6 +167,83 @@ public sealed class DocxAdapterTests
         Assert.Equal(changedRuns, restored.Runs);
     }
 
+    // A double strikethrough (w:dstrike) reads as struck, and an edit to its paragraph writes it back
+    // struck twice: it used to be invisible to the reader and removed by the rewrite.
+    [Fact]
+    public async Task Double_strikethrough_reads_as_struck_and_survives_an_edit_of_its_paragraph()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var source = Path.Combine(directory, "dstrike.docx");
+        await using (var file = File.Create(source))
+        using (var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false))
+        {
+            await Write(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+            await Write(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+            await Write(zip, "word/document.xml", """
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+                <w:p><w:r><w:t xml:space="preserve">価格 </w:t></w:r><w:r><w:rPr><w:dstrike /></w:rPr><w:t>1,000円</w:t></w:r><w:r><w:t xml:space="preserve"> 1,200円</w:t></w:r></w:p>
+                </w:body></w:document>
+                """);
+        }
+        var adapter = new DocxAdapter();
+        var export = await adapter.ExtractAsync(source);
+        var target = Assert.Single(export.Graph.Nodes, node => node.Content is RichTextNodeContent);
+        var runs = Assert.IsType<RichTextNodeContent>(target.Content).Runs;
+        Assert.Equal(new TextRun("1,000円", Strike: true), runs[1]);
+        var edited = export.Graph with
+        {
+            Partitions = [new DocumentPartition("part-0001", 0, export.Graph.Nodes.Select(node => node.Id == target.Id
+                ? node with { Content = new RichTextNodeContent([new TextRun("改定価格 "), runs[1], runs[2]]) } : node).ToArray(), "/word/document.xml")]
+        };
+        var output = Path.Combine(directory, "dstrike-edited.docx");
+        Assert.True((await adapter.RestoreAsync(export, edited, output)).Succeeded);
+        var documentXml = ReadDocumentXml(output);
+        Assert.Contains("<w:dstrike", documentXml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<w:strike", documentXml, StringComparison.Ordinal);
+        Assert.Contains("改定価格", documentXml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task On_off_properties_set_to_off_are_off_and_stay_off_after_an_edit()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "docredock-docx-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var source = Path.Combine(directory, "onoff.docx");
+        await using (var file = File.Create(source))
+        using (var zip = new ZipArchive(file, ZipArchiveMode.Create, leaveOpen: false))
+        {
+            await Write(zip, "[Content_Types].xml", "<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\" />");
+            await Write(zip, "_rels/.rels", "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\" />");
+            await Write(zip, "word/document.xml", """
+                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+                <w:p><w:r><w:rPr><w:dstrike w:val="off" /></w:rPr><w:t xml:space="preserve">消さない1 </w:t></w:r><w:r><w:rPr><w:strike w:val="off" /></w:rPr><w:t xml:space="preserve">消さない2 </w:t></w:r><w:r><w:rPr><w:b w:val="off" /><w:i w:val="off" /></w:rPr><w:t xml:space="preserve">太くない </w:t></w:r><w:r><w:rPr><w:dstrike w:val="on" /></w:rPr><w:t>消す</w:t></w:r></w:p>
+                </w:body></w:document>
+                """);
+        }
+        var adapter = new DocxAdapter();
+        var export = await adapter.ExtractAsync(source);
+        var target = Assert.Single(export.Graph.Nodes, node => node.Content is RichTextNodeContent);
+        var runs = Assert.IsType<RichTextNodeContent>(target.Content).Runs;
+        Assert.Equal(new TextRun("消さない1 "), runs[0]);
+        Assert.Equal(new TextRun("消さない2 "), runs[1]);
+        Assert.Equal(new TextRun("太くない "), runs[2]);
+        Assert.Equal(new TextRun("消す", Strike: true), runs[3]);
+        var edited = export.Graph with
+        {
+            Partitions = [new DocumentPartition("part-0001", 0, export.Graph.Nodes.Select(node => node.Id == target.Id
+                ? node with { Content = new RichTextNodeContent([new TextRun("改定 "), .. runs]) } : node).ToArray(), "/word/document.xml")]
+        };
+        var output = Path.Combine(directory, "onoff-edited.docx");
+        Assert.True((await adapter.RestoreAsync(export, edited, output)).Succeeded);
+        var documentXml = ReadDocumentXml(output);
+        // Only the run that was struck twice is struck after the edit.
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(documentXml, "<w:dstrike"));
+        Assert.DoesNotContain("<w:strike", documentXml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<w:b ", documentXml, StringComparison.Ordinal);
+        Assert.DoesNotContain("<w:b/>", documentXml, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task RichTextCompletesDocxToMarkdownEditToDocxRoundTrip()
     {
