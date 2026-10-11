@@ -72,7 +72,7 @@ public sealed class PdfMeasuredLineTests : IDisposable
     public void Shows_without_glyph_widths_keep_the_old_rule_of_one_and_a_half_heights()
     {
         // Estimated at 6 units a character, "Name" ends at 96. A gap of 12 is under 18 and glues; 20 is over.
-        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Custom >> >> >>";
         var glued = Line(Show(72, 700, 11, "Name") + "\n" + Show(108, 700, 11, "Value"), resources);
         var spaced = Line(Show(72, 700, 11, "Name") + "\n" + Show(116, 700, 11, "Value"), resources);
         Assert.Equal(["NameValue", "Name Value"], [glued.Text, spaced.Text]);
@@ -105,7 +105,7 @@ public sealed class PdfMeasuredLineTests : IDisposable
     [Fact]
     public void Evenly_spaced_digits_without_glyph_widths_separate_but_touching_digits_join()
     {
-        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Custom >> >> >>";
         var spaced = string.Join("\n", Enumerable.Range(0, 5).Select(index =>
             Show(72 + 18 * index, 700, 12, (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))));
         var touching = string.Join("\n", Enumerable.Range(0, 5).Select(index =>
@@ -118,7 +118,7 @@ public sealed class PdfMeasuredLineTests : IDisposable
     public void A_repeated_aligned_numeric_and_text_boundary_marks_a_cell_separator()
     {
         const int size = 11;
-        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Custom >> >> >>";
         var labels = new[] { "Widget", "Gadget", "Plain", "Terms" };
         var notes = new[] { "N/A", "struck", "literal", "link" };
         var amounts = new[] { 1000, 2000, 3000, 5000 };
@@ -461,7 +461,7 @@ public sealed class PdfMeasuredLineTests : IDisposable
     [Fact]
     public void Shows_without_glyph_widths_in_a_table_cell_are_still_joined_with_a_space()
     {
-        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Custom >> >> >>";
         var cells = string.Join("\n", Show(78, 650, 9, "Mi"), Show(90, 650, 9, "xed"), Show(208, 650, 9, "x"), Show(338, 650, 9, "x"),
             Show(78, 620, 9, "x"), Show(208, 620, 9, "x"), Show(338, 620, 9, "x"));
         Assert.Equal(["Item", "Formula", "Note", "Mi xed", "x", "x", "x", "x", "x"], Texts(TableOf(Table(cells), resources)));

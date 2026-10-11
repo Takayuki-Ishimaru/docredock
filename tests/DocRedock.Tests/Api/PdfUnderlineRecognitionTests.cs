@@ -1005,18 +1005,20 @@ public sealed class PdfUnderlineRecognitionTests : IDisposable
         Assert.Equal(["Item", "Quantity", "Total"], UnderlinedTexts(result));
     }
 
-    [Fact]
-    public void Pdf_an_underline_over_text_whose_font_gives_no_widths_is_taken_for_an_underline_whatever_the_gap()
+    [Theory]
+    [InlineData("Custom", true)]
+    [InlineData("Times-Roman", false)]
+    public void Pdf_missing_widths_leave_a_cell_gap_unknown_only_for_nonstandard_fonts(string font, bool underlined)
     {
-        // The gap between two texts is only known where the fonts place their characters: here the cell
-        // between two measured ones is not, so the line stays an underline of all three.
-        const string unmeasured = "<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman >>";
+        // Standard metrics place the middle cell even without /Widths, so the line is a row rule.
+        // A custom font still leaves its gap unknown and the line stays an underline of all three.
+        var middleFont = $"<< /Type /Font /Subtype /Type1 /BaseFont /{font} >>";
         var total = Span(400, "Total", "Total");
         var content = string.Join("\n", Text(72, 720, "Item"), "BT /F2 12 Tf 1 0 0 1 250 720 Tm (Quantity) Tj ET", Text(400, 720, "Total"),
             Rule(72, total.Right, Under(720)));
         var result = Extract(Page(content, "<< /Font << /F1 4 0 R /F2 5 0 R >> >>",
-            new Dictionary<int, string> { [4] = SimpleFont, [5] = unmeasured }));
-        Assert.Equal(["Item", "Quantity", "Total"], UnderlinedTexts(result));
+            new Dictionary<int, string> { [4] = SimpleFont, [5] = middleFont }));
+        Assert.Equal(underlined ? new[] { "Item", "Quantity", "Total" } : Array.Empty<string>(), UnderlinedTexts(result));
     }
 
     [Fact]

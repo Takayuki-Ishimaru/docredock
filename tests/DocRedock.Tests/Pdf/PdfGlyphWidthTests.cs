@@ -11,7 +11,7 @@ namespace DocRedock.Tests.Pdf;
 /// font, /W and /DW in an Identity-H composite font, TJ adjustments, and the size, character and word
 /// spacing and horizontal scaling in force. Estimated at 6 units a character, a run that LibreOffice
 /// placed where the previous one ends overlapped it, and the line split there. A font that gives no
-/// widths keeps that estimate.
+/// widths and is not a standard 14 font keeps that estimate.
 /// </summary>
 public sealed class PdfGlyphWidthTests : IDisposable
 {
@@ -100,8 +100,8 @@ public sealed class PdfGlyphWidthTests : IDisposable
     }
 
     [Theory]
-    // A standard 14 font that leaves its widths out, and a font the page does not define.
-    [InlineData("<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>")]
+    // A nonstandard font that leaves its widths out, and a font the page does not define.
+    [InlineData("<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Custom >> >> >>")]
     [InlineData("<< >>")]
     public void Fonts_without_widths_keep_the_estimate_of_six_units_a_character(string resources)
     {

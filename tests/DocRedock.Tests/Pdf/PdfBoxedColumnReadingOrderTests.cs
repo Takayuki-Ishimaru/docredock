@@ -21,7 +21,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
         "<< /Type /Font /Subtype /TrueType /BaseFont /Mono /FirstChar 32 /LastChar 126 /Widths [" + string.Join(" ", Enumerable.Repeat(600, 95)) + "] >>";
 
     /// <summary>A Latin font that gives no widths: its text is placed, but how wide it is is only an estimate.</summary>
-    private const string UnmeasuredFont = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>";
+    private const string UnmeasuredFont = "<< /Type /Font /Subtype /Type1 /BaseFont /Custom >>";
 
     /// <summary>A page built from content: Latin text in the measured Helvetica of <see cref="MeasuredPdf"/>
     /// (F1) or, when asked, in a fixed-pitch font (F3), anything else in a font with a code for each character

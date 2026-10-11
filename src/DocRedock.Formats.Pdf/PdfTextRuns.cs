@@ -40,6 +40,25 @@ internal static class PdfTextRuns
     private const int MaxPerSquare = 256;
     private const double Square = 16;
 
+    /// <summary>Sorts nearly identical baselines as one row before sorting its fragments by X.
+    /// Producers round separately positioned text to different decimal places; sorting by exact Y
+    /// put the last letters (468.42) before the start of their word (468.4181).</summary>
+    public static PdfTextRegion[] OrderByBaseline(IReadOnlyList<PdfTextRegion> fragments)
+    {
+        var ordered = fragments.OrderByDescending(region => region.BoundingBox.Y).ToArray();
+        var result = new List<PdfTextRegion>(ordered.Length);
+        for (var from = 0; from < ordered.Length;)
+        {
+            var to = from + 1;
+            // Bound each group against its first baseline, rather than chaining neighbouring
+            // baselines until unrelated lines drift into the same row.
+            while (to < ordered.Length && ordered[from].BoundingBox.Y - ordered[to].BoundingBox.Y <= 0.01) to++;
+            result.AddRange(ordered[from..to].OrderBy(region => region.BoundingBox.X).ThenBy(region => region.ReadingOrder));
+            from = to;
+        }
+        return result.ToArray();
+    }
+
     /// <summary>Whether the gap between the end of <paramref name="left"/> and the start of
     /// <paramref name="right"/> is a word space, for shows whose edges are measured and that do not
     /// already carry a space at the join. A gap beside an East Asian character has to be wider, and none
