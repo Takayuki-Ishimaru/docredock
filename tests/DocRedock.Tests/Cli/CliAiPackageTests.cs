@@ -75,7 +75,7 @@ public sealed class CliAiPackageTests : IDisposable
             Assert.Equal(0, exit);
             using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(target, "manifest.json")));
             var parts = manifest.RootElement.GetProperty("parts").EnumerateArray().ToArray();
-            Assert.Equal("2.1", manifest.RootElement.GetProperty("schema_version").GetString());
+            Assert.Equal("2.2", manifest.RootElement.GetProperty("schema_version").GetString());
             Assert.Equal(rowBlocks, manifest.RootElement.GetProperty("table_row_blocks").GetBoolean());
             Assert.All(parts, part => Assert.True(part.GetProperty("estimated_tokens").GetInt32() > 0));
             if (!rowBlocks)
@@ -157,5 +157,36 @@ public sealed class CliAiPackageTests : IDisposable
             Assert.Empty(Directory.GetFileSystemEntries(root, ".docredock-*"));
         }
         finally { Directory.Delete(link); }
+    }
+
+    // v0.3.2 evaluation A: review items never change the exit code by default, but a pipeline can ask
+    // to stop (exit 11) before handing an output that needs source comparison to a model.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("dir")]
+    [InlineData("zip")]
+    public async Task Fail_on_review_returns_11_only_when_review_is_required_and_still_writes_the_output(string? form)
+    {
+        foreach (var (name, reviewed) in new[] { ("independent_one_column.xlsx", true), ("unified_numeric_id.xlsx", false) })
+            foreach (var flag in new[] { false, true })
+            {
+                var target = Path.Combine(root, $"{Path.GetFileNameWithoutExtension(name)}-{form ?? "md"}-{flag}" +
+                    (form == "zip" ? ".zip" : form is null ? ".md" : string.Empty));
+                var output = new StringWriter();
+                var error = new StringWriter();
+                string[] options = [.. form is null ? [] : new[] { "--ai-package", form }, .. flag ? new[] { "--fail-on-review" } : []];
+                var exit = await App(output, error).RunAsync(["export", V031EvaluationRegressionTests.Fixture(name), "--output", target,
+                    "--ocr", "off", .. options]);
+                Assert.True(exit == (flag && reviewed ? 11 : 0), $"{name} {form} {flag}: {exit} {output} {error}");
+                Assert.Equal(flag && reviewed, output.ToString().Contains("Review required:", StringComparison.Ordinal));
+                Assert.True(File.Exists(target) || Directory.Exists(target), target);
+                if (form is null) continue;
+                var manifest = await AiPackageManifestReader.ReadAsync(target);
+                Assert.Empty(await AiPackageManifestReader.VerifyFilesAsync(target, manifest));
+                Assert.Equal(reviewed, await AiPackageManifestReader.ReadReviewRequiredAsync(target, manifest));
+            }
+        var help = new StringWriter();
+        Assert.Equal(0, await App(help, new()).RunAsync(["export", "--help"]));
+        Assert.Contains("[--fail-on-review]", help.ToString(), StringComparison.Ordinal);
     }
 }

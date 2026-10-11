@@ -7,6 +7,8 @@
     "OFL-1.1"
   ],
   "sourceData": [
+    { "id": "Adobe-Japan1-UCS2", "version": "2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5", "license": "BSD-3-Clause", "source": "https://github.com/adobe-type-tools/mapping-resources-pdf/blob/2dd5e53fb74a01718b9dfd448a0d1cce6fff2aa5/pdf2unicode/Adobe-Japan1-UCS2", "sha256": "6a9693361647a37996312cc57071bb79f8c06411207be7c730a83fda1254cd82", "copyright": "Copyright 1990-2023 Adobe. All rights reserved.", "notice": "THIRD-PARTY-NOTICES.txt", "note": "Supplement 7 CID-to-Unicode mapping, compressed in generated C#; no font programs or runtime dependency." },
+    { "id": "PDFjs-standard-font-metrics", "version": "ae842e1c3a75b34344e5c37ca09e497bc49a0d24", "license": "Apache-2.0", "source": "https://github.com/mozilla/pdf.js/tree/ae842e1c3a75b34344e5c37ca09e497bc49a0d24/src/core", "note": "Standard 14 glyph advances and Symbol/ZapfDingbats encoding names converted to generated C#; no font programs or runtime dependency." },
     { "id": "WHATWG-HTML-entities", "version": "2026-09-13", "license": "BSD-3-Clause", "source": "https://html.spec.whatwg.org/entities.json", "note": "2,125 semicolon-terminated names incorporated into generated C# source; no NuGet dependency." }
   ],
   "packages": [

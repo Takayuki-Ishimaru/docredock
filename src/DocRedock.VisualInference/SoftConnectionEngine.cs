@@ -463,6 +463,11 @@ public sealed class SoftConnectionEngine
 
         public IReadOnlyList<VisualNodePrimitive> QuerySegment(VisualPoint start, VisualPoint end, double padding)
         {
+            // With no nodes there is nothing a segment can query. Apart from avoiding wasted
+            // work, this matters when a document has only connectors: their coordinates may be
+            // in EMUs while ScaleOf has only the 1-unit empty-canvas fallback, making this
+            // bounding-box walk visit millions of empty spatial cells.
+            if (_nodes.Length == 0) return [];
             padding += _maxNodeExtent;
             return QueryBounds(Math.Min(start.X, end.X) - padding, Math.Min(start.Y, end.Y) - padding,
                 Math.Max(start.X, end.X) + padding, Math.Max(start.Y, end.Y) + padding);

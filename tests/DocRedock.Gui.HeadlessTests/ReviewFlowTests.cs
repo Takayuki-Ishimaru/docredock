@@ -155,6 +155,42 @@ public sealed class ReviewFlowTests
     }
 
     [AvaloniaFact]
+    public void Undecodable_text_is_explained_in_japanese_once_beside_its_review_page()
+    {
+        // A font that gives no way to read its character codes (macOS Quartz's Hiragino): the page review
+        // already says "characters could not be determined", so the warning is not listed a second time,
+        // and its details name the cause and what to do.
+        var root = Directory.CreateTempSubdirectory("docredock-review-undecodable-").FullName;
+        var window = new MainWindow();
+        try
+        {
+            var page = new ReviewPage(1, "page-0001", DocumentFormatKind.Pdf,
+                [new ReviewElement(ReviewElementKind.UncertainText, "n#0:C1", new ReviewRegion(.1, .1, .3, .05))], null, true, HasTables: false);
+            var item = new GuiReviewItem("quartz.pdf", Path.Combine(root, "quartz.md"), page, ExportReviewText.Location(page),
+                ExportReviewText.DescribeJapanese(page), null, "text\n");
+            SetField(window, "_latestReviewItems", (IReadOnlyList<GuiReviewItem>)[item]);
+            SetField(window, "_latestOcrReviewItems", 0);
+            Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, new[]
+            {
+                new Diagnostic("PdfTextUndecodable", "PDF page 1: 2 text fragment(s) use font resource /C1, which gives no way to tell what its character codes stand for",
+                    DiagnosticSeverity.Warning, PartUri: "pdf:page:1"),
+            });
+
+            Assert.Equal("要確認 1ページ／照合画像 0ページ添付／確認が必要な文字 1件", Get<TextBlock>(window, "ResultCountsText").Text);
+            Assert.Equal(item.Description, Get<TextBlock>(window, "ResultReviewText").Text);
+            var details = Get<TextBox>(window, "DiagnosticsTextBox").Text!;
+            Assert.Contains("警告 PdfTextUndecodable: PDFの文字が使うフォントに、文字コードを文字へ変換する情報（ToUnicode）がなく、文字を確定できませんでした。", details);
+            Assert.Contains("対処: 「該当ページを確認」または原本PDFで、該当する文字を確認してください。", details);
+            Assert.DoesNotContain("変換時の注意事項があります", details);
+        }
+        finally
+        {
+            window.Close();
+            Directory.Delete(root, true);
+        }
+    }
+
+    [AvaloniaFact]
     public void Ocr_review_without_warnings_keeps_a_clean_completion()
     {
         var window = new MainWindow();

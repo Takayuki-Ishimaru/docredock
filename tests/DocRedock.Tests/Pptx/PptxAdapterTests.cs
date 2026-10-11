@@ -1051,6 +1051,65 @@ public sealed class PptxAdapterTests
     }
 
     [Fact]
+    public void TableTabStopDefinitionsDoNotAddTextTabsOrBlockDrawnLineMatching()
+    {
+        const string table =
+            "<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"3\" name=\"Table\" /></p:nvGraphicFramePr>" +
+            "<p:xfrm><a:off x=\"0\" y=\"0\" /><a:ext cx=\"1200000\" cy=\"400000\" /></p:xfrm>" +
+            "<a:graphic><a:graphicData><a:tbl><a:tblGrid><a:gridCol w=\"1200000\" /></a:tblGrid>" +
+            "<a:tr h=\"400000\"><a:tc><a:txBody><a:bodyPr /><a:p><a:pPr><a:tabLst><a:tab pos=\"300000\" /></a:tabLst></a:pPr>" +
+            "<a:r><a:t>Crossed</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>";
+        const string line =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"10\" name=\"Strike\" /></p:nvSpPr><p:spPr>" +
+            "<a:xfrm><a:off x=\"0\" y=\"200000\" /><a:ext cx=\"1200000\" cy=\"0\" /></a:xfrm>" +
+            "<a:prstGeom prst=\"line\"><a:avLst /></a:prstGeom><a:ln><a:solidFill><a:srgbClr val=\"FF0000\" /></a:solidFill></a:ln>" +
+            "</p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(table + line)));
+        var tableNode = Assert.Single(extraction.Graph.Nodes, node => node.Kind == NodeKind.Table);
+        var cell = Assert.Single(Assert.Single(Assert.IsType<TableNodeContent>(tableNode.Content).Rows));
+
+        Assert.Equal("Crossed", cell.Text);
+        Assert.DoesNotContain('\t', cell.Text);
+        Assert.True(tableNode.Extensions!.ContainsKey("strike_cells"),
+            "A tab stop list must not make the text in its cell disagree with the drawn-line text reader.");
+    }
+
+    [Fact]
+    public void EmptyTableTabStopListDoesNotSuppressAnActualTextTab()
+    {
+        const string table = "<a:tbl><a:tr><a:tc><a:txBody><a:p><a:pPr><a:tabLst />" +
+            "</a:pPr><a:tab /><a:r><a:t>Tabbed</a:t></a:r></a:p></a:txBody></a:tc></a:tr></a:tbl>";
+        var shape = Assert.Single(new PptxAdapter().Extract(new MemoryStream(WithTableXml(table))).Slides)
+            .Shapes.Single(item => item.ShapeId == "3");
+
+        Assert.Equal("\tTabbed", Assert.Single(Assert.Single(shape.TableRows!)).Text);
+    }
+
+    [Theory]
+    [InlineData("dist", true)]
+    [InlineData("thaiDist", true)]
+    [InlineData("l", false)]
+    public void Thai_distributed_slide_alignment_uses_the_existing_distributed_line_classification(string alignment, bool expectsPartialStrikeReview)
+    {
+        const string text =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"20\" name=\"Text\" /></p:nvSpPr><p:spPr>" +
+            "<a:xfrm><a:off x=\"914400\" y=\"1270000\" /><a:ext cx=\"5080000\" cy=\"508000\" /></a:xfrm>" +
+            "<a:prstGeom prst=\"rect\"><a:avLst /></a:prstGeom></p:spPr><p:txBody><a:bodyPr lIns=\"0\" rIns=\"0\" tIns=\"0\" bIns=\"0\" />" +
+            "<a:p><a:pPr algn=\"";
+        const string textEnd = "\" /><a:r><a:t>東京都</a:t></a:r></a:p></p:txBody></p:sp>";
+        const string line =
+            "<p:sp><p:nvSpPr><p:cNvPr id=\"21\" name=\"Strike\" /></p:nvSpPr><p:spPr>" +
+            "<a:xfrm><a:off x=\"914400\" y=\"1417320\" /><a:ext cx=\"508000\" cy=\"0\" /></a:xfrm>" +
+            "<a:prstGeom prst=\"line\"><a:avLst /></a:prstGeom><a:ln><a:solidFill><a:srgbClr val=\"FF0000\" /></a:solidFill></a:ln>" +
+            "</p:spPr></p:sp>";
+        var extraction = new PptxAdapter().Extract(new MemoryStream(CreateTableOverlayPackage(text + alignment + textEnd + line)));
+        var node = Assert.Single(extraction.Graph.Nodes, item => item.Source?.Locators.Any(locator => locator.Value == "20") == true);
+        var hasReview = node.Extensions?.TryGetValue(ReviewExtensionKeys.StrikeUnplaced, out var review) == true && review.GetBoolean();
+
+        Assert.Equal(expectsPartialStrikeReview, hasReview);
+    }
+
+    [Fact]
     public void MergedCellWithGridSpanPreservesMultipleParagraphsAndLeavesColumnCountIntact()
     {
         const string table = "<a:tbl><a:tr>" +

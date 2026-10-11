@@ -13,6 +13,37 @@ public sealed class PdfTextExtractorTests
             content.Length + " >> stream\n" + content + "\nendstream\n%%EOF"));
 
     [Theory]
+    [InlineData("0 0 595 842 re f")]
+    [InlineData("5 5 585 832 re f")]
+    public void A_filled_rectangle_covering_nearly_the_page_is_background_not_an_unlabelled_node(string rectangle)
+    {
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(rectangle));
+
+        Assert.Empty(result.Diagnostics ?? []);
+        Assert.False(Assert.Single(result.Pages).HasVectorContent);
+        Assert.DoesNotContain("[PDF visual content:", result.Text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_small_filled_box_with_a_label_keeps_its_visual_node()
+    {
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page(
+            "BT /F1 12 Tf 1 0 0 1 110 500 Tm (Chart) Tj ET\n100 450 100 100 re f"));
+
+        Assert.Contains(result.VisualGraphs![1].Nodes, node => node.Label == "Chart");
+    }
+
+    [Fact]
+    public void A_page_sized_filled_triangle_is_not_discarded_as_a_background_rectangle()
+    {
+        var result = PdfTextExtractor.Extract(MeasuredPdf.Page("0 0 m 0 842 l 595 842 l h f"));
+        var graph = result.VisualGraphs![1];
+
+        Assert.True(Assert.Single(result.Pages).HasVectorContent);
+        Assert.NotEmpty(graph.Paths!);
+    }
+
+    [Theory]
     [InlineData("f")]
     [InlineData("F")]
     [InlineData("f*")]

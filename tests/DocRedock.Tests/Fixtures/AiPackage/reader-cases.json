@@ -1,0 +1,303 @@
+{
+  "about": "Packages both AI package readers must accept or refuse alike. Each case copies a sample folder from this directory, applies its changes in order and checks it as a folder and as a ZIP (or the forms it names). verify is what `ai_package_reader.py PACKAGE --verify` prints and returns: exit 0 or 1 with exactly these stdout lines, or exit 2 with one stderr line containing every string in says. The .NET AiPackageManifestReader must give the same result: ReadAsync, VerifyFilesAsync (its problems are the lines of exit 1), then ReadSourceIndexAsync and ReadReviewAsync (exit 0 prints files ok); an InvalidDataException, AiPackageSchemaException or FileNotFoundException is exit 2 and its message contains every string in says. Changes: set (a JSON value at a JSON pointer; a segment may also be [key=value], the one array element whose field key is that string, and \"-\" appends), remove (the value at such a pointer), replace (text occurring once in a file), write (a file's text or JSON), rename and delete (a file), reseal (give a file's manifest entry its current size and SHA-256). Tests: tools/test_ai_package_reader_cases.py and tests/DocRedock.Tests/Api/AiPackageReaderCaseTests.cs.",
+  "cases": [
+    {
+      "name": "published schema-2.1 sample",
+      "from": "schema-2.1",
+      "changes": [],
+      "verify": {"exit": 0, "lines": ["files ok"]}
+    },
+    {
+      "name": "same-length change in a part",
+      "from": "schema-2.1",
+      "changes": [{"replace": "parts/0003.md", "text": "| 80 |", "with": "| 99 |"}],
+      "verify": {"exit": 1, "lines": ["parts/0003.md: sha256 mismatch (expected de7e86cbaccb2d72912a5dc201de8fd22b578822066cc105f95d790f75a8c69d, got ff2c44a317ac20339b27bac1b51649983a4805ffaa32c54cf2b87915e85f36dc)"]}
+    },
+    {
+      "name": "manifest with only a schema version",
+      "from": "schema-2.1",
+      "changes": [{"write": "manifest.json", "json": {"schema_version": "2.1"}}],
+      "verify": {"exit": 2, "says": ["source is missing"]}
+    },
+    {
+      "name": "file entry without bytes",
+      "from": "schema-2.1",
+      "changes": [{"remove": "manifest.json", "at": "/files/3/bytes"}],
+      "verify": {"exit": 2, "says": ["files[3].bytes is missing"]}
+    },
+    {
+      "name": "file entry without sha256",
+      "from": "schema-2.1",
+      "changes": [{"remove": "manifest.json", "at": "/files/3/sha256"}],
+      "verify": {"exit": 2, "says": ["files[3].sha256 is missing"]}
+    },
+    {
+      "name": "source is a number",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/source", "to": 123}],
+      "verify": {"exit": 2, "says": ["source must be an object, got a number"]}
+    },
+    {
+      "name": "file path is null",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/files/0/path", "to": null}],
+      "verify": {"exit": 2, "says": ["files[0].path is null"]}
+    },
+    {
+      "name": "changed part left out of files",
+      "from": "schema-2.1",
+      "changes": [
+        {"remove": "manifest.json", "at": "/files/[path=parts/0003.md]"},
+        {"replace": "parts/0003.md", "text": "| 80 |", "with": "| 99 |"}
+      ],
+      "verify": {"exit": 2, "says": ["files does not list 'parts/0003.md'"]}
+    },
+    {
+      "name": "source index names an undeclared location",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "source-index.json", "at": "/parts/2/sources/0/source_id", "to": "source-NOT-DECLARED"},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["parts[2] groups name the locations", "source-NOT-DECLARED"]}
+    },
+    {
+      "name": "eight node ids and one cell address",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "source-index.json", "at": "/parts/2/sources/0/cell_addresses", "to": ["D4"]},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["parts[2].sources[0].cell_addresses must hold one address or null for each of its 8 node_ids"]}
+    },
+    {
+      "name": "source index without a manifest part",
+      "from": "schema-2.1",
+      "changes": [
+        {"remove": "source-index.json", "at": "/parts/[id=part-0003]"},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["no entry for part-0003"]}
+    },
+    {
+      "name": "source index of an unknown major version",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "source-index.json", "at": "/schema_version", "to": "99.0"},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["source-index.json schema_version '99.0' is unsupported (supported: 1.x)"]}
+    },
+    {
+      "name": "two parts with one id",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/1/id", "to": "part-0003"}],
+      "verify": {"exit": 2, "says": ["parts list the id 'part-0003' twice"]}
+    },
+    {
+      "name": "next part that does not exist",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/next_part", "to": "part-DOES-NOT-EXIST"}],
+      "verify": {"exit": 2, "says": ["part part-0003 next_part names an unknown part 'part-DOES-NOT-EXIST'"]}
+    },
+    {
+      "name": "unknown manifest major version",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/schema_version", "to": "3.0"}],
+      "verify": {"exit": 2, "says": ["'3.0'", "supported: 1.x, 2.x"]}
+    },
+    {
+      "name": "later minor version with an unknown field",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "manifest.json", "at": "/schema_version", "to": "2.99"},
+        {"set": "manifest.json", "at": "/future_additive_field", "to": {"x": 1}}
+      ],
+      "verify": {"exit": 0, "lines": ["files ok"]}
+    },
+    {
+      "name": "part path leaving the package",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/2/path", "to": "../outside.txt"}],
+      "verify": {"exit": 2, "says": ["parts[2].path", "'../outside.txt'"]}
+    },
+    {
+      "name": "absolute part path",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/2/path", "to": "/tmp/outside.txt"}],
+      "verify": {"exit": 2, "says": ["parts[2].path", "'/tmp/outside.txt'"]}
+    },
+    {
+      "name": "part path with a drive",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/2/path", "to": "C:/outside.txt"}],
+      "verify": {"exit": 2, "says": ["parts[2].path", "'C:/outside.txt'"]}
+    },
+    {
+      "name": "part path with a backslash",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/2/path", "to": "parts\\0003.md"}],
+      "verify": {"exit": 2, "says": ["parts[2].path"]}
+    },
+    {
+      "name": "part path with a control character",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/2/path", "to": "parts/0003.md\nfiles ok"}],
+      "verify": {"exit": 2, "says": ["parts[2].path"]}
+    },
+    {
+      "name": "part path with a right-to-left override",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/files/[path=parts/0003.md]/path", "to": "parts/\u202edm.3000"}],
+      "verify": {"exit": 2, "says": ["files[3].path"]}
+    },
+    {
+      "name": "report saying review is required",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "report.json", "at": "/review/required", "to": true},
+        {"set": "report.json", "at": "/summary/review_items_detected", "to": true},
+        {"reseal": "report.json"}
+      ],
+      "verify": {"exit": 0, "lines": ["files ok"]}
+    },
+    {
+      "name": "report whose review.required is not a boolean",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "report.json", "at": "/review/required", "to": "yes"},
+        {"reseal": "report.json"}
+      ],
+      "verify": {"exit": 2, "says": ["review.required must be true or false, got a string"]}
+    },
+    {
+      "name": "report whose summary flag is not a boolean",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "report.json", "at": "/summary/hidden_content_included", "to": "no"},
+        {"reseal": "report.json"}
+      ],
+      "verify": {"exit": 2, "says": ["summary.hidden_content_included must be true or false, got a string"]}
+    },
+    {
+      "name": "table blocks in a circle",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/next_part", "to": "part-0002"}],
+      "verify": {"exit": 2, "says": ["part part-0003 table_block.next_part is 'part-0002', but block 3/3 of table 'table-0001' is part-0004"]}
+    },
+    {
+      "name": "table block naming itself as the next",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/next_part", "to": "part-0003"}],
+      "verify": {"exit": 2, "says": ["part part-0003 table_block.next_part is 'part-0003', but block 3/3 of table 'table-0001' is part-0004"]}
+    },
+    {
+      "name": "table block leading into another table",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0002]/table_block/next_part", "to": "part-0006"}],
+      "verify": {"exit": 2, "says": ["part part-0002 table_block.next_part is 'part-0006', but block 2/3 of table 'table-0001' is part-0003"]}
+    },
+    {
+      "name": "table block without its previous part",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/previous_part", "to": null}],
+      "verify": {"exit": 2, "says": ["part part-0003 table_block.previous_part is null, but block 1/3 of table 'table-0001' is part-0002"]}
+    },
+    {
+      "name": "last table block with a next part",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0004]/table_block/next_part", "to": "part-0001"}],
+      "verify": {"exit": 2, "says": ["part part-0004 table_block.next_part is 'part-0001', but it is the last block of table 'table-0001'"]}
+    },
+    {
+      "name": "table block counting more blocks",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/count", "to": 4}],
+      "verify": {"exit": 2, "says": ["part part-0003 says table 'table-0001' has 4 blocks, but the manifest lists 3"]}
+    },
+    {
+      "name": "two table blocks with one index",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/parts/[id=part-0003]/table_block/index", "to": 1}],
+      "verify": {"exit": 2, "says": ["table 'table-0001' gives index 1 to parts part-0002 and part-0003"]}
+    },
+    {
+      "name": "two tables with one table id",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "manifest.json", "at": "/parts/[id=part-0005]/table_block/table_id", "to": "table-0001"},
+        {"set": "manifest.json", "at": "/parts/[id=part-0006]/table_block/table_id", "to": "table-0001"}
+      ],
+      "verify": {"exit": 2, "says": ["part part-0002 says table 'table-0001' has 3 blocks, but the manifest lists 5"]}
+    },
+    {
+      "name": "schema 2 manifest without a source index",
+      "from": "schema-2.1",
+      "changes": [{"remove": "manifest.json", "at": "/source_index"}],
+      "verify": {"exit": 2, "says": ["source_index is missing"]}
+    },
+    {
+      "name": "node listed twice in one part",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "source-index.json", "at": "/parts/2/sources/0/node_ids/5", "to": "n_2074edcdf4d78005"},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["parts[2] lists node 'n_2074edcdf4d78005' twice"]}
+    },
+    {
+      "name": "repeated header node at another cell",
+      "from": "schema-2.1",
+      "changes": [
+        {"set": "source-index.json", "at": "/parts/2/sources/0/cell_addresses/0", "to": "Z9"},
+        {"reseal": "source-index.json"}
+      ],
+      "verify": {"exit": 2, "says": ["parts[2] puts node 'n_74738e53925bfe20' at source-0001 cell 'Z9', but part part-0002 puts it at source-0001 cell 'A2'"]}
+    },
+    {
+      "name": "schema 1 node listed twice in one part",
+      "from": "schema-1.0",
+      "changes": [
+        {"set": "manifest.json", "at": "/parts/0/node_ids/2", "to": "n_ISE2GLYDWTRG5QMS"},
+        {"set": "manifest.json", "at": "/parts/0/sources/2/node_id", "to": "n_ISE2GLYDWTRG5QMS"}
+      ],
+      "verify": {"exit": 2, "says": ["parts[0] lists node 'n_ISE2GLYDWTRG5QMS' twice"]}
+    },
+    {
+      "name": "file the manifest does not list",
+      "from": "schema-2.1",
+      "changes": [{"write": "parts/0007.md", "text": "# planted\n"}],
+      "verify": {"exit": 1, "lines": ["parts/0007.md: not listed in the manifest"]}
+    },
+    {
+      "name": "files left by Finder and Explorer",
+      "from": "schema-2.1",
+      "changes": [
+        {"write": ".DS_Store", "text": "Bud1"},
+        {"write": "parts/Thumbs.db", "text": "thumbs"},
+        {"write": "desktop.ini", "text": "[.ShellClassInfo]\n"},
+        {"write": "parts/._0003.md", "text": "AppleDouble"},
+        {"write": "__MACOSX/._document.md", "text": "AppleDouble"}
+      ],
+      "verify": {"exit": 0, "lines": ["files ok"]}
+    },
+    {
+      "name": "manifest listing itself",
+      "from": "schema-2.1",
+      "changes": [{"set": "manifest.json", "at": "/files/-", "to": {"path": "manifest.json", "bytes": 1, "sha256": "0000000000000000000000000000000000000000000000000000000000000000"}}],
+      "verify": {"exit": 2, "says": ["files[10].path is manifest.json, which cannot hold its own size and SHA-256"]}
+    },
+    {
+      "name": "part file in another letter case",
+      "from": "schema-2.1",
+      "changes": [{"rename": "parts/0003.md", "to": "parts/0003.MD"}],
+      "verify": {"exit": 1, "lines": ["parts/0003.md: missing", "parts/0003.MD: not listed in the manifest"]}
+    },
+    {
+      "name": "part file missing",
+      "from": "schema-2.2",
+      "changes": [{"delete": "parts/0002.md"}],
+      "verify": {"exit": 1, "lines": ["parts/0002.md: missing"]}
+    }
+  ]
+}

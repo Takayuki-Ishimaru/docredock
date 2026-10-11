@@ -373,7 +373,7 @@ public sealed partial class DocumentService
         {
             case DocumentFormatKind.Docx:
                 {
-                    var extraction = await docx.ExtractAsync(source, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var extraction = await docx.ExtractAsync(source, new DocxExportOptions(ShowTrackedRevisions: true), cancellationToken).ConfigureAwait(false);
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Diagnostics);
                     break;
@@ -928,16 +928,18 @@ public sealed partial class DocumentService
             .Select(partition => partition.Order + 1).ToHashSet();
         var unanalyzedPages = PagesWith(ReviewElementKind.UnanalyzedContent);
         var uncertainTextPages = PagesWith(ReviewElementKind.UncertainText);
+        var unplacedStrikePages = PagesWith(ReviewElementKind.StrikethroughUnplaced);
         var visualReviewPages = graph.Partitions.Where(partition => partition.Nodes.Any(node =>
                 ExportReviewBuilder.CountUnanalyzedContent(node) == 0 && ReadableMarkdownSerializer.RequiresSourceReview(node)))
             .Select(partition => partition.Order + 1).ToHashSet();
         (string Subject, string Verb, string Alt) ReviewReason(int page)
         {
             var subjects = new List<(string English, string Japanese)>();
-            if (visualReviewPages.Contains(page) || !unanalyzedPages.Contains(page) && !uncertainTextPages.Contains(page))
+            if (visualReviewPages.Contains(page) || !unanalyzedPages.Contains(page) && !uncertainTextPages.Contains(page) && !unplacedStrikePages.Contains(page))
                 subjects.Add(("unresolved tables/figures", "未解決の表・図"));
             if (unanalyzedPages.Contains(page)) subjects.Add(("content that could not be analyzed", "解析できなかった描画部品"));
             if (uncertainTextPages.Contains(page)) subjects.Add(("text whose characters or visibility could not be determined", "確定できなかった文字"));
+            if (unplacedStrikePages.Contains(page)) subjects.Add(("text with a strikethrough that could not be placed", "取り消し線の位置を確定できなかった文字"));
             return (string.Join(" and ", subjects.Select(subject => subject.English)),
                 subjects.Count == 1 && subjects[0].English != "unresolved tables/figures" ? "needs" : "need",
                 string.Join("と", subjects.Select(subject => subject.Japanese)) + "を確認");

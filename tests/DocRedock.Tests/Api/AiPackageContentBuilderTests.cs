@@ -169,6 +169,44 @@ public sealed class AiPackageContentBuilderTests
         Assert.DoesNotContain("FURNITURE", string.Concat(sanitized.Select(p => p.Markdown)), StringComparison.Ordinal);
     }
 
+    // A sheet or Word section written on its own reads as it does in document.md: every part carries
+    // the document's own title, not one taken from its own first cell ("2018-01-01") or the generic one.
+    [Fact]
+    public void EveryPartCarriesTheDocumentTitleAndReadsAsInTheWholeDocument()
+    {
+        DocumentNode Cell(string id, string address, string text, int order) => new(id, NodeKind.Cell, null, order,
+            ContentLayer.Body, new TextNodeContent(text), Source: new SourceAnchor("xlsx", "/xl/worksheets/sheet1.xml",
+                [new AnchorLocator("cell_address", address)]));
+        var workbook = Graph(DocumentFormatKind.Xlsx,
+            Partition("sheet-Summary", 0, Cell("t", "A1", "Quality evaluation", 0), Cell("c1", "A3", "Item", 1),
+                Cell("c2", "B3", "Score", 2), Cell("c3", "A4", "Plan", 3), Cell("c4", "B4", "3", 4)),
+            Partition("sheet-Reference", 1, Cell("d1", "B1", "2018-01-01", 0), Cell("d2", "B2", "Publisher", 1),
+                Cell("d3", "A4", "Tag", 2), Cell("d4", "B4", "Meaning", 3)));
+        var whole = new ReadableMarkdownSerializer().Serialize(workbook);
+        var sheets = Build(workbook, target: 128);
+        Assert.Equal(2, sheets.Count);
+        Assert.All(sheets, part => Assert.StartsWith("# Quality evaluation\n", part.Markdown, StringComparison.Ordinal));
+        Assert.Contains("2018-01-01", sheets[1].Markdown, StringComparison.Ordinal);
+        Assert.EndsWith(whole[whole.IndexOf("## Reference", StringComparison.Ordinal)..].TrimEnd(), sheets[1].Markdown.TrimEnd(), StringComparison.Ordinal);
+        Assert.Equal(whole.Split('\n').Count(line => line == "Quality evaluation"), sheets.Sum(part => part.Markdown.Split('\n').Count(line => line == "Quality evaluation")));
+
+        var title = new Dictionary<string, JsonElement> { ["document_title"] = JsonSerializer.SerializeToElement(true) };
+        var document = Graph(DocumentFormatKind.Docx, Partition("p1", 0,
+            Node("title", NodeKind.Heading, "Expense system design", extensions: title),
+            Node("h1", NodeKind.Heading, "Alpha Chapter", order: 1),
+            Node("b1", NodeKind.Paragraph, "alpha body", order: 2),
+            Node("h2", NodeKind.Heading, "Beta Chapter", order: 3),
+            Node("b2", NodeKind.Paragraph, "beta body", order: 4)));
+        var wholeDocument = new ReadableMarkdownSerializer().Serialize(document);
+        Assert.StartsWith("# Expense system design\n", wholeDocument, StringComparison.Ordinal);
+        Assert.Contains("\n## Beta Chapter\n", wholeDocument, StringComparison.Ordinal);
+        var sections = Build(document);
+        Assert.Equal(2, sections.Count);
+        Assert.All(sections, part => Assert.Single(part.Markdown.Split('\n'), line => line == "# Expense system design"));
+        Assert.All(sections, part => Assert.StartsWith("# Expense system design\n", part.Markdown, StringComparison.Ordinal));
+        Assert.Contains("\n## Beta Chapter\n", sections[1].Markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void DocxSplitsOnHeadingsWithHeadingPathLabels()
     {

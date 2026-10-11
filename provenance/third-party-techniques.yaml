@@ -1,5 +1,15 @@
 schema_version: "1.0"
 techniques:
+  - id: pdfjs-standard-font-metrics
+    source: "https://github.com/mozilla/pdf.js/tree/ae842e1c3a75b34344e5c37ca09e497bc49a0d24/src/core"
+    retrieved: "2026-10-11"
+    license: "Apache-2.0"
+    license_source: "https://github.com/mozilla/pdf.js/blob/ae842e1c3a75b34344e5c37ca09e497bc49a0d24/LICENSE"
+    copyright: "2012 Mozilla Foundation"
+    usage: "Glyph advance widths for the standard 14 fonts and Symbol/ZapfDingbats encoding names; no font programs."
+    implementation: "src/DocRedock.Formats.Pdf/PdfStandardFontMetrics.g.cs"
+    generator: "tools/generate-pdf-standard-metrics.py"
+    notice: "THIRD-PARTY-NOTICES.txt"
   - id: whatwg-html-entities
     source: "https://html.spec.whatwg.org/entities.json"
     retrieved: "2026-09-13"

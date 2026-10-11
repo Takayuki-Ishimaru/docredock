@@ -10,7 +10,7 @@ using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.Xlsx;
 
-public sealed class XlsxAdapterTests
+public sealed partial class XlsxAdapterTests
 {
     [Theory]
     [InlineData("centerContinuous", true, 3)]
@@ -106,6 +106,165 @@ public sealed class XlsxAdapterTests
 
         Assert.Contains(result.Warnings, warning =>
             warning.StartsWith("XlsxFormulaCachedValueMissing: Formula cell Sheet1!B1", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("<conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><formula>1</formula></cfRule></conditionalFormatting>")]
+    [InlineData("<x:conditionalFormatting xmlns:x=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" sqref=\"A1\"><x:cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><x:formula>1</x:formula></x:cfRule></x:conditionalFormatting>")]
+    public void Conditional_strike_dxf_is_reported_without_applying_unevaluated_formatting(string rules)
+    {
+        var bytes = WithConditionalFormatting(
+            "<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>",
+            rules);
+        var result = new XlsxAdapter().Extract(new MemoryStream(bytes));
+        var cell = Assert.Single(result.Worksheets).Cells.Single(item => item.CellReference == "A1");
+
+        Assert.True(cell.DisplayStyle!.IsStrike);
+        var strike = Assert.Single(cell.StruckRanges!);
+        Assert.Equal(0, strike.Start);
+        Assert.Equal(cell.Value!.Length, strike.End);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional strikethrough rule(s) whose conditions, priority or ranges could not be evaluated; ordinary formatting was retained for affected cells.");
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("false")]
+    public void Referenced_conditional_strike_off_dxf_is_reported_without_applying_unevaluated_formatting(string value)
+    {
+        var bytes = WithConditionalFormatting(
+            $"<dxfs count=\"1\"><dxf><font><strike val=\"{value}\" /></font></dxf></dxfs>",
+            "<conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><formula>1</formula></cfRule></conditionalFormatting>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(bytes));
+        var cell = Assert.Single(result.Worksheets).Cells.Single(item => item.CellReference == "A1");
+
+        Assert.True(cell.DisplayStyle!.IsStrike);
+        var strike = Assert.Single(cell.StruckRanges!);
+        Assert.Equal(0, strike.Start);
+        Assert.Equal(cell.Value!.Length, strike.End);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional strikethrough rule(s) whose conditions, priority or ranges could not be evaluated; ordinary formatting was retained for affected cells.");
+    }
+
+    [Theory]
+    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
+    [InlineData("<dxfs count=\"2\"><dxf><font><strike /></font></dxf><dxf><font><b /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
+    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><x:cfRule xmlns:x=\"urn:unrelated\" dxfId=\"0\" /></conditionalFormatting>")]
+    public void Conditional_formatting_without_a_referenced_strike_dxf_has_no_warning(string dxfs, string rules)
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(WithConditionalFormatting(dxfs, rules)));
+
+        Assert.DoesNotContain(result.Warnings, warning => warning.StartsWith(
+            "XlsxConditionalStrikeNotEvaluated:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Duplicate_cell_references_keep_the_last_cell_and_preserve_other_cells()
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>" +
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Earlier</t></is></c>" +
+            "<c r=\"B1\" t=\"inlineStr\"><is><t>Keep B1</t></is></c>" +
+            "<c r=\"A1\" t=\"inlineStr\"><is><t>Later</t></is></c></row></sheetData></worksheet>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var cells = Assert.Single(result.Worksheets).Cells;
+
+        Assert.Equal("Later", Assert.Single(cells, cell => cell.CellReference == "A1").Value);
+        Assert.Equal("Keep B1", Assert.Single(cells, cell => cell.CellReference == "B1").Value);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxDuplicateCellReference: Sheet1!A1 occurred more than once; the last cell was retained.");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Discarded_shared_hyperlink_master_does_not_suppress_member_underline(bool duplicateWinnerAppearsAfterMember)
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"2\">" +
+            "<font><name val=\"Calibri\"/></font><font><name val=\"Calibri\"/><u/></font></fonts>" +
+            "<cellXfs count=\"2\"><xf fontId=\"0\"/><xf fontId=\"1\" applyFont=\"1\"/></cellXfs></styleSheet>");
+        const string master = "<c r=\"A1\"><f t=\"shared\" ref=\"A1:B1\" si=\"0\">HYPERLINK(&quot;https://example.invalid&quot;,&quot;source link&quot;)</f><v>master cached</v></c>";
+        const string replacement = "<c r=\"A1\" t=\"inlineStr\"><is><t>last cell kept</t></is></c>";
+        const string member = "<c r=\"B1\" s=\"1\" t=\"str\"><f t=\"shared\" si=\"0\"/><v>ordinary underlined text</v></c>";
+        var cells = duplicateWinnerAppearsAfterMember ? master + member + replacement : master + replacement + member;
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">" +
+            cells + "</row></sheetData></worksheet>");
+
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var worksheet = Assert.Single(result.Worksheets);
+        var retainedA1 = Assert.Single(worksheet.Cells, cell => cell.CellReference == "A1");
+        var memberCell = Assert.Single(worksheet.Cells, cell => cell.CellReference == "B1");
+
+        Assert.Equal("last cell kept", retainedA1.Value);
+        Assert.NotNull(memberCell.UnderlinedRanges);
+        Assert.Contains(memberCell.UnderlinedRanges!, range => range.Start == 0 && range.End == "ordinary underlined text".Length);
+        Assert.Contains(result.FormulaDiagnostics, diagnostic => diagnostic.CellReference == "A1" && diagnostic.Safety == XlsxFormulaSafety.Suspicious);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Retained_shared_hyperlink_master_suppresses_member_static_underline(bool masterAppearsAfterMember)
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"2\">" +
+            "<font><name val=\"Calibri\"/></font><font><name val=\"Calibri\"/><u/></font></fonts>" +
+            "<cellXfs count=\"2\"><xf fontId=\"0\"/><xf fontId=\"1\" applyFont=\"1\"/></cellXfs></styleSheet>");
+        const string master = "<c r=\"A1\"><f t=\"shared\" ref=\"A1:B1\" si=\"0\">HYPERLINK(&quot;https://example.invalid&quot;,&quot;source link&quot;)</f><v>master cached</v></c>";
+        const string member = "<c r=\"B1\" s=\"1\" t=\"str\"><f t=\"shared\" si=\"0\"/><v>ordinary underlined text</v></c>";
+        var cells = masterAppearsAfterMember ? member + master : master + member;
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">" +
+            cells + "</row></sheetData></worksheet>");
+
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var memberCell = Assert.Single(Assert.Single(result.Worksheets).Cells, cell => cell.CellReference == "B1");
+
+        Assert.Null(memberCell.UnderlinedRanges);
+    }
+
+    [Theory]
+    [InlineData("defaultRowHeight", "NaN")]
+    [InlineData("defaultRowHeight", "Infinity")]
+    [InlineData("defaultRowHeight", "1e300")]
+    [InlineData("ht", "NaN")]
+    [InlineData("ht", "Infinity")]
+    [InlineData("ht", "1e300")]
+    [InlineData("defaultColWidth", "NaN")]
+    [InlineData("defaultColWidth", "Infinity")]
+    [InlineData("defaultColWidth", "1e300")]
+    [InlineData("width", "NaN")]
+    [InlineData("width", "Infinity")]
+    [InlineData("width", "1e300")]
+    public void Invalid_or_oversized_worksheet_dimensions_use_defaults_and_warn(string attribute, string value)
+    {
+        var entries = Entries(CreatePicturePackage());
+        var defaultRowHeight = attribute == "defaultRowHeight" ? value : "15";
+        var rowHeight = attribute == "ht" ? value : "20";
+        var defaultColumnWidth = attribute == "defaultColWidth" ? value : "8.43";
+        var columnWidth = attribute == "width" ? value : "18.5";
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+            $"<sheetFormatPr defaultRowHeight=\"{defaultRowHeight}\" defaultColWidth=\"{defaultColumnWidth}\"/>" +
+            $"<cols><col min=\"1\" max=\"1\" width=\"{columnWidth}\"/></cols>" +
+            "<sheetData><row r=\"1\" ht=\"" + rowHeight + "\"><c r=\"A1\" t=\"inlineStr\"><is><t>Keep A1</t></is></c>" +
+            "<c r=\"B1\" t=\"inlineStr\"><is><t>Keep B1</t></is></c></row></sheetData><drawing r:id=\"rDrawing\"/></worksheet>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var worksheet = Assert.Single(result.Worksheets);
+
+        Assert.Equal("Keep A1", worksheet.Cells.Single(cell => cell.CellReference == "A1").Value);
+        Assert.Equal("Keep B1", worksheet.Cells.Single(cell => cell.CellReference == "B1").Value);
+        Assert.Contains(result.Warnings, warning => warning.StartsWith(
+            "XlsxInvalidWorksheetDimension: Sheet1 ", StringComparison.Ordinal) && warning.Contains("@" + attribute, StringComparison.Ordinal));
+        Assert.Equal(15d, worksheet.Metrics!.DefaultRowHeight);
+        Assert.Equal(8.43d, worksheet.Metrics.DefaultColumnWidth);
+        Assert.InRange(XlsxWorksheetMetrics.RowHeightToEmu(worksheet.Metrics.RowHeight(1)), 0L, long.MaxValue);
+        Assert.InRange(XlsxWorksheetMetrics.ColumnWidthToEmu(worksheet.Metrics.ColumnWidth(1)), 0L, long.MaxValue);
     }
 
     [Fact]
@@ -1704,5 +1863,30 @@ public sealed class XlsxAdapterTests
     {
         using var input = new MemoryStream(bytes); using var zip = new ZipArchive(input); var result = new Dictionary<string, byte[]>(); foreach (var entry in zip.Entries) using (var source = entry.Open()) using (var output = new MemoryStream()) { source.CopyTo(output); result[entry.FullName] = output.ToArray(); }
         return result;
+    }
+
+    private static byte[] WithConditionalFormatting(string dxfs, string rules)
+    {
+        var entries = Entries(CreatePackage());
+        var styles = Encoding.UTF8.GetString(entries["xl/styles.xml"])
+            .Replace("<fonts count=\"1\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font></fonts>",
+                "<fonts count=\"2\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font><font><strike /></font></fonts>", StringComparison.Ordinal)
+            .Replace("<xf fontId=\"0\" applyFont=\"1\" />", "<xf fontId=\"1\" applyFont=\"1\" />", StringComparison.Ordinal);
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(styles.Replace("</styleSheet>", dxfs + "</styleSheet>", StringComparison.Ordinal));
+        var worksheet = Encoding.UTF8.GetString(entries["xl/worksheets/sheet1.xml"]);
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(worksheet.Replace("</worksheet>", rules + "</worksheet>", StringComparison.Ordinal));
+        return Pack(entries);
+    }
+
+    private static byte[] Pack(Dictionary<string, byte[]> entries)
+    {
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var (name, bytes) in entries)
+            {
+                using var entry = zip.CreateEntry(name).Open();
+                entry.Write(bytes);
+            }
+        return output.ToArray();
     }
 }
