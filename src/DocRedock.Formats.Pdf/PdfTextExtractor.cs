@@ -3556,9 +3556,7 @@ public static partial class PdfTextExtractor
         IReadOnlySet<int>? tableSourceIds, out int columnCount, BoxLayout? boxes = null)
     {
         // A superscript or subscript sorts away from the line it belongs to unless it is put on its baseline.
-        var geometric = PdfTextRuns.PlaceScripts(regions as IReadOnlyList<PdfTextRegion> ?? regions.ToArray())
-            .OrderByDescending(region => region.BoundingBox.Y)
-            .ThenBy(region => region.BoundingBox.X).ThenBy(region => region.ReadingOrder).ToArray();
+        var geometric = PdfTextRuns.OrderByBaseline(PdfTextRuns.PlaceScripts(regions as IReadOnlyList<PdfTextRegion> ?? regions.ToArray()));
         var lines = ReadLines(geometric, tableSourceIds, boxes, out columnCount);
         // PdfPageText.Text and PdfPageProjection.ToDocumentNodes key their own ordering off
         // ReadingOrder rather than re-deriving it from geometry (row-major and column-major

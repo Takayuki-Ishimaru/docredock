@@ -8,9 +8,9 @@ namespace DocRedock.Formats.Pdf;
 // text after it continues used to be estimated at 6 units a character whatever the font, its size and
 // the spacing in force: a line whose runs a producer places one by one (LibreOffice gives every change
 // of format its own show at its exact position) split wherever the estimate overshot the next run, and
-// a strikethrough over part of a show could not be placed. A font that does not give its widths - one
-// of the standard 14 without /Widths, a vertical font, a composite font with a CMap other than
-// Identity-H, a font the extractor cannot read - keeps the estimate, exactly as before.
+// a strikethrough over part of a show could not be placed. The standard 14 supply built-in advances;
+// other fonts without usable widths, vertical fonts and composite fonts with a CMap other than
+// Identity-H keep the estimate.
 public static partial class PdfTextExtractor
 {
     /// <summary>The glyph widths a font dictionary gives: how far each character code moves the text
@@ -72,8 +72,8 @@ public static partial class PdfTextExtractor
 
     private static PdfGlyphWidths? ReadSimpleWidths(IReadOnlyList<(string Key, string Value)> font, IReadOnlyDictionary<int, string> objects, double scale)
     {
-        // The standard 14 fonts may leave their widths out; their metrics are not built in here.
-        if (ReadNumbers(ResolveValue(EntryValue(font, "Widths"), objects)) is not { Count: > 0 } widths) return null;
+        if (ReadNumbers(ResolveValue(EntryValue(font, "Widths"), objects)) is not { Count: > 0 } widths)
+            return ReadStandardWidths(font, objects);
         var firstChar = ResolveValue(EntryValue(font, "FirstChar"), objects);
         var first = 0;
         if (firstChar is not null)
