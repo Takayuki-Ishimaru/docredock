@@ -6,14 +6,21 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.3 Public Beta
+
+- [v0.3.3 release notes](RELEASE_NOTES_v0.3.3.en.md)
+- Improved Office/PDF underlines, strikethroughs, text and reading order
+- Added Word revision display, Excel conditional strikethrough and review-required exit options
+- Tightened AI-package reading and repeated table context; updated manifest to schema 2.2
+
+## Published releases
+
 ### v0.3.2 Public Beta
 
 - [v0.3.2 release notes](RELEASE_NOTES_v0.3.2.en.md)
 - Improved Excel table boundaries, headings and conversion review guidance
 - Added optional row blocks for large Excel tables in AI packages
 - Updated to manifest schema 2.1 and report schema 1.1; release notes describe compatibility and limitations
-
-## Published releases
 
 ### v0.3.1 Public Beta
 

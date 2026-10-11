@@ -12,13 +12,13 @@
   <img alt="DocRedock app icon" src="assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" width="96" height="96">
 </p>
 
-A local-first Office-to-Markdown converter for AI workflows. Round-trip editing remains experimental.
+DocRedock converts Word, Excel, PowerPoint, and PDF documents into AI-friendly Markdown on your own computer. It organizes document text, tables, and images into output you can use for AI summarization and analysis. Round-trip editing—editing Markdown and restoring it to an Office document—is experimental.
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.3.2 Public Beta support
+## v0.3.3 Public Beta support
 
-v0.3.2 improves Excel table boundaries and conversion review guidance, and adds optional row blocks for large Excel tables in **AI packages**. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
+v0.3.3 improves text decorations, PDF extraction and verified **AI package** reading, and displays Word revisions in readable output. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
 
 | Feature | Status |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.2 improves Excel table boundaries and conversion review guidance, and adds 
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.2 release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.3 release notes](release-docs/RELEASE_NOTES_v0.3.3.en.md).
 
 ## Use it in 30 seconds
 
@@ -67,15 +67,17 @@ Readable export has three policies in both the GUI and CLI. They filter the Mark
 
 | Policy | Behavior |
 | --- | --- |
-| `visible` | Default. Excludes recognized Office-hidden text, sheets, rows/columns, slides/objects, notes, comments, and revisions, and PDF text entirely outside the visible area or on a layer that is off. |
+| `visible` | Default. Excludes recognized Office-hidden text, sheets, rows/columns, slides/objects, notes, comments, and revision metadata, and PDF text entirely outside the visible area or on a layer that is off. |
 | `complete` | Includes hidden and metadata content and emits a warning. |
 | `sanitized` | Applies the visible filter and additionally removes privacy-sensitive metadata, derived/OCR content, and document furniture. |
+
+Word body revisions are displayed in readable Markdown and AI packages even under `visible` or `sanitized`, and may include deleted text. Finalize revisions in a copy before conversion if they should not be shared.
 
 XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
 
 ## Important limitations
 
-- v0.3.2 is a Public Beta, not a production-stable release.
+- v0.3.3 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -88,9 +90,9 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.3.2 supported features](docs/en/supported-features.md)
+- [v0.3.3 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.3.2 release notes](release-docs/RELEASE_NOTES_v0.3.2.en.md)
+- [v0.3.3 release notes](release-docs/RELEASE_NOTES_v0.3.3.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 
