@@ -6,14 +6,21 @@
 
 ## 最新版
 
+### v0.3.3 Public Beta
+
+- [v0.3.3 リリースノート](RELEASE_NOTES_v0.3.3.md)
+- Office／PDFの下線・取り消し線、文字と読み順を改善
+- Wordの変更履歴表示、Excelの条件付き取り消し線、要確認時の終了オプションを追加
+- AIパッケージの読み取りを強化し、表の注記を再掲。manifest schema 2.2へ更新
+
+## 公開済みリリース
+
 ### v0.3.2 Public Beta
 
 - [v0.3.2 リリースノート](RELEASE_NOTES_v0.3.2.md)
 - Excelの表の区切り・見出しと、変換結果の確認案内を改善
 - AI向けパッケージに大きなExcelの表を行単位で分割するオプションを追加
 - manifest schema 2.1、report schema 1.1へ更新。互換性と制約はリリースノートに記載
-
-## 公開済みリリース
 
 ### v0.3.1 Public Beta
 

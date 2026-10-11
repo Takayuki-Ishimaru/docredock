@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.2 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.3 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 ## 1. Get DocRedock
 
@@ -35,7 +35,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.2. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.3. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -82,9 +82,11 @@ Mermaid is emitted only when connections are clear and consistent. Recognized vi
 
 ## 4. Choose a content policy
 
-- **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revisions, as well as PDF text entirely outside the visible area or on a layer that is off, out of the Markdown projection.
+- **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revision metadata, as well as PDF text entirely outside the visible area or on a layer that is off, out of the Markdown projection.
 - **complete**: includes hidden/metadata content and emits a warning.
 - **sanitized**: also filters metadata, derived/OCR content, and furniture such as headers and footers.
+
+Word body revisions remain visible in readable Markdown and AI packages under `visible` and `sanitized`, including deleted text. Finalize revisions in a copy of the source before conversion if they should not be shared.
 
 XLSX exports also accept `--sheets Sheet1,Sheet2` (CLI only) to project only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
 
