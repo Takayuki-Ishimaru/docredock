@@ -373,7 +373,7 @@ public sealed partial class DocumentService
         {
             case DocumentFormatKind.Docx:
                 {
-                    var extraction = await docx.ExtractAsync(source, cancellationToken: cancellationToken).ConfigureAwait(false);
+                    var extraction = await docx.ExtractAsync(source, new DocxExportOptions(ShowTrackedRevisions: true), cancellationToken).ConfigureAwait(false);
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Diagnostics);
                     break;

@@ -14,15 +14,21 @@ internal static class Program
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
 
-    private sealed record Allowlist(string[] AllowedLicenses, List<AllowedPackage> Packages);
+    private sealed record Allowlist(string[] AllowedLicenses, List<AllowedPackage> Packages, List<SourceData>? SourceData = null);
+    private sealed record SourceData(string Id, string Version, string License, string Source, string? Sha256 = null);
     private sealed record AllowedPackage(string Id, string Version, string License, string? Note = null);
     private sealed record PackageRef(string Id, string Version, string LockFile);
     private sealed record Violation(string Code, string Message, string? Package = null);
 
-    private sealed record Component(string Type, string Name, string Version, string Purl, ComponentLicense[] Licenses)
+    private sealed record Component(string Type, string Name, string Version, string Purl, ComponentLicense[] Licenses,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ExternalReference[]? ExternalReferences = null,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] ComponentHash[]? Hashes = null)
     {
-        public string BomRef => $"pkg:nuget/{Name.ToLowerInvariant()}@{Version}";
+        [JsonPropertyName("bom-ref")]
+        public string BomRef => Purl;
     }
+    private sealed record ExternalReference(string Type, string Url);
+    private sealed record ComponentHash(string Alg, string Content);
 
     private sealed record ComponentLicense(License License);
     private sealed record License(string Id);
@@ -49,6 +55,10 @@ internal static class Program
                 .Where(p => p is not null)
                 .Select(p => new Component("library", p!.Id, p.Version, $"pkg:nuget/{p.Id.ToLowerInvariant()}@{p.Version}",
                     [new ComponentLicense(new License(p.License))]))
+                .Concat((allowlist.SourceData ?? []).Where(data => data.Id is not null && data.Version is not null).Select(data => new Component("data", data.Id, data.Version,
+                    $"pkg:generic/{Uri.EscapeDataString(data.Id)}@{Uri.EscapeDataString(data.Version)}",
+                    [new ComponentLicense(new License(data.License))], [new ExternalReference("distribution", data.Source)],
+                    data.Sha256 is null ? null : [new ComponentHash("SHA-256", data.Sha256)])))
                 .OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(p => p.Version, StringComparer.Ordinal)
                 .ToArray();
@@ -58,7 +68,7 @@ internal static class Program
 
             foreach (var violation in violations)
                 Console.Error.WriteLine($"{violation.Code}: {violation.Message}");
-            Console.WriteLine($"License audit: {packages.Count} package reference(s), {violations.Count} violation(s).");
+            Console.WriteLine($"License audit: {packages.Count} package reference(s), {allowlist.SourceData?.Count ?? 0} source data item(s), {violations.Count} violation(s).");
             return violations.Count == 0 ? 0 : 1;
         }
         catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException or UnauthorizedAccessException)
@@ -117,6 +127,17 @@ internal static class Program
                 violations.Add(new("LIC003", $"Package {package.Id} {package.Version} has an unknown license.", package.Id));
             else if (!allowedLicenses.Contains(allowed.License))
                 violations.Add(new("LIC004", $"Package {package.Id} {package.Version} uses non-permitted license '{allowed.License}'.", package.Id));
+        }
+        var sourceIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var data in allowlist.SourceData ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(data.Id) || string.IsNullOrWhiteSpace(data.Version) || !sourceIds.Add(data.Id) ||
+                !Uri.TryCreate(data.Source, UriKind.Absolute, out var uri) || uri.Scheme != "https")
+                violations.Add(new("LIC005", $"Source data '{data.Id}' requires a unique ID, version and HTTPS source."));
+            if (string.IsNullOrWhiteSpace(data.License) || !allowedLicenses.Contains(data.License))
+                violations.Add(new("LIC006", $"Source data '{data.Id}' uses unknown or non-permitted license '{data.License}'."));
+            if (data.Sha256 is not null && (data.Sha256.Length != 64 || !data.Sha256.All(Uri.IsHexDigit)))
+                violations.Add(new("LIC007", $"Source data '{data.Id}' has an invalid SHA-256."));
         }
         return violations;
     }

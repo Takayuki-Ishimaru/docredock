@@ -75,7 +75,7 @@ public static class MarkdownInlineParser
     private const char PlaceholderLast = '\uFDEF';
 
     private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
+        @"(?<safeTag><br\s*/?>|</?(?:u|ins|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
         RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     /// <summary>Reads one run of inline Markdown into the shared syntax tree.</summary>
@@ -207,6 +207,7 @@ public static class MarkdownInlineParser
         // '<u>' has no node of its own: it is an allowlisted raw tag, so underline is carried as
         // reader state exactly the way the HTML writer lets the tag pair wrap what follows.
         var underlineDepth = 0;
+        var insertionDepth = 0;
         Visit(nodes);
         return runs;
 
@@ -214,7 +215,7 @@ public static class MarkdownInlineParser
         {
             foreach (var node in children)
             {
-                var underline = underlineDepth > 0;
+                var underline = underlineDepth > 0 || insertionDepth > 0;
                 switch (node)
                 {
                     case MarkdownInlineText text: AddRuns(runs, text.Text, bold, italic, underline, strike); break;
@@ -235,6 +236,12 @@ public static class MarkdownInlineParser
                         break;
                     case MarkdownInlineRawHtml raw when raw.Markup.Equals("</u>", StringComparison.OrdinalIgnoreCase):
                         underlineDepth = Math.Max(0, underlineDepth - 1);
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("<ins>", StringComparison.OrdinalIgnoreCase):
+                        insertionDepth++;
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("</ins>", StringComparison.OrdinalIgnoreCase):
+                        insertionDepth = Math.Max(0, insertionDepth - 1);
                         break;
                 }
             }

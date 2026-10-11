@@ -80,7 +80,7 @@ MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 # A backslash escape, or else the inline markup readable Markdown writes around text: underline
 # (<u>...</u>), strikethrough (~~...~~) and bold (**...**, ***...*** with italics). Matching escapes first
 # keeps \~ and \* the characters they are; a character reference (&lt;u&gt;) holds none of these.
-INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?u>|~~|\*\*\*|\*\*")
+INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?(?:u|ins)>|~~|\*\*\*|\*\*")
 
 
 class PackageError(ValueError):
