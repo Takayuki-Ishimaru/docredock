@@ -89,7 +89,10 @@ public sealed class DocxRealCorpusTests
             if (kind == "revision")
             {
                 Assert.True(export.SourceIndex.HasTrackedRevisions);
-                Assert.Contains(export.Diagnostics, diagnostic => diagnostic.Code == "TrackedRevisionsPresent");
+                var revisionWarning = Assert.Single(export.Diagnostics, diagnostic => diagnostic.Code == "TrackedRevisionsPresent");
+                Assert.Equal("DOCX contains tracked revisions; extracted body follows Word's final view (insertions shown, deletions retained as hidden content), and edits crossing revision markup are strict-rejected.", revisionWarning.Message);
+                Assert.Contains(export.Graph.Nodes, node => node.Layer == ContentLayer.Body && node.Content is TextNodeContent { Text: "inserted" });
+                Assert.Contains(export.Graph.Nodes, node => node.Layer == ContentLayer.Hidden && node.Content is TextNodeContent { Text: "deleted" });
             }
             await Assert.ThrowsAsync<InvalidDataException>(() => adapter.RestoreAsync(export, edited, output).AsTask());
         }

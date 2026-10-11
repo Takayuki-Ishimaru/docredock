@@ -194,8 +194,8 @@ public enum TextRunKind { Text, LineBreak, Tab }
 /// <summary>
 /// A deliberately portable inline-format subset.  It represents direct Word run
 /// properties (<c>w:rPr</c>) rather than arbitrary Word character formatting.
-/// Fields, revision markup, and drawing runs remain outside this contract.
-/// <see cref="LinkTarget"/>, <see cref="Color"/>, and <see cref="HighlightColor"/> are
+/// Fields, editable revision markup, and drawing runs remain outside this contract.
+/// <see cref="LinkTarget"/>, <see cref="Color"/>, <see cref="HighlightColor"/> and <see cref="Inserted"/> are
 /// read-only decorations for the one-way readable projection: the shared
 /// <c>DocRedockInlineMarkdown</c> serializer/parser used by the round-trippable
 /// <c>rich-text=inline-v1</c> block contract intentionally ignores them, so they never
@@ -212,7 +212,8 @@ public sealed record TextRun(
     TextRunKind Kind = TextRunKind.Text,
     string? LinkTarget = null,
     string? Color = null,
-    string? HighlightColor = null);
+    string? HighlightColor = null,
+    bool Inserted = false);
 
 public sealed record StyleDescriptor(string Id, string? Name = null, IReadOnlyDictionary<string, string>? Properties = null);
 public sealed record AssetDescriptor(string Id, string Sha256, string MediaType, string? FileName = null);

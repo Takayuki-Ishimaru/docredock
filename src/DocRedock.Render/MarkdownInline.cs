@@ -24,9 +24,18 @@ public sealed record MarkdownInlineText(string Text) : MarkdownInline;
 /// <summary>A code span.  <paramref name="Text"/> is verbatim: no reference is resolved inside it.</summary>
 public sealed record MarkdownInlineCode(string Text) : MarkdownInline;
 
-public sealed record MarkdownInlineEmphasis(string Text) : MarkdownInline;
-public sealed record MarkdownInlineStrong(string Text) : MarkdownInline;
-public sealed record MarkdownInlineStrike(string Text) : MarkdownInline;
+public sealed record MarkdownInlineEmphasis(string Text) : MarkdownInline
+{
+    public IReadOnlyList<MarkdownInline>? Children { get; init; }
+}
+public sealed record MarkdownInlineStrong(string Text) : MarkdownInline
+{
+    public IReadOnlyList<MarkdownInline>? Children { get; init; }
+}
+public sealed record MarkdownInlineStrike(string Text) : MarkdownInline
+{
+    public IReadOnlyList<MarkdownInline>? Children { get; init; }
+}
 
 /// <summary>
 /// A hyperlink.  <paramref name="Literal"/> is the source text of the whole construct, which the
@@ -66,15 +75,26 @@ public static class MarkdownInlineParser
     private const char PlaceholderLast = '\uFDEF';
 
     private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>.+?)~~|\*\*(?<strong>.+?)\*\*|\*(?<em>[^*]+)\*|_(?<emUnderscore>[^_\r\n]+)_",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"(?<safeTag><br\s*/?>|</?(?:u|ins|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     /// <summary>Reads one run of inline Markdown into the shared syntax tree.</summary>
     public static IReadOnlyList<MarkdownInline> Parse(string value)
     {
         ArgumentNullException.ThrowIfNull(value);
-        var protectedValue = ProtectEscapes(value);
+        return ParseProtected(ProtectEscapes(value), 0);
+    }
+
+    private static IReadOnlyList<MarkdownInline> ParseProtected(string protectedValue, int depth)
+    {
         var nodes = new List<MarkdownInline>();
+        // Parse before decoding entities and escape placeholders: decoded literal delimiters
+        // must never become live markup when a containing style is read again.
+        if (depth >= 32)
+        {
+            AddText(nodes, protectedValue);
+            return nodes;
+        }
         var cursor = 0;
         foreach (Match match in HtmlInlineToken.Matches(protectedValue))
         {
@@ -89,10 +109,21 @@ public static class MarkdownInlineParser
             // A code span is verbatim; only the escape placeholders are restored, because
             // ProtectEscapes copies a span through untouched and never creates any inside one.
             else if (match.Groups["code"].Success) nodes.Add(new MarkdownInlineCode(DecodePlaceholders(match.Groups["code"].Value)));
-            else if (match.Groups["strike"].Success) nodes.Add(new MarkdownInlineStrike(DecodeText(match.Groups["strike"].Value)));
-            else if (match.Groups["strong"].Success) nodes.Add(new MarkdownInlineStrong(DecodeText(match.Groups["strong"].Value)));
-            else if (match.Groups["em"].Success) nodes.Add(new MarkdownInlineEmphasis(DecodeText(match.Groups["em"].Value)));
-            else if (match.Groups["emUnderscore"].Success) nodes.Add(new MarkdownInlineEmphasis(DecodeText(match.Groups["emUnderscore"].Value)));
+            else if (match.Groups["strike"].Success)
+            {
+                var children = ParseProtected(match.Groups["strike"].Value, depth + 1);
+                nodes.Add(new MarkdownInlineStrike(PlainText(children)) { Children = children });
+            }
+            else if (match.Groups["strong"].Success)
+            {
+                var children = ParseProtected(match.Groups["strong"].Value, depth + 1);
+                nodes.Add(new MarkdownInlineStrong(PlainText(children)) { Children = children });
+            }
+            else if (match.Groups["em"].Success || match.Groups["emUnderscore"].Success)
+            {
+                var children = ParseProtected(match.Groups[match.Groups["em"].Success ? "em" : "emUnderscore"].Value, depth + 1);
+                nodes.Add(new MarkdownInlineEmphasis(PlainText(children)) { Children = children });
+            }
             else AddText(nodes, match.Value);
             cursor = match.Index + match.Length;
         }
@@ -133,9 +164,9 @@ public static class MarkdownInlineParser
                     else output.Append(Encode(link.Literal));
                     break;
                 case MarkdownInlineCode code: output.Append("<code>").Append(Encode(code.Text)).Append("</code>"); break;
-                case MarkdownInlineStrike strike: output.Append("<del>").Append(Encode(strike.Text)).Append("</del>"); break;
-                case MarkdownInlineStrong strong: output.Append("<strong>").Append(Encode(strong.Text)).Append("</strong>"); break;
-                case MarkdownInlineEmphasis emphasis: output.Append("<em>").Append(Encode(emphasis.Text)).Append("</em>"); break;
+                case MarkdownInlineStrike strike: output.Append("<del>").Append(strike.Children is { } struck ? Html(struck, sourceDirectory, outputPath) : Encode(strike.Text)).Append("</del>"); break;
+                case MarkdownInlineStrong strong: output.Append("<strong>").Append(strong.Children is { } bold ? Html(bold, sourceDirectory, outputPath) : Encode(strong.Text)).Append("</strong>"); break;
+                case MarkdownInlineEmphasis emphasis: output.Append("<em>").Append(emphasis.Children is { } italic ? Html(italic, sourceDirectory, outputPath) : Encode(emphasis.Text)).Append("</em>"); break;
             }
         }
         return output.ToString();
@@ -154,9 +185,9 @@ public static class MarkdownInlineParser
             {
                 MarkdownInlineText text => text.Text,
                 MarkdownInlineCode code => code.Text,
-                MarkdownInlineEmphasis emphasis => emphasis.Text,
-                MarkdownInlineStrong strong => strong.Text,
-                MarkdownInlineStrike strike => strike.Text,
+                MarkdownInlineEmphasis emphasis => emphasis.Children is { } italic ? PlainText(italic) : emphasis.Text,
+                MarkdownInlineStrong strong => strong.Children is { } bold ? PlainText(bold) : strong.Text,
+                MarkdownInlineStrike strike => strike.Children is { } struck ? PlainText(struck) : strike.Text,
                 MarkdownInlineLink link => link.Text,
                 MarkdownInlineImage image => image.AltText,
                 MarkdownInlineRawHtml raw when IsLineBreakTag(raw.Markup) => "\n",
@@ -175,30 +206,46 @@ public static class MarkdownInlineParser
         var runs = new List<TextRun>();
         // '<u>' has no node of its own: it is an allowlisted raw tag, so underline is carried as
         // reader state exactly the way the HTML writer lets the tag pair wrap what follows.
-        var underline = false;
-        foreach (var node in nodes)
+        var underlineDepth = 0;
+        var insertionDepth = 0;
+        Visit(nodes);
+        return runs;
+
+        void Visit(IReadOnlyList<MarkdownInline> children, bool bold = false, bool italic = false, bool strike = false)
         {
-            switch (node)
+            foreach (var node in children)
             {
-                case MarkdownInlineText text: AddRuns(runs, text.Text, underline: underline); break;
-                case MarkdownInlineCode code: AddRuns(runs, code.Text, underline: underline, code: true); break;
-                case MarkdownInlineEmphasis emphasis: AddRuns(runs, emphasis.Text, italic: true, underline: underline); break;
-                case MarkdownInlineStrong strong: AddRuns(runs, strong.Text, bold: true, underline: underline); break;
-                case MarkdownInlineStrike strike: AddRuns(runs, strike.Text, underline: underline, strike: true); break;
-                case MarkdownInlineLink link: AddRuns(runs, link.Text, underline: underline, linkTarget: link.Destination); break;
-                case MarkdownInlineImage image: AddRuns(runs, image.AltText, underline: underline); break;
-                case MarkdownInlineRawHtml raw when IsLineBreakTag(raw.Markup):
-                    runs.Add(new TextRun("\n", Kind: TextRunKind.LineBreak));
-                    break;
-                case MarkdownInlineRawHtml raw when raw.Markup.Equals("<u>", StringComparison.OrdinalIgnoreCase):
-                    underline = true;
-                    break;
-                case MarkdownInlineRawHtml raw when raw.Markup.Equals("</u>", StringComparison.OrdinalIgnoreCase):
-                    underline = false;
-                    break;
+                var underline = underlineDepth > 0 || insertionDepth > 0;
+                switch (node)
+                {
+                    case MarkdownInlineText text: AddRuns(runs, text.Text, bold, italic, underline, strike); break;
+                    case MarkdownInlineCode code: AddRuns(runs, code.Text, bold, italic, underline, strike, code: true); break;
+                    case MarkdownInlineEmphasis emphasis when emphasis.Children is { } nested: Visit(nested, bold, true, strike); break;
+                    case MarkdownInlineStrong strong when strong.Children is { } nested: Visit(nested, true, italic, strike); break;
+                    case MarkdownInlineStrike struck when struck.Children is { } nested: Visit(nested, bold, italic, true); break;
+                    case MarkdownInlineEmphasis emphasis: AddRuns(runs, emphasis.Text, bold, true, underline, strike); break;
+                    case MarkdownInlineStrong strong: AddRuns(runs, strong.Text, true, italic, underline, strike); break;
+                    case MarkdownInlineStrike struck: AddRuns(runs, struck.Text, bold, italic, underline, true); break;
+                    case MarkdownInlineLink link: AddRuns(runs, link.Text, bold, italic, underline, strike, linkTarget: link.Destination); break;
+                    case MarkdownInlineImage image: AddRuns(runs, image.AltText, bold, italic, underline, strike); break;
+                    case MarkdownInlineRawHtml raw when IsLineBreakTag(raw.Markup):
+                        runs.Add(new TextRun("\n", Kind: TextRunKind.LineBreak));
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("<u>", StringComparison.OrdinalIgnoreCase):
+                        underlineDepth++;
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("</u>", StringComparison.OrdinalIgnoreCase):
+                        underlineDepth = Math.Max(0, underlineDepth - 1);
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("<ins>", StringComparison.OrdinalIgnoreCase):
+                        insertionDepth++;
+                        break;
+                    case MarkdownInlineRawHtml raw when raw.Markup.Equals("</ins>", StringComparison.OrdinalIgnoreCase):
+                        insertionDepth = Math.Max(0, insertionDepth - 1);
+                        break;
+                }
             }
         }
-        return runs;
     }
 
     /// <summary>

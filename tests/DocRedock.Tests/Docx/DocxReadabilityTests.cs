@@ -8,7 +8,7 @@ using DocRedock.Markdown;
 
 namespace DocRedock.Tests.Docx;
 
-public sealed class DocxReadabilityTests
+public sealed partial class DocxReadabilityTests
 {
     [Theory]
     [InlineData("21", "", 2)]

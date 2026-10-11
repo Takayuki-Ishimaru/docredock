@@ -1152,6 +1152,32 @@ public sealed class ReadableMarkdownTests
             markdown, StringComparison.Ordinal);
     }
 
+    // A struck row label longer than the 24 characters a line-style note quotes: the note names the
+    // row in plain text, never half a strikethrough.
+    [Fact]
+    public void Line_style_notes_name_struck_rows_in_plain_text()
+    {
+        var table = TableOverlayNode("table", 0,
+        [
+            [new TableCell("Task"), new TableCell("Jan"), new TableCell("Feb"), new TableCell("Mar")],
+            [new TableCell("DESIGN-PHASE-WITH-A-VERY-LONG-NAME"), new TableCell(""), new TableCell(""), new TableCell("")],
+        ],
+            new OverlaySpec("1", "arrow", "both", "horizontal", 1, 1, 1, 3, LineStyle: "dashed"));
+        var extensions = new Dictionary<string, JsonElement>(table.Extensions!, StringComparer.Ordinal)
+        {
+            ["strike_cells"] = JsonSerializer.SerializeToElement(new object[] { new object[] { 1, 0, new[] { new[] { 0, 34 } } } }),
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc-overlay-struck-label", DocumentFormatKind.Pdf,
+            [new DocumentPartition("page-0001", 0, [table with { Extensions = extensions }])]);
+
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+
+        Assert.Contains("| ~~DESIGN-PHASE-WITH-A-VERY-LONG-NAME~~ | ", markdown, StringComparison.Ordinal);
+        Assert.Contains("> - 破線の両矢印: 行「DESIGN-PHASE-WITH-A-VERY…」、列「Jan」〜「Mar」\n", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain('\uFDD0', markdown);
+        Assert.DoesNotContain('\uFDD1', markdown);
+    }
+
     // v0.2.9 evaluation, priority 2: dashed and dotted overlays keep their direction and span but
     // use different stroke characters, and a note after the table names each styled shape.
     [Fact]

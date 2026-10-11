@@ -4,6 +4,20 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.3]
+
+- Preserved underline and strikethrough across Word, Excel, PowerPoint and PDF, including supported lines drawn over text and Word decorations inherited from styles.
+- Displayed Word text, row and cell revisions and previous/current formatting notes in readable Markdown and AI packages. Body revisions can include deleted text even under visible or sanitized content policies.
+- Evaluated supported Excel conditional strikethrough with saved values and defined names, retaining ordinary formatting and diagnostics when conditions cannot be resolved.
+- Improved PDF glyph decoding, measured word spacing, heading order, boxed-column reading and dashed-rule tables; ambiguous characters and unsupported layouts remain source-review items.
+- Fixed Word nested-table omissions, Excel rich-text loss and large-sheet stalls, PowerPoint spacing and tab-stop handling, and nested emphasis in GUI/Markdown previews.
+- Repeated short table titles, units and conditions in later Excel row blocks. Manifest schema is `2.2` with `table_block.context_range`; report schema remains `1.1`.
+- Added verified AI-package part reading with source cells and review state, text search, and stricter manifest, source-index, folder and ZIP validation. Malformed packages previously accepted may now fail.
+- Added `export --fail-on-review`: review-required exports save output and return exit code 11; default exit codes are unchanged.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.3.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.3.md)
+
 ## [0.3.2]
 
 - Improved Excel table boundaries: kept IDs, row labels, values and remarks together; separated independent tables and lookup lists using layout and declared Excel table ranges; listed uncertain boundaries for source comparison.

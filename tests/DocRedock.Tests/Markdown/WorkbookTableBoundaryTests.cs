@@ -265,6 +265,91 @@ public sealed class WorkbookTableBoundaryTests
         Assert.DoesNotContain("| Sales by quarter", markdown, StringComparison.Ordinal);
     }
 
+    // A title together with a unit or condition note (several caption rows) above a table is not its
+    // header, does not push the header into the data, and does not turn a two-column table into
+    // label/value pairs or document information.
+    [Theory]
+    [InlineData(2, 2)]
+    [InlineData(2, 3)]
+    [InlineData(3, 2)]
+    [InlineData(3, 3)]
+    [InlineData(5, 3)]
+    public void Several_captions_above_a_table_are_not_its_header(int columns, int captions)
+    {
+        string[] notes = ["売上実績（単位: 千円、税抜）", "対象: 国内全店", "期間: 2025年4月〜2026年3月"];
+        string[] names = ["商品", "売上", "数量", "単価", "粗利"];
+        var nodes = new List<DocumentNode> { C("A1", "2025年度 営業報告", bold: true) };
+        for (var index = 0; index < captions; index++) nodes.Add(C($"A{3 + index}", notes[index]));
+        var header = 3 + captions;
+        for (var column = 0; column < columns; column++) nodes.Add(C($"{(char)('A' + column)}{header}", names[column], bold: true));
+        for (var row = 1; row <= 3; row++)
+        {
+            nodes.Add(C($"A{header + row}", $"商品{row}"));
+            for (var column = 1; column < columns; column++) nodes.Add(N($"{(char)('A' + column)}{header + row}", row * 10 * column));
+        }
+        var (markdown, serializer) = Serialize(nodes.ToArray());
+        var table = "| " + string.Join(" | ", names.Take(columns)) + " |\n| " + string.Join(" | ", Enumerable.Repeat("---", columns)) + " |\n| 商品1 |";
+        Assert.Contains(string.Join("\n\n", notes.Take(captions)) + "\n\n" + table, markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("文書情報", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("**: ", markdown, StringComparison.Ordinal);
+        Assert.Equal(1, serializer.RenderedTables);
+    }
+
+    // A title and a description, each merged across the sheet, above two tables side by side: every
+    // row of the right table must stay in its own table, and the left table's rows in their order
+    // (the right table's header used to join the title's region and interleave the two tables).
+    [Theory]
+    [InlineData(1, true)]
+    [InlineData(2, true)]
+    [InlineData(2, false)]
+    public void Stacked_banners_over_side_by_side_tables_keep_each_table_whole_and_in_order(int titleRows, bool description)
+    {
+        var nodes = new List<DocumentNode> { C("A1", "OCR評価用 正解データ", toColumn: 8, toRow: titleRows) };
+        if (description) nodes.Add(C("A3", "スクリーンショット内の主要文字列。", toColumn: 8));
+        nodes.AddRange([C("A4", "No.", bold: true, fill: true), C("B4", "期待文字列", bold: true, fill: true), C("C4", "難易度", bold: true, fill: true)]);
+        for (var row = 1; row <= 8; row++) nodes.AddRange([N($"A{4 + row}", row), C($"B{4 + row}", $"文字列{row}"), C($"C{4 + row}", $"観点{row}")]);
+        nodes.AddRange([C("E5", "集計", bold: true, fill: true), C("F5", "値", bold: true, fill: true),
+            C("E6", "期待行数"), N("F6", 25), C("E7", "評価対象"), C("F7", "主要25行"), C("E8", "評価指標"), C("F8", "文字誤り率")]);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "boundaries", DocumentFormatKind.Xlsx,
+            [new DocumentPartition("sheet-Cover", 0, [C("A1", "受注管理システム 基本設計書")]), new DocumentPartition("sheet-Data", 1, nodes)]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        var left = Enumerable.Range(1, 8).Select(row => $"| {row} | 文字列{row} | 観点{row} |").ToArray();
+        Assert.Contains("| No. | 期待文字列 | 難易度 |\n| --- | --- | --- |\n" + string.Join("\n", left) + "\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("| 集計 | 値 |\n| --- | --- |\n| 期待行数 | 25 |\n| 評価対象 | 主要25行 |\n| 評価指標 | 文字誤り率 |\n", markdown, StringComparison.Ordinal);
+        AssertIndependent(markdown, ["文字列1", "文字列2", "観点8"], ["集計", "期待行数", "評価指標"]);
+    }
+
+    // Lone rows are set apart as captions only above a row that names the table's columns. Above a form's
+    // label/value pairs, a list's category rows or a headerless table they stay where they were.
+    [Theory]
+    [InlineData("form with bordered labels", "承認者", null)]
+    [InlineData("form with bold labels", "承認者", null)]
+    [InlineData("bold pair among labels", "会議名", "| 場所 | 本社 |")]
+    [InlineData("bordered pairs under captions", "顧客情報", "| 氏名 | 山田太郎 |")]
+    [InlineData("category rows of a list", "食品", "| トマト | 120 | 5 |")]
+    [InlineData("headerless list with blank values", "申請書作成", "| 支払処理 | 経理 | 完了 |")]
+    public void Lone_rows_above_anything_but_a_column_header_stay_in_their_group(string name, string lone, string? notHeader)
+    {
+        DocumentNode[] cells = name switch
+        {
+            "form with bordered labels" => [C("A3", "承認者", border: true), C("A4", "確認者", border: true), C("A5", "作成者", border: true),
+                C("B5", "設計担当", border: true), C("A6", "作成日", border: true), C("B6", "2025/10/01", border: true)],
+            "form with bold labels" => [C("A3", "承認者", bold: true), C("A4", "確認者", bold: true), C("A5", "作成者", bold: true),
+                C("B5", "設計担当"), C("A6", "作成日", bold: true), C("B6", "2025/10/01")],
+            "bold pair among labels" => [C("A3", "会議名"), C("A4", "日時"), C("A5", "場所", bold: true), C("B5", "本社", bold: true),
+                C("A6", "出席者"), C("B6", "山田、鈴木"), C("A7", "議題"), C("B7", "予算")],
+            "bordered pairs under captions" => [C("A3", "顧客情報"), C("A4", "※必須項目"), C("A5", "氏名", border: true), C("B5", "山田太郎", border: true),
+                C("A6", "電話", border: true), C("B6", "03-1234-5678", border: true), C("A7", "住所", border: true), C("B7", "東京都", border: true)],
+            "category rows of a list" => [C("A3", "食品"), C("A4", "野菜"), C("A5", "トマト"), N("B5", 120), N("C5", 5),
+                C("A6", "キャベツ"), N("B6", 200), N("C6", 3), C("A7", "果物"), C("A8", "りんご"), N("B8", 150), N("C8", 2)],
+            _ => [C("A3", "申請書作成"), C("A4", "承認依頼"), C("A5", "支払処理"), C("B5", "経理"), C("C5", "完了"),
+                C("A6", "記帳"), C("B6", "経理"), C("C6", "未")],
+        };
+        var markdown = Serialize([C("A1", "業務文書", bold: true), .. cells]).Markdown;
+        Assert.DoesNotContain("\n" + lone + "\n", markdown, StringComparison.Ordinal);
+        if (notHeader is not null) Assert.DoesNotContain(notHeader + "\n| --- |", markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Document_information_heading_marks_label_value_blocks_but_not_tables()
     {

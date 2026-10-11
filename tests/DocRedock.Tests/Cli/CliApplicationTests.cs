@@ -318,7 +318,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Contains("--content-policy visible|complete|sanitized", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmd", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("file.drmdpkg", stdout.ToString(), StringComparison.Ordinal);
-        Assert.DoesNotContain("licenses", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("docredock licenses [--json] [--verify]", stdout.ToString(), StringComparison.Ordinal);
         // --strict was removed from export/restore (strict Markdown validation is always enabled),
         // but doctor legitimately carries its own --strict flag (see CapabilityExitPolicy).
         var lines = stdout.ToString().Split('\n');

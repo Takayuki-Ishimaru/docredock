@@ -44,7 +44,7 @@ internal static class PdfDocumentGraphProjection
             var nodes = page.Regions.Where(_ => includeTextlessPlaceholderNodes || !page.IsImageOnly).Select(region =>
             {
                 var isVisualMember = IsConsumedNodeLabel(region);
-                IReadOnlyDictionary<string, JsonElement>? extensions = isVisualMember
+                var extensions = isVisualMember
                     ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                     {
                         ["visual_graph_member"] = JsonSerializer.SerializeToElement(true)
@@ -53,6 +53,11 @@ internal static class PdfDocumentGraphProjection
                         ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                         { ["pdf_textless_placeholder"] = JsonSerializer.SerializeToElement(true) }
                         : null;
+                // Struck-through and underlined characters of the line (those the extractor could place).
+                if (PdfPageProjection.StrikeRanges(region) is { } struck)
+                    (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["strike_ranges"] = struck;
+                if (PdfPageProjection.UnderlineRanges(region) is { } underlined)
+                    (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["underline_ranges"] = underlined;
                 return new DocumentNode(
                 $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", NodeKind.Paragraph, null, region.ReadingOrder,
                 ContentLayer.Body, new TextNodeContent(region.Text),
@@ -122,16 +127,16 @@ internal static class PdfDocumentGraphProjection
                 nodes = InsertAtReadingPosition(nodes, marker, bounds);
             }
             // Text the page kept but may not match the original: a font resource that could not be
-            // resolved, or a layer whose visibility could not be evaluated. The text stays; the
-            // marker asks for source comparison where it sits.
+            // resolved, a font whose codes cannot be turned into characters, a layer whose visibility
+            // could not be evaluated, or a strikethrough over part of the text that could not be
+            // placed. The text stays; the marker asks for source comparison where it sits.
             if (page.UncertainText is { Count: > 0 } uncertain)
             {
                 var bounds = MergeBounds(uncertain.Select(item => item.Bounds).OfType<Geometry>().ToArray());
-                var fragments = uncertain.Sum(item => item.Fragments);
                 var marker = new DocumentNode(
                     $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_uncertain_text", NodeKind.Annotation, null, nodes.Count,
                     ContentLayer.Body,
-                    new TextNodeContent($"[PDF page {page.PageNumber}: the characters or visibility of {fragments} text fragment(s) above could not be determined - compare with the source page]"),
+                    new TextNodeContent(UncertainTextMarker(page.PageNumber, uncertain)),
                     new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("uncertain_text", page.PageNumber.ToString())]),
                     Geometry: bounds, Editability: NodeEditability.RenderOnly,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
@@ -203,11 +208,29 @@ internal static class PdfDocumentGraphProjection
     /// font resource concerned (for an unresolved font), how many fragments, and where they are.</summary>
     internal sealed record PdfUncertainTextRecord(string Reason, string? ResourceName, int Fragments, Geometry? Bounds);
 
+    /// <summary>The reason code of a strikethrough over part of the text that could not be placed.</summary>
+    internal const string StrikethroughUnplacedReason = "strikethrough-unplaced";
+
     private static string UncertainReasonCode(PdfUncertainTextReason reason) => reason switch
     {
         PdfUncertainTextReason.FontResourceAmbiguous => "font-resource-ambiguous",
+        PdfUncertainTextReason.StrikethroughUnplaced => StrikethroughUnplacedReason,
+        PdfUncertainTextReason.TextUndecodable => "text-undecodable",
         _ => "layer-visibility-unknown",
     };
+
+    // What the page's marker says about the text above it, for each kind of doubt it has.
+    private static string UncertainTextMarker(int pageNumber, IReadOnlyList<PdfUncertainText> uncertain)
+    {
+        var undecodable = uncertain.Where(item => item.Reason == PdfUncertainTextReason.TextUndecodable).Sum(item => item.Fragments);
+        var doubted = uncertain.Where(item => item.Reason is not (PdfUncertainTextReason.StrikethroughUnplaced or PdfUncertainTextReason.TextUndecodable)).Sum(item => item.Fragments);
+        var struck = uncertain.Where(item => item.Reason == PdfUncertainTextReason.StrikethroughUnplaced).Sum(item => item.Fragments);
+        var parts = new List<string>();
+        if (doubted > 0) parts.Add($"the characters or visibility of {doubted} text fragment(s) above could not be determined");
+        if (undecodable > 0) parts.Add($"{undecodable} text fragment(s) above use a font whose character codes cannot be turned into characters, so their text is probably garbled");
+        if (struck > 0) parts.Add($"a strikethrough crosses part of {struck} text fragment(s) above and which characters it strikes could not be determined");
+        return $"[PDF page {pageNumber}: {string.Join("; ", parts)} - compare with the source page]";
+    }
 
     /// <summary>One unanalyzed form draw as stored on the graph: its resource name, a stable reason
     /// code, and where it paints in PDF user space when that is known.</summary>

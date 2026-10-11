@@ -37,6 +37,7 @@ public static class ExportReviewText
                 ReviewElementKind.Label => $"文字{count}件を、どの線や図形の説明か確定できませんでした",
                 ReviewElementKind.UnanalyzedContent => $"解析できなかった描画部品{count}件の文字・図はMarkdownに含まれていません",
                 ReviewElementKind.UncertainText => $"文字{count}件は、文字の対応または表示の有無を確定できませんでした（Markdownには含めています）",
+                ReviewElementKind.StrikethroughUnplaced => $"文字{count}件は、一部に取り消し線がありますが、どの文字が取り消されているかを確定できませんでした（取り消し線の印を付けずにMarkdownに含めています）",
                 _ => $"図形{style}{count}件を図として再構成できませんでした",
             });
         }
@@ -65,7 +66,7 @@ public static class ExportReviewText
             parts.Add($"要確認 {review.Pages.Count}ページ");
             parts.Add($"照合画像 {review.ReviewImagePages}ページ添付");
             var unanalyzed = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UnanalyzedContent));
-            var uncertain = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UncertainText));
+            var uncertain = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UncertainText) + page.CountOf(ReviewElementKind.StrikethroughUnplaced));
             if (review.Elements > unanalyzed + uncertain) parts.Add($"未解決の図形 {review.Elements - unanalyzed - uncertain}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
             if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
@@ -108,6 +109,7 @@ public static class ExportReviewText
                 ReviewElementKind.Label => $"{count} label(s) not assignable to one line or shape",
                 ReviewElementKind.UnanalyzedContent => $"{count} drawing component(s) not analyzed; their text and graphics are missing from the Markdown",
                 ReviewElementKind.UncertainText => $"{count} text item(s) whose characters or visibility could not be determined; kept in the Markdown",
+                ReviewElementKind.StrikethroughUnplaced => $"{count} text item(s) with a strikethrough over part of them whose struck characters could not be determined; kept in the Markdown without the mark",
                 _ => $"{count} shape(s){style} kept as vector fallback",
             });
         }

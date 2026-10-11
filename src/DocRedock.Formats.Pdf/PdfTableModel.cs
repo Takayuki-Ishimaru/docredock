@@ -51,6 +51,13 @@ public sealed record PdfTableCell(
     string Text,
     /// <summary>Stable ids of the parsed text fragments assigned to this cell. These are never list
     /// positions: the region list is re-ordered and merged after inference runs.</summary>
-    IReadOnlyList<int> SourceTextIds);
+    IReadOnlyList<int> SourceTextIds)
+{
+    /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
+    public IReadOnlyList<TextRange>? Struck { get; init; }
+
+    /// <summary>Underlined characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
+    public IReadOnlyList<TextRange>? Underlined { get; init; }
+}
 
 public enum PdfTableConfidence { NativeTagged, HighConfidenceInferred }
