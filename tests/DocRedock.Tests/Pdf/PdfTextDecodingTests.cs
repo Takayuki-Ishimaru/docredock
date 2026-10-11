@@ -824,6 +824,55 @@ public sealed class PdfTextDecodingTests
         Assert.Empty(result.Diagnostics!);
     }
 
+    [Fact]
+    public void An_omitted_CID_32_stays_undecodable_when_uniform_widths_cannot_identify_it_as_a_space()
+    {
+        var font = "<< /Type /Font /Subtype /Type0 /BaseFont /Mono /Encoding /Identity-H " +
+            "/DescendantFonts [5 0 R] /ToUnicode 6 0 R >>";
+        var objects = new Dictionary<int, string>
+        {
+            [5] = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Mono /DW 600 /W [0 255 600] >>",
+            [6] = TwoByteCMap((0x41, '日'), (0x42, '本')),
+        };
+        var result = Extract("BT /F1 18 Tf 50 780 Td <004100200042> Tj ET", font, objects);
+
+        AssertLines(["日\0 本"], Lines(result));
+        Assert.Single(result.Pages[0].UncertainText!);
+        Assert.Contains(result.Diagnostics!, message => message.StartsWith("PdfTextUndecodable:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Identity_H_CID_32_can_map_to_a_letter_in_a_subset_font()
+    {
+        var font = "<< /Type /Font /Subtype /Type0 /BaseFont /Subset /Encoding /Identity-H " +
+            "/DescendantFonts [5 0 R] /ToUnicode 6 0 R >>";
+        var objects = new Dictionary<int, string>
+        {
+            [5] = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Subset /DW 600 /W [0 255 600] >>",
+            [6] = TwoByteCMap((0x20, 'A')),
+        };
+
+        Assert.Equal("A", OneLine("BT /F1 18 Tf 50 780 Td <0020> Tj ET", font, objects));
+    }
+
+    [Theory]
+    [InlineData("0013", "日\0\u0013本")]
+    [InlineData("001F", "日\0\u001F本")]
+    public void A_missing_low_CID_that_is_not_32_stays_undecodable_even_when_widths_are_uniform(string code, string expected)
+    {
+        var font = "<< /Type /Font /Subtype /Type0 /BaseFont /Mono /Encoding /Identity-H " +
+            "/DescendantFonts [5 0 R] /ToUnicode 6 0 R >>";
+        var objects = new Dictionary<int, string>
+        {
+            [5] = "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /Mono /DW 600 /W [0 255 600] >>",
+            [6] = TwoByteCMap((0x41, '日'), (0x42, '本')),
+        };
+        var result = Extract($"BT /F1 18 Tf 50 780 Td <0041{code}0042> Tj ET", font, objects);
+
+        AssertLines([expected], Lines(result));
+        Assert.Single(result.Pages[0].UncertainText!);
+    }
+
     [Theory]
     // Arial's glyphs 19 to 28 are the digits 0 to 9, 556 thousandths wide, and 3 is the space: a map written for the letters
     // and the space alone lacks the digits, which are no space for being a low code.

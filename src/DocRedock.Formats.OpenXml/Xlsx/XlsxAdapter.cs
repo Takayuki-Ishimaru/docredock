@@ -67,6 +67,8 @@ public sealed record XlsxCellStyle(
     bool IsStrike = false,
     bool IsUnderline = false);
 
+internal sealed record XlsxStyleData(IReadOnlyList<XlsxCellStyle> CellStyles, IReadOnlySet<int> StruckDifferentialStyleIds);
+
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
     string Id,
@@ -168,12 +170,17 @@ public sealed record XlsxWorksheetMetrics(
     // conversion used by the desktop clients for the default Calibri grid.
     public static double ColumnWidthToPixels(double width)
     {
-        if (double.IsNaN(width) || double.IsInfinity(width) || width <= 0) return 0;
+        if (!double.IsFinite(width) || width > 255d) width = 8.43d;
+        if (width <= 0) return 0;
         var pixels = Math.Floor(((256d * width + Math.Floor(128d / 7d)) / 256d) * 7d);
         return Math.Max(0, pixels);
     }
     public static long ColumnWidthToEmu(double width) => checked((long)Math.Round(ColumnWidthToPixels(width) * EmuPerPixel));
-    public static long RowHeightToEmu(double points) => checked((long)Math.Round(Math.Max(0, points) * EmuPerPoint));
+    public static long RowHeightToEmu(double points)
+    {
+        if (!double.IsFinite(points) || points > 409.5d) points = 15d;
+        return checked((long)Math.Round(Math.Max(0, points) * EmuPerPoint));
+    }
 
     public long ColumnStartEmu(int column)
     {
@@ -359,7 +366,8 @@ public sealed partial class XlsxAdapter
         var package = Open(bytes);
         var richShared = ReadSharedStrings(package);
         var shared = richShared.ToDictionary(item => item.Key, item => item.Value.Text, StringComparer.Ordinal);
-        var styles = ReadStyles(package);
+        var styleData = ReadStyles(package);
+        var styles = styleData.CellStyles;
         var relationships = ReadRelationships(package, "xl/_rels/workbook.xml.rels");
         var workbook = ReadWorkbook(package, relationships);
         var worksheets = new List<XlsxWorksheetRecord>();
@@ -385,7 +393,9 @@ public sealed partial class XlsxAdapter
             var mergedRanges = ReadMergedRanges(xml);
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
-            var metrics = ReadWorksheetMetrics(xml);
+            var metrics = ReadWorksheetMetrics(xml, sheet.Name, warnings);
+            if (ReferencesConditionalStrike(xml, styleData.StruckDifferentialStyleIds))
+                warnings.Add($"XlsxConditionalStrikeNotEvaluated: {sheet.Name} has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
             var tables = ReadTables(package, sheet.PartUri, xml);
             var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
@@ -1491,6 +1501,7 @@ public sealed partial class XlsxAdapter
         var isHyperlinkCell = ReadHyperlinkCells(bytes);
         // The cells filled from a shared formula carry no formula text of their own, only its index.
         var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var indexByCoordinate = new Dictionary<(int Row, int Column), int>();
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
         {
             var reference = reader.GetAttribute("r") ?? ""; var type = reader.GetAttribute("t"); var style = reader.GetAttribute("s"); string? formula = null; string? value = null;
@@ -1541,24 +1552,35 @@ public sealed partial class XlsxAdapter
                 if (sharedFormula is not null) sharedLinks[sharedFormula] = formulaLinks;
             }
             var isLink = formulaLinks || isHyperlinkCell(row, column);
-            result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
+            var cell = new XlsxCellRecord(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
                 IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState)
             {
                 StruckRanges = MarkedRanges(value, richRuns, run => run.Strike, displayStyle?.IsStrike == true),
                 UnderlinedRanges = isLink ? null : MarkedRanges(value, richRuns, run => run.Underline, displayStyle?.IsUnderline == true),
-            });
+            };
+            var coordinate = (row, column);
+            if (indexByCoordinate.TryGetValue(coordinate, out var existing))
+            {
+                warnings.Add($"XlsxDuplicateCellReference: {sheet}!{reference} occurred more than once; the last cell was retained.");
+                result[existing] = cell;
+            }
+            else
+            {
+                indexByCoordinate.Add(coordinate, result.Count);
+                result.Add(cell);
+            }
         }
         return result;
     }
 
-    private static IReadOnlyList<XlsxCellStyle> ReadStyles(Dictionary<string, byte[]> package)
+    private static XlsxStyleData ReadStyles(Dictionary<string, byte[]> package)
     {
-        if (!package.TryGetValue("xl/styles.xml", out var bytes)) return [];
+        if (!package.TryGetValue("xl/styles.xml", out var bytes)) return new([], new HashSet<int>());
         var document = new XmlDocument();
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         document.Load(reader);
         var root = document.DocumentElement;
-        if (root is null) return [];
+        if (root is null) return new([], new HashSet<int>());
 
         var fonts = DirectChild(root, "fonts")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "font")
             .Select(font => new
@@ -1575,9 +1597,14 @@ public sealed partial class XlsxAdapter
         var formats = DirectChild(root, "numFmts")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "numFmt")
             .Select(format => (Id: int.TryParse(format.GetAttribute("numFmtId"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? id : -1, Format: format.GetAttribute("formatCode")))
             .Where(item => item.Id >= 0).ToDictionary(item => item.Id, item => item.Format) ?? new Dictionary<int, string>();
+        var struckDifferentialStyleIds = (DirectChild(root, "dxfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "dxf") ?? [])
+            .Select((dxf, index) => (Dxf: dxf, Index: index))
+            .Where(item => DirectChild(item.Dxf, "font") is { } font && DirectChild(font, "strike") is { } strike &&
+                           IsOn(strike.GetAttribute("val") is { Length: > 0 } val ? val : null))
+            .Select(item => item.Index).ToHashSet();
 
         var xfs = DirectChild(root, "cellXfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "xf") ?? [];
-        return xfs.Select(xf =>
+        var cellStyles = xfs.Select(xf =>
         {
             var fontId = AttributeInt(xf, "fontId");
             var fillId = AttributeInt(xf, "fillId");
@@ -1595,6 +1622,23 @@ public sealed partial class XlsxAdapter
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Strike,
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Underline);
         }).ToArray();
+        return new(cellStyles, struckDifferentialStyleIds);
+    }
+
+    private static bool ReferencesConditionalStrike(byte[] worksheetXml, IReadOnlySet<int> struckDifferentialStyleIds)
+    {
+        if (struckDifferentialStyleIds.Count == 0) return false;
+        var document = new XmlDocument();
+        using var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml);
+        document.Load(reader);
+        var worksheetNamespace = document.DocumentElement?.NamespaceURI ?? string.Empty;
+        foreach (var formatting in document.GetElementsByTagName("conditionalFormatting", worksheetNamespace).OfType<XmlElement>())
+        {
+            if (string.IsNullOrWhiteSpace(formatting.GetAttribute("sqref"))) continue;
+            foreach (var rule in formatting.ChildNodes.OfType<XmlElement>().Where(element => element.LocalName == "cfRule" && element.NamespaceURI == worksheetNamespace))
+                if (AttributeInt(rule, "dxfId") is { } id && struckDifferentialStyleIds.Contains(id)) return true;
+        }
+        return false;
     }
 
     private static int? AttributeInt(XmlElement element, string attribute) =>
@@ -2727,7 +2771,7 @@ public sealed partial class XlsxAdapter
         // are cells for each merge, which a sheet drawn in thousands of merged cells cannot afford.
         var indexByCoordinate = new Dictionary<(int Row, int Column), int>(cells.Count);
         for (var index = 0; index < cells.Count; index++)
-            indexByCoordinate.Add((cells[index].RowIndex, cells[index].ColumnIndex), index);
+            indexByCoordinate[(cells[index].RowIndex, cells[index].ColumnIndex)] = index;
         foreach (var reference in mergedRanges)
         {
             var range = ParseRange(reference);
@@ -3000,7 +3044,7 @@ public sealed partial class XlsxAdapter
         return null;
     }
 
-    private static XlsxWorksheetMetrics ReadWorksheetMetrics(byte[] bytes)
+    private static XlsxWorksheetMetrics ReadWorksheetMetrics(byte[] bytes, string sheet, List<string> warnings)
     {
         var defaultColumnWidth = 8.43d;
         var defaultRowHeight = 15d;
@@ -3012,8 +3056,8 @@ public sealed partial class XlsxAdapter
             if (reader.NodeType != XmlNodeType.Element) continue;
             if (reader.LocalName == "sheetFormatPr")
             {
-                defaultColumnWidth = AttributeDouble(reader, "defaultColWidth", defaultColumnWidth);
-                defaultRowHeight = AttributeDouble(reader, "defaultRowHeight", defaultRowHeight);
+                defaultColumnWidth = ReadDimension(reader, "defaultColWidth", defaultColumnWidth, 255d, sheet, warnings);
+                defaultRowHeight = ReadDimension(reader, "defaultRowHeight", defaultRowHeight, 409.5d, sheet, warnings);
             }
             else if (reader.LocalName == "col")
             {
@@ -3024,18 +3068,29 @@ public sealed partial class XlsxAdapter
                 // marked hidden -- means the same thing. Both were previously ignored by a
                 // `width > 0` guard below, which fell back to the DEFAULT column width instead and
                 // skewed every absoluteAnchor arrow that crossed a hidden/zero-width column.
-                var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : AttributeDouble(reader, "width", defaultColumnWidth);
+                var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "width", defaultColumnWidth, 255d, sheet, warnings);
                 if (min <= max)
                     for (var column = Math.Max(1, min); column <= max; column++) columns[column] = width;
             }
             else if (reader.LocalName == "row")
             {
                 var row = AttributeInt(reader, "r", 0);
-                var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : AttributeDouble(reader, "ht", defaultRowHeight);
+                var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "ht", defaultRowHeight, 409.5d, sheet, warnings);
                 if (row > 0) rows[row] = height;
             }
         }
         return new(defaultColumnWidth, defaultRowHeight, columns, rows);
+    }
+
+    private static double ReadDimension(XmlReader reader, string attribute, double fallback, double maximum, string sheet, List<string> warnings)
+    {
+        var raw = reader.GetAttribute(attribute);
+        if (raw is null) return fallback;
+        if (double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) &&
+            double.IsFinite(value) && value >= 0 && value <= maximum)
+            return value;
+        warnings.Add($"XlsxInvalidWorksheetDimension: {sheet} {reader.LocalName}@{attribute} was replaced with {fallback.ToString(CultureInfo.InvariantCulture)}.");
+        return fallback;
     }
 
     private static int AttributeInt(XmlReader reader, string name, int fallback) =>

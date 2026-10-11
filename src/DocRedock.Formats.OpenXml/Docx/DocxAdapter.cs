@@ -292,7 +292,9 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (index.HasMacro) diagnostics.Add(new("MacroPresent", "DOCX contains a macro project; it was not executed.", DiagnosticSeverity.Warning));
         if (index.HasSignature) diagnostics.Add(new("SignaturePresent", "DOCX contains package signatures; edited restore is strict-rejected.", DiagnosticSeverity.Warning));
         if (index.HasDocumentProtection) diagnostics.Add(new("DocumentProtected", "DOCX has document protection; protected edits are strict-rejected.", DiagnosticSeverity.Warning));
-        if (index.HasTrackedRevisions) diagnostics.Add(new("TrackedRevisionsPresent", "DOCX contains tracked revisions; edits crossing revision markup are strict-rejected.", DiagnosticSeverity.Warning));
+        if (index.HasTrackedRevisions) diagnostics.Add(new("TrackedRevisionsPresent",
+            "DOCX contains tracked revisions; extracted body follows Word's final view (insertions shown, deletions retained as hidden content), and edits crossing revision markup are strict-rejected.",
+            DiagnosticSeverity.Warning));
         // One document-level notice, not one per equation: OMML is structured markup that only
         // approximates as linear text, so the reader is told once that layout may have changed.
         var linearizedEquations = bodyElements.Sum(CountMathRoots);

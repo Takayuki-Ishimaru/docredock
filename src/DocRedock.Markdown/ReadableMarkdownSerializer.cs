@@ -486,7 +486,11 @@ public sealed partial class ReadableMarkdownSerializer
                 display = string.Empty;
                 if (aggregated.SkipIds.Contains(candidate.Id) || nestedTableFolds.FoldedChildIds.Contains(candidate.Id)) return false;
                 var candidateText = NodeText(candidate).Trim();
-                if (string.IsNullOrWhiteSpace(candidateText)) return false;
+                // A wrapper table can have no own paragraph text at all while its only content is
+                // a nested table. Its child is folded below, so keep the host in the rendering
+                // pass even though its un-folded projection is empty.
+                if (string.IsNullOrWhiteSpace(candidateText) &&
+                    !(candidate.Kind == NodeKind.Table && nestedTableFolds.ChildrenByParentId.ContainsKey(candidate.Id))) return false;
                 // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
                 // displayText is what every other branch below actually renders.
                 var candidateDisplay = DisplayText(candidate, candidateText);
@@ -565,7 +569,8 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Annotation:
                         WriteQuote(output, displayText);
                         break;
-                    case NodeKind.CodeBlock when ExtensionRanges(node, "strike_ranges") is not null || ExtensionRanges(node, "underline_ranges") is not null:
+                    case NodeKind.CodeBlock when ExtensionRanges(node, "strike_ranges") is not null || ExtensionRanges(node, "underline_ranges") is not null ||
+                                                  node.Content is RichTextNodeContent markedCode && markedCode.Runs.Any(run => run.Strike || run.Underline):
                         // A code fence is verbatim and has no place for a mark: text struck or underlined (a line drawn over a code-style
                         // paragraph) is written as a paragraph with its marks, as an Excel cell of code is.
                         WriteParagraph(output, displayText);

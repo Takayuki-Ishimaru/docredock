@@ -495,7 +495,7 @@ public sealed partial class PptxAdapter
             DrawnTextExtent extent;
             if (row.VisualLines == 1)
             {
-                var alignment = style.Align switch { "ctr" => DrawnAlignment.Center, "r" => DrawnAlignment.Right, "dist" => DrawnAlignment.Fill, _ => DrawnAlignment.Left };
+                var alignment = style.Align switch { "ctr" => DrawnAlignment.Center, "r" => DrawnAlignment.Right, "dist" or "thaiDist" => DrawnAlignment.Fill, _ => DrawnAlignment.Left };
                 // Centered text is centered between its margin and the right inset, whatever the first line's indent.
                 extent = DrawnLineRules.SingleLine(row.Size, frameBottom, alignment == DrawnAlignment.Center ? innerLeft + leftMargin : areaLeft, innerRight, row.Width,
                     alignment, baselines[0]);

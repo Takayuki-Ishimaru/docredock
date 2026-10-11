@@ -195,6 +195,35 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests
         Assert.Equal("[[0,17]]", Extension(node, "strike_ranges"));
     }
 
+    [Fact]
+    public async Task Character_strike_and_underline_in_code_style_paragraphs_render_as_marked_paragraphs()
+    {
+        const string codeStyle = "<w:style w:type=\"paragraph\" w:styleId=\"SourceCode\"><w:name w:val=\"Source Code\"/><w:basedOn w:val=\"Normal\"/></w:style></w:styles>";
+        var body = $"<w:p><w:pPr><w:pStyle w:val=\"SourceCode\"/></w:pPr>{WordRun("DELETE FROM users", "<w:strike/>")}</w:p>" +
+                   $"<w:p><w:pPr><w:pStyle w:val=\"SourceCode\"/></w:pPr>{WordRun("SELECT 1", "<w:u w:val=\"single\"/>")}</w:p>" +
+                   WordParagraph("SELECT 2", properties: "<w:pStyle w:val=\"SourceCode\"/>");
+        var source = Document("code-run-marks.docx", body,
+            styles: Styles.Replace("</w:styles>", codeStyle, StringComparison.Ordinal));
+
+        var (markdown, _) = await Export(source);
+
+        Assert.Contains("\n~~DELETE FROM users~~\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("\n<u>SELECT 1</u>\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("\n```\nSELECT 2\n```\n", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Slanted_word_lines_from_one_to_one_hundred_points_and_one_hundred_lines_finish_quickly()
+    {
+        var lines = string.Concat(Enumerable.Range(1, 100).Select(rise => WordLine(0, 2, 120, rise: rise)));
+        var source = Document("slanted-lines.docx", WordParagraph("A paragraph with a slanted line drawn near it.", lines));
+        var extraction = await Task.Run(() => ExtractDocument(source)).WaitAsync(TimeSpan.FromSeconds(3));
+
+        Assert.DoesNotContain(extraction.Diagnostics, diagnostic => diagnostic.Code == "VisualInferenceTimeout");
+        Assert.Contains(extraction.Graph.Nodes, node => node.Kind == NodeKind.Paragraph &&
+            node.Content is TextNodeContent { Text: "A paragraph with a slanted line drawn near it." });
+    }
+
     private static Dictionary<string, JsonElement> RangesOf(string key, int start, int end) => new() { [key] = JsonSerializer.SerializeToElement(new[] { new[] { start, end } }) };
 
     private static string SerializeNodes(params DocumentNode[] nodes) =>
@@ -413,6 +442,14 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests
         // A line along all of the column strikes it; a line as short over text that is not spread strikes all of it.
         Assert.Contains("\n~~東京都~~\n", (await Export(Document("distwhole.docx", Paragraph(WordLine(-2, WordStrike, 472), "distribute")))).Markdown, StringComparison.Ordinal);
         Assert.Contains("\n~~東京都~~\n", (await Export(Document("leftpartial.docx", Paragraph(WordLine(-2, WordStrike, 42), "left")))).Markdown, StringComparison.Ordinal);
+        foreach (var thaiFill in new[] { "thaiDistribute", "thaiDist" })
+        {
+            var thaiPartial = ExtractDocument(Document($"{thaiFill}-partial.docx", Paragraph(WordLine(-2, WordStrike, 42), thaiFill)));
+            var thaiNode = ParagraphNodes(thaiPartial).Single();
+            Assert.Null(Extension(thaiNode, "strike_ranges"));
+            Assert.Equal("true", Extension(thaiNode, ReviewExtensionKeys.StrikeUnplaced));
+            Assert.Contains("\n~~東京都~~\n", (await Export(Document($"{thaiFill}-whole.docx", Paragraph(WordLine(-2, WordStrike, 472), thaiFill)))).Markdown, StringComparison.Ordinal);
+        }
         // An underline over part of it underlines nothing.
         Assert.DoesNotContain("<u>", (await Export(Document("distunder.docx", Paragraph(WordLine(0, WordUnderline, 42), "distribute")))).Markdown, StringComparison.Ordinal);
         Assert.Contains("<u>東京都</u>", (await Export(Document("leftunder.docx", Paragraph(WordLine(0, WordUnderline, 42), "left")))).Markdown, StringComparison.Ordinal);

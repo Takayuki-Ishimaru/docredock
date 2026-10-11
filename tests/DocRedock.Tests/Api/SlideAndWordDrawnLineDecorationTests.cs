@@ -838,13 +838,21 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests : IDisposable
     }
 
     [Fact]
-    public void A_cell_whose_text_the_node_holds_differently_is_not_placed()
+    public void A_cell_tab_stop_definition_does_not_shift_its_text_decoration()
     {
-        // The node of a cell whose paragraph has a tab stop holds a tab ahead of the text: the offsets of the text the cell reads would be
-        // one off, so the cell is not placed and the line stays what it was.
+        // A tab stop defines placement; it contributes no character that could shift the text's decoration offsets.
         var cell = Cell("", paragraphs: "<a:p><a:pPr><a:tabLst><a:tab pos=\"914400\" algn=\"l\"/></a:tabLst></a:pPr><a:r><a:rPr lang=\"en-US\" sz=\"1800\"/><a:t>Old plan</a:t></a:r></a:p>");
         var table = GridTable(72, 200, [144, 144], [36, 36], [Cell("Item"), Cell("Amount")], [cell, Cell("800")]);
         var extraction = ExtractSlides(Presentation("tabstop.pptx", table + SlideLine(5, 76, 251.7, 150)));
+        Assert.Equal("[[1,0,[[0,8]]]]", Extension(ShapeNode(extraction, "Table"), "strike_cells"));
+    }
+
+    [Fact]
+    public void A_cell_with_a_literal_tab_is_not_placed()
+    {
+        var cell = Cell("", paragraphs: "<a:p><a:tab/><a:r><a:rPr lang=\"en-US\" sz=\"1800\"/><a:t>Old plan</a:t></a:r></a:p>");
+        var table = GridTable(72, 200, [144, 144], [36, 36], [Cell("Item"), Cell("Amount")], [cell, Cell("800")]);
+        var extraction = ExtractSlides(Presentation("literal-tab.pptx", table + SlideLine(5, 76, 251.7, 150)));
         Assert.Null(Extension(ShapeNode(extraction, "Table"), "strike_cells"));
     }
 
@@ -1343,11 +1351,15 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests : IDisposable
     }
 
     [Fact]
-    public async Task A_line_grid_or_space_before_a_paragraph_keeps_the_drawing_where_the_layout_decides_the_height()
+    public async Task A_doc_grid_places_snapped_paragraph_text_while_a_loose_paragraph_uses_font_metrics()
     {
         var gridSection = SectionProperties.Replace("</w:sectPr>", "<w:docGrid w:type=\"lines\" w:linePitch=\"360\"/></w:sectPr>", StringComparison.Ordinal);
         var grid = Document("grid.docx", WordParagraph("Old price 1000 yen", WordLine(-2, WordStrike, 104)), section: gridSection);
-        Assert.DoesNotContain("~~", (await Export(grid)).Markdown, StringComparison.Ordinal);
+        Assert.Contains("~~Old price 1000 yen~~", (await Export(grid)).Markdown, StringComparison.Ordinal);
+        // A larger pitch moves the snapped baseline down; the same line now lies in the strike zone.
+        var wideGridSection = SectionProperties.Replace("</w:sectPr>", "<w:docGrid w:type=\"lines\" w:linePitch=\"480\"/></w:sectPr>", StringComparison.Ordinal);
+        var wideGrid = Document("wide-grid.docx", WordParagraph("Old price 1000 yen", WordLine(-2, 12, 104)), section: wideGridSection);
+        Assert.Contains("~~Old price 1000 yen~~", (await Export(wideGrid)).Markdown, StringComparison.Ordinal);
         // A paragraph that does not snap to the grid is set as the font sets it.
         var loose = Document("gridloose.docx", WordParagraph("Old price 1000 yen", WordLine(-2, WordStrike, 104), "<w:snapToGrid w:val=\"0\"/>"), section: gridSection);
         Assert.Contains("~~Old price 1000 yen~~", (await Export(loose)).Markdown, StringComparison.Ordinal);

@@ -93,6 +93,60 @@ public sealed class PdfMeasuredLineTests : IDisposable
         Assert.Equal("SPACED TITLE", Line(string.Join("\n", shows)).Text);
     }
 
+    [Fact]
+    public void A_rating_scale_of_evenly_spaced_digits_keeps_the_items_separate()
+    {
+        var shows = string.Join("\n", Enumerable.Range(0, 5).Select(index =>
+            Show(72 + 18 * index, 700, 12, (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))));
+
+        Assert.Equal("1 2 3 4 5", Line(shows).Text);
+    }
+
+    [Fact]
+    public void Evenly_spaced_digits_without_glyph_widths_separate_but_touching_digits_join()
+    {
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var spaced = string.Join("\n", Enumerable.Range(0, 5).Select(index =>
+            Show(72 + 18 * index, 700, 12, (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))));
+        var touching = string.Join("\n", Enumerable.Range(0, 5).Select(index =>
+            Show(72 + 6 * index, 680, 12, (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture))));
+
+        Assert.Equal(["1 2 3 4 5", "12345"], [Line(spaced, resources).Text, Line(touching, resources).Text]);
+    }
+
+    [Fact]
+    public void A_repeated_aligned_numeric_and_text_boundary_marks_a_cell_separator()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var rows = Enumerable.Range(0, 3).Select(index => string.Join("\n",
+            Show(index == 2 ? 74.07 : 72, 700 - index * 15, size, (1000 + index * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            Show(98.391, 700 - index * 15, size, index == 0 ? "N/A" : index == 1 ? "struck" : "link")));
+        var lines = Lines(string.Join("\n", rows), resources);
+
+        Assert.Equal(["1000 N/A", "2000 struck", "3000 link"], lines.Select(line => line.Text));
+    }
+
+    [Theory]
+    [InlineData("10", "mm")]
+    [InlineData("H2", "O")]
+    [InlineData("A", "4")]
+    [InlineData("2026Q", "4")]
+    public void A_single_number_letter_transition_is_not_enough_to_insert_a_cell_space(string left, string right)
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n", Show(72, 700, size, left), Show(72 + left.Length * 6 + 1, 700, size, right));
+
+        Assert.Equal(left + right, Line(content, resources).Text);
+    }
+
+    [Fact]
+    public void A_number_and_word_in_one_show_keep_their_written_spacing()
+    {
+        Assert.Equal("1000N/A", Line(Show(72, 700, 11, "1000N/A")).Text);
+    }
+
     [Theory]
     // Set a glyph at a time without spacing, a word is not a row of letters and a space is still one gap beyond the rest;
     // and a label of Latin letters spread over a box (1.2 em apart) is no more words than a tracked heading.

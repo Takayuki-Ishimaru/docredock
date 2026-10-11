@@ -36,6 +36,27 @@ public sealed class SoftConnectionEngineTests
         Assert.Single(exact.Resolved); Assert.Equal(ConnectionConfidence.Native, exact.Resolved[0].Confidence);
     }
 
+    [Fact]
+    public void Connector_only_canvas_does_not_scan_empty_spatial_cells_along_segments()
+    {
+        // DOCX connector coordinates are EMUs, while an empty visual canvas has the 1-unit
+        // fallback scale. A segment query must therefore skip the spatial grid when there are
+        // no nodes, regardless of segment length or slope.
+        var connectors = Enumerable.Range(1, 100).Select(index => (VisualPrimitive)new VisualConnectorPrimitive(
+            $"line-{index:D3}", "c", Anchor(), new VisualConnectorPath([
+                new(0, 0), new(1_524_000, index * 12_700d)]))).ToArray();
+        var document = new VisualPrimitiveDocument("d", DocumentFormatKind.Docx,
+            [new VisualCanvas("c", "/word/document.xml", null, 1, 1, "ooxml")], connectors);
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+        var result = new SoftConnectionEngine().Infer(document);
+
+        stopwatch.Stop();
+        Assert.Empty(result.Resolved);
+        Assert.Equal(100, result.Unresolved.Count);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Connector-only inference took {stopwatch.Elapsed}.");
+    }
+
 
     [Fact]
     public void Endpoint_inside_single_node_does_not_jump_to_first_ray_hit_beyond_it()

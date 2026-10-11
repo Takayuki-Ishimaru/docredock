@@ -150,7 +150,13 @@ public sealed partial class DocxAdapter
         return new DocxDrawnFormat(multiple, DrawnTwips(DrawnAttribute(properties, "spacing", "before")) ?? 0, beforeUnknown,
             DrawnTwips(Indent("left", "start")) ?? 0, DrawnTwips(Indent("right", "end")) ?? 0,
             hanging > 0 ? -hanging : DrawnTwips(Indent("firstLine")) ?? 0,
-            jc switch { "center" => DrawnAlignment.Center, "right" or "end" => DrawnAlignment.Right, "distribute" => DrawnAlignment.Fill, _ => DrawnAlignment.Left },
+            jc switch
+            {
+                "center" => DrawnAlignment.Center,
+                "right" or "end" => DrawnAlignment.Right,
+                "distribute" or "thaiDistribute" or "thaiDist" => DrawnAlignment.Fill,
+                _ => DrawnAlignment.Left
+            },
             !(DrawnAttribute(properties, "snapToGrid", "val") is "0" or "false" or "off"));
     }
 
@@ -173,18 +179,25 @@ public sealed partial class DocxAdapter
         return sections;
     }
 
-    // The width of the column a section sets text in, or null when the section has several columns, a line or character
-    // grid (a grid sets the height of every line, and text is then not where the font's own metrics put it), or no page.
-    private static double? DrawnColumnWidth(XElement? section, out bool snapsLines)
+    // The width of the column a section sets text in, or null when the section has several columns or no page. A line
+    // grid supplies the line height used to place paragraphs that snap to it.
+    private static double? DrawnColumnWidth(XElement? section, out double? linePitch, out bool hasLineGrid)
     {
-        snapsLines = false;
+        linePitch = null;
+        hasLineGrid = false;
         var page = section?.Element(W + "pgSz");
         var margins = section?.Element(W + "pgMar");
         if (DrawnTwips((string?)page?.Attribute(W + "w")) is not { } width ||
             DrawnTwips((string?)margins?.Attribute(W + "left")) is not { } left || DrawnTwips((string?)margins?.Attribute(W + "right")) is not { } right) return null;
         var columns = section!.Element(W + "cols");
         if (columns is not null && (int.TryParse((string?)columns.Attribute(W + "num"), out var count) ? count : 1) > 1) return null;
-        snapsLines = (string?)section.Element(W + "docGrid")?.Attribute(W + "type") is "lines" or "linesAndChars";
+        var docGrid = section.Element(W + "docGrid");
+        if (docGrid is not null && ((string?)docGrid.Attribute(W + "type") is "lines" or "linesAndChars"))
+        {
+            hasLineGrid = true;
+            var pitch = DrawnTwips((string?)docGrid.Attribute(W + "linePitch"));
+            linePitch = pitch is > 0 ? pitch : null;
+        }
         return Math.Max(0, width - left - right);
     }
 
@@ -230,13 +243,13 @@ public sealed partial class DocxAdapter
     private sealed record DocxDrawnLine(DrawnTextExtent Extent, double TextLeft, bool BeforeUnknown, bool AlreadyStruck);
 
     // The line a paragraph of one line is set in, or null when the paragraph is not placed: it is empty, in a list, of
-    // more than one line, with a tab, an equation or a line break in it, in a section with a line grid, or sized in a way the
-    // styles do not give.
-    private static DocxDrawnLine? DrawnParagraphLine(XElement paragraph, DocxDrawnSpace space, bool snapsLines, DocxDrawnStyles styles,
+    // more than one line, with a tab, an equation or a line break in it, in a section with an unusable line grid, or
+    // sized in a way the styles do not give.
+    private static DocxDrawnLine? DrawnParagraphLine(XElement paragraph, DocxDrawnSpace space, double? linePitch, bool hasLineGrid, DocxDrawnStyles styles,
         DocxHiddenStyles hiddenStyles)
     {
         var properties = styles.ParagraphProperties(paragraph, space.TableStyle);
-        if (ReadDocxDrawnFormat(properties) is not { } format || snapsLines && format.SnapsToGrid) return null;
+        if (ReadDocxDrawnFormat(properties) is not { } format || format.SnapsToGrid && hasLineGrid && linePitch is null) return null;
 
         var text = new System.Text.StringBuilder();
         var size = 0.0;
@@ -265,8 +278,10 @@ public sealed partial class DocxAdapter
         // Of one line: its width is no more than 0.9 of the space it is set in.
         var available = space.Width - format.LeftPoints - format.RightPoints;
         if (available <= 1 || width > DrawnSingleLineShare * available) return null;
-        var lineHeight = DrawnLineEm * size * format.LineMultiple;
-        var baseline = size * DrawnBaselineEm + (format.LineMultiple - 1) * DrawnLineEm * size / 2;
+        var naturalLineHeight = DrawnLineEm * size * format.LineMultiple;
+        var lineHeight = format.SnapsToGrid && linePitch is { } pitch ? Math.Max(naturalLineHeight, pitch * format.LineMultiple) : naturalLineHeight;
+        var baseline = size * DrawnBaselineEm + (format.LineMultiple - 1) * DrawnLineEm * size / 2 +
+                       (lineHeight - naturalLineHeight) / 2;
         var textLeft = format.LeftPoints + format.FirstLinePoints;
         var areaLeft = format.Alignment == DrawnAlignment.Center ? format.LeftPoints : textLeft;
         var extent = DrawnLineRules.SingleLine(size, lineHeight, areaLeft, space.Width - format.RightPoints, width, format.Alignment, baseline);
@@ -429,9 +444,9 @@ public sealed partial class DocxAdapter
                 // A paragraph in a text box has the text box's own frame.
                 if (paragraph.Ancestors(W + "txbxContent").Any()) continue;
                 var cell = paragraph.Ancestors(W + "tc").FirstOrDefault();
-                if (DrawnColumnWidth(sections[index], out var snapsLines) is not { } columnWidth) continue;
+                if (DrawnColumnWidth(sections[index], out var linePitch, out var hasLineGrid) is not { } columnWidth) continue;
                 var space = cell is null ? new DocxDrawnSpace(columnWidth, null, false) : DrawnCellSpace(cell, styles);
-                if (space is null || DrawnParagraphLine(paragraph, space, snapsLines, styles, hiddenStyles) is not { } line) continue;
+                if (space is null || DrawnParagraphLine(paragraph, space, linePitch, hasLineGrid, styles, hiddenStyles) is not { } line) continue;
 
                 var shapes = owners.Select(owner => ReadDocxDrawnShape(owner, paragraph, line, cell is not null, hiddenStyles)).ToList();
                 var obstacles = shapes.Where(shape => shape.Obstacle is not null).ToList();

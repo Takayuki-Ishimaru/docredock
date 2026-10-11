@@ -437,22 +437,50 @@ internal static class PdfTextDecorations
         var found = new List<(int Path, Shape Shape)>();
         for (var index = 0; index < paths.Count; index++)
             if ((ShapeOf(paths[index]) ?? DotOf(paths[index], maxDot)) is { } shape) found.Add((index, shape));
-        var strokes = found.Select(item => new PdfDashRuns.Stroke(true, item.Shape.Y, item.Shape.Left, item.Shape.Right,
+        // Some producers split one underline into adjacent paths at a font, script, or link
+        // boundary. Treat pieces that meet with the same stroke geometry as one line so the
+        // endpoint touch guard does not mistake the seam for another drawing.
+        var joined = new List<(int[] Paths, Shape Shape)>();
+        foreach (var item in found.OrderBy(item => item.Shape.Y).ThenBy(item => item.Shape.Left).ThenBy(item => item.Path))
+        {
+            if (!item.Shape.Dot && joined.Count > 0)
+            {
+                var previous = joined[^1];
+                var tolerance = Math.Max(0.25, Math.Max(previous.Shape.Thickness, item.Shape.Thickness) * 0.25);
+                if (!previous.Shape.Dot && previous.Shape.Wavy == item.Shape.Wavy &&
+                    Math.Abs(previous.Shape.Y - item.Shape.Y) <= tolerance &&
+                    Math.Abs(previous.Shape.Thickness - item.Shape.Thickness) <= tolerance &&
+                    item.Shape.Left <= previous.Shape.Right + tolerance &&
+                    item.Shape.Right >= previous.Shape.Left - tolerance)
+                {
+                    joined[^1] = ([.. previous.Paths, item.Path], previous.Shape with
+                    {
+                        Left = Math.Min(previous.Shape.Left, item.Shape.Left),
+                        Right = Math.Max(previous.Shape.Right, item.Shape.Right),
+                        Y = (previous.Shape.Y + item.Shape.Y) / 2,
+                        Thickness = Math.Max(previous.Shape.Thickness, item.Shape.Thickness),
+                    });
+                    continue;
+                }
+            }
+            joined.Add(([item.Path], item.Shape));
+        }
+        var strokes = joined.Select(item => new PdfDashRuns.Stroke(true, item.Shape.Y, item.Shape.Left, item.Shape.Right,
             !item.Shape.Wavy && item.Shape.Thickness <= (item.Shape.Dot ? maxDot : MaxDashThickness))).ToArray();
         var lines = new List<Line>();
-        var inRun = new bool[found.Count];
+        var inRun = new bool[joined.Count];
         foreach (var run in PdfDashRuns.Find(strokes))
         {
             foreach (var member in run) inRun[member] = true;
-            lines.Add(new Line(run.Select(member => found[member].Path).ToArray(), found[run[0]].Shape.Left, found[run[^1]].Shape.Right,
-                run.Average(member => found[member].Shape.Y), run.Max(member => found[member].Shape.Thickness),
+            lines.Add(new Line(run.SelectMany(member => joined[member].Paths).ToArray(), joined[run[0]].Shape.Left, joined[run[^1]].Shape.Right,
+                run.Average(member => joined[member].Shape.Y), run.Max(member => joined[member].Shape.Thickness),
                 Math.Min(PdfDashRuns.MedianGap(strokes, run), 6)));
         }
         // A dot that is not part of a row of them is no line.
-        for (var item = 0; item < found.Count; item++)
-            if (!inRun[item] && !found[item].Shape.Dot)
-                lines.Add(new Line([found[item].Path], found[item].Shape.Left, found[item].Shape.Right, found[item].Shape.Y,
-                    found[item].Shape.Thickness, 0, found[item].Shape.Wavy));
+        for (var item = 0; item < joined.Count; item++)
+            if (!inRun[item] && !joined[item].Shape.Dot)
+                lines.Add(new Line(joined[item].Paths, joined[item].Shape.Left, joined[item].Shape.Right, joined[item].Shape.Y,
+                    joined[item].Shape.Thickness, 0, joined[item].Shape.Wavy));
         return lines.OrderBy(line => line.Paths.Min()).ToList();
     }
 
