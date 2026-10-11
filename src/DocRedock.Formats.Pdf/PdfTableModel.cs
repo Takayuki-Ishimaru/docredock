@@ -55,6 +55,9 @@ public sealed record PdfTableCell(
 {
     /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Struck { get; init; }
+
+    /// <summary>Underlined characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
+    public IReadOnlyList<TextRange>? Underlined { get; init; }
 }
 
 public enum PdfTableConfidence { NativeTagged, HighConfidenceInferred }

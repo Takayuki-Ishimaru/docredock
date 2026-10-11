@@ -897,7 +897,7 @@ public partial class MainWindow : Window
     // Codes the per-page review description already explains in its own words.
     private static bool IsVisualReviewCode(string code) =>
         code.StartsWith("Visual", StringComparison.Ordinal) || code.StartsWith("PdfReviewImage", StringComparison.Ordinal) ||
-        code is "PdfFormXObjectUnparsed" or "PdfFontResourceAmbiguous" or "PdfLayerVisibilityUnknown";
+        code is "PdfFormXObjectUnparsed" or "PdfFontResourceAmbiguous" or "PdfTextUndecodable" or "PdfLayerVisibilityUnknown";
 
     private static string? DiagnosticLocation(Diagnostic diagnostic)
     {
@@ -973,6 +973,7 @@ public partial class MainWindow : Window
         "PdfReviewImageUnavailable" => ("原本照合用のページ画像を作成できませんでした。", "原本PDFの該当ページを開いて確認してください。画像を添付するにはpdftoppmまたはmutoolを構成してください。"),
         "PdfFormXObjectUnparsed" => ("PDFの描画部品（Form XObject）の中身を解析できず、その文字・図はMarkdownに含まれていません。", "「該当ページを確認」または照合画像で、原本の該当箇所を確認してください。"),
         "PdfFontResourceAmbiguous" => ("PDFの文字が使うフォントを特定できず、文字が正しく変換されていない可能性があります（Markdownには含めています）。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
+        "PdfTextUndecodable" => ("PDFの文字が使うフォントに、文字コードを文字へ変換する情報（ToUnicode）がなく、文字を確定できませんでした。Markdownには文字化けした文字が含まれている可能性があります。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
         "PdfLayerVisibilityUnknown" => ("PDFのレイヤー（Optional Content）の表示状態を判定できなかった文字を、Markdownに含めました。", "原本PDFで、その文字が画面に表示されているかを確認してください。"),
         "PdfStrikethroughUnplaced" => ("PDFの行の一部に取り消し線があり、どの文字が取り消されているかを判定できなかったため、取り消し線の印を付けずに出力しました。", "原本PDFの該当ページで、取り消された文字を確認してください。"),
         "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),

@@ -117,7 +117,7 @@ public static class PdfVisualOutputCompactor
         foreach (var diagnostic in diagnostics)
         {
             if (diagnostic.SourceObjectId is { } id && consumedIds.Contains(id) &&
-                diagnostic.Code is "VisualConnectorUnresolved" or "VisualNodeLabelMissing" or "VisualEdgeDirectionUnknown")
+                diagnostic.Code is "VisualConnectorUnresolved" or "VisualNodeLabelMissing" or "VisualEdgeDirectionUnknown" or "VisualPathPartial")
             {
                 if (diagnostic.Code == "VisualConnectorUnresolved") removedUnresolvedEdges--;
                 continue;

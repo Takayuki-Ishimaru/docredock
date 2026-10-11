@@ -26,12 +26,14 @@ public enum ReviewElementKind
     /// Form XObject the extractor could not read); it is missing from the Markdown.</summary>
     UnanalyzedContent,
     /// <summary>Text that is in the Markdown but whose characters or visibility could not be
-    /// determined (a PDF font resource that could not be resolved, or a layer whose visibility could
-    /// not be evaluated). Counted with unanalyzed content: its analysis is not complete either.</summary>
+    /// determined (a PDF font resource that could not be resolved, a font whose character codes
+    /// cannot be turned into characters, or a layer whose visibility could not be evaluated).
+    /// Counted with unanalyzed content: its analysis is not complete either.</summary>
     UncertainText,
     /// <summary>Text that is in the Markdown without the strikethrough the original draws over part of
-    /// it: which characters it strikes could not be determined (PDF text in a font that gives no glyph widths).
-    /// Counted with unanalyzed content, like <see cref="UncertainText"/>.</summary>
+    /// it: which characters it strikes could not be determined (PDF text in a font that gives no glyph
+    /// widths, or text in a worksheet, slide or Word document that a drawn line crosses in part). Counted with
+    /// unanalyzed content, like <see cref="UncertainText"/>.</summary>
     StrikethroughUnplaced,
 }
 
@@ -253,6 +255,13 @@ public static class ExportReviewBuilder
                 yield return new ReviewElement(ReviewElementKind.UnanalyzedContent, record?.Name is { Length: > 0 } name ? $"{sourceId}:{name}" : sourceId,
                     record?.Bounds is { } bounds ? mapping?.Map(bounds) : null);
             }
+            yield break;
+        }
+        // Text a drawn line crosses in part (a worksheet cell, a slide's text frame or table, a Word paragraph or
+        // table): one element per node, whose text the Markdown has without the mark.
+        if (ExtensionBool(node, ReviewExtensionKeys.StrikeUnplaced))
+        {
+            yield return new ReviewElement(ReviewElementKind.StrikethroughUnplaced, node.Id);
             yield break;
         }
         if (ExtensionBool(node, ReadableMarkdownSerializer.SourceReviewRequiredExtension) && ReadVisualGraph(node) is null &&

@@ -65,9 +65,10 @@ public sealed class PdfGlyphWidthTests : IDisposable
     public void TJ_adjustments_character_and_word_spacing_and_horizontal_scaling_move_the_glyphs()
     {
         // Each glyph advances by (w x 10 / 1000 + Tc, plus Tw for the space) x Tz; -1000 in the TJ
-        // array moves the next glyph a font size forward. "D" follows where the array ends.
+        // array moves the next glyph a font size forward, a word space the text gets (but "D", in a show
+        // of its own, follows where the array ends).
         var line = Line("BT /F1 10 Tf 2 Tc 3 Tw 50 Tz 72 700 Td [(A B) -1000 (C)] TJ (D) Tj ET");
-        Assert.Equal("A BCD", line.Text);
+        Assert.Equal("A B CD", line.Text);
         var expected = ((6.67 + 2) + (2.78 + 2 + 3) + (6.67 + 2) + 10 + (7.22 + 2) + (7.22 + 2)) * 0.5;
         Assert.Equal(expected, line.BoundingBox.Width, 6);
     }

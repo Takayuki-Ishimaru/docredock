@@ -65,7 +65,7 @@ public sealed partial class ReadableMarkdownSerializer
     public ReadableMarkdownSerializer(ReadableMarkdownOptions? options = null)
     {
         var given = options ?? new();
-        this.options = given.Title is { } title && HasStruckMarker(title) ? given with { Title = WithoutStruckMarkers(title) } : given;
+        this.options = given.Title is { } title && HasMarker(title) ? given with { Title = WithoutMarkers(title) } : given;
     }
 
     /// <summary>The level-1 title <see cref="Serialize"/> writes for the graph with these options: the
@@ -84,7 +84,7 @@ public sealed partial class ReadableMarkdownSerializer
             .Select(partition => partition with
             {
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node))
-                    .Select(WithoutStruckMarkers).ToArray()
+                    .Select(WithoutMarkers).ToArray()
             }).ToList();
         if (graph.Format == DocumentFormatKind.Xlsx) return FindWorkbookTitle(partitions) ?? "ドキュメント";
         if (graph.Format == DocumentFormatKind.Pptx) return "プレゼンテーション";
@@ -122,7 +122,7 @@ public sealed partial class ReadableMarkdownSerializer
             Partitions = selectedGraph.Partitions.Select(partition => partition with
             {
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node))
-                    .Select(WithoutStruckMarkers).ToArray()
+                    .Select(WithoutMarkers).ToArray()
             }).ToArray()
         };
         sideBySideRegions = 0;
@@ -173,11 +173,12 @@ public sealed partial class ReadableMarkdownSerializer
             .Where(partition => IsIncludedPartition(partition.Id))
             .OrderBy(partition => partition.Order).ThenBy(partition => partition.Id, StringComparer.Ordinal).ToList();
         var titleCell = options.Title?.Trim() is { Length: > 0 } ? null : FindWorkbookTitleCell(partitions);
-        // Compared with the rows as plain text (IsRedundantTitle), written with its strikethrough.
+        // Compared with the rows as plain text (IsRedundantTitle), written with its strikethrough and
+        // without its underline (a title is not underlined).
         var title = options.Title?.Trim() is { Length: > 0 } customTitle
             ? customTitle
             : titleCell is not null ? PlainText(titleCell.Text) : "ドキュメント";
-        WriteHeading(output, 1, EscapeLiteral(titleCell is not null ? PlainText(titleCell.Shown) : title));
+        WriteHeading(output, 1, EscapeLiteral(titleCell is not null ? PlainText(titleCell.ShownWithoutUnderline) : title));
         var sheets = RecordWorkbookLayout ? new List<(string PartitionId, int Start, int ContentStart, int End, List<ReadableSheetSegment> Segments)>() : null;
 
         foreach (var partition in partitions)
@@ -564,6 +565,11 @@ public sealed partial class ReadableMarkdownSerializer
                     case NodeKind.Annotation:
                         WriteQuote(output, displayText);
                         break;
+                    case NodeKind.CodeBlock when ExtensionRanges(node, "strike_ranges") is not null || ExtensionRanges(node, "underline_ranges") is not null:
+                        // A code fence is verbatim and has no place for a mark: text struck or underlined (a line drawn over a code-style
+                        // paragraph) is written as a paragraph with its marks, as an Excel cell of code is.
+                        WriteParagraph(output, displayText);
+                        break;
                     case NodeKind.CodeBlock:
                         // D11: render literal line breaks, not the styled `<br>` markdown used
                         // inline elsewhere — a code fence's content must stay verbatim, never
@@ -592,7 +598,7 @@ public sealed partial class ReadableMarkdownSerializer
                             .Append(marker).AppendLine(listText);
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
-                        var overlayHostRows = FoldNestedTableRows(node.Id, StruckRows(node, table.Rows), nestedTableFolds);
+                        var overlayHostRows = FoldNestedTableRows(node.Id, MarkedRows(node, table.Rows), nestedTableFolds);
                         WriteArbitraryTable(output, ApplyTableOverlays(node, overlayHostRows));
                         WriteOverlayLineStyleNotes(output, node, overlayHostRows);
                         break;
@@ -994,10 +1000,19 @@ public sealed partial class ReadableMarkdownSerializer
             return;
         }
 
+        // Strikethrough and underline the node marks over the text of its paragraphs, joined by line breaks (a line drawn
+        // over the text): the paragraphs find their own place in them. Ranges that reach past that text are over some other
+        // text: they mark nothing, rather than characters that were not meant.
+        var struck = ExtensionRanges(node, "strike_ranges");
+        var underlined = ExtensionRanges(node, "underline_ranges");
+        var (starts, textEnd) = PptxParagraphStarts(details, node.Content is RichTextNodeContent);
+        if ((struck ?? []).Concat(underlined ?? []).Any(range => range.End >= textEnd)) (struck, underlined) = (null, null);
+        var index = 0;
         var wroteBullet = false;
         foreach (var paragraph in details.EnumerateArray())
         {
-            var text = RichParagraphText(paragraph);
+            var start = starts[index++];
+            var text = RichParagraphText(paragraph, start, struck, underlined);
             if (string.IsNullOrWhiteSpace(text)) continue;
             var isBullet = JsonBool(paragraph, "IsBullet", "isBullet", "is_bullet");
             var level = JsonInt(paragraph, "Level", "level") ?? 0;
@@ -1022,6 +1037,24 @@ public sealed partial class ReadableMarkdownSerializer
             }
         }
         if (wroteBullet) output.AppendLine();
+    }
+
+    // Where each paragraph of a shape begins in the text its node holds, and where that text ends (one past its last character, as every
+    // paragraph is followed by the line break that joins the next). A node of formatted text begins at its first paragraph with runs: the
+    // empty paragraphs above it have no place in it (PptxAdapter.ShapeTextRuns).
+    private static (List<int> Starts, int End) PptxParagraphStarts(JsonElement details, bool formatted)
+    {
+        var starts = new List<int>();
+        var end = 0;
+        var begun = !formatted;
+        foreach (var paragraph in details.EnumerateArray())
+        {
+            var length = (JsonString(paragraph, "Text", "text") ?? string.Empty).Length;
+            begun |= length > 0 || TryProperty(paragraph, out var runs, "Runs", "runs") && runs.ValueKind == JsonValueKind.Array && runs.GetArrayLength() > 0;
+            starts.Add(end);
+            if (begun) end += length + 1;
+        }
+        return (starts, end);
     }
 
     private static void WritePptxFallbackParagraphs(StringBuilder output, string text)
@@ -1079,43 +1112,120 @@ public sealed partial class ReadableMarkdownSerializer
         return false;
     }
 
-    private static string RichParagraphText(JsonElement paragraph)
+    /// <summary>The Markdown of one paragraph of a slide's text. <paramref name="struck"/> and <paramref name="underlined"/> are
+    /// strikethrough and underline over the text of all the node's paragraphs (a line drawn over the text), and
+    /// <paramref name="start"/> is where this paragraph begins in that text.</summary>
+    private static string RichParagraphText(JsonElement paragraph, int start = 0, IReadOnlyList<MarkedSpan>? struck = null,
+        IReadOnlyList<MarkedSpan>? underlined = null)
     {
         if (TryProperty(paragraph, out var runs, "Runs", "runs") && runs.ValueKind == JsonValueKind.Array)
         {
             var output = new StringBuilder();
+            var marked = struck is not null || underlined is not null;
+            var position = start;
+            // The runs, or with marks over them the pieces the marks cut them into; pieces next to each other that are
+            // written alike are one, so that a line over a paragraph of several runs strikes it once.
+            var pieces = new List<RunPiece>();
             foreach (var run in runs.EnumerateArray())
             {
                 var value = JsonString(run, "Text", "text") ?? string.Empty;
                 if (value.Length == 0) continue;
                 var bold = JsonBool(run, "Bold", "bold");
                 var italic = JsonBool(run, "Italic", "italic");
-                var underline = JsonBool(run, "Underline", "underline");
+                // The underline of a link is how a link looks, not emphasis (Google Slides underlines the run of a link
+                // itself): it is not written, as in a Word paragraph and a table cell.
+                var underline = JsonBool(run, "Underline", "underline") && !JsonBool(run, "IsLink", "isLink", "is_link");
                 var strike = JsonBool(run, "Strike", "strike", "is_strike");
+                if (!marked)
+                {
+                    pieces.Add(new RunPiece(value, bold, italic, underline, strike));
+                    continue;
+                }
+                foreach (var (piece, isStruck, isUnderlined) in MarkedPieces(value, position, struck, underlined))
+                {
+                    var item = new RunPiece(piece, bold, italic, underline || isUnderlined, strike || isStruck);
+                    if (pieces.Count > 0 && pieces[^1] is var previous && previous.Bold == item.Bold && previous.Italic == item.Italic &&
+                        previous.Underline == item.Underline && previous.Strike == item.Strike)
+                        pieces[^1] = previous with { Text = previous.Text + piece };
+                    else pieces.Add(item);
+                }
+                position += value.Length;
+            }
+            foreach (var (value, bold, italic, underline, strike) in pieces)
+            {
                 // The run's leading and trailing whitespace stays, outside the delimiters: trimming
                 // each run joined the words at every formatting change ("Keep this " + "word" read
                 // "Keep thisword"), and GFM ignores "~~ word~~". Only the paragraph is trimmed.
-                var start = 0;
-                while (start < value.Length && char.IsWhiteSpace(value[start])) start++;
+                var first = 0;
+                while (first < value.Length && char.IsWhiteSpace(value[first])) first++;
                 var end = value.Length;
-                while (end > start && char.IsWhiteSpace(value[end - 1])) end--;
+                while (end > first && char.IsWhiteSpace(value[end - 1])) end--;
                 // F-Issue7: escape the literal run text before any decoration is wrapped around
                 // it — escaping the composed "**bold**" afterward would corrupt the markers we
                 // just added.
-                var core = RunInlineText(value[start..end]);
+                var core = RunInlineText(value[first..end]);
                 if (core.Length > 0)
                 {
                     if (strike) core = "~~" + core + "~~";
-                    if (underline) core = "<u>" + core + "</u>";
                     if (bold && italic) core = "***" + core + "***";
                     else if (bold) core = "**" + core + "**";
                     else if (italic) core = "_" + core + "_";
+                    // Underline goes outside, as DocRedockInlineMarkdown writes it: the project's own reader (the preview)
+                    // takes <u> around ** or ~~ for what it is, and would print the tag it finds inside them.
+                    if (underline) core = "<u>" + core + "</u>";
                 }
-                output.Append(RunInlineText(value[..start])).Append(core).Append(RunInlineText(value[end..]));
+                output.Append(RunInlineText(value[..first])).Append(core).Append(RunInlineText(value[end..]));
             }
             if (output.ToString().Trim() is { Length: > 0 } text) return text;
         }
         return InlineText(EscapeLiteral(JsonString(paragraph, "Text", "text") ?? string.Empty));
+    }
+
+    /// <summary>A stretch of a slide paragraph's text written alike.</summary>
+    private readonly record struct RunPiece(string Text, bool Bold, bool Italic, bool Underline, bool Strike);
+
+    // The pieces the edges of the marked ranges cut a stretch of text into, each with whether a struck range and an
+    // underlined range cover it. <paramref name="start"/> is where the text begins in the text the ranges are over.
+    private static IEnumerable<(string Text, bool Struck, bool Underlined)> MarkedPieces(string text, int start,
+        IReadOnlyList<MarkedSpan>? struck, IReadOnlyList<MarkedSpan>? underlined)
+    {
+        var cuts = new SortedSet<int> { 0, text.Length };
+        foreach (var span in (struck ?? []).Concat(underlined ?? []))
+            foreach (var edge in new[] { span.Start - start, span.End - start })
+                if (edge > 0 && edge < text.Length) cuts.Add(edge);
+        var positions = cuts.ToArray();
+        for (var index = 0; index + 1 < positions.Length; index++)
+        {
+            var from = start + positions[index];
+            bool Covers(IReadOnlyList<MarkedSpan>? spans) => spans is not null && spans.Any(span => span.Start <= from && from < span.End);
+            yield return (text[positions[index]..positions[index + 1]], Covers(struck), Covers(underlined));
+        }
+    }
+
+    // The runs of a rich text node with what the node's "strike_ranges" and "underline_ranges" mark in the text of its
+    // runs struck through and underlined (a line drawn over the text; the ranges are readable-only marks, so the node's own
+    // runs, and with them the round-trip projection, stay as the source has them). The runs are cut at the edges of
+    // the ranges in a copy.
+    private static IReadOnlyList<TextRun> WithDrawnMarks(DocumentNode node, IReadOnlyList<TextRun> runs)
+    {
+        var struck = ExtensionRanges(node, "strike_ranges");
+        var underlined = ExtensionRanges(node, "underline_ranges");
+        if (struck is null && underlined is null) return runs;
+        // The ranges are over the text of the runs. Ones that reach past it are over some other text: nothing is marked, rather than
+        // characters that were not meant.
+        var length = runs.Sum(run => run.Text.Length);
+        if ((struck ?? []).Concat(underlined ?? []).Any(range => range.End > length)) return runs;
+        var marked = new List<TextRun>(runs.Count);
+        var position = 0;
+        foreach (var run in runs)
+        {
+            if (run.Kind != TextRunKind.Text || run.Text.Length == 0) marked.Add(run);
+            else
+                foreach (var (piece, isStruck, isUnderlined) in MarkedPieces(run.Text, position, struck, underlined))
+                    marked.Add(run with { Text = piece, Strike = run.Strike || isStruck, Underline = run.Underline || isUnderlined });
+            position += run.Text.Length;
+        }
+        return marked;
     }
 
     private static bool HasExtension(DocumentNode node, string key) => node.Extensions?.ContainsKey(key) == true;
@@ -1144,7 +1254,7 @@ public sealed partial class ReadableMarkdownSerializer
     }
 
     private static string? JsonString(JsonElement element, params string[] names) =>
-        TryProperty(element, out var value, names) && value.ValueKind == JsonValueKind.String ? WithoutStruckMarkers(value.GetString()) : null;
+        TryProperty(element, out var value, names) && value.ValueKind == JsonValueKind.String ? WithoutMarkers(value.GetString()) : null;
 
     private static bool JsonBool(JsonElement element, params string[] names) =>
         TryProperty(element, out var value, names) && value.ValueKind is JsonValueKind.True or JsonValueKind.False && value.GetBoolean();
@@ -1206,7 +1316,8 @@ public sealed partial class ReadableMarkdownSerializer
     /// <summary>
     /// XLSX port of PptxAdapter/ApplyTableOverlays' cell folding: each "sheet_overlay" Shape node
     /// (one per detected overlay -- see XlsxAdapter.DetectSheetOverlays) writes its marker into
-    /// every cell its StartRow..EndRow/StartColumn..EndColumn range covers. Unlike the PPTX table
+    /// every cell its StartRow..EndRow/StartColumn..EndColumn range covers (see OverlayPositions for
+    /// an overlay too large for that). Unlike the PPTX table
     /// path there is no TableGrid/merged-slot dedup to do here: XlsxAdapter already resolves a
     /// covered cell inside a merged range to that range's origin before the overlay node is ever
     /// created, so every (row, column) this loop visits is already a distinct origin cell.
@@ -1221,8 +1332,7 @@ public sealed partial class ReadableMarkdownSerializer
         {
             var overlay = ReadSheetOverlay(node);
             if (overlay is null || overlay.EndRow < overlay.StartRow || overlay.EndColumn < overlay.StartColumn) continue;
-            for (var row = overlay.StartRow; row <= overlay.EndRow; row++)
-            for (var column = overlay.StartColumn; column <= overlay.EndColumn; column++)
+            foreach (var (row, column) in OverlayPositions(overlay, cellsByPosition.Keys))
             {
                 var isLabelSlot = row == overlay.StartRow && column == overlay.StartColumn;
                 var fragment = OverlayFragment(overlay, OverlayGlyph(overlay, row, column), isLabelSlot);
@@ -1234,6 +1344,34 @@ public sealed partial class ReadableMarkdownSerializer
                         OverlayNodeIds: [node.Id]);
             }
         }
+    }
+
+    // An overlay normally lies over a few cells of a table, and every one of them gets its marker. A shape can
+    // lie over far more than that (one as large as the sheet, a line drawn down to its last row), and writing
+    // a marker into each of those cells would make millions of cells out of nothing: such an overlay goes only
+    // into the cells where a row and a column that hold something meet, and its label, if it has one, into the
+    // first cell. Below this size nothing changes.
+    private const long MaxSheetOverlayCells = 100_000;
+
+    private static IEnumerable<(int Row, int Column)> OverlayPositions(TableOverlay overlay, IEnumerable<(int Row, int Column)> occupied)
+    {
+        var rowCount = (long)overlay.EndRow - overlay.StartRow + 1;
+        var columnCount = (long)overlay.EndColumn - overlay.StartColumn + 1;
+        if (rowCount * columnCount <= MaxSheetOverlayCells)
+        {
+            for (var row = overlay.StartRow; row <= overlay.EndRow; row++)
+            for (var column = overlay.StartColumn; column <= overlay.EndColumn; column++)
+                yield return (row, column);
+            yield break;
+        }
+        var cells = occupied.ToArray();
+        var rows = cells.Select(cell => cell.Row).Where(row => row >= overlay.StartRow && row <= overlay.EndRow).Distinct().Order().ToArray();
+        var columns = cells.Select(cell => cell.Column).Where(column => column >= overlay.StartColumn && column <= overlay.EndColumn).Distinct().Order().ToArray();
+        foreach (var row in rows)
+        foreach (var column in columns)
+            yield return (row, column);
+        if (overlay.Text.Length > 0 && (Array.BinarySearch(rows, overlay.StartRow) < 0 || Array.BinarySearch(columns, overlay.StartColumn) < 0))
+            yield return (overlay.StartRow, overlay.StartColumn);
     }
 
     private static TableOverlay? ReadSheetOverlay(DocumentNode node)
@@ -1297,17 +1435,20 @@ public sealed partial class ReadableMarkdownSerializer
                 : string.IsNullOrWhiteSpace(value) ? "（保存済み計算値なし）" : value
             : value;
         var returnsText = StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "str");
-        // A cell struck through as a whole is struck however it is shown; struck runs of rich text are
-        // placed in the text when it is the value as typed (no formula, only trimmed).
-        IReadOnlyList<StruckSpan>? struck = null;
-        if (ExtensionBool(node, "strike")) struck = text.Length == 0 ? null : [new StruckSpan(0, text.Length)];
-        else if (string.IsNullOrWhiteSpace(formula) && ExtensionRanges(node, "strike_ranges") is { } ranges && NodeText(node) is var raw &&
-                 raw.Trim() == text)
+        // A cell struck through or underlined as a whole is so however it is shown; struck and underlined
+        // runs of rich text are placed in the text when it is the value as typed (no formula, only trimmed).
+        IReadOnlyList<MarkedSpan>? Marked(string whole, string partial)
         {
+            if (ExtensionBool(node, whole)) return text.Length == 0 ? null : [new MarkedSpan(0, text.Length)];
+            if (!string.IsNullOrWhiteSpace(formula) || ExtensionRanges(node, partial) is not { } ranges) return null;
+            var raw = NodeText(node);
+            if (raw.Trim() != text) return null;
             var leading = raw.Length - raw.TrimStart().Length;
-            struck = ranges.Select(range => new StruckSpan(Math.Max(range.Start - leading, 0), Math.Min(range.End - leading, text.Length)))
+            return ranges.Select(range => new MarkedSpan(Math.Max(range.Start - leading, 0), Math.Min(range.End - leading, text.Length)))
                 .Where(range => range.End > range.Start).ToArray();
         }
+        var struck = Marked("strike", "strike_ranges");
+        var underlined = Marked("underline", "underline_ranges");
         return new ReadableCell(row.Value, column.Value, text, !string.IsNullOrWhiteSpace(formula),
             ExtensionBool(node, "is_numeric") || StringComparer.Ordinal.Equals(ExtensionString(node, "cell_type"), "n"),
             ExtensionBool(node, "is_bold"), ExtensionBool(node, "has_fill"), ExtensionBool(node, "has_border"),
@@ -1318,7 +1459,7 @@ public sealed partial class ReadableMarkdownSerializer
             NodeId: node.Id, Table: ExtensionString(node, "excel_table"), Display: value,
             IsComputed: !string.IsNullOrWhiteSpace(formula) && IsComputedResult(formula!, value, returnsText),
             IsFormulaCopy: string.IsNullOrWhiteSpace(formula) && ExtensionBool(node, "is_formula"),
-            Formula: string.IsNullOrWhiteSpace(formula) ? null : formula, ReturnsText: returnsText, Struck: struck);
+            Formula: string.IsNullOrWhiteSpace(formula) ? null : formula, ReturnsText: returnsText, Struck: struck, Underlined: underlined);
     }
 
     // A formula's result is a value unless it is text the formula did not choose itself: one of the
@@ -1379,7 +1520,7 @@ public sealed partial class ReadableMarkdownSerializer
 
         if (rows.Count >= 2 && IsHeaderRow(rows[0]))
         {
-            WriteSheetTable(output, rows[0].Cells.Select(cell => cell.Shown).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
+            WriteSheetTable(output, rows[0].Cells.Select(cell => cell.ShownWithoutUnderline).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
             return;
         }
 
@@ -1395,7 +1536,7 @@ public sealed partial class ReadableMarkdownSerializer
             if (FirstColumnLooksLikeData(rows))
                 WriteSheetTable(output, Enumerable.Repeat(string.Empty, width).ToArray(), [], rows);
             else
-                WriteSheetTable(output, rows[0].Cells.Select(cell => cell.Shown).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
+                WriteSheetTable(output, rows[0].Cells.Select(cell => cell.ShownWithoutUnderline).ToArray(), rows.Take(1).ToArray(), rows.Skip(1).ToArray());
             return;
         }
 
@@ -1407,7 +1548,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (rows.Count >= 3 && width == 1 && rows[0].Cells[0] is { IsNumeric: false } header && (header.IsBold || header.HasFill) &&
             IsListName(header) && rows.Skip(1).All(row => !row.Cells[0].IsBold && IsListName(row.Cells[0])))
         {
-            WriteSheetTable(output, [header.Shown], rows.Take(1).ToArray(), rows.Skip(1).ToArray());
+            WriteSheetTable(output, [header.ShownWithoutUnderline], rows.Take(1).ToArray(), rows.Skip(1).ToArray());
             return;
         }
 
@@ -1425,7 +1566,9 @@ public sealed partial class ReadableMarkdownSerializer
     }
 
     // WriteTable for worksheet rows: the same Markdown, plus, when a layout is being recorded, where
-    // the header and each data row line were written and which cells they came from.
+    // the header and each data row line were written and which cells they came from. The headers name
+    // the columns, so callers give them without underline (ShownWithoutUnderline), as the labels of a
+    // label/value list.
     private void WriteSheetTable(StringBuilder output, IReadOnlyList<string> headers, IReadOnlyList<SheetRow> headerRows,
         IReadOnlyList<SheetRow> dataRows)
     {
@@ -1493,7 +1636,7 @@ public sealed partial class ReadableMarkdownSerializer
             // Fill only a merge's declared span. Arbitrary empty cells never inherit
             // the label to their left. Vertical merges appear once in each path.
             var path = sourceHeaders.Where(cell => cell.Column <= column && cell.MaxColumn >= column)
-                .OrderBy(cell => cell.Row).Select(cell => cell.Shown).Distinct(StringComparer.Ordinal).ToArray();
+                .OrderBy(cell => cell.Row).Select(cell => cell.ShownWithoutUnderline).Distinct(StringComparer.Ordinal).ToArray();
             return path.Length > 0 ? string.Join(" / ", path) : $"列 {column}";
         }).ToArray();
         WriteSheetTable(output, headers, headerRows, rows.Skip(start).Take(dataEnd - start).ToArray());
@@ -1512,7 +1655,7 @@ public sealed partial class ReadableMarkdownSerializer
         WriteInference(output, "キー・値の配置を文書情報として分離");
         foreach (var row in rows)
             for (var index = 0; index + 1 < row.Cells.Count; index += 2)
-                output.Append("- **").Append(EscapedInlineText(row.Cells[index].Shown)).Append("**: ")
+                output.Append("- **").Append(EscapedInlineText(row.Cells[index].ShownWithoutUnderline)).Append("**: ")
                     .AppendLine(EscapedInlineText(row.Cells[index + 1].Shown));
         output.AppendLine();
     }
@@ -1620,15 +1763,25 @@ public sealed partial class ReadableMarkdownSerializer
     private static HashSet<int> BridgingTitleRows(IReadOnlyList<SheetRow> rows)
     {
         static bool Merged(ReadableCell cell) => cell.MaxColumn > cell.Column && !cell.IsOverlay;
-        var covered = new HashSet<int>();
-        foreach (var cell in rows.Where(row => !row.Cells.All(Merged)).SelectMany(row => row.Cells))
-            for (var column = cell.Column; column <= cell.MaxColumn; column++) covered.Add(column);
-        var (first, last) = covered.Count == 0 ? (0, 0) : (covered.Min(), covered.Max());
+        // The columns the ordinary rows cover, as runs of adjacent columns: a merge across the whole width of the sheet is one
+        // run, not sixteen thousand columns to add to a set.
+        var runs = new List<(int Start, int End)>();
+        foreach (var cell in rows.Where(row => !row.Cells.All(Merged)).SelectMany(row => row.Cells)
+                     .Where(cell => cell.MaxColumn >= cell.Column).OrderBy(cell => cell.Column))
+        {
+            if (runs.Count > 0 && cell.Column <= runs[^1].End + 1) runs[^1] = (runs[^1].Start, Math.Max(runs[^1].End, cell.MaxColumn));
+            else runs.Add((cell.Column, cell.MaxColumn));
+        }
+        var (first, last) = runs.Count == 0 ? (0, 0) : (runs[0].Start, runs[^1].End);
+        var starts = runs.Select(run => run.Start).ToArray();
         bool Bridges(ReadableCell cell)
         {
-            for (var column = Math.Max(cell.Column, first + 1); column <= Math.Min(cell.MaxColumn, last - 1); column++)
-                if (!covered.Contains(column)) return true;
-            return false;
+            var (from, to) = (Math.Max(cell.Column, first + 1), Math.Min(cell.MaxColumn, last - 1));
+            if (from > to) return false;
+            // A column lies between any two runs that no cell covers, so from..to is covered only if the last run that starts at or
+            // before from reaches to.
+            var at = Array.BinarySearch(starts, from);
+            return runs[at >= 0 ? at : ~at - 1].End < to;
         }
         return rows.Where(row => row.Cells.Count > 0 && row.Cells.All(Merged) &&
                 (row.Cells.Count == 1 || row.Cells.Any(Bridges)))
@@ -2034,8 +2187,8 @@ public sealed partial class ReadableMarkdownSerializer
             var text = cell.Text;
             if (!cell.IsNumeric && TryGetSectionHeading(text, out _, out var level)) WriteHeading(output, level, EscapeLiteral(HeadingText(cell)));
             else if (NoteRegex().IsMatch(text)) WriteQuote(output, EscapeLiteral(cell.Shown));
-            // A code block cannot show a strikethrough; struck text stays a paragraph that can.
-            else if (cell.Struck is null && LooksLikeCode(text)) WriteCodeBlock(output, text);
+            // A code block cannot show a strikethrough or an underline; such text stays a paragraph that can.
+            else if (cell.Struck is null && cell.Underlined is null && LooksLikeCode(text)) WriteCodeBlock(output, text);
             else WriteParagraph(output, EscapeLiteral(cell.Shown));
             return;
         }
@@ -2239,7 +2392,7 @@ public sealed partial class ReadableMarkdownSerializer
             var paragraphs = string.IsNullOrEmpty(hostCell.Text) ? [] : hostCell.Text.Split('\n').ToList();
             var placed = cellSlots.Select(slot =>
             {
-                var childRows = slot.Child.Content is TableNodeContent childTable ? StruckRows(slot.Child, childTable.Rows) : Array.Empty<IReadOnlyList<TableCell>>();
+                var childRows = slot.Child.Content is TableNodeContent childTable ? MarkedRows(slot.Child, childTable.Rows) : Array.Empty<IReadOnlyList<TableCell>>();
                 var foldedChildRows = FoldNestedTableRows(slot.Child.Id, childRows, folds);
                 var nestedText = string.Join("\n", foldedChildRows.Select(nestedRow => string.Join(" / ", nestedRow.Select(cell => cell.Text))));
                 var offset = slot.ParagraphOffset is { } known ? Math.Clamp(known, 0, paragraphs.Count) : paragraphs.Count;
@@ -2458,7 +2611,7 @@ public sealed partial class ReadableMarkdownSerializer
         string Label(int row, int column)
         {
             if (grid is null || row < 0 || column < 0 || row >= grid.RowCount || column >= grid.ColumnCount) return string.Empty;
-            var text = WithoutStrikethrough(grid.Rows[row][column].Origin.Text).Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')[0].Trim();
+            var text = Unmarked(grid.Rows[row][column].Origin.Text).Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n')[0].Trim();
             return text.Length > 24 ? text[..24] + "…" : text;
         }
         string RowName(int row) => Label(row, 0) is { Length: > 0 } text ? $"「{text}」" : $"{row + 1}行目";
@@ -2642,7 +2795,7 @@ public sealed partial class ReadableMarkdownSerializer
                     .AppendLine("| --- | --- | --- | --- |");
             foreach (var region in shown)
             {
-                var word = region.TryGetProperty("text", out var t) ? WithoutStruckMarkers(t.GetString()) ?? "" : "";
+                var word = region.TryGetProperty("text", out var t) ? WithoutMarkers(t.GetString()) ?? "" : "";
                 var confidence = region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out var score) && double.IsFinite(score)
                     ? score : (double?)null;
                 var label = confidence is { } value ? value.ToString("P0", CultureInfo.InvariantCulture) + (value < .8 ? "（要照合）" : "") : "未提供";
@@ -2703,9 +2856,9 @@ public sealed partial class ReadableMarkdownSerializer
         foreach (var series in seriesItems)
         {
             var categories = TryProperty(series, out var catElement, "Categories", "categories") && catElement.ValueKind == JsonValueKind.Array
-                ? catElement.EnumerateArray().Select(item => WithoutStruckMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
+                ? catElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
             var values = TryProperty(series, out var valElement, "Values", "values") && valElement.ValueKind == JsonValueKind.Array
-                ? valElement.EnumerateArray().Select(item => WithoutStruckMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
+                ? valElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
             var name = JsonString(series, "Name", "name");
             WriteChartSummary(output, string.IsNullOrWhiteSpace(name) ? "値" : name, categories, values, rawType);
             if (categories.Length == 0) continue;
@@ -2785,7 +2938,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (node.Extensions is null || !node.Extensions.TryGetValue("diagram_items", out var items) || items.ValueKind != JsonValueKind.Array) return;
         foreach (var item in items.EnumerateArray())
         {
-            var text = WithoutStruckMarkers(item.GetString());
+            var text = WithoutMarkers(item.GetString());
             if (string.IsNullOrWhiteSpace(text)) continue;
             output.Append("- ").AppendLine(EscapedInlineText(text));
         }
@@ -2795,7 +2948,7 @@ public sealed partial class ReadableMarkdownSerializer
     /// <summary>Marks a node that stands for source content an adapter could not analyze at all
     /// (for example a PDF Form XObject it could not read). Such content is no visual graph, but it
     /// is just as missing from the Markdown and needs the same comparison with the source.</summary>
-    public const string SourceReviewRequiredExtension = "source_review_required";
+    public const string SourceReviewRequiredExtension = ReviewExtensionKeys.SourceReviewRequired;
 
     /// <summary>Uses the actual Markdown projection to decide whether source comparison is
     /// needed, including raw-path-only fallback that graph accounting considers resolved.</summary>
@@ -2952,7 +3105,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (diagram.Extensions is null || !diagram.Extensions.TryGetValue("visual_graph_member_shape_ids", out var raw) ||
             raw.ValueKind != JsonValueKind.Array) return [];
         return raw.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => WithoutStruckMarkers(item.GetString())).Where(value => !string.IsNullOrWhiteSpace(value)).Cast<string>();
+            .Select(item => WithoutMarkers(item.GetString())).Where(value => !string.IsNullOrWhiteSpace(value)).Cast<string>();
     }
 
     private static bool HasVisualGraph(DocumentNode node) =>
@@ -3187,8 +3340,8 @@ public sealed partial class ReadableMarkdownSerializer
         try
         {
             var json = raw.GetRawText();
-            graph = HasStruckMarker(json) || json.Contains("\\ufdd", StringComparison.OrdinalIgnoreCase)
-                ? WithoutStruckMarkers(JsonNode.Parse(json))?.Deserialize<VisualGraph>()
+            graph = HasMarker(json) || json.Contains("\\ufdd", StringComparison.OrdinalIgnoreCase)
+                ? WithoutMarkers(JsonNode.Parse(json))?.Deserialize<VisualGraph>()
                 : raw.Deserialize<VisualGraph>();
         }
         catch (JsonException) { }
@@ -3214,7 +3367,7 @@ public sealed partial class ReadableMarkdownSerializer
     private static string NodeText(DocumentNode node) => node.Content switch
     {
         TextNodeContent text => text.Text,
-        RichTextNodeContent rich => ReadableInlineText(rich.Runs),
+        RichTextNodeContent rich => ReadableInlineText(IsHeadingLike(node) ? WithoutUnderline(WithDrawnMarks(node, rich.Runs)) : WithDrawnMarks(node, rich.Runs)),
         ReferenceNodeContent reference => reference.AltText ?? reference.Reference,
         TableNodeContent table => string.Join("\n", table.Rows.Select(row => string.Join(" | ", row.Select(cell => cell.Text)))),
         _ => string.Empty
@@ -3232,9 +3385,56 @@ public sealed partial class ReadableMarkdownSerializer
             run.LinkTarget is not null ||
             !string.IsNullOrWhiteSpace(run.Color) ||
             !string.IsNullOrWhiteSpace(run.HighlightColor));
-        var serialized = needsDecoration ? SerializeReadableRuns(runs) : DocRedockInlineMarkdown.Serialize(runs);
+        var serialized = needsDecoration ? SerializeReadableRuns(runs) : SerializeSpannedRuns(runs);
         return serialized.Contains("&#9;", StringComparison.Ordinal) ? serialized.Replace("&#9;", "\t", StringComparison.Ordinal) : serialized;
     }
+
+    // DocRedockInlineMarkdown.Serialize writes each run of different formatting on its own, so a strike over runs of mixed formatting came out
+    // as adjacent pairs (~~a~~~~**b**~~): cmark-gfm prints the four tildes as they are, and markdown-it leaves the bold run unstruck.
+    // Here a maximal stretch of underlined text is written inside one <u>, and in it a maximal stretch of struck text inside one ~~, around the
+    // bold, italic and code of its runs. A line break or a tab ends a stretch, as it always has. The round-trip projection keeps the shared writer.
+    private static string SerializeSpannedRuns(IReadOnlyList<TextRun> runs)
+    {
+        if (!runs.Any(run => run.Underline || run.Strike)) return DocRedockInlineMarkdown.Serialize(runs);
+        var output = new StringBuilder();
+        for (var index = 0; index < runs.Count;)
+        {
+            if (runs[index].Kind != TextRunKind.Text)
+            {
+                output.Append(DocRedockInlineMarkdown.Serialize([runs[index++]]));
+                continue;
+            }
+            var underlined = runs[index].Underline;
+            var end = index;
+            while (end < runs.Count && runs[end].Kind == TextRunKind.Text && runs[end].Underline == underlined) end++;
+            var stretch = new StringBuilder();
+            for (var inner = index; inner < end;)
+            {
+                var struck = runs[inner].Strike;
+                var stop = inner;
+                while (stop < end && runs[stop].Strike == struck) stop++;
+                var text = DocRedockInlineMarkdown.Serialize(runs.Skip(inner).Take(stop - inner).Select(run => run with { Underline = false, Strike = false }).ToArray());
+                stretch.Append(struck ? Delimited(text, "~~", "~~") : text);
+                inner = stop;
+            }
+            output.Append(underlined ? Delimited(stretch.ToString(), "<u>", "</u>") : stretch.ToString());
+            index = end;
+        }
+        return output.ToString();
+    }
+
+    // The text inside delimiters, its white space left outside them: a delimiter next to white space opens or closes nothing.
+    private static string Delimited(string text, string open, string close)
+    {
+        var start = 0;
+        while (start < text.Length && char.IsWhiteSpace(text[start])) start++;
+        var end = text.Length;
+        while (end > start && char.IsWhiteSpace(text[end - 1])) end--;
+        return start == end ? text : text[..start] + open + text[start..end] + close + text[end..];
+    }
+
+    private static IReadOnlyList<TextRun> WithoutUnderline(IReadOnlyList<TextRun> runs) =>
+        runs.Any(run => run.Underline) ? runs.Select(run => run with { Underline = false }).ToArray() : runs;
 
     private static string SerializeReadableRuns(IReadOnlyList<TextRun> runs)
     {
@@ -3252,9 +3452,12 @@ public sealed partial class ReadableMarkdownSerializer
                 index++;
             }
 
+            // The underline of a link is how a link looks, not emphasis: it is not written. Only here,
+            // in the readable text; the round-trip projection keeps it (DocRedockInlineMarkdown).
+            var isLink = current.LinkTarget is not null;
             var segmentRuns = runs.Skip(start).Take(index - start)
-                .Select(run => run with { LinkTarget = null, Color = null, HighlightColor = null }).ToArray();
-            var segment = DocRedockInlineMarkdown.Serialize(segmentRuns);
+                .Select(run => run with { LinkTarget = null, Color = null, HighlightColor = null, Underline = run.Underline && !isLink }).ToArray();
+            var segment = SerializeSpannedRuns(segmentRuns);
             if (segment.Length == 0) continue;
 
             if (!string.IsNullOrWhiteSpace(current.HighlightColor))
@@ -3301,7 +3504,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (value.StartsWith("sheet-", StringComparison.OrdinalIgnoreCase)) value = value["sheet-".Length..];
         else if (value.StartsWith("worksheet-", StringComparison.OrdinalIgnoreCase)) value = value["worksheet-".Length..];
         else if (value.StartsWith("partition-", StringComparison.OrdinalIgnoreCase)) value = value["partition-".Length..];
-        return WithoutStruckMarkers(value.Replace('_', ' ').Trim()) is { Length: > 0 } result ? result : "シート";
+        return WithoutMarkers(value.Replace('_', ' ').Trim()) is { Length: > 0 } result ? result : "シート";
     }
 
     private static string PlainText(string value) => value.Replace("`", string.Empty, StringComparison.Ordinal);
@@ -3376,6 +3579,12 @@ public sealed partial class ReadableMarkdownSerializer
                 case StruckOpen or StruckClose:
                     output.Append("~~");
                     break;
+                case UnderlineOpen:
+                    output.Append("<u>");
+                    break;
+                case UnderlineClose:
+                    output.Append("</u>");
+                    break;
                 default:
                     output.Append(character);
                     break;
@@ -3384,128 +3593,205 @@ public sealed partial class ReadableMarkdownSerializer
         return output.ToString();
     }
 
-    // Struck-through text inside a plain-origin string (a worksheet cell, a table cell, a PDF line)
-    // is wrapped in these two noncharacters, which interchange text never holds; EscapeLiteral turns
-    // them into GFM's ~~ after escaping everything around them. Layout decisions keep reading the
-    // unmarked text: only what is written carries the markers (StruckText).
+    // Struck-through and underlined text inside a plain-origin string (a worksheet cell, a table cell,
+    // a PDF line) is wrapped in these noncharacters, which interchange text never holds; EscapeLiteral
+    // turns them into GFM's ~~ and the project's <u> after escaping everything around them. Layout
+    // decisions keep reading the unmarked text: only what is written carries the markers (MarkedText).
+    // The four are consecutive (IsMarker).
     private const char StruckOpen = '\uFDD0';
     private const char StruckClose = '\uFDD1';
+    private const char UnderlineOpen = '\uFDD2';
+    private const char UnderlineClose = '\uFDD3';
 
-    // The same two noncharacters in the document itself read as U+FFFD, so that only the markers
-    // turn into ~~. Every string the serializer writes comes from a node of the projected graph, an
-    // extension value, a sheet name or the given title, and each is cleaned where it is read.
-    private static bool HasStruckMarker(string? value) => value is not null && value.AsSpan().IndexOfAny(StruckOpen, StruckClose) >= 0;
+    private static bool IsMarker(char character) => character is >= StruckOpen and <= UnderlineClose;
+
+    // The same four noncharacters in the document itself read as U+FFFD, so that only the markers
+    // turn into ~~ and <u>. Every string the serializer writes comes from a node of the projected
+    // graph, an extension value, a sheet name or the given title, and each is cleaned where it is read.
+    private static bool HasMarker(string? value) => value is not null && value.AsSpan().IndexOfAnyInRange(StruckOpen, UnderlineClose) >= 0;
 
     [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(value))]
-    private static string? WithoutStruckMarkers(string? value) =>
-        HasStruckMarker(value) ? value!.Replace(StruckOpen, '\uFFFD').Replace(StruckClose, '\uFFFD') : value;
+    private static string? WithoutMarkers(string? value) =>
+        HasMarker(value) ? string.Concat(value!.Select(character => IsMarker(character) ? '\uFFFD' : character)) : value;
 
-    private static DocumentNode WithoutStruckMarkers(DocumentNode node) => node.Content switch
+    private static DocumentNode WithoutMarkers(DocumentNode node) => node.Content switch
     {
-        TextNodeContent text when HasStruckMarker(text.Text) => node with { Content = new TextNodeContent(WithoutStruckMarkers(text.Text)) },
-        RichTextNodeContent rich when rich.Runs.Any(run => HasStruckMarker(run.Text)) =>
-            node with { Content = new RichTextNodeContent(rich.Runs.Select(run => run with { Text = WithoutStruckMarkers(run.Text) }).ToArray()) },
-        TableNodeContent table when table.Rows.Any(row => row.Any(cell => HasStruckMarker(cell.Text))) =>
+        TextNodeContent text when HasMarker(text.Text) => node with { Content = new TextNodeContent(WithoutMarkers(text.Text)) },
+        RichTextNodeContent rich when rich.Runs.Any(run => HasMarker(run.Text)) =>
+            node with { Content = new RichTextNodeContent(rich.Runs.Select(run => run with { Text = WithoutMarkers(run.Text) }).ToArray()) },
+        TableNodeContent table when table.Rows.Any(row => row.Any(cell => HasMarker(cell.Text))) =>
             node with
             {
                 Content = new TableNodeContent(table.Rows.Select(row =>
-                    (IReadOnlyList<TableCell>)row.Select(cell => cell with { Text = WithoutStruckMarkers(cell.Text) }).ToArray()).ToArray())
+                    (IReadOnlyList<TableCell>)row.Select(cell => cell with { Text = WithoutMarkers(cell.Text) }).ToArray()).ToArray())
             },
-        ReferenceNodeContent reference when HasStruckMarker(reference.AltText) => node with { Content = reference with { AltText = WithoutStruckMarkers(reference.AltText) } },
+        ReferenceNodeContent reference when HasMarker(reference.AltText) => node with { Content = reference with { AltText = WithoutMarkers(reference.AltText) } },
         _ => node,
     };
 
-    private static JsonNode? WithoutStruckMarkers(JsonNode? value)
+    private static JsonNode? WithoutMarkers(JsonNode? value)
     {
         switch (value)
         {
             case JsonObject members:
                 foreach (var name in members.Select(member => member.Key).ToArray())
                     members[name] = members[name] is JsonValue text && text.TryGetValue<string>(out var item)
-                        ? WithoutStruckMarkers(item) : WithoutStruckMarkers(members[name]);
+                        ? WithoutMarkers(item) : WithoutMarkers(members[name]);
                 break;
             case JsonArray items:
                 for (var index = 0; index < items.Count; index++)
                     items[index] = items[index] is JsonValue text && text.TryGetValue<string>(out var item)
-                        ? WithoutStruckMarkers(item) : WithoutStruckMarkers(items[index]);
+                        ? WithoutMarkers(item) : WithoutMarkers(items[index]);
                 break;
         }
         return value;
     }
 
-    // A written string with its markers taken out: struck text read as plain.
-    private static string WithoutStrikethrough(string value) => HasStruckMarker(value)
-        ? value.Replace(StruckOpen.ToString(), string.Empty, StringComparison.Ordinal).Replace(StruckClose.ToString(), string.Empty, StringComparison.Ordinal)
-        : value;
+    // A written string with its markers taken out: struck and underlined text read as plain. For the
+    // names that label or match something (the notes that name a row).
+    private static string Unmarked(string value) => HasMarker(value) ? string.Concat(value.Where(character => !IsMarker(character))) : value;
 
     // A worksheet cell as a section heading (TryGetSectionHeading's text), with its struck text marked.
-    private static string HeadingText(ReadableCell cell) => PlainText(cell.Shown).Trim();
+    // A heading names what follows it; underline is not written there.
+    private static string HeadingText(ReadableCell cell) => PlainText(cell.ShownWithoutUnderline).Trim();
 
-    /// <summary>text with each struck range ([Start, End) offsets into it) wrapped in the markers, its
-    /// leading and trailing whitespace and every line break left outside, so renderers see the
-    /// delimiters (GFM ignores "~~ word~~").</summary>
-    private static string StruckText(string text, IReadOnlyList<StruckSpan>? struck)
+    /// <summary>text with each struck range and each underlined range ([Start, End) offsets into it)
+    /// wrapped in the markers, the leading and trailing whitespace of a range and every line break left
+    /// outside, so renderers see the delimiters (GFM ignores "~~ word~~"). Where both cover the same
+    /// characters underline goes outside (&lt;u&gt;~~text~~&lt;/u&gt;), as for Word runs; a range of one that
+    /// crosses the edge of a range of the other is cut there, so that the markers stay balanced.</summary>
+    private static string MarkedText(string text, IReadOnlyList<MarkedSpan>? struck, IReadOnlyList<MarkedSpan>? underlined = null)
     {
-        if (struck is not { Count: > 0 } || text.Length == 0) return text;
-        var marked = new bool[text.Length];
-        foreach (var range in struck)
-            for (var index = Math.Max(range.Start, 0); index < Math.Min(range.End, text.Length); index++) marked[index] = true;
-        var output = new StringBuilder(text.Length + 8);
+        if (struck is not { Count: > 0 } && underlined is not { Count: > 0 } || text.Length == 0) return text;
+        var underlines = MarkedRuns(text, underlined);
+        var strikes = MarkedRuns(text, struck);
+        if (strikes.Count == 0 && underlines.Count == 0) return text;
+
+        // Every strike goes wholly inside one underline or wholly outside all of them: it is cut where
+        // it crosses an edge, and the blanks the cut leaves at the end of a piece stay outside it.
+        var pieces = new List<(int Start, int End)>();
+        void Piece(int start, int end)
+        {
+            while (start < end && char.IsWhiteSpace(text[start])) start++;
+            while (end > start && char.IsWhiteSpace(text[end - 1])) end--;
+            if (end > start) pieces.Add((start, end));
+        }
+        var next = 0;
+        foreach (var (start, end) in strikes)
+        {
+            var from = start;
+            while (next < underlines.Count && underlines[next].End <= from) next++;
+            for (var index = next; index < underlines.Count && underlines[index].Start < end; index++)
+            {
+                if (underlines[index].Start > from) Piece(from, underlines[index].Start);
+                Piece(Math.Max(from, underlines[index].Start), Math.Min(end, underlines[index].End));
+                from = Math.Min(end, underlines[index].End);
+            }
+            if (from < end) Piece(from, end);
+        }
+
+        // At one position: strikes close, underlines close, underlines open, strikes open.
+        var marks = new List<(int Position, int Order, char Marker)>();
+        foreach (var (start, end) in pieces)
+        {
+            marks.Add((start, 3, StruckOpen));
+            marks.Add((end, 0, StruckClose));
+        }
+        foreach (var (start, end) in underlines)
+        {
+            marks.Add((start, 2, UnderlineOpen));
+            marks.Add((end, 1, UnderlineClose));
+        }
+        var output = new StringBuilder(text.Length + 3 * marks.Count);
+        var written = 0;
+        foreach (var (position, _, marker) in marks.OrderBy(mark => mark.Position).ThenBy(mark => mark.Order))
+        {
+            output.Append(text, written, position - written).Append(marker);
+            written = position;
+        }
+        return output.Append(text, written, text.Length - written).ToString();
+    }
+
+    // The runs of marked characters in text, each within one line and without the whitespace at its
+    // ends: [Start, End) pairs in order.
+    private static List<(int Start, int End)> MarkedRuns(string text, IReadOnlyList<MarkedSpan>? marked)
+    {
+        var runs = new List<(int Start, int End)>();
+        if (marked is not { Count: > 0 } || text.Length == 0) return runs;
+        var covered = new bool[text.Length];
+        foreach (var range in marked)
+            for (var index = Math.Max(range.Start, 0); index < Math.Min(range.End, text.Length); index++) covered[index] = true;
         for (var index = 0; index < text.Length;)
         {
-            if (!marked[index] || char.IsWhiteSpace(text[index]))
+            if (!covered[index] || char.IsWhiteSpace(text[index]))
             {
-                output.Append(text[index++]);
+                index++;
                 continue;
             }
             var end = index;
-            while (end < text.Length && marked[end] && text[end] is not ('\n' or '\r')) end++;
+            while (end < text.Length && covered[end] && text[end] is not ('\n' or '\r')) end++;
             var last = end;
             while (last > index && char.IsWhiteSpace(text[last - 1])) last--;
-            output.Append(StruckOpen).Append(text, index, last - index).Append(StruckClose).Append(text, last, end - last);
+            runs.Add((index, last));
             index = end;
         }
-        return output.ToString();
+        return runs;
     }
 
-    /// <summary>Struck characters [Start, End) of a string (not this project's TextRange, which
-    /// counts a length).</summary>
-    private readonly record struct StruckSpan(int Start, int End);
+    /// <summary>Marked (struck or underlined) characters [Start, End) of a string (not this project's
+    /// TextRange, which counts a length).</summary>
+    private readonly record struct MarkedSpan(int Start, int End);
 
     // [start, end) pairs from an extension such as "strike_ranges"; anything malformed reads as none.
-    private static IReadOnlyList<StruckSpan>? RangesOf(JsonElement element)
+    private static IReadOnlyList<MarkedSpan>? RangesOf(JsonElement element)
     {
         if (element.ValueKind != JsonValueKind.Array) return null;
-        var ranges = new List<StruckSpan>();
+        var ranges = new List<MarkedSpan>();
         foreach (var pair in element.EnumerateArray())
         {
             if (pair.ValueKind != JsonValueKind.Array || pair.GetArrayLength() != 2 || pair[0].ValueKind != JsonValueKind.Number ||
                 pair[1].ValueKind != JsonValueKind.Number || !pair[0].TryGetInt32(out var start) || !pair[1].TryGetInt32(out var end) ||
                 start < 0 || end < start) return null;
-            ranges.Add(new StruckSpan(start, end));
+            ranges.Add(new MarkedSpan(start, end));
         }
         return ranges.Count == 0 ? null : ranges;
     }
 
-    private static IReadOnlyList<StruckSpan>? ExtensionRanges(DocumentNode node, string key) =>
+    private static IReadOnlyList<MarkedSpan>? ExtensionRanges(DocumentNode node, string key) =>
         node.Extensions is not null && node.Extensions.TryGetValue(key, out var element) ? RangesOf(element) : null;
 
-    // Word and PowerPoint table cells are plain text; the table names their struck-through text in
-    // "strike_cells": [[row, cell, [[start, end], ...]], ...], indexing TableNodeContent.Rows. The
-    // returned cells carry the markers, for writing only.
-    private static IReadOnlyList<IReadOnlyList<TableCell>> StruckRows(DocumentNode node, IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    // Word, PowerPoint and PDF table cells are plain text; the table names their struck-through text in
+    // "strike_cells" and their underlined text in "underline_cells": [[row, cell, [[start, end], ...]],
+    // ...], indexing TableNodeContent.Rows. The returned cells carry the markers, for writing only.
+    private static IReadOnlyList<IReadOnlyList<TableCell>> MarkedRows(DocumentNode node, IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
-        if (node.Extensions is null || !node.Extensions.TryGetValue("strike_cells", out var cells) || cells.ValueKind != JsonValueKind.Array)
-            return rows;
+        var struck = CellRanges(node, "strike_cells", rows);
+        var underlined = CellRanges(node, "underline_cells", rows);
+        if (struck.Count == 0 && underlined.Count == 0) return rows;
         var copy = rows.Select(row => row.ToArray()).ToArray();
+        foreach (var (row, column) in struck.Keys.Union(underlined.Keys))
+            copy[row][column] = copy[row][column] with
+            {
+                Text = MarkedText(copy[row][column].Text, struck.GetValueOrDefault((row, column)), underlined.GetValueOrDefault((row, column)))
+            };
+        return copy;
+    }
+
+    // The ranges a table gives under key for each of its cells; an item that is malformed or names a
+    // cell the table does not have is skipped.
+    private static Dictionary<(int Row, int Cell), IReadOnlyList<MarkedSpan>> CellRanges(DocumentNode node, string key,
+        IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    {
+        var result = new Dictionary<(int Row, int Cell), IReadOnlyList<MarkedSpan>>();
+        if (node.Extensions is null || !node.Extensions.TryGetValue(key, out var cells) || cells.ValueKind != JsonValueKind.Array) return result;
         foreach (var item in cells.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Array || item.GetArrayLength() != 3 || item[0].ValueKind != JsonValueKind.Number ||
                 item[1].ValueKind != JsonValueKind.Number || !item[0].TryGetInt32(out var row) || !item[1].TryGetInt32(out var column) ||
-                row < 0 || row >= copy.Length || column < 0 || column >= copy[row].Length || RangesOf(item[2]) is not { } ranges) continue;
-            copy[row][column] = copy[row][column] with { Text = StruckText(copy[row][column].Text, ranges) };
+                row < 0 || row >= rows.Count || column < 0 || column >= rows[row].Count || RangesOf(item[2]) is not { } ranges) continue;
+            result[(row, column)] = result.TryGetValue((row, column), out var known) ? [.. known, .. ranges] : ranges;
         }
-        return copy;
+        return result;
     }
 
     private static bool IsHtmlTagStart(string value, int nextIndex) =>
@@ -3526,18 +3812,30 @@ public sealed partial class ReadableMarkdownSerializer
     /// comparisons (dedup, footer-repetition, titles), so escaping is layered on at display time via
     /// this helper instead.</summary>
     private static string DisplayText(DocumentNode node, string rawText) =>
-        node.Content is RichTextNodeContent ? rawText : EscapeLiteral(StruckNodeText(node, rawText));
+        node.Content is RichTextNodeContent ? rawText : EscapeLiteral(MarkedNodeText(node, rawText));
 
-    // A plain node's text (rawText: all of it, or all of it trimmed) with the struck-through ranges
-    // its "strike_ranges" extension names (a PDF line) marked for EscapeLiteral.
-    private static string StruckNodeText(DocumentNode node, string rawText)
+    // A plain node's text (rawText: all of it, or all of it trimmed) with the struck-through and
+    // underlined ranges its "strike_ranges" and "underline_ranges" extensions name (a PDF line)
+    // marked for EscapeLiteral. A heading is not underlined.
+    private static string MarkedNodeText(DocumentNode node, string rawText)
     {
-        if (node.Content is not TextNodeContent { Text: var text } || ExtensionRanges(node, "strike_ranges") is not { } ranges) return rawText;
+        if (node.Content is not TextNodeContent { Text: var text }) return rawText;
+        var struck = ExtensionRanges(node, "strike_ranges");
+        var underlined = IsHeadingLike(node) ? null : ExtensionRanges(node, "underline_ranges");
+        if (struck is null && underlined is null) return rawText;
         var leading = text.Length - text.TrimStart().Length;
         if (rawText != text && rawText != text.Trim()) return rawText;
         var shift = rawText == text ? 0 : leading;
-        return StruckText(rawText, ranges.Select(range => new StruckSpan(range.Start - shift, range.End - shift)).ToArray());
+        IReadOnlyList<MarkedSpan>? Shifted(IReadOnlyList<MarkedSpan>? ranges) =>
+            ranges?.Select(range => new MarkedSpan(range.Start - shift, range.End - shift)).ToArray();
+        return MarkedText(rawText, Shifted(struck), Shifted(underlined));
     }
+
+    // A heading or a title names what follows it; underline there is styling more than emphasis, and
+    // is not written (strikethrough still is).
+    private static bool IsHeadingLike(DocumentNode node) =>
+        node.Kind is NodeKind.Heading or NodeKind.Section or NodeKind.Slide or NodeKind.Page ||
+        node.Kind == NodeKind.Shape && StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title");
 
     // Replaces the narrower EscapeParagraphStart: walks every line (not just the first) of a
     // paragraph and escapes whatever would otherwise open an ATX heading, blockquote, list item, or
@@ -3583,7 +3881,7 @@ public sealed partial class ReadableMarkdownSerializer
     private static string? ExtensionString(DocumentNode node, string key)
     {
         if (node.Extensions is null || !node.Extensions.TryGetValue(key, out var element)) return null;
-        return WithoutStruckMarkers(element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString());
+        return WithoutMarkers(element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString());
     }
 
     private static bool ExtensionBool(DocumentNode node, string key) =>
@@ -3625,13 +3923,18 @@ public sealed partial class ReadableMarkdownSerializer
     // formula looked up or built from other cells is read like typed text. IsFormulaCopy marks a copy
     // of a formula filled down or across, which Excel stores without its text (Formula is null); it is
     // judged against the formula it copies.
-    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false, int MaxRow = 0, bool IsCenterAcross = false, string? NodeId = null, string? Table = null, IReadOnlyList<string>? OverlayNodeIds = null, string? Display = null, bool IsComputed = false, bool IsFormulaCopy = false, string? Formula = null, bool ReturnsText = false, IReadOnlyList<StruckSpan>? Struck = null)
+    private sealed record ReadableCell(int Row, int Column, string Text, bool IsFormula, bool IsNumeric, bool IsBold, bool HasFill, bool HasBorder, bool IsCentered, double? FontSize, int MaxColumn, bool IsOverlay = false, int MaxRow = 0, bool IsCenterAcross = false, string? NodeId = null, string? Table = null, IReadOnlyList<string>? OverlayNodeIds = null, string? Display = null, bool IsComputed = false, bool IsFormulaCopy = false, string? Formula = null, bool ReturnsText = false, IReadOnlyList<MarkedSpan>? Struck = null, IReadOnlyList<MarkedSpan>? Underlined = null)
     {
         public bool IsHeaderStyled => IsBold || HasFill || HasBorder || IsCentered || FontSize is >= 12;
 
-        /// <summary>What is written for the cell: <see cref="Text"/> with its struck-through parts
-        /// marked (EscapeLiteral turns the marks into ~~). Layout decisions read <see cref="Text"/>.</summary>
-        public string Shown => StruckText(Text, Struck);
+        /// <summary>What is written for the cell: <see cref="Text"/> with its struck-through and
+        /// underlined parts marked (EscapeLiteral turns the marks into ~~ and &lt;u&gt;). Layout
+        /// decisions read <see cref="Text"/>.</summary>
+        public string Shown => MarkedText(Text, Struck, Underlined);
+
+        /// <summary><see cref="Shown"/> for a heading or a name (a column, a label), which are not
+        /// underlined.</summary>
+        public string ShownWithoutUnderline => MarkedText(Text, Struck);
     }
     private sealed record SheetRow(int Number, IReadOnlyList<ReadableCell> Cells);
     private sealed record RowFragment(SheetRow Row, IReadOnlyList<ReadableCell> Cells)
