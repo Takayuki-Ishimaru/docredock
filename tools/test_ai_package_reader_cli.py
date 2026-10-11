@@ -201,6 +201,47 @@ class Search(ReaderTest):
         self.assertEqual(['part-%04d' % i for i in range(1, 7)], [part['id'] for part in json.loads(out)['search']['parts']])
         self.assertEqual([{'number': 2, 'text': 'ソース: workbook\\_base.xlsx'}], json.loads(out)['search']['parts'][0]['lines'])
 
+    def test_searchable_drops_inline_markup_but_keeps_escaped_characters_and_references(self):
+        # Underline, strikethrough and bold marks do not stand between the words of a line.
+        for marked in ('これは<u>重要</u>な点', 'これは~~重要~~な点', 'これは**重要**な点', 'これは***重要***な点',
+                       'これは<u>~~**重要**~~</u>な点', '<u>これは</u><u>重要</u>な点'):
+            with self.subTest(marked=marked):
+                self.assertEqual('これは重要な点', reader._searchable(marked))
+        # An escaped delimiter and a character reference are the characters they stand for, not markup.
+        self.assertEqual('a~~b', reader._searchable(r'a\~\~b'))
+        self.assertEqual('a**b', reader._searchable(r'a\*\*b'))
+        self.assertEqual('a<u>b</u>', reader._searchable('a&lt;u&gt;b&lt;/u&gt;'))
+        self.assertEqual('a<u>b', reader._searchable(r'a\<u>b'))
+        self.assertEqual('a\\b', reader._searchable(r'a\\b'))     # an escaped backslash
+        self.assertEqual('a\\', reader._searchable(r'a\\**'))     # and bold right after it
+        self.assertEqual('a**b', reader._searchable(r'a\**b'))     # an escaped asterisk, then a single one: text
+        # A single tilde or asterisk, and any other tag, are text.
+        self.assertEqual('2 ~ 3 * 4 <b>x</b>', reader._searchable('2 ~ 3 * 4 <b>x</b>'))
+
+    def test_search_finds_text_across_inline_markup_and_what_was_written_as_text(self):
+        package = self.copy_of('schema-2.1')
+        added = ('\n\nこれは<u>重要</u>な点です。\n\n'
+                 r'literal \~\~kept\~\~ and **bold** &lt;u&gt;typed&lt;/u&gt;' + '\n')
+        self.relisted(package, 'parts/0003.md', (package / 'parts/0003.md').read_bytes() + added.encode('utf-8'))
+        lines = (package / 'parts/0003.md').read_text(encoding='utf-8').splitlines()
+        underlined = next(i for i, line in enumerate(lines, 1) if line.startswith('これは'))
+        typed = next(i for i, line in enumerate(lines, 1) if line.startswith('literal'))
+        for query, number in (('重要な点', underlined), ('これは重要な点です', underlined),   # as it reads
+                              ('これは<u>重要</u>な点', underlined), ('**bold**', typed),    # as it is written
+                              ('~~kept~~', typed), ('<u>typed</u>', typed), ('literal ~~kept~~ and bold', typed)):
+            with self.subTest(query=query):
+                code, out, err = self.run_cli(package, '--search', query)
+                self.assertEqual((0, ''), (code, err))
+                self.assertEqual(['part-0003'], [line.split()[0] for line in out.splitlines() if not line.startswith(' ')])
+                self.assertEqual(['  %d: %s' % (number, lines[number - 1])], [line for line in out.splitlines() if line.startswith(' ')])
+        code, out, err = self.run_cli(package, '--search', '重要な点', '--json')
+        self.assertEqual([{'number': underlined, 'text': 'これは<u>重要</u>な点です。'}], json.loads(out)['search']['parts'][0]['lines'])
+        # Marks are not the text: nothing reads "重要 な点" or "重要~~な点".
+        for query in ('重要 な点', '重要~~な点'):
+            code, out, err = self.run_cli(package, '--search', query)
+            self.assertEqual((0, ''), (code, out))
+            self.assertIn('no part contains', err)
+
     def test_search_with_verify_refuses_a_changed_package_before_printing(self):
         code, out, err = self.run_cli(self.changed_cost(), '--verify', '--search', 'Cost')
         self.assertEqual((1, ''), (code, out))

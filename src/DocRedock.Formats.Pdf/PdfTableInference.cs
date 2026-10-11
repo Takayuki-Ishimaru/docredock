@@ -1,3 +1,4 @@
+using System.Text;
 using DocRedock.Core.Documents;
 
 namespace DocRedock.Formats.Pdf;
@@ -117,13 +118,27 @@ public static class PdfTableInference
                 region.MeasuredWidth && IsCentredOnRightEdge(cell, region.BoundingBox, right)).ToArray();
             var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
             if (ids.Any(id => !assigned.Add(id))) return [];
-            var parts = inside.Where(region => !string.IsNullOrWhiteSpace(region.Text)).ToArray();
-            var text = string.Join(" ", parts.Select(region => region.Text));
-            // Each part's struck characters, placed where the part starts in the joined text.
+            // Parts are joined by a space, except a part measured to continue the one before it (the next
+            // format of a word, a subscript), and each part's struck and underlined characters are placed
+            // where the part starts in the joined text. A part of nothing but white space is a space of its own.
+            var text = new StringBuilder();
             IReadOnlyList<TextRange>? struck = null;
-            for (int part = 0, offset = 0; part < parts.Length; offset += parts[part].Text.Length + 1, part++)
-                struck = PdfTextDecorations.Join(struck, PdfTextDecorations.Shift(parts[part].Struck, offset));
-            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text, ids) { Struck = struck });
+            IReadOnlyList<TextRange>? underlined = null;
+            PdfTextRegion? last = null;
+            var spaced = false;
+            // Shows of one glyph each, spaced out letter by letter, are one word (see PdfTextRuns.TypicalGaps).
+            var typical = PdfTextRuns.TypicalGaps(inside);
+            for (var position = 0; position < inside.Length; position++)
+            {
+                var region = inside[position];
+                if (string.IsNullOrWhiteSpace(region.Text)) { spaced = true; continue; }
+                if (last is not null && (spaced || !PdfTextRuns.Continues(last, region, typical[position]))) text.Append(' ');
+                struck = PdfTextDecorations.Join(struck, PdfTextDecorations.Shift(region.Struck, text.Length));
+                underlined = PdfTextDecorations.Join(underlined, PdfTextDecorations.Shift(region.Underlined, text.Length));
+                text.Append(region.Text);
+                (last, spaced) = (region, false);
+            }
+            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text.ToString(), ids) { Struck = struck, Underlined = underlined });
         }
         var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
         // Text touching a cell boundary has no unique owner. Do not silently leave it in

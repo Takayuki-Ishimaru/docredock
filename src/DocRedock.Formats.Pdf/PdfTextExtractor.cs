@@ -22,13 +22,17 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
     /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Struck { get; init; }
 
+    /// <summary>Underlined characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
+    public IReadOnlyList<TextRange>? Underlined { get; init; }
+
     /// <summary>Whether the width of <see cref="BoundingBox"/> was measured with the font's glyph
     /// widths; otherwise it is estimated at 6 units a character.</summary>
     internal bool MeasuredWidth { get; init; }
 
     /// <summary>Where each character of <see cref="Text"/> is drawn along the baseline of upright
     /// text - its left and right edge in page units - when the font's glyph widths are known; null
-    /// otherwise. A strikethrough over part of the text strikes the characters under it.</summary>
+    /// otherwise. A strikethrough over part of the text strikes the characters under it. A space that a
+    /// move inside a show adds to the text has no glyph of its own; it takes the place of the move.</summary>
     internal IReadOnlyList<(double Left, double Right)>? Glyphs { get; init; }
 }
 
@@ -80,10 +84,18 @@ public enum PdfUncertainTextReason
     /// <summary>A strikethrough crosses part of text whose font gives no glyph widths; without them it
     /// cannot be told which characters it strikes, so the text is kept without the mark.</summary>
     StrikethroughUnplaced,
+    /// <summary>The text is drawn with a font whose character codes are glyph indexes or CIDs and the
+    /// file gives no way to turn them into characters (no usable ToUnicode map, no Unicode CMap, no
+    /// standard encoding), or with codes of such a font that its ToUnicode map lacks (other than a space,
+    /// a control character or the notdef glyph, which a map is left without on purpose), or with a
+    /// code that a simple font's /Differences array gives a glyph name the extractor does not know; the
+    /// codes were read as Latin-1, which is almost never what the page shows.</summary>
+    TextUndecodable,
 }
 
 /// <summary>Text fragments of one kind of doubt on a page. <see cref="ResourceName"/> names the
-/// font resource for <see cref="PdfUncertainTextReason.FontResourceAmbiguous"/>; <see cref="Bounds"/>
+/// font resource for <see cref="PdfUncertainTextReason.FontResourceAmbiguous"/> and
+/// <see cref="PdfUncertainTextReason.TextUndecodable"/>; <see cref="Bounds"/>
 /// is the union of the fragments' boxes in PDF user space.</summary>
 public sealed record PdfUncertainText(PdfUncertainTextReason Reason, string? ResourceName, int Fragments, Geometry? Bounds);
 
@@ -180,8 +192,6 @@ public static partial class PdfTextExtractor
 {
     private const string PageMarkerPattern = @"/Type\s*/Page(?!s)\b";
     private const string ObjectPattern = @"\b\d+\s+\d+\s+obj\b";
-    private const string TextStringPattern = @"\[(?:\s*(?:\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]+>|[-+]?\d+(?:\.\d+)?))*\s*\]|\((?:\\.|[^\\)])*\)|<[0-9A-Fa-f\s]+>";
-    private const string LiteralPattern = @"\((?:\\.|[^\\)])*\)";
     private const string NumberPattern = @"[-+]?(?:\d+(?:\.\d*)?|\.\d+)";
 
     public static PdfExtractionResult Extract(string path, PdfExtractionOptions? options = null,
@@ -307,6 +317,8 @@ public static partial class PdfTextExtractor
                     doubts.Add((PdfUncertainTextReason.LayerVisibilityUnknown, null, fragment.Region.BoundingBox));
                 if (fragment.AmbiguousFont is { } fontName)
                     doubts.Add((PdfUncertainTextReason.FontResourceAmbiguous, fontName, fragment.Region.BoundingBox));
+                if (fragment.UndecodableFont is { } undecodableName)
+                    doubts.Add((PdfUncertainTextReason.TextUndecodable, undecodableName, fragment.Region.BoundingBox));
                 // Visible fragments keep consecutive ids, exactly as when nothing is hidden.
                 regions.Add(fragment.Region with { ReadingOrder = regions.Count, SourceIds = [regions.Count] });
             }
@@ -351,13 +363,21 @@ public static partial class PdfTextExtractor
                 diagnostics.Add($"PdfFormXObjectUnparsed: {DescribeUnparsedForms(pageNumber, unparsedForms)}");
             // Text that was kept but may not be what the original shows: never a silent guess.
             foreach (var doubt in uncertainText)
-                diagnostics.Add(doubt.Reason == PdfUncertainTextReason.FontResourceAmbiguous
-                    ? $"PdfFontResourceAmbiguous: PDF page {pageNumber}: {doubt.Fragments} text fragment(s) use font resource /{doubt.ResourceName}, " +
-                      "which is not defined where it is used and names fonts with different character maps elsewhere in the document; " +
-                      $"the text was not decoded with any of them and its characters may be wrong. Compare with page {pageNumber} of the original."
-                    : $"PdfLayerVisibilityUnknown: PDF page {pageNumber}: {doubt.Fragments} text fragment(s) belong to optional content (layers) " +
-                      "whose visibility could not be evaluated; they are kept in the output and may be hidden in the original. " +
-                      $"Compare with page {pageNumber} of the original.");
+                diagnostics.Add(doubt.Reason switch
+                {
+                    PdfUncertainTextReason.FontResourceAmbiguous =>
+                        $"PdfFontResourceAmbiguous: PDF page {pageNumber}: {doubt.Fragments} text fragment(s) use font resource /{doubt.ResourceName}, " +
+                        "which is not defined where it is used and names fonts with different character maps elsewhere in the document; " +
+                        $"the text was not decoded with any of them and its characters may be wrong. Compare with page {pageNumber} of the original.",
+                    PdfUncertainTextReason.TextUndecodable =>
+                        $"PdfTextUndecodable: PDF page {pageNumber}: {doubt.Fragments} text fragment(s) use font resource /{doubt.ResourceName}, " +
+                        "which gives no way to tell what its character codes stand for (no ToUnicode map entry, Unicode CMap or standard encoding); " +
+                        $"the text is kept as the codes spell it and is probably garbled. Compare with page {pageNumber} of the original.",
+                    _ =>
+                        $"PdfLayerVisibilityUnknown: PDF page {pageNumber}: {doubt.Fragments} text fragment(s) belong to optional content (layers) " +
+                        "whose visibility could not be evaluated; they are kept in the output and may be hidden in the original. " +
+                        $"Compare with page {pageNumber} of the original.",
+                });
             cancellationToken.ThrowIfCancellationRequested();
             IReadOnlyDictionary<int, string> visualLabelNodeIds = new Dictionary<int, string>();
             VisualGraph? visualGraph = vector
@@ -366,8 +386,8 @@ public static partial class PdfTextExtractor
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
             // Underlines and strikethroughs are formatting of the text they cross, not drawings: they
-            // leave the graph before its lines are read as a table or kept as fallback, and a
-            // strikethrough (drawn, or a StrikeOut annotation) marks the text it covers as struck.
+            // leave the graph before its lines are read as a table or kept as fallback, and each (drawn,
+            // or an annotation of the page) marks the text it covers as underlined or struck.
             var decorations = visualGraph is null ? [] : PdfTextDecorations.Find(visualGraph, regions, cancellationToken);
             if (visualGraph is not null && decorations.Count > 0)
             {
@@ -382,12 +402,13 @@ public static partial class PdfTextExtractor
                     .ToDictionary(entry => entry.Key, entry => entry.Value);
                 diagnostics.AddRange((visualGraph.Diagnostics ?? []).Select(diagnostic => $"{diagnostic.Code}: PDF page {pageNumber}: {diagnostic.Message}"));
             }
-            var strikes = decorations.Where(decoration => decoration.Kind == PdfTextDecorations.DecorationKind.Strike)
-                .Select(decoration => (decoration.Left, decoration.Right, decoration.Y)).Concat(attributes?.StrikeOuts ?? []).ToArray();
-            if (strikes.Length > 0)
+            var markup = attributes?.Markup ?? PdfTextDecorations.PageMarkup.None;
+            var lines = decorations.Select(decoration => new PdfTextDecorations.TextLine(decoration.Kind, decoration.Left, decoration.Right, decoration.Y, Drawn: true))
+                .Concat(markup.Lines).ToArray();
+            if (lines.Length > 0)
             {
-                var (struck, unplaced) = PdfTextDecorations.ApplyStrikes(regions, strikes);
-                regions = struck;
+                var (marked, unplaced) = PdfTextDecorations.Apply(regions, lines, markup.Links);
+                regions = marked;
                 foreach (var crossed in unplaced) diagnostics.Add(PdfTextDecorations.Describe(pageNumber, crossed));
                 // The text is kept without the mark; like other text that may not match the original,
                 // it asks for source comparison where it sits.
@@ -404,6 +425,9 @@ public static partial class PdfTextExtractor
                 if (vectorPlaceholder)
                     regions.RemoveAll(region => region.Text.StartsWith("[PDF visual content:", StringComparison.Ordinal));
             }
+            // Whether the page's diagram is projected as one - it has a resolved edge - which takes the text of
+            // its nodes out of the flow (see PdfDocumentGraphProjection): reading order must not touch those lines.
+            var diagramProjected = false;
             if (vector && visualGraph is not null)
             {
                 visualGraphs[pageNumber] = visualGraph;
@@ -449,6 +473,7 @@ public static partial class PdfTextExtractor
                     diagnostics.AddRange((outputGraph.Graph.Diagnostics ?? []).Where(d => d.Code == "VisualOutputBudgetExceeded")
                         .Select(d => $"{d.Code}: PDF page {pageNumber}: {d.Message}"));
                 visualProjections[pageNumber] = outputGraph;
+                diagramProjected = outputGraph.Graph.HasTopology;
                 var fallback = PdfVisualOutputCompactor.Compact(outputGraph.Graph, options.OutputBudget);
                 visualFallbacks[pageNumber] = fallback;
                 // Partiality is judged from the finalized output graph's source-item ledger, not a
@@ -471,7 +496,8 @@ public static partial class PdfTextExtractor
                 if (invariantIssues.Count > 0)
                     throw new PdfExtractionException(string.Join(" ", invariantIssues));
             }
-            var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount);
+            var boxes = FindBoxLayout(visualGraph, pageTables, VisibleArea(attributes), diagramProjected ? visualLabelNodeIds : null);
+            var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount, boxes);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
             var embeddedBounds = embeddedImages.Where(bounds => bounds is not null).Select(bounds => bounds!).ToArray();
@@ -595,10 +621,10 @@ public static partial class PdfTextExtractor
     /// table swallow unrelated native text, then reconciles every parsed fragment against the two
     /// places it may legitimately live: a table cell, or a surviving flow region.</summary>
     private static IReadOnlyList<PdfTextRegion> BuildFlowRegions(IReadOnlyList<PdfTextRegion> regions,
-        IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount)
+        IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount, BoxLayout? boxes = null)
     {
         var tableSourceIds = PdfTextAccounting.TableSourceIds(tables);
-        var flow = SortReadingOrder(regions, tableSourceIds, out columnCount);
+        var flow = SortReadingOrder(regions, tableSourceIds, out columnCount, boxes);
         if (tables.Count == 0) return flow;
         var accounting = PdfTextAccounting.Reconcile(regions.SelectMany(region => region.SourceTextIds).ToArray(), flow, tables);
         if (accounting.IsComplete) return flow;
@@ -2161,7 +2187,7 @@ public static partial class PdfTextExtractor
                 diagnostics.Add($"VisualConnectorUnresolved: PDF page {pageNumber} edge endpoint is ambiguous.");
                 graphDiagnostics.Add(Diag("VisualConnectorUnresolved", "Edge endpoint is ambiguous.", 0.2) with { SourceObjectId = edges[^1].Id, SourceObjectType = "connector" });
             }
-            if (subpathCurveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45)); }
+            if (subpathCurveSeen) { diagnostics.Add($"VisualPathPartial: PDF page {pageNumber} curve path retained as fallback."); graphDiagnostics.Add(Diag("VisualPathPartial", "Curve path retained as fallback.", 0.45) with { SourceObjectId = pathId }); }
         }
 
         void RetainClosedSubpath(IReadOnlyList<VisualPathPoint> subpath)
@@ -2465,8 +2491,8 @@ public static partial class PdfTextExtractor
     /// itself. Null members mean the document declares nothing resolvable for that key.</summary>
     private sealed record PdfPageAttributes(PdfResourceScope? Resources, Geometry? MediaBox, Geometry? CropBox, int Rotation)
     {
-        /// <summary>The page's visible StrikeOut annotations, each marked area as the line through its middle.</summary>
-        public IReadOnlyList<(double Left, double Right, double Y)> StrikeOuts { get; init; } = [];
+        /// <summary>What the page's visible annotations say about its text (see <see cref="ReadPageMarkup"/>).</summary>
+        public PdfTextDecorations.PageMarkup Markup { get; init; } = PdfTextDecorations.PageMarkup.None;
     }
 
     /// <summary>How many characters of Form XObject content one document may be scanned for
@@ -2953,44 +2979,10 @@ public static partial class PdfTextExtractor
                 ReadRectangle(InheritedValue(body, "CropBox", index.ById, timeout), timeout),
                 ReadRotation(InheritedValue(body, "Rotate", index.ById, timeout)))
             {
-                StrikeOuts = ReadStrikeOuts(body, index.ById, timeout),
+                Markup = ReadPageMarkup(body, index.ById, timeout),
             };
         }
         return result;
-    }
-
-    /// <summary>A page's StrikeOut markup annotations (/Annots, never inherited), each quadrilateral of
-    /// /QuadPoints - or the /Rect when there are none - as the horizontal line through its middle. An
-    /// annotation flagged hidden (bit 2 of /F) is one a viewer does not show.</summary>
-    private static IReadOnlyList<(double Left, double Right, double Y)> ReadStrikeOuts(string body,
-        IReadOnlyDictionary<int, string> objects, TimeSpan timeout)
-    {
-        if (ResolveKeyValue(body, "Annots", objects, timeout) is not { } annotations) return [];
-        var strikes = new List<(double Left, double Right, double Y)>();
-        foreach (Match reference in Regex.Matches(annotations, @"(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
-        {
-            if (!int.TryParse(reference.Groups["id"].Value, out var id) || !objects.TryGetValue(id, out var annotation) ||
-                !Regex.IsMatch(annotation, @"/Subtype\s*/StrikeOut\b", RegexOptions.None, timeout)) continue;
-            if (Regex.Match(annotation, @"/F\s+(?<flags>\d+)\b", RegexOptions.None, timeout) is { Success: true } flags &&
-                int.TryParse(flags.Groups["flags"].Value, out var value) && (value & 2) != 0) continue;
-            var numbers = Numbers(ResolveKeyValue(annotation, "QuadPoints", objects, timeout));
-            if (numbers.Length >= 8)
-            {
-                for (var start = 0; start + 8 <= numbers.Length; start += 8)
-                {
-                    var xs = new[] { numbers[start], numbers[start + 2], numbers[start + 4], numbers[start + 6] };
-                    var ys = new[] { numbers[start + 1], numbers[start + 3], numbers[start + 5], numbers[start + 7] };
-                    if (xs.Max() > xs.Min()) strikes.Add((xs.Min(), xs.Max(), (ys.Min() + ys.Max()) / 2));
-                }
-            }
-            else if (ReadRectangle(ResolveKeyValue(annotation, "Rect", objects, timeout), timeout) is { } rectangle)
-                strikes.Add((rectangle.X, rectangle.X + rectangle.Width, rectangle.Y + rectangle.Height / 2));
-        }
-        return strikes;
-
-        double[] Numbers(string? declaration) => declaration is null ? [] : Regex.Matches(declaration, NumberPattern, RegexOptions.None, timeout)
-            .Select(item => double.TryParse(item.Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : double.NaN)
-            .Where(double.IsFinite).ToArray();
     }
 
     /// <summary>The value of an inheritable page key: the page's own when it declares one, else the
@@ -3259,10 +3251,12 @@ public static partial class PdfTextExtractor
         return false;
     }
 
-    /// <summary>One shown string as parsed: its region, whether it can be seen, and - when its font
-    /// resource could not be resolved and the document names differently decoding fonts so - that
-    /// resource's name.</summary>
-    private readonly record struct PdfParsedText(PdfTextRegion Region, PdfTextVisibility Visibility, string? AmbiguousFont);
+    /// <summary>One shown string as parsed: its region, whether it can be seen, and the name of its font
+    /// resource when that font could not be resolved and the document names differently decoding fonts
+    /// so (<paramref name="AmbiguousFont"/>), or when the file gives no way to read its character
+    /// codes (<paramref name="UndecodableFont"/>).</summary>
+    private readonly record struct PdfParsedText(PdfTextRegion Region, PdfTextVisibility Visibility, string? AmbiguousFont,
+        string? UndecodableFont);
 
     private static List<PdfParsedText> ParseOperators(string content, PdfExtractionOptions options,
         IReadOnlyDictionary<string, PdfFontBinding> fonts, IReadOnlyDictionary<int, PdfTextShow> shows)
@@ -3275,27 +3269,26 @@ public static partial class PdfTextExtractor
         var transform = PdfMatrix.Identity;
         var graphicsStack = new Stack<PdfMatrix>();
         string? currentFont = null;
-        // The size and text matrix in force, to know how large upright text is drawn (text
-        // decorations are matched against it); the position keeps using only Tm's translation.
+        // The size in force, and the linear part of the text matrix: with the CTM they tell how large
+        // upright text is drawn (text decorations are matched against it) and which way and how far a
+        // glyph's width runs. (x, y) is the text matrix's translation, the current text position; a
+        // move of the text line (see PdfTextShow.LineId) puts it back on the line matrix.
         double? currentFontSize = null;
         var textMatrix = PdfMatrix.Identity;
-        Regex textString;
+        var lineId = 0;
         Regex showOperator;
-        Regex showParts;
         try
         {
-            textString = new Regex(TextStringPattern, RegexOptions.Compiled | RegexOptions.NonBacktracking, options.EffectiveRegexTimeout);
-            showOperator = new Regex(@"\G\s*(?<op>Tj|TJ)\b", RegexOptions.None, options.EffectiveRegexTimeout);
-            showParts = new Regex(ShowPartPattern, RegexOptions.None, options.EffectiveRegexTimeout);
+            showOperator = new Regex(@"\G\s*(?<op>Tj\b|TJ\b|'|"")", RegexOptions.None, options.EffectiveRegexTimeout);
         }
         catch (ArgumentOutOfRangeException exception) { throw new PdfExtractionException("Invalid PDF regex timeout.", exception); }
         try
         {
-            foreach (Match match in textString.Matches(content))
+            foreach (var (operandStart, operandLength) in TextOperands(content))
             {
-                var operatorContext = content[operatorCursor..match.Index];
-                var actualTextContext = content[actualTextCursor..match.Index];
-                operatorCursor = match.Index + match.Length;
+                var operandEnd = operandStart + operandLength;
+                var operatorContext = content[operatorCursor..operandStart];
+                operatorCursor = operandEnd;
                 UpdateGraphicsTransform(operatorContext, options.EffectiveRegexTimeout, graphicsStack, ref transform);
                 var fontOperators = Regex.Matches(operatorContext, @"/(?<font>[A-Za-z][A-Za-z0-9_.+-]*)\s+(?<size>[-+]?\d+(?:\.\d*)?|\.\d+)\s+Tf\b", RegexOptions.None, options.EffectiveRegexTimeout);
                 if (fontOperators.Count > 0)
@@ -3304,41 +3297,43 @@ public static partial class PdfTextExtractor
                     currentFontSize = double.TryParse(fontOperators[^1].Groups["size"].Value, System.Globalization.NumberStyles.Float,
                         System.Globalization.CultureInfo.InvariantCulture, out var fontSize) ? fontSize : null;
                 }
-                if (Regex.IsMatch(operatorContext, @"\bBT\b", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout)) (x, y, textMatrix) = (0, 0, PdfMatrix.Identity);
-                foreach (Match td in Regex.Matches(operatorContext, $@"({NumberPattern})\s+({NumberPattern})\s+Td", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout))
-                    if (InvariantNumber(td.Groups[1].Value) is { } dx && InvariantNumber(td.Groups[2].Value) is { } dy) (x, y) = (x + dx, y + dy);
-                foreach (Match tm in Regex.Matches(operatorContext, $@"({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+Tm", RegexOptions.NonBacktracking, options.EffectiveRegexTimeout))
-                {
-                    if (InvariantNumber(tm.Groups[5].Value) is { } tx && InvariantNumber(tm.Groups[6].Value) is { } ty) (x, y) = (tx, ty);
-                    if (InvariantNumber(tm.Groups[1].Value) is { } ta && InvariantNumber(tm.Groups[2].Value) is { } tb &&
-                        InvariantNumber(tm.Groups[3].Value) is { } tc && InvariantNumber(tm.Groups[4].Value) is { } td)
-                        textMatrix = new PdfMatrix(ta, tb, tc, td, 0, 0);
-                }
                 // Anchored where the string ends instead of run over a copy of the rest of the
                 // stream: that copy made this loop quadratic in the length of the content.
-                var operatorMatch = showOperator.Match(content, match.Index + match.Length);
+                var operatorMatch = showOperator.Match(content, operandEnd);
                 // Dictionary strings (notably /ActualText) may occur between two
                 // shown strings. Keep them in the context for the next Tj/TJ.
                 if (!operatorMatch.Success) continue;
-                var actualText = FindActiveActualText(actualTextContext, options.EffectiveRegexTimeout);
+                var actualText = FindActiveActualText(content[actualTextCursor..operandStart]);
                 // The ordered text-state pass knows the font in force here, including one restored
                 // by the Q that ends a form; the last Tf before the string is only a fallback.
-                var show = shows.TryGetValue(match.Index, out var scanned) ? scanned : (PdfTextShow?)null;
+                var show = shows.TryGetValue(operandStart, out var scanned) ? scanned : (PdfTextShow?)null;
+                // A quote after a string is a show only where the ordered pass saw one: it skips inline
+                // image data, in which a stray ' or " can follow bytes that look like a string.
+                if (show is null && (operatorMatch.Groups["op"].Value is "'" or "\"")) continue;
+                // The same pass follows the line matrix as a renderer does (BT, Td, TD, T*, Tm, ' and "),
+                // so a move starts from the start of the line and not from where the text before it
+                // ended; the shows after a move only advance the position.
+                if (show is { } placed && placed.LineId != lineId)
+                {
+                    lineId = placed.LineId;
+                    var line = placed.LineMatrix;
+                    (x, y, textMatrix) = (line.E, line.F, new PdfMatrix(line.A, line.B, line.C, line.D, 0, 0));
+                }
+                // A show the pass has no record of is placed by the operators since the last string, as every show was before
+                // the pass followed the line matrix. The pass ends strings where this parser does, so none should be missing; a
+                // stream the two read differently must not leave the shows after it where the first one stands.
+                else if (show is null) PlaceByOperators(operatorContext, options.EffectiveRegexTimeout, ref x, ref y, ref textMatrix);
                 var font = (show?.Font ?? currentFont) is { } token && fonts.TryGetValue(token, out var binding) ? binding : null;
-                var text = actualText ?? (match.Value[0] == '['
-                    ? string.Join("", Regex.Matches(match.Value, LiteralPattern + @"|<[0-9A-Fa-f\s]+>", RegexOptions.None, options.EffectiveRegexTimeout)
-                        .Select(item => DecodeString(item.Value, font?.Map)))
-                    : DecodeString(match.Value, font?.Map));
                 // A font that gives its glyph widths measures the show with the text state the ordered
                 // pass followed: its width, where the text after it continues, and where each of its
                 // characters is drawn. Any other font keeps the estimate of 6 units a character, and so
                 // does text whose text matrix turns it: lines and reading order are built for text
                 // running across the page, and the estimate keeps a turned run's shows on one line.
-                var measured = font is { Widths: { } widths, Vertical: false } && show is { FontSize: { } size } state &&
-                    size > 0 && double.IsFinite(size) && state.HorizontalScale > 0 && double.IsFinite(state.HorizontalScale) &&
-                    IsAxisAligned(textMatrix)
-                        ? MeasureShow(match.Value, widths, font.Map, state, size, showParts)
-                        : null;
+                var measurable = font is { Widths: not null, Vertical: false } && show is { FontSize: > 0, HorizontalScale: > 0 } state &&
+                    double.IsFinite(state.FontSize!.Value) && double.IsFinite(state.HorizontalScale) && IsAxisAligned(textMatrix);
+                var read = ReadShow(content[operandStart..operandEnd], font, measurable, show);
+                var text = actualText ?? read.Text;
+                var measured = read.Measured;
                 if (text.Length > 0)
                 {
                     var origin = transform.Apply(x, y);
@@ -3361,11 +3356,12 @@ public static partial class PdfTextExtractor
                                     : null,
                             },
                         show?.Visibility ?? PdfTextVisibility.Visible,
-                        actualText is null && font is { Ambiguous: true } ? font.ResourceName : null));
+                        actualText is null && font is { Ambiguous: true } ? font.ResourceName : null,
+                        actualText is null && font is { } shown && (shown.Undecodable || read.Uncertain) ? shown.ResourceName : null));
                 }
                 if (measured is null) x += text.Length * 6;
                 else (x, y) = (x + textMatrix.A * measured.Advance, y + textMatrix.B * measured.Advance);
-                actualTextCursor = match.Index + match.Length;
+                actualTextCursor = operandEnd;
             }
         }
         catch (RegexMatchTimeoutException exception)
@@ -3377,6 +3373,22 @@ public static partial class PdfTextExtractor
 
     private static double? InvariantNumber(string value) =>
         double.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var number) ? number : null;
+
+    /// <summary>Moves the text position by the <c>BT</c>, <c>Td</c> and <c>Tm</c> operators written since the last
+    /// string, which is how a show was placed before the ordered pass followed the line matrix (see <see cref="PdfTextShow"/>).</summary>
+    private static void PlaceByOperators(string operators, TimeSpan timeout, ref double x, ref double y, ref PdfMatrix textMatrix)
+    {
+        if (Regex.IsMatch(operators, @"\bBT\b", RegexOptions.NonBacktracking, timeout)) (x, y, textMatrix) = (0, 0, PdfMatrix.Identity);
+        foreach (Match move in Regex.Matches(operators, $@"({NumberPattern})\s+({NumberPattern})\s+Td", RegexOptions.NonBacktracking, timeout))
+            if (InvariantNumber(move.Groups[1].Value) is { } dx && InvariantNumber(move.Groups[2].Value) is { } dy) (x, y) = (x + dx, y + dy);
+        foreach (Match set in Regex.Matches(operators, $@"({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+({NumberPattern})\s+Tm", RegexOptions.NonBacktracking, timeout))
+        {
+            if (InvariantNumber(set.Groups[5].Value) is { } tx && InvariantNumber(set.Groups[6].Value) is { } ty) (x, y) = (tx, ty);
+            if (InvariantNumber(set.Groups[1].Value) is { } a && InvariantNumber(set.Groups[2].Value) is { } b &&
+                InvariantNumber(set.Groups[3].Value) is { } c && InvariantNumber(set.Groups[4].Value) is { } d)
+                textMatrix = new PdfMatrix(a, b, c, d, 0, 0);
+        }
+    }
 
     /// <summary>Whether a text matrix only scales or flips the text, without turning or skewing it.</summary>
     private static bool IsAxisAligned(PdfMatrix matrix) =>
@@ -3465,22 +3477,41 @@ public static partial class PdfTextExtractor
             B * next.E + D * next.F + F);
     }
 
-    private static string? FindActiveActualText(string preceding, TimeSpan timeout)
+    /// <summary>How many /ActualText entries without a string that can be read are looked past before the
+    /// rest are given up.</summary>
+    private const int MaxDamagedActualTexts = 8;
+
+    private static string? FindActiveActualText(string preceding)
     {
-        var matches = Regex.Matches(preceding,
-            @"/ActualText\s*(?<value><[0-9A-Fa-f\s]+>|\((?:\\.|[^\\)])*\))",
-            RegexOptions.NonBacktracking, timeout);
-        if (matches.Count == 0) return null;
-        var actual = matches[^1];
-        if (preceding.LastIndexOf("EMC", StringComparison.Ordinal) > actual.Index) return null;
-        var token = actual.Groups["value"].Value;
-        if (!token.StartsWith('<')) return DecodeString(token);
-        var hex = Regex.Replace(token[1..^1], @"\s+", string.Empty, RegexOptions.CultureInvariant);
-        if (hex.Length % 2 != 0) hex += "0";
-        var bytes = Convert.FromHexString(hex);
+        // The last /ActualText that is followed by a string, as it is written: parentheses that balance
+        // belong to a literal string, as they do wherever else a string is read. It is looked for from the
+        // end; a few that are damaged are looked past, but not a hundred thousand, each of which would scan
+        // on to the end of the content.
+        string? token = null;
+        var actualIndex = -1;
+        var damaged = 0;
+        for (var at = preceding.LastIndexOf("/ActualText", StringComparison.Ordinal); at >= 0 && damaged < MaxDamagedActualTexts;
+             at = preceding.AsSpan(0, at).LastIndexOf("/ActualText", StringComparison.Ordinal))
+        {
+            var start = at + "/ActualText".Length;
+            while (start < preceding.Length && char.IsWhiteSpace(preceding[start])) start++;
+            var end = start >= preceding.Length ? -1
+                : preceding[start] == '(' ? EndOfLiteralString(preceding, start)
+                : preceding[start] == '<' && start + 1 < preceding.Length && preceding[start + 1] != '<' ? EndOfHexString(preceding, start)
+                : -1;
+            if (end < 0) { damaged++; continue; }
+            token = preceding[start..end];
+            actualIndex = at;
+            break;
+        }
+        if (token is null || preceding.LastIndexOf("EMC", StringComparison.Ordinal) > actualIndex) return null;
+        var bytes = StringBytes(token);
+        // A text string is UTF-16 when it starts with a byte order mark, whether it is written in
+        // hexadecimal or in parentheses ("(\376\377\000e)"); without one, a literal string is PDFDocEncoding,
+        // which Latin-1 stands for, and a hexadecimal one keeps being read as UTF-16BE when it can be.
         if (bytes.Length >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) return Encoding.BigEndianUnicode.GetString(bytes, 2, bytes.Length - 2);
         if (bytes.Length >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) return Encoding.Unicode.GetString(bytes, 2, bytes.Length - 2);
-        return bytes.Length % 2 == 0 ? Encoding.BigEndianUnicode.GetString(bytes) : Encoding.Latin1.GetString(bytes);
+        return token[0] == '<' && bytes.Length % 2 == 0 ? Encoding.BigEndianUnicode.GetString(bytes) : Encoding.Latin1.GetString(bytes);
     }
 
     /// <summary>Sorts fragments into reading order, first unrolling any detected column layout
@@ -3489,12 +3520,13 @@ public static partial class PdfTextExtractor
     /// interleaving side-by-side columns baseline by baseline. <paramref name="columnCount"/>
     /// reports how many side-by-side columns were detected (1 when the page is single-column).</summary>
     private static IReadOnlyList<PdfTextRegion> SortReadingOrder(IEnumerable<PdfTextRegion> regions,
-        IReadOnlySet<int>? tableSourceIds, out int columnCount)
+        IReadOnlySet<int>? tableSourceIds, out int columnCount, BoxLayout? boxes = null)
     {
-        var geometric = regions.OrderByDescending(region => region.BoundingBox.Y)
+        // A superscript or subscript sorts away from the line it belongs to unless it is put on its baseline.
+        var geometric = PdfTextRuns.PlaceScripts(regions as IReadOnlyList<PdfTextRegion> ?? regions.ToArray())
+            .OrderByDescending(region => region.BoundingBox.Y)
             .ThenBy(region => region.BoundingBox.X).ThenBy(region => region.ReadingOrder).ToArray();
-        var ordered = ApplyColumnLayout(geometric, tableSourceIds, out columnCount);
-        var lines = MergeAdjacentIntoLines(ordered, tableSourceIds);
+        var lines = ReadLines(geometric, tableSourceIds, boxes, out columnCount);
         // PdfPageText.Text and PdfPageProjection.ToDocumentNodes key their own ordering off
         // ReadingOrder rather than re-deriving it from geometry (row-major and column-major
         // layouts can otherwise share the same page-level Y/X extents), so the final emitted
@@ -3508,27 +3540,44 @@ public static partial class PdfTextExtractor
     /// <summary>The original per-baseline merge: fragments sharing a Y baseline are glued into one
     /// readable line (joined with a space across a wide gap, left untouched otherwise), except a
     /// table-owned fragment never merges with a non-table one, and an overlapping fragment (nested
-    /// coordinate frames, e.g. table cells, sharing a local Y) is kept separate. Operates purely on
-    /// the order it is given, so a caller controls reading order - including column-major
-    /// unrolling - by controlling the order of <paramref name="ordered"/>.</summary>
+    /// coordinate frames, e.g. table cells, sharing a local Y) is kept separate. A gap is wide when
+    /// it is more than one and a half fragment heights, or - between two fragments whose widths are
+    /// measured - when it is a word space (see <see cref="PdfTextRuns.IsWordGap"/>), which among shows of one
+    /// glyph each is a gap beyond the one all their glyphs are spaced by. Operates purely
+    /// on the order it is given, so a caller controls reading order - including column-major
+    /// unrolling - by controlling the order of <paramref name="ordered"/>. A fragment in
+    /// <paramref name="isolated"/> is never merged with another.</summary>
     private static List<PdfTextRegion> MergeAdjacentIntoLines(IReadOnlyList<PdfTextRegion> ordered,
-        IReadOnlySet<int>? tableSourceIds)
+        IReadOnlySet<int>? tableSourceIds, IReadOnlySet<int>? isolated = null)
     {
         var lines = new List<PdfTextRegion>();
-        foreach (var region in ordered)
+        // The fragment last joined to the current line: its font and measured edge say what a gap after it is.
+        PdfTextRegion tail = null!;
+        // Shows of one glyph each, spaced out letter by letter (a heading tracked by a quarter of an em), keep that gap
+        // between all their glyphs: a word space is a gap beyond it.
+        var typical = PdfTextRuns.TypicalGaps(ordered);
+        for (var position = 0; position < ordered.Count; position++)
         {
+            var region = ordered[position];
             if (lines.Count == 0 || Math.Abs(lines[^1].BoundingBox.Y - region.BoundingBox.Y) > Math.Max(1, region.BoundingBox.Height * 0.35))
             {
-                lines.Add(region);
+                lines.Add(tail = region);
                 continue;
             }
             var previous = lines[^1];
+            // The stand-in for a group of boxes (see ArrangeBoxedColumns) takes no neighbour on its baseline
+            // and gives none: it is replaced by the group's own lines.
+            if (isolated is { Count: > 0 } && (isolated.Contains(previous.SourceTextIds[0]) || isolated.Contains(region.SourceTextIds[0])))
+            {
+                lines.Add(tail = region);
+                continue;
+            }
             // Table cells and unrelated body text routinely share a baseline. Gluing them into one
             // line would force the table projection to either drop native body text or duplicate a
             // cell, so the two families never join the same readable line.
             if (PdfTextAccounting.IsTableOwned(previous, tableSourceIds) != PdfTextAccounting.IsTableOwned(region, tableSourceIds))
             {
-                lines.Add(region);
+                lines.Add(tail = region);
                 continue;
             }
             var previousRight = previous.BoundingBox.X + previous.BoundingBox.Width;
@@ -3540,10 +3589,13 @@ public static partial class PdfTextExtractor
                 // can share a local Y while their estimated horizontal bounds overlap.
                 // Keep those runs as separate regions instead of collapsing a page
                 // into one unreadable line.
-                lines.Add(region);
+                lines.Add(tail = region);
                 continue;
             }
-            var separator = gap > Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height) * 1.5 ? " " : string.Empty;
+            // The tail's own edge is the one a word gap is measured from only when it is the line's end.
+            var wide = gap > Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height) * 1.5 ||
+                Math.Abs(tail.BoundingBox.X + tail.BoundingBox.Width - previousRight) < 1e-6 && PdfTextRuns.IsWordGap(tail, region, gap, typical[position]);
+            var separator = wide ? " " : string.Empty;
             var right = Math.Max(previousRight, region.BoundingBox.X + region.BoundingBox.Width);
             lines[^1] = new PdfTextRegion(previous.Text + separator + region.Text,
                 new Geometry(previous.BoundingBox.CoordinateSpace, previous.BoundingBox.X,
@@ -3552,7 +3604,9 @@ public static partial class PdfTextExtractor
                 [.. previous.SourceTextIds, .. region.SourceTextIds])
             {
                 Struck = PdfTextDecorations.Join(previous.Struck, PdfTextDecorations.Shift(region.Struck, previous.Text.Length + separator.Length)),
+                Underlined = PdfTextDecorations.Join(previous.Underlined, PdfTextDecorations.Shift(region.Underlined, previous.Text.Length + separator.Length)),
             };
+            tail = region;
         }
         return lines;
     }
@@ -3609,7 +3663,7 @@ public static partial class PdfTextExtractor
     /// entirely and keep the position the geometric sort gave them; only the surrounding non-table
     /// fragments move.</summary>
     private static PdfTextRegion[] ApplyColumnLayout(IReadOnlyList<PdfTextRegion> geometric,
-        IReadOnlySet<int>? tableSourceIds, out int columnCount)
+        IReadOnlySet<int>? tableSourceIds, out int columnCount, IReadOnlySet<int>? isolated = null)
     {
         columnCount = 1;
         var isTableOwned = new bool[geometric.Count];
@@ -3767,7 +3821,7 @@ public static partial class PdfTextExtractor
         // Finish each body line before inserting table fragments. Otherwise a table slot
         // can split two fragments that became adjacent when the columns were reordered.
         // Emit a whole line at its first fragment's slot and skip its consumed fragments.
-        var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds)
+        var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds, isolated)
             .ToDictionary(line => line.SourceTextIds[0]);
         var result = new List<PdfTextRegion>(geometric.Count);
         var flowCursor = 0;
@@ -3780,14 +3834,16 @@ public static partial class PdfTextExtractor
         return result.ToArray();
     }
 
-    private static string DecodeString(string value, PdfToUnicodeMap? map = null) => Decode(StringBytes(value), map, null);
-
     /// <summary>The characters <paramref name="bytes"/> stand for in a font with <paramref name="map"/>
     /// (Latin-1 without one). <paramref name="sources"/>, when given, receives for every character the
-    /// bytes [Start, End) it was decoded from.</summary>
-    private static string Decode(byte[] bytes, PdfToUnicodeMap? map, List<(int Start, int End)>? sources)
+    /// bytes [Start, End) it was decoded from, and <paramref name="uncertain"/> says whether the map
+    /// reports a code it could not read (see <c>PdfToUnicodeMap.Decode</c>, to which <paramref name="widths"/>,
+    /// the widths of the font, go).</summary>
+    private static string Decode(byte[] bytes, PdfToUnicodeMap? map, List<(int Start, int End)>? sources, out bool uncertain,
+        PdfGlyphWidths? widths = null)
     {
-        if (map is not null) return map.Decode(bytes, sources);
+        uncertain = false;
+        if (map is not null) return map.Decode(bytes, sources, out uncertain, widths);
         if (sources is not null)
             for (var index = 0; index < bytes.Length; index++) sources.Add((index, index + 1));
         return Encoding.Latin1.GetString(bytes);
@@ -3810,12 +3866,21 @@ public static partial class PdfTextExtractor
         {
             if (inner[i] != (char)92 || i + 1 >= inner.Length) { raw.Add((byte)inner[i]); continue; }
             var escaped = inner[++i];
+            if (escaped is '\r' or '\n')
+            {
+                // A backslash before the end of a line continues the string on the next line and
+                // shows nothing (Quartz wraps long strings this way, in the middle of words).
+                if (escaped == '\r' && i + 1 < inner.Length && inner[i + 1] == '\n') i++;
+                continue;
+            }
             if (escaped is >= '0' and <= '7')
             {
-                var octal = new StringBuilder(3).Append(escaped);
-                while (octal.Length < 3 && i + 1 < inner.Length && inner[i + 1] is >= '0' and <= '7')
-                    octal.Append(inner[++i]);
-                raw.Add(Convert.ToByte(octal.ToString(), 8));
+                // One to three digits; a code above 255 keeps its low eight bits (the specification
+                // ignores the overflow) instead of failing the whole page.
+                var code = escaped - '0';
+                for (var digits = 1; digits < 3 && i + 1 < inner.Length && inner[i + 1] is >= '0' and <= '7'; digits++)
+                    code = code * 8 + inner[++i] - '0';
+                raw.Add((byte)(code & 0xFF));
                 continue;
             }
             raw.Add((byte)(escaped switch { 'n' => (char)10, 'r' => (char)13, 't' => (char)9, 'b' => (char)8, 'f' => (char)12, '(' => (char)40, ')' => (char)41, _ => escaped }));
@@ -3878,12 +3943,25 @@ public static partial class PdfTextExtractor
     {
         private readonly Dictionary<string, string> _entries;
         private readonly int _maxSourceBytes;
-        private PdfToUnicodeMap(Dictionary<string, string> entries)
+        private readonly int _codeLength;
+        private readonly bool _utf16;
+        private readonly bool _reportsMissing;
+        private readonly HashSet<string>? _unresolved;
+        private PdfToUnicodeMap(Dictionary<string, string> entries, bool utf16 = false, bool reportsMissing = false, HashSet<string>? unresolved = null)
         {
             _entries = entries;
+            _utf16 = utf16;
+            _reportsMissing = reportsMissing;
+            _unresolved = unresolved;
             _maxSourceBytes = entries.Keys.Select(key => key.Length / 2).DefaultIfEmpty(1).Max();
+            // The length of a code when all the map's codes are alike, which is what a code it lacks is taken to be.
+            _codeLength = entries.Keys.Select(key => key.Length / 2).Distinct().Take(2).ToArray() is [var length] ? length : 0;
         }
         public int Count => _entries.Count;
+
+        /// <summary>What a composite font encoded with a Unicode CMap (UniJIS-UCS2-H, UniGB-UTF16-H, ...)
+        /// decodes with: its codes are the UTF-16 code units of the text, big-endian.</summary>
+        public static PdfToUnicodeMap Utf16 { get; } = new([], utf16: true);
 
         /// <summary>The map's content, so that two CMap objects that decode alike count as one.</summary>
         public string Signature => _signature ??= string.Join("\u0001", _entries.OrderBy(entry => entry.Key, StringComparer.Ordinal)
@@ -3891,10 +3969,43 @@ public static partial class PdfTextExtractor
 
         private string? _signature;
 
+        /// <summary>The map a simple font reads its codes with: this one's entries (a ToUnicode map, or none)
+        /// where they give a code, and what the font's <paramref name="encoding"/> makes of every other.
+        /// A code the encoding names a glyph for that is not known stays Latin-1 and is reported by
+        /// <c>Decode</c>.</summary>
+        public static PdfToUnicodeMap WithEncoding(PdfToUnicodeMap? toUnicode, PdfFontEncoding encoding)
+        {
+            var entries = new Dictionary<string, string>(toUnicode?._entries ?? [], StringComparer.OrdinalIgnoreCase);
+            var unresolved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var code = 0; code < encoding.Characters.Length; code++)
+            {
+                var key = code.ToString("X2", System.Globalization.CultureInfo.InvariantCulture);
+                if (entries.ContainsKey(key)) continue;
+                if (encoding.Characters[code] is { } text) entries[key] = text;
+                else if (encoding.Unresolved.Contains(code)) unresolved.Add(key);
+            }
+            return new PdfToUnicodeMap(entries, unresolved: unresolved.Count > 0 ? unresolved : null);
+        }
+
+        /// <summary>This map for a font whose codes only a map can read: a code the map lacks is reported
+        /// by <c>Decode</c>.</summary>
+        public PdfToUnicodeMap ReportingMissingCodes() => new(_entries, _utf16, reportsMissing: true, _unresolved);
+
         /// <summary>The characters <paramref name="bytes"/> decode to. <paramref name="sources"/>, when
         /// given, receives for every character the bytes [Start, End) it was decoded from.</summary>
-        public string Decode(ReadOnlySpan<byte> bytes, List<(int Start, int End)>? sources = null)
+        public string Decode(ReadOnlySpan<byte> bytes, List<(int Start, int End)>? sources = null) => Decode(bytes, sources, out _);
+
+        /// <summary>As above. A code the map does not give is read as the Latin-1 characters of its bytes,
+        /// as it always was; <paramref name="uncertain"/> says whether such a code was shown where it should
+        /// have been readable: a code a font's encoding names a glyph for that is not known, or any code
+        /// but a space, a control character and the notdef glyph - the codes a producer leaves out of a map
+        /// on purpose - in a font whose codes only the map can read (see <see cref="ReportingMissingCodes"/>).
+        /// Of a composite font's codes, which are glyph indexes and not characters, only those the font gives
+        /// the width of a space are taken for one (see <see cref="LeftOut"/>); <paramref name="widths"/> are its widths.</summary>
+        public string Decode(ReadOnlySpan<byte> bytes, List<(int Start, int End)>? sources, out bool uncertain, PdfGlyphWidths? widths = null)
         {
+            uncertain = false;
+            if (_utf16) return DecodeUtf16(bytes, sources);
             var output = new StringBuilder();
             for (var index = 0; index < bytes.Length;)
             {
@@ -3907,14 +4018,77 @@ public static partial class PdfTextExtractor
                 }
                 if (consumed == 0)
                 {
-                    sources?.Add((index, index + 1));
-                    output.Append((char)bytes[index++]);
+                    // The codes of a map that lacks one are all as long as its own, so the code that is missing is too.
+                    var length = _reportsMissing && _codeLength > 1 && bytes.Length - index >= _codeLength ? _codeLength : 1;
+                    if (_reportsMissing)
+                    {
+                        if (LeftOut(bytes.Slice(index, length), widths) is { } blank)
+                        {
+                            output.Append(blank);
+                            if (sources is not null)
+                                for (var character = 0; character < blank.Length; character++) sources.Add((index, index + length));
+                            index += length;
+                            continue;
+                        }
+                        uncertain = true;
+                    }
+                    else if (_unresolved is not null && _unresolved.Contains(Convert.ToHexString(bytes.Slice(index, 1)))) uncertain = true;
+                    for (var at = 0; at < length; at++)
+                    {
+                        sources?.Add((index, index + length));
+                        output.Append((char)bytes[index + at]);
+                    }
+                    index += length;
                     continue;
                 }
                 output.Append(mapped);
                 if (sources is not null)
                     for (var character = 0; character < mapped!.Length; character++) sources.Add((index, index + consumed));
                 index += consumed;
+            }
+            return output.ToString();
+        }
+
+        // A space is a quarter of an em wide, give or take (Calibri 0.226, Times 0.25, Arial 0.278, a justified one a little more).
+        private const double SpaceWidthFromEm = 0.15;
+        private const double SpaceWidthToEm = 0.4;
+
+        /// <summary>What a code reads as that a map leaves out on purpose: a space for the space and the
+        /// control codes (the space glyph of a subset font is often one of them), nothing for the notdef
+        /// glyph; null for every other code. That holds for a single byte, a character code of a simple font.
+        /// A longer code is a glyph index (Identity-H), and a low index is as likely a digit as a space (Arial's
+        /// 19 to 28 are 0 to 9): it is a space only where the font gives it the width of one.</summary>
+        private static string? LeftOut(ReadOnlySpan<byte> code, PdfGlyphWidths? widths)
+        {
+            if (code.Length > 4) return null;
+            var value = 0;
+            foreach (var part in code) value = value << 8 | part;
+            if (value == 0) return string.Empty;
+            if (value > 0x20) return null;
+            return code.Length == 1 || widths?.Width(value) is >= SpaceWidthFromEm and <= SpaceWidthToEm ? " " : null;
+        }
+
+        private static string DecodeUtf16(ReadOnlySpan<byte> bytes, List<(int Start, int End)>? sources)
+        {
+            var output = new StringBuilder(bytes.Length / 2 + 1);
+            for (var index = 0; index < bytes.Length;)
+            {
+                if (index + 1 >= bytes.Length)
+                {
+                    // A last byte alone is no code unit; it is read as Latin-1 like any byte no code covers.
+                    sources?.Add((index, index + 1));
+                    output.Append((char)bytes[index++]);
+                    continue;
+                }
+                var unit = (char)(bytes[index] << 8 | bytes[index + 1]);
+                // A supplementary character is a surrogate pair, one code of four bytes; a surrogate on its own is no character.
+                var pair = char.IsHighSurrogate(unit) && index + 3 < bytes.Length && char.IsLowSurrogate((char)(bytes[index + 2] << 8 | bytes[index + 3]));
+                var width = pair ? 4 : 2;
+                if (pair) output.Append(unit).Append((char)(bytes[index + 2] << 8 | bytes[index + 3]));
+                else output.Append(char.IsSurrogate(unit) ? '\uFFFD' : unit);
+                if (sources is not null)
+                    for (var character = 0; character < width / 2; character++) sources.Add((index, index + width));
+                index += width;
             }
             return output.ToString();
         }
@@ -3953,25 +4127,28 @@ public static partial class PdfTextExtractor
             var lines = body.Split('\n');
             foreach (var line in lines)
             {
-                var range = Regex.Match(line, @"<(?<start>[0-9A-Fa-f\s]+)>\s+<(?<end>[0-9A-Fa-f\s]+)>\s+(?<dest>\[.*\]|<[0-9A-Fa-f\s]+>)", RegexOptions.None, timeout);
-                if (!range.Success) continue;
-                var sourceStart = NormalizeHex(range.Groups["start"].Value); var sourceEnd = NormalizeHex(range.Groups["end"].Value);
-                // A code is at most four bytes; a longer one is malformed and skipped rather than overflowing.
-                if (sourceStart.Length > 8 || sourceEnd.Length > 8) continue;
-                var start = Convert.ToUInt32(sourceStart, 16); var end = Convert.ToUInt32(sourceEnd, 16); var destinationToken = range.Groups["dest"].Value.Trim();
-                if (end < start) continue;
-                var count = (uint)Math.Min((ulong)end - start + 1, MaxRangeCodes);
-                if (destinationToken.StartsWith("[", StringComparison.Ordinal))
+                // The spaces between the angle brackets are optional (Quartz writes <21><21><0054>), and
+                // a producer may put several ranges on one line.
+                foreach (Match range in Regex.Matches(line, @"<(?<start>[0-9A-Fa-f\s]+)>\s*<(?<end>[0-9A-Fa-f\s]+)>\s*(?<dest>\[[^\]]*\]|<[0-9A-Fa-f\s]+>)", RegexOptions.None, timeout))
                 {
-                    var destinations = Regex.Matches(destinationToken, @"<(?<hex>[0-9A-Fa-f\s]+)>", RegexOptions.None, timeout)
-                        .Select(match => NormalizeHex(match.Groups["hex"].Value)).ToArray();
-                    for (var index = 0U; index < destinations.Length && index < count; index++)
-                        entries[(start + index).ToString("X" + sourceStart.Length, System.Globalization.CultureInfo.InvariantCulture)] = DecodeDestination(destinations[index]);
-                    continue;
+                    var sourceStart = NormalizeHex(range.Groups["start"].Value); var sourceEnd = NormalizeHex(range.Groups["end"].Value);
+                    // A code is at most four bytes; a longer one is malformed and skipped rather than overflowing.
+                    if (sourceStart.Length > 8 || sourceEnd.Length > 8) continue;
+                    var start = Convert.ToUInt32(sourceStart, 16); var end = Convert.ToUInt32(sourceEnd, 16); var destinationToken = range.Groups["dest"].Value.Trim();
+                    if (end < start) continue;
+                    var count = (uint)Math.Min((ulong)end - start + 1, MaxRangeCodes);
+                    if (destinationToken.StartsWith("[", StringComparison.Ordinal))
+                    {
+                        var destinations = Regex.Matches(destinationToken, @"<(?<hex>[0-9A-Fa-f\s]+)>", RegexOptions.None, timeout)
+                            .Select(match => NormalizeHex(match.Groups["hex"].Value)).ToArray();
+                        for (var index = 0U; index < destinations.Length && index < count; index++)
+                            entries[(start + index).ToString("X" + sourceStart.Length, System.Globalization.CultureInfo.InvariantCulture)] = DecodeDestination(destinations[index]);
+                        continue;
+                    }
+                    var destination = NormalizeHex(destinationToken[1..^1]);
+                    for (var offset = 0U; offset < count; offset++)
+                        entries[(start + offset).ToString("X" + sourceStart.Length, System.Globalization.CultureInfo.InvariantCulture)] = DecodeDestination(destination, offset);
                 }
-                var destination = NormalizeHex(destinationToken[1..^1]);
-                for (var offset = 0U; offset < count; offset++)
-                    entries[(start + offset).ToString("X" + sourceStart.Length, System.Globalization.CultureInfo.InvariantCulture)] = DecodeDestination(destination, offset);
             }
         }
 

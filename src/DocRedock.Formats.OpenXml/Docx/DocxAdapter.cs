@@ -16,7 +16,7 @@ namespace DocRedock.Formats.OpenXml.Docx;
 /// Built-in DOCX extractor and F1 paragraph patcher. It parses XML with a secure reader,
 /// retains original top-level XML slices, and only splices blocks selected by graph diff.
 /// </summary>
-public sealed class DocxAdapter : IFormatProbe
+public sealed partial class DocxAdapter : IFormatProbe
 {
     /// <summary>Optional wall-clock budget for the DOCX visual inference pass.</summary>
     public TimeSpan? VisualInferenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
@@ -186,6 +186,11 @@ public sealed class DocxAdapter : IFormatProbe
         // so AddDocumentVisualGraph (below, after this loop) can exclude all of them from its one
         // shared whole-document visual canvas in a single pass.
         var overlayExcludedShapes = new HashSet<XElement>();
+        // Lines drawn over the text of a paragraph are text formatting (DocxAdapter.DrawnLines.cs): such a line is no
+        // overlay, no diagram edge and no unresolved line, so it joins the shapes the visual canvas leaves out, and the
+        // paragraph or cell it decorates carries the mark.
+        var drawnLines = FindDocxDrawnLines(doc, bodyElements, readabilityStyles, hiddenStyles);
+        overlayExcludedShapes.UnionWith(drawnLines.Consumed);
         // D5: the most recently processed paragraph's own `order` value (the `ordinal` counter's
         // value at the moment it was assigned) -- kept so a table immediately following one can
         // recompute that exact paragraph's node id below (see TagPrecedingParagraphOverlayTextBoxes).
@@ -209,6 +214,7 @@ public sealed class DocxAdapter : IFormatProbe
                 var textBoxes = BindHostTextBoxes(entry.Original, entry.Slice, textBoxLedger, alternateMirrors, hiddenStyles);
                 AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes);
                 nodes[firstBlockNode] = readability.ApplyHeading(element, nodes[firstBlockNode]);
+                nodes[firstBlockNode] = ApplyDrawnParagraphMarks(nodes[firstBlockNode], element, drawnLines);
             }
             else if (element.Name == W + "tbl")
             {
@@ -218,7 +224,7 @@ public sealed class DocxAdapter : IFormatProbe
                 // paragraph immediately before this table -- processed on an EARLIER loop iteration,
                 // before this table's own id was known -- already added to `nodes`.
                 var precedingParagraph = elementIndex > 0 && bodyElements[elementIndex - 1].Name == W + "p" ? bodyElements[elementIndex - 1] : null;
-                var overlayDetection = DetectDocxTableOverlays(doc, element, precedingParagraph, bodyElements, elementIndex, hiddenStyles);
+                var overlayDetection = DetectDocxTableOverlays(doc, element, precedingParagraph, bodyElements, elementIndex, hiddenStyles, drawnLines.Consumed);
                 if (overlayDetection is { } detection)
                 {
                     overlayExcludedShapes.UnionWith(detection.ExcludedVisualElements);
@@ -246,7 +252,7 @@ public sealed class DocxAdapter : IFormatProbe
                     }
                 }
                 AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal, hiddenStyles, entry.Control,
-                    tableOverlays: overlayDetection?.Overlays, documentBytes: documentBytes, originalTable: entry.Original);
+                    tableOverlays: overlayDetection?.Overlays, documentBytes: documentBytes, originalTable: entry.Original, drawn: drawnLines);
             }
             else if (IsMathRoot(element))
             {
@@ -623,11 +629,14 @@ public sealed class DocxAdapter : IFormatProbe
                 {
                     ["shape_id"] = JsonSerializer.SerializeToElement(shapeId),
                 };
+            // The box's text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
+            var boxText = TextBoxText(textBox, hiddenStyles);
+            boxExtensions = WithMarkedRanges(boxExtensions, boxText, MarkedTextBoxText(textBox, hiddenStyles));
             // A bound box owns the bytes of its w:txbxContent, so an edit to its text splices only
             // that element and leaves the shape, the drawing anchor and the host paragraph around
             // it byte-identical. Without a binding - a box in a header, or one the two walks
             // disagree about - it projects exactly as it used to: text, but no way back.
-            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(TextBoxText(textBox, hiddenStyles)), boxAnchor,
+            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(boxText), boxAnchor,
                 binding?.Slice,
                 Editability: binding is null ? NodeEditability.EditableWithConstraints : NodeEditability.EditableInPlace,
                 Provenance: [new(EvidenceKind.Native)], Extensions: boxExtensions));
@@ -1723,7 +1732,8 @@ public sealed class DocxAdapter : IFormatProbe
         ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, ref int ordinal,
         DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, DocxNestedTable? nested = null,
         IReadOnlyList<DocxTableOverlay>? tableOverlays = null,
-        byte[]? documentBytes = null, IReadOnlyDictionary<XElement, RawSliceRef>? tableSlices = null, XElement? originalTable = null)
+        byte[]? documentBytes = null, IReadOnlyDictionary<XElement, RawSliceRef>? tableSlices = null, XElement? originalTable = null,
+        DocxDrawnLines? drawn = null)
     {
         // Resolution of an inline AlternateContent can change the element walk. Keep its
         // nested tables protected unless the byte and semantic trees are identical in shape.
@@ -1735,8 +1745,9 @@ public sealed class DocxAdapter : IFormatProbe
         var anchor = new SourceAnchor("docx", partUri, [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
         var grid = new List<List<TableCell>>();
-        // Struck-through text per cell, for the readable projection: (row, cell, [start, end) ranges).
+        // Struck-through and underlined text per cell, for the readable projection: (row, cell, [start, end) ranges).
         var struckCells = new List<object[]>();
+        var underlinedCells = new List<object[]>();
         // Tracks, per logical grid column, which (row, cell) in `grid` is the still-open vMerge
         // origin so a later continuation cell can add itself to that origin's RowSpan count.
         var openVerticalMerges = new Dictionary<int, (int RowIndex, int CellIndex)>();
@@ -1759,8 +1770,13 @@ public sealed class DocxAdapter : IFormatProbe
                 // that inherits the cell above; only w:val="restart" starts a new merge region.
                 var isContinuation = vMerge is not null && !StringComparer.OrdinalIgnoreCase.Equals((string?)vMerge.Attribute(W + "val"), "restart");
                 var text = CellText(tc, hiddenStyles);
-                if (!isContinuation && StruckCellText(tc, hiddenStyles) is { Struck.Count: > 0 } struck && struck.Text == text)
-                    struckCells.Add([grid.Count, rowCells.Count, struck.Struck.Select(range => new[] { range.Start, range.End }).ToArray()]);
+                if (!isContinuation && MarkedCellText(tc, hiddenStyles, drawn) is var marked && marked.Text == text)
+                {
+                    if (marked.Struck.Count > 0)
+                        struckCells.Add([grid.Count, rowCells.Count, marked.Struck.Select(range => new[] { range.Start, range.End }).ToArray()]);
+                    if (marked.Underlined.Count > 0)
+                        underlinedCells.Add([grid.Count, rowCells.Count, marked.Underlined.Select(range => new[] { range.Start, range.End }).ToArray()]);
+                }
                 if (isContinuation)
                 {
                     if (openVerticalMerges.TryGetValue(gridColumn, out var origin))
@@ -1791,8 +1807,13 @@ public sealed class DocxAdapter : IFormatProbe
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
-        // Table cells are plain text; the readable projection marks these ranges as struck through.
+        // Table cells are plain text; the readable projection marks these ranges as struck through and underlined.
         if (struckCells.Count > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
+        if (underlinedCells.Count > 0) extensions["underline_cells"] = JsonSerializer.SerializeToElement(underlinedCells);
+        // A paragraph of a cell that a drawn line strikes in part: which characters it strikes could not be determined.
+        if (drawn is not null && table.Elements(W + "tr").SelectMany(row => row.Elements(W + "tc")).SelectMany(CellBlocks)
+                .Any(block => block.Name == W + "p" && drawn.Paragraphs.TryGetValue(block, out var decoration) && decoration.StrikeUnplaced))
+            MarkDrawnStrikeUnplaced(extensions);
         // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already shared with PPTX/XLSX
         // and reads this same "table_overlays" extension key off any NodeKind.Table node -- see
         // DetectDocxTableOverlays below for how the DOCX port populates it.
@@ -1843,7 +1864,7 @@ public sealed class DocxAdapter : IFormatProbe
                     var nestedSlice = tableSlices is not null && tableSlices.TryGetValue(cellBlocks[blockIndex], out var indexed) ? indexed : null;
                     AddTable(cellBlocks[blockIndex], partUri, nestedSlice, nestedOrder, nodes, sliceMap, ref ordinal, hiddenStyles,
                         contentControl, new DocxNestedTable(id, rowIndex, cellIndex, paragraphOffset, lineOffset),
-                        tableSlices: tableSlices);
+                        tableSlices: tableSlices, drawn: drawn);
                 }
                 cellIndex++;
             }
@@ -2395,7 +2416,8 @@ public sealed class DocxAdapter : IFormatProbe
     }
 
     private static DocxTableOverlayDetection? DetectDocxTableOverlays(
-        XDocument doc, XElement table, XElement? precedingParagraph, XElement[] bodyElements, int tableIndex, DocxHiddenStyles hiddenStyles)
+        XDocument doc, XElement table, XElement? precedingParagraph, XElement[] bodyElements, int tableIndex, DocxHiddenStyles hiddenStyles,
+        IReadOnlySet<XElement>? drawnLines = null)
     {
         // Spec "非対応": a floating table's column mapping is out of scope.
         if (table.Element(W + "tblPr")?.Element(W + "tblpPr") is not null) return null;
@@ -2430,6 +2452,8 @@ public sealed class DocxAdapter : IFormatProbe
                 var cellBottomTwips = geometry.RowBoundaries[boundedRow + 1];
                 foreach (var candidate in CollectCellOverlayCandidates(tc, hiddenStyles))
                 {
+                    // A line drawn over a paragraph's text is its strikethrough or underline, no overlay symbol.
+                    if (drawnLines?.Contains(candidate.Owner) == true) continue;
                     if (candidate.WidthTwips <= 0 && candidate.HeightTwips <= 0) continue; // a true point: nothing to place.
                     // (A) X is measured from the CELL's own left edge for the "column"/default bucket
                     // (tableLeftTwips, including tblInd, cancels out of the column-boundary comparison
@@ -2456,6 +2480,7 @@ public sealed class DocxAdapter : IFormatProbe
             var shiftedColumnBoundaries = geometry.ColumnBoundaries.Select(boundary => boundary + tableLeftTwips).ToArray();
             foreach (var candidate in CollectPrecedingParagraphOverlayCandidates(precedingParagraph, hiddenStyles))
             {
+                if (drawnLines?.Contains(candidate.Owner) == true) continue;
                 if (candidate.WidthTwips <= 0 && candidate.HeightTwips <= 0) continue;
                 // (B) "column" (the only bucket the spec lists a distinct rule for) resolves against
                 // pgMar@left alone, same reasoning as (A)'s "margin" bucket above.
@@ -2583,30 +2608,43 @@ public sealed class DocxAdapter : IFormatProbe
     // w:t in the subtree instead — the previous behaviour — silently glued "A", "B", "C" into
     // "ABC". Leading and trailing empty paragraphs are dropped because Word always leaves one
     // after a nested table, and they would otherwise show up as stray blank lines.
-    // CellText with the characters its struck-through runs hold, as [start, end) offsets into it.
-    private static (string Text, IReadOnlyList<(int Start, int End)> Struck) StruckCellText(XElement cell, DocxHiddenStyles hiddenStyles)
+    // CellText with the characters its struck-through and underlined runs hold, as [start, end) offsets
+    // into it.
+    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined) MarkedCellText(
+        XElement cell, DocxHiddenStyles hiddenStyles, DocxDrawnLines? drawn = null)
     {
-        var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").Select(block => StruckParagraphText(block, hiddenStyles)).ToList();
+        var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").Select(block => MarkedParagraphText(block, hiddenStyles,
+            drawn is not null && drawn.Paragraphs.TryGetValue(block, out var decoration) ? decoration : null)).ToList();
         while (paragraphs.Count > 0 && paragraphs[0].Text.Length == 0) paragraphs.RemoveAt(0);
         while (paragraphs.Count > 0 && paragraphs[^1].Text.Length == 0) paragraphs.RemoveAt(paragraphs.Count - 1);
         var text = new StringBuilder();
         var struck = new List<(int Start, int End)>();
+        var underlined = new List<(int Start, int End)>();
         for (var index = 0; index < paragraphs.Count; index++)
         {
             if (index > 0) text.Append('\n');
             var offset = text.Length;
             struck.AddRange(paragraphs[index].Struck.Select(range => (range.Start + offset, range.End + offset)));
+            underlined.AddRange(paragraphs[index].Underlined.Select(range => (range.Start + offset, range.End + offset)));
             text.Append(paragraphs[index].Text);
         }
-        return (text.ToString(), struck);
+        return (text.ToString(), struck, underlined);
     }
 
-    // ParagraphText with the characters of struck-through runs (w:strike, w:dstrike): the same walk,
-    // so the offsets fall on its text.
-    private static (string Text, List<(int Start, int End)> Struck) StruckParagraphText(XContainer container, DocxHiddenStyles hiddenStyles)
+    // ParagraphText with the characters of struck-through runs (w:strike, w:dstrike) and of underlined
+    // runs (w:u other than none): the same walk, so the offsets fall on its text. The underline of a
+    // hyperlink's runs is how a link looks, not emphasis, and is left out.
+    private static (string Text, List<(int Start, int End)> Struck, List<(int Start, int End)> Underlined) MarkedParagraphText(
+        XContainer container, DocxHiddenStyles hiddenStyles, DocxDrawnDecoration? drawn = null)
     {
         var output = new StringBuilder();
         var struck = new List<(int Start, int End)>();
+        var underlined = new List<(int Start, int End)>();
+        static void Mark(List<(int Start, int End)> ranges, int start, int end)
+        {
+            if (ranges.Count > 0 && ranges[^1].End == start) ranges[^1] = (ranges[^1].Start, end);
+            else ranges.Add((start, end));
+        }
         foreach (var element in RelevantDescendants(container))
         {
             if (IsHiddenContentElement(element, hiddenStyles)) continue;
@@ -2615,10 +2653,11 @@ public sealed class DocxAdapter : IFormatProbe
             {
                 var start = output.Length;
                 output.Append(element.Value);
-                if (output.Length > start && element.Parent is { } run && run.Name == W + "r" && ReadRunProperties(run).Strike)
+                if (output.Length > start && element.Parent is { } run && run.Name == W + "r")
                 {
-                    if (struck.Count > 0 && struck[^1].End == start) struck[^1] = (struck[^1].Start, output.Length);
-                    else struck.Add((start, output.Length));
+                    var properties = ReadRunProperties(run);
+                    if (properties.Strike) Mark(struck, start, output.Length);
+                    if (properties.Underline && !run.Ancestors(W + "hyperlink").Any()) Mark(underlined, start, output.Length);
                 }
             }
             else if (element.Name is var name && (name == W + "br" || name == W + "cr"))
@@ -2628,7 +2667,10 @@ public sealed class DocxAdapter : IFormatProbe
             }
             else if (element.Name == W + "tab") output.Append('\t');
         }
-        return (output.ToString(), struck);
+        // A line drawn over the whole paragraph strikes or underlines all of it (DocxAdapter.DrawnLines.cs).
+        if (drawn?.Strike == true && output.Length > 0) { struck.Clear(); struck.Add((0, output.Length)); }
+        if (drawn?.Underline == true && output.Length > 0) { underlined.Clear(); underlined.Add((0, output.Length)); }
+        return (output.ToString(), struck, underlined);
     }
 
     private static string CellText(XElement cell, DocxHiddenStyles hiddenStyles)
@@ -2689,8 +2731,11 @@ public sealed class DocxAdapter : IFormatProbe
             {
                 var anchor = new SourceAnchor("docx", partUri, [new("part_paragraph_ordinal", ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture))], ordinal);
                 var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-                nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(ParagraphText(paragraph, hiddenStyles)), anchor,
-                    Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
+                var text = ParagraphText(paragraph, hiddenStyles);
+                // The text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
+                nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(text), anchor,
+                    Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
+                    Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(paragraph, hiddenStyles))));
             }
         }
         return ordinal;
@@ -2745,8 +2790,10 @@ public sealed class DocxAdapter : IFormatProbe
             var noteId = (string?)footnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var anchor = new SourceAnchor("docx", "/word/footnotes.xml", [new("footnote_id", noteId)], ordinal);
             var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-            nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(footnote, hiddenStyles)), anchor,
-                Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
+            var text = ParagraphText(footnote, hiddenStyles);
+            nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
+                Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
+                Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(footnote, hiddenStyles))));
         }
     }
 
@@ -2760,8 +2807,10 @@ public sealed class DocxAdapter : IFormatProbe
             var noteId = (string?)endnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var anchor = new SourceAnchor("docx", "/word/endnotes.xml", [new("endnote_id", noteId)], ordinal);
             var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
-            nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(ParagraphText(endnote, hiddenStyles)), anchor,
-                Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)]));
+            var text = ParagraphText(endnote, hiddenStyles);
+            nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
+                Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
+                Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(endnote, hiddenStyles))));
         }
     }
 

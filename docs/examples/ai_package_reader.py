@@ -77,6 +77,10 @@ UNSHOWN_IN_JSON_RE = re.compile("[\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-
 SYSTEM_FILES = (".DS_Store", "Thumbs.db", "desktop.ini")
 # A Markdown backslash escape (DocRedock escapes literal text this way), undone before searching.
 MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
+# A backslash escape, or else the inline markup readable Markdown writes around text: underline
+# (<u>...</u>), strikethrough (~~...~~) and bold (**...**, ***...*** with italics). Matching escapes first
+# keeps \~ and \* the characters they are; a character reference (&lt;u&gt;) holds none of these.
+INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?u>|~~|\*\*\*|\*\*")
 
 
 class PackageError(ValueError):
@@ -1034,10 +1038,18 @@ def read_verified_part(package, manifest, part_id):
             "review": review}
 
 
-def _searchable(text):
-    """text as search compares it: Markdown escapes and character references undone, then NFKC
-    (full-width letters and digits as ASCII) and case folded."""
+def _plain(text):
+    """text as search compares it letter for letter: Markdown escapes and character references undone,
+    then NFKC (full-width letters and digits as ASCII) and case folded."""
     return unicodedata.normalize("NFKC", html.unescape(MARKDOWN_ESCAPE_RE.sub(r"\1", text))).casefold()
+
+
+def _searchable(text):
+    """_plain(text) with the inline markup of readable Markdown taken out (<u>, </u>, ~~, **), so that
+    "a <u>word</u> here" is searched as "a word here". Only markup goes: an escaped delimiter (\\~) or a
+    character reference (&lt;u&gt;) is the character it stands for."""
+    return unicodedata.normalize(
+        "NFKC", html.unescape(INLINE_MARKUP_RE.sub(lambda match: match.group(1) or "", text))).casefold()
 
 
 def _lines(text):
@@ -1048,16 +1060,18 @@ def _lines(text):
 
 
 def search_parts(package, manifest, text, contents=None):
-    """The parts whose Markdown contains text, compared after _searchable (case, width and Markdown
-    escapes do not matter): [(part, [(line number, line), ...]), ...] in manifest order. contents
-    maps package paths to bytes already read (and verified)."""
-    query = _searchable(text)
+    """The parts whose Markdown contains text, as the line reads (_searchable) or as it is written
+    (_plain); case, width, Markdown escapes and, in the first, inline markup do not matter:
+    [(part, [(line number, line), ...]), ...] in manifest order. contents maps package paths to bytes
+    already read (and verified)."""
+    query = _plain(text)
     contents = contents or {}
     matches = []
     for part in manifest["parts"]:
         data = contents.get(part["path"])
         markdown = _decode(package.read_bytes(part["path"]) if data is None else data, part["path"])
-        lines = [(number, line) for number, line in enumerate(_lines(markdown), 1) if query in _searchable(line)]
+        lines = [(number, line) for number, line in enumerate(_lines(markdown), 1)
+                 if query in _searchable(line) or query in _plain(line)]
         if lines:
             matches.append((part, lines))
     return matches
@@ -1258,8 +1272,8 @@ def main(argv=None):
     shown = parser.add_mutually_exclusive_group()
     shown.add_argument("--part", metavar="PART_ID", help="print one part's Markdown")
     shown.add_argument("--search", metavar="TEXT",
-                       help="list the parts containing TEXT (ignoring case, full-width forms and Markdown "
-                            "escapes) with their matching lines")
+                       help="list the parts containing TEXT (ignoring case, full-width forms, Markdown "
+                            "escapes and underline, strikethrough and bold marks) with their matching lines")
     parser.add_argument("--fail-on-review", action="store_true",
                         help="exit 3 instead of printing when report.json says the conversion needs review")
     parser.add_argument("--json", action="store_true",

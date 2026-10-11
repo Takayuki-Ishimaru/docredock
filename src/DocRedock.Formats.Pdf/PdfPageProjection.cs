@@ -10,9 +10,23 @@ public static class PdfPageProjection
 {
     /// <summary>The "strike_ranges" extension of a line: its struck-through characters as [start, end)
     /// offsets into its text; null when nothing is struck.</summary>
-    public static JsonElement? StrikeRanges(PdfTextRegion region) => region.Struck is { Count: > 0 } struck
-        ? JsonSerializer.SerializeToElement(struck.Select(range => new[] { range.Start, range.End }).ToArray())
+    public static JsonElement? StrikeRanges(PdfTextRegion region) => Ranges(region.Struck);
+
+    /// <summary>The "underline_ranges" extension of a line: its underlined characters, in the same form.</summary>
+    public static JsonElement? UnderlineRanges(PdfTextRegion region) => Ranges(region.Underlined);
+
+    private static JsonElement? Ranges(IReadOnlyList<TextRange>? ranges) => ranges is { Count: > 0 }
+        ? JsonSerializer.SerializeToElement(ranges.Select(range => new[] { range.Start, range.End }).ToArray())
         : null;
+
+    /// <summary>The marked cells of a table as the extensions Word and PowerPoint tables name them:
+    /// [row, cell, [[start, end], ...]], indexing the rows as they are written and their cells by column.</summary>
+    private static object[] MarkedCells(PdfTable table, Func<PdfTableCell, IReadOnlyList<TextRange>?> ranges) =>
+        table.Rows.SelectMany((row, rowIndex) => row.Cells.OrderBy(cell => cell.Column)
+                .Select((cell, cellIndex) => (rowIndex, cellIndex, Ranges: ranges(cell))))
+            .Where(item => item.Ranges is { Count: > 0 })
+            .Select(item => new object[] { item.rowIndex, item.cellIndex, item.Ranges!.Select(range => new[] { range.Start, range.End }).ToArray() })
+            .ToArray();
 
     public static IReadOnlyList<DocumentNode> ToDocumentNodes(PdfPageText page,
         IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0)
@@ -48,7 +62,9 @@ public static class PdfPageProjection
             {
                 var region = flow[flowIndex++];
                 var order = startingOrder + nodes.Count;
-                var extensions = StrikeRanges(region) is { } ranges ? new Dictionary<string, JsonElement> { ["strike_ranges"] = ranges } : null;
+                Dictionary<string, JsonElement>? extensions = null;
+                if (StrikeRanges(region) is { } struck) (extensions ??= [])["strike_ranges"] = struck;
+                if (UnderlineRanges(region) is { } underlined) (extensions ??= [])["underline_ranges"] = underlined;
                 nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", NodeKind.Paragraph, null, order,
                     ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));
@@ -70,13 +86,11 @@ public static class PdfPageProjection
             // text folded with glyphs, no PDF-specific serializer change needed.
             if (table.Overlays is { Count: > 0 } overlays)
                 extensions["table_overlays"] = JsonSerializer.SerializeToElement(overlays);
-            // Struck-through cell text, as Word and PowerPoint tables name it: [row, cell, [[start, end], ...]].
-            var struckCells = table.Rows.SelectMany((row, rowIndex) => row.Cells.OrderBy(cell => cell.Column)
-                    .Select((cell, cellIndex) => (rowIndex, cellIndex, cell.Struck)))
-                .Where(item => item.Struck is { Count: > 0 })
-                .Select(item => new object[] { item.rowIndex, item.cellIndex, item.Struck!.Select(range => new[] { range.Start, range.End }).ToArray() })
-                .ToArray();
+            // Struck-through and underlined cell text, as Word and PowerPoint tables name it.
+            var struckCells = MarkedCells(table, cell => cell.Struck);
             if (struckCells.Length > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
+            var underlinedCells = MarkedCells(table, cell => cell.Underlined);
+            if (underlinedCells.Length > 0) extensions["underline_cells"] = JsonSerializer.SerializeToElement(underlinedCells);
             nodes.Add(new DocumentNode(table.Id, NodeKind.Table, null, order, ContentLayer.Body,
                 new TableNodeContent(rows), Geometry: table.Bounds, Editability: NodeEditability.Protected,
                 Provenance: [new ProvenanceItem(EvidenceKind.TableInferred, Engine: "pdf vector grid")], Extensions: extensions));

@@ -188,6 +188,15 @@ public static partial class PdfTextExtractor
 
     private static int SkipLiteralString(string text, int index)
     {
+        var end = EndOfLiteralString(text, index);
+        return end < 0 ? text.Length : end;
+    }
+
+    /// <summary>The index just past the literal string that starts at <paramref name="index"/>, or -1 when
+    /// it is never closed. Parentheses that balance are part of the string, to any depth: <c>(a(b)c)</c> is
+    /// one string.</summary>
+    private static int EndOfLiteralString(string text, int index)
+    {
         var depth = 0;
         while (index < text.Length)
         {
@@ -196,15 +205,44 @@ public static partial class PdfTextExtractor
             if (character == '(') depth++;
             else if (character == ')' && --depth == 0) return index;
         }
-        return text.Length;
+        return -1;
+    }
+
+    /// <summary>The index just past the hexadecimal string that starts at <paramref name="index"/>, or -1
+    /// when it is never closed or holds anything but hexadecimal digits and white space.</summary>
+    private static int EndOfHexString(string text, int index)
+    {
+        for (var at = index + 1; at < text.Length; at++)
+        {
+            if (text[at] == '>') return at + 1;
+            if (!char.IsAsciiHexDigit(text[at]) && !char.IsWhiteSpace(text[at])) return -1;
+        }
+        return -1;
+    }
+
+    /// <summary>What a font's character codes stand for when it has no ToUnicode map.</summary>
+    private enum PdfFontCodes
+    {
+        /// <summary>Single-byte codes under a standard encoding (or a font the extractor does not
+        /// classify): read as Latin-1, as for every font before.</summary>
+        Latin1,
+        /// <summary>A composite font encoded with a Unicode CMap (UniJIS-UCS2-H and the like): its
+        /// codes are UTF-16 code units.</summary>
+        Utf16,
+        /// <summary>Glyph indexes, CIDs, or codes under a built-in encoding: nothing but a ToUnicode
+        /// map says which characters they are, so without one they cannot be read.</summary>
+        Glyphs,
     }
 
     /// <summary>What decoding one font needs. <see cref="Identity"/> is shared by every resource name
     /// that points at the same font object; <see cref="ToUnicodeObject"/> is the object of its
     /// <c>/ToUnicode</c> CMap; <see cref="Vertical"/> marks a font whose encoding is a <c>-V</c> CMap
     /// (or declares <c>/WMode 1</c>), so its glyphs advance down the page, not across it;
-    /// <see cref="Widths"/> are its glyph widths, null when it gives none the extractor follows.</summary>
-    private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical, PdfGlyphWidths? Widths = null);
+    /// <see cref="Widths"/> are its glyph widths, null when it gives none the extractor follows;
+    /// <see cref="Codes"/> says what its codes stand for without a ToUnicode map, and
+    /// <see cref="Encoding"/> what a simple font's <c>/Encoding</c> makes of them (null without one).</summary>
+    private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical, PdfGlyphWidths? Widths = null,
+        PdfFontCodes Codes = PdfFontCodes.Latin1, PdfFontEncoding? Encoding = null);
 
     /// <summary>Reads each font a resource dictionary names once, and remembers under which names
     /// the document's resource dictionaries offer it - the evidence a name that cannot be resolved
@@ -262,8 +300,49 @@ public static partial class PdfTextExtractor
                 ? name.EndsWith("-V", StringComparison.Ordinal)
                 : encoding is not null && TryReadReference(encoding, out var embedded) && objects.TryGetValue(embedded, out var cmapBody) &&
                   Regex.IsMatch(cmapBody, @"/WMode\s+1\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
-            return new PdfFontResource(identity, toUnicode, vertical, vertical ? null : ReadGlyphWidths(entries, objects));
+            // Only a simple font's codes are read through an /Encoding; a composite font's /Encoding is a CMap.
+            var simple = ReadName(EntryValue(entries, "Subtype")) is "Type1" or "MMType1" or "TrueType" or "Type3";
+            return new PdfFontResource(identity, toUnicode, vertical, vertical ? null : ReadGlyphWidths(entries, objects), ReadCodes(entries, encoding),
+                simple ? ReadFontEncoding(encoding, objects) : null);
         }
+
+        /// <summary>What the font's codes stand for when no ToUnicode map says. Only a font seen to
+        /// hold glyph codes counts as such: one the extractor cannot read stays Latin-1, so a document
+        /// whose fonts it cannot reach is not questioned for that.</summary>
+        private PdfFontCodes ReadCodes(IReadOnlyList<(string Key, string Value)> font, string? encoding)
+        {
+            switch (ReadName(EntryValue(font, "Subtype")))
+            {
+                case "Type0":
+                    // A CMap named for Unicode hands over UTF-16 code units. Every other one - Identity-H/V,
+                    // a legacy one such as 90ms-RKSJ-H, an embedded one - gives CIDs or legacy codes.
+                    return ReadName(encoding) is { } cmap && IsUnicodeCMap(cmap) ? PdfFontCodes.Utf16 : PdfFontCodes.Glyphs;
+                case "Type1" or "MMType1" or "TrueType":
+                    // Any /Encoding is a way to read the codes. Without one, a symbolic font's codes are
+                    // positions in its own built-in encoding (Symbol's 'a' is alpha).
+                    return encoding is null && IsSymbolic(font) ? PdfFontCodes.Glyphs : PdfFontCodes.Latin1;
+                default:
+                    return PdfFontCodes.Latin1;
+            }
+        }
+
+        private bool IsSymbolic(IReadOnlyList<(string Key, string Value)> font)
+        {
+            // Bit 3 of the descriptor's flags is Symbolic, bit 6 Nonsymbolic.
+            if (ResolveDictionary(EntryValue(font, "FontDescriptor"), objects) is { } descriptor &&
+                ReadNumber(ResolveValue(EntryValue(ReadDictionaryEntries(descriptor), "Flags"), objects)) is { } flags)
+                return ((long)flags & 4) != 0 && ((long)flags & 32) == 0;
+            // The two standard fonts that are symbolic by definition come without a descriptor; a subset
+            // tag ("ABCDEF+") and a style or copy suffix ("Symbol,Bold", Ghostscript's "Symbol~201") are not part of the name.
+            var name = ReadName(EntryValue(font, "BaseFont")) ?? string.Empty;
+            if (name.Length > 7 && name[6] == '+') name = name[7..];
+            var suffix = name.IndexOfAny([',', '~']);
+            return (suffix < 0 ? name : name[..suffix]) is "Symbol" or "ZapfDingbats";
+        }
+
+        private static bool IsUnicodeCMap(string name) =>
+            name.StartsWith("Uni", StringComparison.Ordinal) &&
+            (name.Contains("-UCS2-", StringComparison.Ordinal) || name.Contains("-UTF16-", StringComparison.Ordinal));
     }
 
     /// <summary>The document's ToUnicode CMaps by object, and for each resource name the distinct
@@ -281,8 +360,11 @@ public static partial class PdfTextExtractor
     /// <summary>A font as the rewritten content names it: <see cref="Ambiguous"/> marks a name that
     /// could not be resolved where it is used and that the document gives to fonts decoding
     /// differently, so its text is left undecoded instead of being read with one of them.
+    /// <see cref="Undecodable"/> marks a font resolved where it is used whose codes are glyph
+    /// codes that no map, CMap or encoding in the file turns into characters.
     /// <see cref="Widths"/> are known only for a font resolved where it is used.</summary>
-    private sealed record PdfFontBinding(string ResourceName, PdfToUnicodeMap? Map, bool Vertical, bool Ambiguous, PdfGlyphWidths? Widths = null);
+    private sealed record PdfFontBinding(string ResourceName, PdfToUnicodeMap? Map, bool Vertical, bool Ambiguous, PdfGlyphWidths? Widths = null,
+        bool Undecodable = false);
 
     /// <summary>Gives every font a page or form really uses its own name in the expanded content.
     /// Inlining forms merges several resource scopes into one stream; after the rewrite, a
@@ -301,8 +383,18 @@ public static partial class PdfTextExtractor
             PdfFontBinding binding;
             if (scope?.Fonts is { } fonts && fonts.TryGetValue(name, out var font))
             {
-                identity = font.Identity;
-                binding = new PdfFontBinding(name, table.MapFor(font.ToUnicodeObject), font.Vertical, false, font.Widths);
+                // One font may be called /F1 on one page and /F3 on another; a message cites the name its page uses.
+                identity = $"{font.Identity}/{name}";
+                // A page sets its font again for every line, thousands of times: the map the font decodes with (a
+                // copy of its ToUnicode map and what its encoding adds) is built once for an identity, not for each Tf.
+                if (tokens.TryGetValue(identity, out var known)) return known;
+                var map = table.MapFor(font.ToUnicodeObject);
+                // A simple font's encoding reads the codes its ToUnicode map leaves out. A font whose codes
+                // only a map can read answers for the codes it lacks (see PdfToUnicodeMap.Decode).
+                if (font.Encoding is { } encoding) map = PdfToUnicodeMap.WithEncoding(map, encoding);
+                else if (map is not null && font.Codes == PdfFontCodes.Glyphs) map = map.ReportingMissingCodes();
+                binding = new PdfFontBinding(name, map ?? (font.Codes == PdfFontCodes.Utf16 ? PdfToUnicodeMap.Utf16 : null),
+                    font.Vertical, false, font.Widths, Undecodable: map is null && font.Codes == PdfFontCodes.Glyphs);
             }
             else
             {

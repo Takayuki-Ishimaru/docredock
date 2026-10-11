@@ -5,11 +5,13 @@ namespace DocRedock.Formats.Pdf;
 // One ordered pass over a page's expanded content that follows the graphics and text state the way
 // a renderer does - q/Q, cm, the text matrices, the font, clipping, and optional content - and
 // records, for every text-showing operator, which font it draws with, whether its glyphs can be
-// seen at all, and the spacing they advance by. The regular-expression text parser keeps producing
-// the text and its reading-order geometry; this pass answers the questions that parser cannot: a
-// font set inside a form ends with the form, text entirely outside a form's /BBox, a clipping path,
-// or the page is not visible even though it is in the content stream, and the size, spacing and
-// scaling in force (all part of the graphics state that q/Q save and restore) measure the glyphs.
+// seen at all, the spacing they advance by, and which text line they are on. The regular-expression
+// text parser keeps producing the text and its reading-order geometry; this pass answers the
+// questions that parser cannot: a font set inside a form ends with the form, text entirely outside
+// a form's /BBox, a clipping path, or the page is not visible even though it is in the content
+// stream, the size, spacing and scaling in force (all part of the graphics state that q/Q save and
+// restore) measure the glyphs, and every move of the line (Td, TD, T* and the leading TL sets, Tm,
+// ' and ") starts from the line matrix, which only this pass follows in order.
 public static partial class PdfTextExtractor
 {
     /// <summary>Whether the glyphs of one text-showing operator can be visible.</summary>
@@ -26,11 +28,14 @@ public static partial class PdfTextExtractor
     }
 
     /// <summary>What the text-showing operator whose string operand starts at a given offset draws
-    /// with: the font token in force (see <see cref="PdfFontRegistry"/>), its visibility, and the text
+    /// with: the font token in force (see <see cref="PdfFontRegistry"/>), its visibility, the text
     /// state its glyphs advance by - the font size (Tf), character and word spacing (Tc, Tw) and
-    /// horizontal scaling (Tz, as a fraction).</summary>
+    /// horizontal scaling (Tz, as a fraction) - and the text line it is drawn on: the line matrix in
+    /// force and an id that is new each time a move (BT, Td, TD, T*, Tm, ' or ") sets a line matrix,
+    /// so that shows with one id follow each other along the line.</summary>
     private readonly record struct PdfTextShow(string? Font, PdfTextVisibility Visibility, double? FontSize = null,
-        double CharSpacing = 0, double WordSpacing = 0, double HorizontalScale = 1);
+        double CharSpacing = 0, double WordSpacing = 0, double HorizontalScale = 1,
+        PdfMatrix LineMatrix = default, int LineId = 0);
 
     private enum PdfContentEventKind { FormBegin, FormEnd }
 
@@ -123,6 +128,7 @@ public static partial class PdfTextExtractor
         var formMarkedDepths = new Stack<int>();
         var textMatrix = PdfMatrix.Identity;
         var lineMatrix = PdfMatrix.Identity;
+        var lineId = 0;
         // How far along the writing direction the next glyph may be from textMatrix's origin: every
         // shown string moves it by an amount only bounded here (see MaxGlyphAdvanceEm); the text
         // parser measures glyphs where the font gives their widths.
@@ -133,6 +139,9 @@ public static partial class PdfTextExtractor
         PdfTextOperand? text = null;
         string? name = null;
         var nextEvent = 0;
+        // Strings end where TextOperands ends them (see PdfStringEnds), or the parser would ask for the state of a show at an
+        // offset this pass never saw, and set the text of a damaged file on one line.
+        var strings = new PdfStringEnds();
 
         void ApplyEvent(PdfContentEvent contentEvent)
         {
@@ -149,9 +158,13 @@ public static partial class PdfTextExtractor
 
         void SetLine(PdfMatrix matrix)
         {
+            // Operands that are not finite numbers (NaN, or too large to add up) move nothing: a
+            // position that is not a number would poison the sorting of every line of the page.
+            if (!IsFinite(matrix)) return;
             lineMatrix = matrix;
             textMatrix = matrix;
             advanceLow = advanceHigh = 0;
+            lineId++;
         }
 
         void Show()
@@ -165,7 +178,8 @@ public static partial class PdfTextExtractor
                   !glyphs.Intersects(clip) ? PdfTextVisibility.Clipped
                 : layer == PdfLayerVisibility.Unknown ? PdfTextVisibility.UnknownLayer
                 : PdfTextVisibility.Visible;
-            shows[operand.Start] = new PdfTextShow(state.Font, visibility, state.FontSize, state.CharSpacing, state.WordSpacing, state.HorizontalScale);
+            shows[operand.Start] = new PdfTextShow(state.Font, visibility, state.FontSize, state.CharSpacing, state.WordSpacing, state.HorizontalScale,
+                lineMatrix, lineId);
             if (run is { } advance)
             {
                 advanceLow += advance.Low;
@@ -184,7 +198,9 @@ public static partial class PdfTextExtractor
             }
             if (character == '(')
             {
-                var end = SkipLiteralString(content, index);
+                var end = strings.Literal(content, index);
+                // A parenthesis nothing closes starts no string.
+                if (end < 0) { index++; continue; }
                 var (bytes, spaces) = CountLiteralBytes(content, index + 1, end - 1);
                 text = new PdfTextOperand(index, bytes, spaces, 0, 0);
                 index = end;
@@ -193,7 +209,9 @@ public static partial class PdfTextExtractor
             if (character == '<')
             {
                 if (index + 1 < content.Length && content[index + 1] == '<') { index += 2; continue; }
-                var end = SkipHexString(content, index);
+                var end = EndOfHexString(content, index);
+                // A stray "<" starts no string either, and what follows it is read as it stands.
+                if (end < 0) { index++; continue; }
                 var (bytes, spaces) = CountHexBytes(content, index + 1, end - 1);
                 text = new PdfTextOperand(index, bytes, spaces, 0, 0);
                 index = end;
@@ -201,8 +219,9 @@ public static partial class PdfTextExtractor
             }
             if (character == '[')
             {
-                var end = SkipBracketed(content, index);
-                text = ReadArrayOperand(content, index, end);
+                var end = EndOfTextArray(content, index, strings, out var array);
+                if (end < 0) { index++; continue; }
+                text = array;
                 index = end;
                 continue;
             }
@@ -297,6 +316,10 @@ public static partial class PdfTextExtractor
     }
 
     private static PdfMatrix Translation(double x, double y) => new(1, 0, 0, 1, x, y);
+
+    private static bool IsFinite(PdfMatrix matrix) =>
+        double.IsFinite(matrix.A) && double.IsFinite(matrix.B) && double.IsFinite(matrix.C) &&
+        double.IsFinite(matrix.D) && double.IsFinite(matrix.E) && double.IsFinite(matrix.F);
 
     /// <summary>Hidden wins over unknown, and unknown over visible: content nested in a hidden
     /// layer is hidden whatever the inner layer says.</summary>
@@ -426,42 +449,179 @@ public static partial class PdfTextExtractor
         _ => -1,
     };
 
-    /// <summary>The strings and adjustments of a <c>TJ</c> array (or of any array, which the next
-    /// operator then ignores unless it is <c>TJ</c>).</summary>
-    private static PdfTextOperand ReadArrayOperand(string content, int start, int end)
+    /// <summary>Where the strings and the arrays of strings and numbers a content stream writes lie, in order
+    /// of appearance: each is a candidate operand of a text-showing operator, which the text parser keeps
+    /// when one follows it. The ordered pass above finds them with the same functions, so that both start and end
+    /// every string at the same offsets - however deeply its parentheses nest, however its numbers are
+    /// written, whether its parentheses balance - and the parser finds the state the pass recorded for a show at
+    /// the offset it starts at. An array holding anything but strings and numbers is no operand, and neither is
+    /// a "(" nothing closes or a "&lt;" that starts no hexadecimal string: each is skipped as the one character it is.
+    /// How a string is ended in a file whose parentheses do not balance is <see cref="PdfStringEnds"/>'s concern.</summary>
+    private static IEnumerable<(int Start, int Length)> TextOperands(string content)
     {
-        int bytes = 0, spaces = 0;
-        double positive = 0, negative = 0;
-        for (var index = start + 1; index < end - 1;)
+        var strings = new PdfStringEnds();
+        for (var index = 0; index < content.Length;)
         {
             var character = content[index];
+            if (character == '%')
+            {
+                while (index < content.Length && content[index] is not '\r' and not '\n') index++;
+                continue;
+            }
             if (character == '(')
             {
-                var close = SkipLiteralString(content, index);
-                var (count, blank) = CountLiteralBytes(content, index + 1, Math.Min(close, end) - 1);
-                bytes += count; spaces += blank;
-                index = close;
+                var end = strings.Literal(content, index);
+                if (end < 0) { index++; continue; }
+                yield return (index, end - index);
+                index = end;
                 continue;
             }
             if (character == '<')
             {
-                var close = SkipHexString(content, index);
-                var (count, blank) = CountHexBytes(content, index + 1, Math.Min(close, end) - 1);
-                bytes += count; spaces += blank;
-                index = close;
+                if (index + 1 < content.Length && content[index + 1] == '<') { index += 2; continue; }
+                var end = EndOfHexString(content, index);
+                if (end >= 0) yield return (index, end - index);
+                index = end >= 0 ? end : index + 1;
                 continue;
             }
-            if (char.IsWhiteSpace(character) || IsPdfDelimiter(character)) { index++; continue; }
-            var tokenEnd = NameEnd(content, index);
-            if (tokenEnd == index) tokenEnd++;
-            if (double.TryParse(content.AsSpan(index, tokenEnd - index), System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var adjustment) && double.IsFinite(adjustment))
+            if (character == '[')
+            {
+                var end = EndOfTextArray(content, index, strings, out _);
+                if (end >= 0) yield return (index, end - index);
+                index = end >= 0 ? end : index + 1;
+                continue;
+            }
+            if (character == '/')
+            {
+                index = NameEnd(content, index + 1);
+                continue;
+            }
+            if (char.IsWhiteSpace(character) || character is '>' or ']' or '{' or '}' or ')') { index++; continue; }
+            var start = index;
+            index = NameEnd(content, index);
+            if (index == start) index++;
+            if (index - start == 2 && content[start] == 'B' && content[start + 1] == 'I') index = SkipInlineImageData(content, index);
+        }
+    }
+
+    /// <summary>Where literal strings end, with the one concession a damaged file needs. Parentheses that
+    /// balance belong to the string; one whose parentheses never balance - no viewer reads such a file as it was
+    /// meant - ends at its first closing parenthesis, as every string did before nesting was followed, and so
+    /// does each string after it. The balance is looked for until it fails once, and an opening parenthesis
+    /// with no closing one after it is no string at all and costs nothing: scanning on to the end of the
+    /// content for each of a hundred thousand of them would not end.</summary>
+    private sealed class PdfStringEnds
+    {
+        private bool balanced = true;
+        private bool closable = true;
+
+        /// <summary>The index just past the string the parenthesis at <paramref name="index"/> opens, or -1
+        /// when it opens none.</summary>
+        public int Literal(string content, int index)
+        {
+            var end = balanced ? EndOfLiteralString(content, index) : -1;
+            if (end >= 0) return end;
+            balanced = false;
+            end = closable ? EndOfUnbalancedLiteral(content, index) : -1;
+            if (end < 0) closable = false;
+            return end;
+        }
+    }
+
+    /// <summary>The index just past the first closing parenthesis, not escaped, after the one that opens the
+    /// string at <paramref name="start"/>, or -1: how a string whose parentheses do not balance is read.</summary>
+    private static int EndOfUnbalancedLiteral(string content, int start)
+    {
+        for (var index = start + 1; index < content.Length; index++)
+        {
+            if (content[index] == '\\') index++;
+            else if (content[index] == ')') return index + 1;
+        }
+        return -1;
+    }
+
+    /// <summary>The index just past the array of strings and numbers that starts at <paramref name="start"/>,
+    /// or -1 when it holds anything else; <paramref name="operand"/> is what the array shows. The ordered pass reads
+    /// its arrays with this too, so that the two cannot end one differently.</summary>
+    private static int EndOfTextArray(string content, int start, PdfStringEnds strings, out PdfTextOperand operand)
+    {
+        int bytes = 0, spaces = 0;
+        double positive = 0, negative = 0;
+        operand = default;
+        for (var index = start + 1; index < content.Length;)
+        {
+            var character = content[index];
+            if (char.IsWhiteSpace(character)) { index++; continue; }
+            if (character == ']')
+            {
+                operand = new PdfTextOperand(start, bytes, spaces, positive, negative);
+                return index + 1;
+            }
+            var end = character == '(' ? strings.Literal(content, index)
+                : character == '<' ? EndOfHexString(content, index)
+                : EndOfNumber(content, index);
+            if (end < 0) return -1;
+            if (character is '(' or '<')
+            {
+                var (count, blank) = character == '(' ? CountLiteralBytes(content, index + 1, end - 1) : CountHexBytes(content, index + 1, end - 1);
+                bytes += count; spaces += blank;
+            }
+            else if (double.TryParse(content.AsSpan(index, end - index), System.Globalization.NumberStyles.Float,
+                         System.Globalization.CultureInfo.InvariantCulture, out var adjustment) && double.IsFinite(adjustment))
             {
                 if (adjustment > 0) positive += adjustment;
                 else negative -= adjustment;
             }
-            index = tokenEnd;
+            index = end;
         }
-        return new PdfTextOperand(start, bytes, spaces, positive, negative);
+        return -1;
+    }
+
+    /// <summary>The index just past the number written at <paramref name="start"/> - an optional sign and
+    /// digits with one decimal point at most, in any of the forms <c>5</c>, <c>5.</c>, <c>.5</c>, <c>-.5</c>
+    /// and <c>+5.25</c> - or -1 when what stands there is no number.</summary>
+    private static int EndOfNumber(string content, int start)
+    {
+        var index = start;
+        if (index < content.Length && content[index] is '+' or '-') index++;
+        var digits = 0;
+        var point = false;
+        for (; index < content.Length; index++)
+        {
+            if (char.IsAsciiDigit(content[index])) digits++;
+            else if (content[index] == '.' && !point) point = true;
+            else break;
+        }
+        // A number ends at white space or a delimiter; anything else stuck to its end makes it no number.
+        return digits > 0 && (index == content.Length || char.IsWhiteSpace(content[index]) || IsPdfDelimiter(content[index])) ? index : -1;
+    }
+
+    /// <summary>One piece of a show's operand: the bytes of a string, or (without bytes) the number of a
+    /// <c>TJ</c> array, which moves the next glyph back by that many thousandths of the font size.</summary>
+    private readonly record struct PdfShowPart(byte[]? Bytes, double Adjustment);
+
+    /// <summary>The strings and numbers of a show's operand (a string, or an array of them as
+    /// <see cref="TextOperands"/> found it), in order. A string of an array that never balanced ends at its
+    /// first closing parenthesis here as it did there: an array with a string that ends otherwise would
+    /// have been left with a stray parenthesis, and not been accepted.</summary>
+    private static List<PdfShowPart> ShowParts(string operand)
+    {
+        if (operand.Length == 0 || operand[0] != '[') return [new PdfShowPart(StringBytes(operand), 0)];
+        var parts = new List<PdfShowPart>();
+        var strings = new PdfStringEnds();
+        for (var index = 1; index < operand.Length;)
+        {
+            var character = operand[index];
+            if (char.IsWhiteSpace(character) || character == ']') { index++; continue; }
+            var end = character == '(' ? strings.Literal(operand, index)
+                : character == '<' ? EndOfHexString(operand, index)
+                : EndOfNumber(operand, index);
+            if (end < 0) break;
+            parts.Add(character is '(' or '<'
+                ? new PdfShowPart(StringBytes(operand[index..end]), 0)
+                : new PdfShowPart(null, InvariantNumber(operand[index..end]) ?? 0));
+            index = end;
+        }
+        return parts;
     }
 }

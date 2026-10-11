@@ -50,6 +50,10 @@ public sealed record PptxShapeRecord(
     /// <summary>A table's struck-through cell text: the row and cell of <see cref="TableRows"/> and the
     /// [start, end) character ranges of that cell's text.</summary>
     internal IReadOnlyList<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>? StruckCells { get; init; }
+
+    /// <summary>A table's underlined cell text, found the same way. A run that is a hyperlink is left
+    /// out: its underline is how a link looks, not emphasis.</summary>
+    internal IReadOnlyList<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>? UnderlinedCells { get; init; }
 }
 
 /// <summary>
@@ -68,8 +72,12 @@ public sealed record PptxTableOverlay(
     string? ShapePreset,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     string? LineStyle = null);
+/// <param name="IsLink">The run is a hyperlink (it has a:hlinkClick). Its underline is how a link looks, not emphasis, so the
+/// readable projection does not write it; the round-trip projection keeps it. Written to the paragraph's JSON only when true.</param>
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
-    bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false);
+    bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    bool IsLink = false);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
     string? BulletCharacter = null, IReadOnlyList<PptxTextRun>? Runs = null,
     bool IsOrdered = false, int? ListNumber = null);
@@ -81,7 +89,7 @@ public sealed record PptxPatchPlan(IReadOnlyList<PptxShapeTextEdit> Edits, IRead
 public sealed record PptxRestoreResult(byte[] Bytes, bool IsByteIdentical, PptxPatchPlan Plan, IReadOnlyList<string> Warnings);
 
 /// <summary>BCL-only PPTX extractor and existing-shape text patcher.</summary>
-public sealed class PptxAdapter
+public sealed partial class PptxAdapter
 {
     private const string PresentationRelNs = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     private const string DrawingNs = "http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -96,58 +104,20 @@ public sealed class PptxAdapter
         var slides = ReadSlides(package);
         var partitions = new List<DocumentPartition>();
         var visualDiagnostics = new List<VisualDiagnostic>();
+        var drawnParts = new DrawnPartCache();
         foreach (var slide in slides)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var nodes = new List<DocumentNode>(); var order = 0;
-            // G11: both DetectTableOverlays and DetectShapeGridTables need this slide's native
-            // a:tbl hosts and connector-wired shape ids; computing each once here instead of once
-            // per call (DetectTableOverlays, then again inside DetectShapeGridTables' own guard
-            // rail (c) and box-candidate gate, then again on every ClassifyOverlayCandidates call)
-            // avoids repeating the same LINQ pass 3-4 times per slide for the same answer.
-            var nativeHostTables = GetNativeHostTables(slide.Shapes);
-            var wiredShapeIds = GetWiredShapeIds(slide.Shapes);
-            // P-Overlay: strip schedule-arrow/bar/marker/line overlay shapes out of the pool that
-            // feeds visual-flow inference (they overlay a table, they are not a diagram edge) before
-            // building this slide's visual graphs -- see DetectTableOverlays for the full contract.
-            var (tableOverlaysByTable, tableOverlayShapeIds) = DetectTableOverlays(slide.Shapes, nativeHostTables, wiredShapeIds);
-            var tableOverlayHostByShapeId = tableOverlaysByTable
-                .SelectMany(entry => entry.Value.Select(overlay => (OverlayId: overlay.ShapeId, HostId: entry.Key)))
-                .ToDictionary(pair => pair.OverlayId, pair => pair.HostId, StringComparer.Ordinal);
-            // P-ShapeGrid: detect grids of adjacent rectangle shapes standing in for a native table
-            // (shape-grid-table-spec.md) -- must run after DetectTableOverlays (so a grid never
-            // claims a shape a native table already absorbed) and before BuildVisualGraphs (so
-            // grid members/overlays never leak into visual-flow inference either, same contract as
-            // tableOverlayShapeIds just above).
-            var shapeGridTables = DetectShapeGridTables(slide.Shapes, tableOverlayShapeIds, nativeHostTables, wiredShapeIds);
-            var gridMemberHostByShapeId = shapeGridTables
-                .SelectMany(grid => grid.MemberShapeIds.Select(id => (MemberId: id, HostId: grid.GridShapeId)))
-                .ToDictionary(pair => pair.MemberId, pair => pair.HostId, StringComparer.Ordinal);
-            var gridInsertBeforeShapeId = shapeGridTables.ToDictionary(grid => grid.InsertBeforeShapeId, StringComparer.Ordinal);
-            // Grid overlays reuse the exact same table_overlay_host/table_overlay extension wiring
-            // as a native table's overlays (below) -- merging them into the same dictionary means
-            // ReadableMarkdownSerializer's existing overlay-shape suppression needs no changes at all.
-            foreach (var grid in shapeGridTables)
-                foreach (var overlayId in grid.OverlayShapeIds)
-                    tableOverlayHostByShapeId[overlayId] = grid.GridShapeId;
-            var visualExclusionShapeIds = shapeGridTables.Count == 0
-                ? tableOverlayShapeIds
-                : tableOverlayShapeIds.Concat(shapeGridTables.SelectMany(grid => grid.MemberShapeIds.Concat(grid.OverlayShapeIds)))
-                    .ToHashSet(StringComparer.Ordinal);
-            var tocLeaderShapeIds = FindTocLeaderShapeIds(slide);
-            var visualGraphs = BuildVisualGraphs(
-                visualExclusionShapeIds.Count > 0 || tocLeaderShapeIds.Count > 0
-                    ? slide with { Shapes = slide.Shapes.Where(s => !visualExclusionShapeIds.Contains(s.ShapeId) && !tocLeaderShapeIds.Contains(s.ShapeId)).ToArray() } : slide,
-                out var visualLabelShapeIds, VisualInferenceTimeout, cancellationToken);
+            // Lines drawn over text are text formatting (PptxAdapter.DrawnLines.cs). The slide record above keeps every
+            // shape; for what looks at the slide's drawings -- table overlays, shape grids, the visual graph -- the lines
+            // taken as formatting are not drawings, so none of them also becomes an overlay symbol or a diagram edge.
+            // Each still has its own node below: the node list, and with it the round-trip projection, does not change.
+            var (drawnLines, drawings) = AnalyzeSlide(package, slide, drawnParts, cancellationToken);
+            var (tableOverlaysByTable, tableOverlayHostByShapeId, shapeGridTables, gridMemberHostByShapeId, gridInsertBeforeShapeId,
+                tocLeaderShapeIds, visualGraphs, visualLabelShapeIds, visualConnectorShapeIds, visualNodeShapeIds, _) = drawings;
             visualDiagnostics.AddRange(visualGraphs.SelectMany(graph => graph.Diagnostics ?? []));
             var visual = visualGraphs.FirstOrDefault();
-            var visualConnectorShapeIds = visualGraphs.SelectMany(graph => graph.Edges).Where(edge => edge.SourceId is not null && edge.TargetId is not null)
-                .Select(edge => edge.SourceNodeId).Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
-            var visualNodeShapeIds = visualGraphs.SelectMany(graph => graph.Nodes).Select(node => node.SourceNodeId)
-                .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
-            visualNodeShapeIds.UnionWith(slide.Shapes.Where(shape => StringComparer.Ordinal.Equals(shape.ShapeType, "connector"))
-                .SelectMany(shape => new[] { shape.ConnectorStartId, shape.ConnectorEndId })
-                .Where(id => id is not null).Cast<string>());
             foreach (var shape in slide.Shapes)
             {
                 // P-ShapeGrid: insert the synthesized grid Table node right before its header's
@@ -209,10 +179,27 @@ public sealed class PptxAdapter
                     if (chartData.Series.Count > 0) extension["chart_series"] = JsonSerializer.SerializeToElement(chartData.Series);
                 }
                 if (diagramTexts is { Count: > 0 }) extension["diagram_items"] = JsonSerializer.SerializeToElement(diagramTexts);
-                // Table cells are plain text; the readable projection marks these ranges as struck through.
-                if (shape.IsTable && shape.StruckCells is { Count: > 0 } struckCells)
-                    extension["strike_cells"] = JsonSerializer.SerializeToElement(struckCells
-                        .Select(cell => new object[] { cell.Row, cell.Column, cell.Ranges.Select(range => new[] { range.Start, range.End }).ToArray() }).ToArray());
+                // Table cells are plain text; the readable projection marks these ranges as struck through
+                // and underlined. They are those of the cell's runs and those of the lines drawn over it
+                // (PptxAdapter.DrawnLines.cs).
+                if (shape.IsTable)
+                {
+                    drawnLines.Cells.TryGetValue(shape, out var drawnCells);
+                    var struckCells = DrawnCellValue(shape.StruckCells, drawnCells, decoration => decoration.Struck);
+                    if (struckCells.Length > 0) extension["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
+                    var underlinedCells = DrawnCellValue(shape.UnderlinedCells, drawnCells, decoration => decoration.Underlined);
+                    if (underlinedCells.Length > 0) extension["underline_cells"] = JsonSerializer.SerializeToElement(underlinedCells);
+                    if (drawnCells?.Values.Any(decoration => decoration.StrikeUnplaced) == true) MarkDrawnStrikeUnplaced(extension);
+                }
+                // Text of a shape struck or underlined by a drawn line, as ranges over the text the node holds. They are
+                // readable-only marks: the node's content and its paragraph details, which the round-trip projection
+                // and the restore read, stay as the source has them.
+                if (drawnLines.Shapes.TryGetValue(shape, out var drawnText))
+                {
+                    if (drawnText.Struck.Count > 0) extension["strike_ranges"] = JsonSerializer.SerializeToElement(DrawnRangeValue(drawnText.Struck));
+                    if (drawnText.Underlined.Count > 0) extension["underline_ranges"] = JsonSerializer.SerializeToElement(DrawnRangeValue(drawnText.Underlined));
+                    if (drawnText.StrikeUnplaced) MarkDrawnStrikeUnplaced(extension);
+                }
                 NodeContent content = kind switch
                 {
                     NodeKind.Image => new ReferenceNodeContent(ResolveImageReference(package, slide.PartUri, shape.ImageRelationshipIds[0]), shape.Description ?? shape.Name),
@@ -597,7 +584,7 @@ public sealed class PptxAdapter
             var inShapeProperties = false; var inShapeOutline = false; string? lineStyle = null; var lineNoFill = false;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
-            var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; string? runFont = null; double? runSize = null;
+            var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; var runLink = false; string? runFont = null; double? runSize = null;
             var tableRows = new List<IReadOnlyList<TableCell>>(); List<TableCell>? tableRow = null; var tcGridSpan = 1; var tcRowSpan = 1; var tcHMerge = false; var tcVMerge = false;
             // P-Overlay: table-overlay detection needs the table's own column/row sizing (a:tblGrid
             // gridCol@w, a:tr@h) and whether a plain "sp" is a PowerPoint text box (p:cNvSpPr@txBox).
@@ -606,10 +593,14 @@ public sealed class PptxAdapter
             // GFM tables have no native multi-paragraph cell, and ReadableMarkdownSerializer's
             // TableText already turns '\n' into "<br>" for exactly this purpose.
             var tableCellParagraphs = new List<string>(); StringBuilder? tableCellParagraph = null;
-            // Struck-through runs of the cell being read: per paragraph, and per finished cell.
+            // Struck-through and underlined runs of the cell being read: per paragraph, and per finished
+            // cell. A run with a:hlinkClick is a hyperlink, and its underline is not emphasis.
             var cellRunStrike = false; var tableCellParagraphStruck = new List<(int Start, int End)>();
+            var cellRunUnderline = false; var cellRunLink = false; var tableCellParagraphUnderlined = new List<(int Start, int End)>();
             var tableCellParagraphsStruck = new List<List<(int Start, int End)>>();
+            var tableCellParagraphsUnderlined = new List<List<(int Start, int End)>>();
             var tableStruckCells = new List<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>();
+            var tableUnderlinedCells = new List<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>();
             var autoNumCounters = new Dictionary<int, int>();
             while (subtree.Read())
             {
@@ -634,7 +625,7 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
-                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null; tableCellParagraphsStruck = [];
+                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null; tableCellParagraphsStruck = []; tableCellParagraphsUnderlined = [];
                     tcGridSpan = ParseIntOr1(subtree.GetAttribute("gridSpan")); tcRowSpan = ParseIntOr1(subtree.GetAttribute("rowSpan"));
                     tcHMerge = IsOn(subtree.GetAttribute("hMerge")); tcVMerge = IsOn(subtree.GetAttribute("vMerge"));
                 }
@@ -644,11 +635,15 @@ public sealed class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "p" && inTableCell)
                 {
-                    tableCellParagraph = new StringBuilder(); tableCellParagraphStruck = [];
+                    tableCellParagraph = new StringBuilder(); tableCellParagraphStruck = []; tableCellParagraphUnderlined = [];
                 }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName is "r" or "fld" && inTableCell) cellRunStrike = false;
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName is "r" or "fld" && inTableCell) { cellRunStrike = false; cellRunUnderline = false; cellRunLink = false; }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "rPr" && inTableCell)
+                {
                     cellRunStrike = IsStrike(subtree.GetAttribute("strike"));
+                    cellRunUnderline = IsUnderline(subtree.GetAttribute("u"));
+                }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && inTableCell) cellRunLink = true;
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "pPr" && !inTableCell)
                 {
                     paragraphLevel = ParseInt(subtree.GetAttribute("lvl"));
@@ -667,12 +662,14 @@ public sealed class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "buNone" && !inTableCell) { paragraphBullet = false; paragraphBulletSpecified = true; paragraphOrdered = false; }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "r" && !inTableCell)
                 {
-                    runBold = false; runItalic = false; runUnderline = false; runStrike = false; runFont = null; runSize = null;
+                    runBold = false; runItalic = false; runUnderline = false; runStrike = false; runLink = false; runFont = null; runSize = null;
                 }
+                // The run is a hyperlink (Google Slides underlines a link run itself): its underline is not emphasis.
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && !inTableCell) runLink = true;
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "rPr" && !inTableCell)
                 {
                     runBold = IsOn(subtree.GetAttribute("b")); runItalic = IsOn(subtree.GetAttribute("i"));
-                    runUnderline = !string.IsNullOrWhiteSpace(subtree.GetAttribute("u")) && !StringComparer.OrdinalIgnoreCase.Equals(subtree.GetAttribute("u"), "none");
+                    runUnderline = IsUnderline(subtree.GetAttribute("u"));
                     runStrike = IsStrike(subtree.GetAttribute("strike"));
                     runFont = null; runSize = ParseDoubleNullable(subtree.GetAttribute("sz"));
                 }
@@ -697,17 +694,13 @@ public sealed class PptxAdapter
                     {
                         var start = tableCellParagraph.Length;
                         tableCellParagraph.Append(value);
-                        if (cellRunStrike && value.Length > 0)
-                        {
-                            if (tableCellParagraphStruck.Count > 0 && tableCellParagraphStruck[^1].End == start)
-                                tableCellParagraphStruck[^1] = (tableCellParagraphStruck[^1].Start, tableCellParagraph.Length);
-                            else tableCellParagraphStruck.Add((start, tableCellParagraph.Length));
-                        }
+                        if (cellRunStrike && value.Length > 0) AddRange(tableCellParagraphStruck, start, tableCellParagraph.Length);
+                        if (cellRunUnderline && !cellRunLink && value.Length > 0) AddRange(tableCellParagraphUnderlined, start, tableCellParagraph.Length);
                     }
                     else
                     {
                         paragraph?.Append(value);
-                        if (paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike));
+                        if (paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike, runLink));
                     }
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tbl") isTable = true;
@@ -738,8 +731,13 @@ public sealed class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tc")
                 {
-                    if (!tcHMerge && tableRow is not null && !tcVMerge && JoinCellStruck(tableCellParagraphs, tableCellParagraphsStruck) is { Count: > 0 } struckRanges)
-                        tableStruckCells.Add((tableRows.Count, tableRow.Count, struckRanges));
+                    if (!tcHMerge && tableRow is not null && !tcVMerge)
+                    {
+                        if (JoinCellRanges(tableCellParagraphs, tableCellParagraphsStruck) is { Count: > 0 } struckRanges)
+                            tableStruckCells.Add((tableRows.Count, tableRow.Count, struckRanges));
+                        if (JoinCellRanges(tableCellParagraphs, tableCellParagraphsUnderlined) is { Count: > 0 } underlinedRanges)
+                            tableUnderlinedCells.Add((tableRows.Count, tableRow.Count, underlinedRanges));
+                    }
                     if (!tcHMerge) tableRow?.Add(new TableCell(tcVMerge ? string.Empty : JoinCellParagraphs(tableCellParagraphs), tcGridSpan, tcVMerge ? 0 : tcRowSpan));
                     tableCellParagraph = null; inTableCell = false;
                 }
@@ -748,6 +746,7 @@ public sealed class PptxAdapter
                 {
                     tableCellParagraphs.Add(tableCellParagraph?.ToString() ?? string.Empty);
                     tableCellParagraphsStruck.Add(tableCellParagraph is null ? [] : tableCellParagraphStruck);
+                    tableCellParagraphsUnderlined.Add(tableCellParagraph is null ? [] : tableCellParagraphUnderlined);
                     tableCellParagraph = null;
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && !inTableCell && paragraph is not null)
@@ -788,6 +787,7 @@ public sealed class PptxAdapter
                 IsTextBox: isTextBox, FlipH: flipH, FlipV: flipV, LineStyle: lineNoFill ? null : lineStyle)
             {
                 StruckCells = tableStruckCells.Count > 0 ? tableStruckCells : null,
+                UnderlinedCells = tableUnderlinedCells.Count > 0 ? tableUnderlinedCells : null,
             });
         }
         if (inferTitle && !result.Any(shape => StringComparer.Ordinal.Equals(shape.Role, "title")))
@@ -810,8 +810,8 @@ public sealed class PptxAdapter
     // turns that into "<br>"), but a leading/trailing empty a:p -- a common authoring artifact --
     // must not surface as a spurious blank line at either edge. An empty paragraph sandwiched
     // between real ones is kept: it is a deliberate blank line inside the cell.
-    // The struck ranges of a cell's paragraphs placed in JoinCellParagraphs' text.
-    private static IReadOnlyList<(int Start, int End)> JoinCellStruck(List<string> paragraphs, List<List<(int Start, int End)>> struck)
+    // The struck-through (or underlined) ranges of a cell's paragraphs placed in JoinCellParagraphs' text.
+    private static IReadOnlyList<(int Start, int End)> JoinCellRanges(List<string> paragraphs, List<List<(int Start, int End)>> struck)
     {
         var start = 0; var end = paragraphs.Count;
         while (start < end && paragraphs[start].Length == 0) start++;
@@ -2645,11 +2645,21 @@ public sealed class PptxAdapter
         return (newline >= 0 ? normalized[..newline] : normalized).Trim();
     }
 
-    private static NodeContent CreateShapeTextContent(PptxShapeRecord shape)
+    private static NodeContent CreateShapeTextContent(PptxShapeRecord shape) =>
+        ShapeTextRuns(shape) is { } runs ? new RichTextNodeContent(runs) : new TextNodeContent(shape.Text);
+
+    /// <summary>The text a shape's node holds.</summary>
+    private static string HeldShapeText(PptxShapeRecord shape) =>
+        ShapeTextRuns(shape) is { } runs ? string.Concat(runs.Select(run => run.Text)) : shape.Text;
+
+    // The runs a shape's node holds when some of its text is formatted; null when it holds the text as it is. A line break comes
+    // between paragraphs once something is before it, so the node's text begins at its first paragraph with runs: the empty
+    // paragraphs above it add nothing, not even a break (and a drawn line's offsets are counted from there).
+    private static List<TextRun>? ShapeTextRuns(PptxShapeRecord shape)
     {
         var details = shape.ParagraphDetails;
         if (details is null || details.Count == 0 || !details.SelectMany(item => item.Runs ?? []).Any(run => run.Bold || run.Italic || run.Underline || run.Strike))
-            return new TextNodeContent(shape.Text);
+            return null;
         var runs = new List<TextRun>();
         foreach (var paragraph in details)
         {
@@ -2657,7 +2667,7 @@ public sealed class PptxAdapter
             foreach (var run in paragraph.Runs ?? [])
                 runs.Add(new TextRun(run.Text, Bold: run.Bold, Italic: run.Italic, Underline: run.Underline, Strike: run.Strike));
         }
-        return new RichTextNodeContent(runs);
+        return runs;
     }
 
     private static (string? Text, IReadOnlyList<PptxTextParagraph>? Details) ReadNotesParagraphs(Dictionary<string, byte[]> package, string slidePart)
@@ -2956,6 +2966,14 @@ public sealed class PptxAdapter
     // OOXML a:rPr@strike is an enum (noStrike/sngStrike/dblStrike/...); anything other than an
     // explicit "noStrike" (or an absent attribute) means the run is struck through (P14-3).
     private static bool IsStrike(string? value) => value is not null && !StringComparer.OrdinalIgnoreCase.Equals(value, "noStrike");
+    // OOXML a:rPr@u is an enum (none/sng/dbl/words/heavy/dotted/dash/wavy/...): any value but "none" underlines.
+    private static bool IsUnderline(string? value) => !string.IsNullOrWhiteSpace(value) && !StringComparer.OrdinalIgnoreCase.Equals(value, "none");
+    // Adds [start, end) to ranges, joined to the last one when they touch.
+    private static void AddRange(List<(int Start, int End)> ranges, int start, int end)
+    {
+        if (ranges.Count > 0 && ranges[^1].End == start) ranges[^1] = (ranges[^1].Start, end);
+        else ranges.Add((start, end));
+    }
     private static byte[] ReadAll(Stream stream) { using var output = new MemoryStream(); stream.CopyTo(output); return output.ToArray(); }
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     private static string Hash(string text) => Hash(Encoding.UTF8.GetBytes(text));

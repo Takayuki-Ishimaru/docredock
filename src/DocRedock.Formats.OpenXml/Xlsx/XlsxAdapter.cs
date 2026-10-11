@@ -37,6 +37,10 @@ public sealed record XlsxCellRecord(
     /// <summary>The parts of <see cref="Value"/> drawn struck through: the whole value when the cell's
     /// font strikes it, or the struck runs of rich text. Null when nothing is struck.</summary>
     public IReadOnlyList<TextRange>? StruckRanges { get; init; }
+
+    /// <summary>The parts of <see cref="Value"/> drawn underlined, found the same way. Null when nothing
+    /// is, and for a cell that is a hyperlink: its underline is how a link looks, not emphasis.</summary>
+    public IReadOnlyList<TextRange>? UnderlinedRanges { get; init; }
 }
 
 /// <summary>An Excel table (ListObject) that a worksheet declares through a tablePart relationship.
@@ -60,7 +64,8 @@ public sealed record XlsxCellStyle(
     double? FontSize = null,
     string? NumberFormat = null,
     bool IsCenterAcross = false,
-    bool IsStrike = false);
+    bool IsStrike = false,
+    bool IsUnderline = false);
 
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
@@ -104,7 +109,12 @@ public sealed record XlsxDrawingShapeRecord(
     // more group levels deep). Computed in ReadDrawingShapes -- see the comment there --
     // and consulted by DetectSheetOverlays to exclude these shapes from schedule-overlay
     // candidacy, since only one level of group-transform resolution is implemented.
-    bool IsInNestedGroup = false)
+    bool IsInNestedGroup = false,
+    // True when the shape's own group is rotated or flipped, which the one-level group transform
+    // does not apply, so its resolved position cannot be trusted either.
+    bool IsInTransformedGroup = false,
+    // True when the shape paints nothing: no outline and, unless it is a line, no fill.
+    bool IsUnpainted = false)
 {
     /// <summary>Absolute worksheet-space bounds after anchor and metric resolution.</summary>
     public XlsxDrawingBounds? AbsoluteBounds => AbsoluteWidthEmu > 0 || AbsoluteHeightEmu > 0
@@ -169,21 +179,13 @@ public sealed record XlsxWorksheetMetrics(
     {
         if (column <= 1) return 0;
         var defaultEmu = ColumnWidthToEmu(DefaultColumnWidth);
-        var total = checked(defaultEmu * (column - 1L));
-        if (ColumnWidths is not null)
-            foreach (var item in ColumnWidths.Where(item => item.Key > 0 && item.Key < column))
-                total = checked(total + ColumnWidthToEmu(item.Value) - defaultEmu);
-        return total;
+        return checked(defaultEmu * (column - 1L) + Offsets.Columns.Before(column));
     }
     public long RowStartEmu(int row)
     {
         if (row <= 1) return 0;
         var defaultEmu = RowHeightToEmu(DefaultRowHeight);
-        var total = checked(defaultEmu * (row - 1L));
-        if (RowHeights is not null)
-            foreach (var item in RowHeights.Where(item => item.Key > 0 && item.Key < row))
-                total = checked(total + RowHeightToEmu(item.Value) - defaultEmu);
-        return total;
+        return checked(defaultEmu * (row - 1L) + Offsets.Rows.Before(row));
     }
     public double ColumnFromEmu(long emu) => FractionalIndex(emu, ColumnStartEmu, column => ColumnWidthToEmu(ColumnWidth(column)), 16_384);
     public double RowFromEmu(long emu) => FractionalIndex(emu, RowStartEmu, row => RowHeightToEmu(RowHeight(row)), 1_048_576);
@@ -202,6 +204,50 @@ public sealed record XlsxWorksheetMetrics(
         var index = low;
         var width = Math.Max(1, size(index));
         return index + (emu - start(index)) / (double)width;
+    }
+
+    // How far the columns and the rows that differ from the default size put an index off the default grid, added up once for the
+    // sheet: the file records the height of every one of its rows, and placing a drawing asks where a row starts at every step of a
+    // binary search. Kept beside the record rather than in a field of it, so that its equality and its copies stay what its
+    // parameters say.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<XlsxWorksheetMetrics, GridOffsets> OffsetsOf = new();
+
+    private GridOffsets Offsets => OffsetsOf.GetValue(this, static metrics => new GridOffsets(metrics));
+
+    private sealed class GridOffsets(XlsxWorksheetMetrics metrics)
+    {
+        private AxisOffsets? columns, rows;
+        public AxisOffsets Columns => columns ??= new(metrics.ColumnWidths, ColumnWidthToEmu(metrics.DefaultColumnWidth), ColumnWidthToEmu);
+        public AxisOffsets Rows => rows ??= new(metrics.RowHeights, RowHeightToEmu(metrics.DefaultRowHeight), RowHeightToEmu);
+    }
+
+    private sealed class AxisOffsets
+    {
+        private readonly int[] keys;
+        // offsets[n] is what the n entries with the smallest keys add to the default sizes. It ends before the first entry whose
+        // size cannot be added up, so that only a query that reaches that entry fails, as adding up the sizes one by one does.
+        private readonly long[] offsets;
+
+        public AxisOffsets(IReadOnlyDictionary<int, double>? sizes, long defaultEmu, Func<double, long> toEmu)
+        {
+            var entries = sizes is null ? [] : sizes.Where(item => item.Key > 0).OrderBy(item => item.Key).ToArray();
+            keys = entries.Select(item => item.Key).ToArray();
+            var running = new List<long>(entries.Length + 1) { 0 };
+            try
+            {
+                foreach (var item in entries) running.Add(checked(running[^1] + toEmu(item.Value) - defaultEmu));
+            }
+            catch (OverflowException) { /* the entries from here on stay out of the sums */ }
+            offsets = running.ToArray();
+        }
+
+        /// <summary>What the entries with a key below <paramref name="index"/> add to the default sizes.</summary>
+        public long Before(int index)
+        {
+            var at = Array.BinarySearch(keys, index);
+            var below = at >= 0 ? at : ~at;
+            return below < offsets.Length ? offsets[below] : throw new OverflowException();
+        }
     }
 }
 
@@ -283,11 +329,14 @@ public sealed record XlsxPatchPlan(
 public sealed record XlsxRestoreResult(byte[] Bytes, bool IsByteIdentical, XlsxPatchPlan Plan, IReadOnlyList<string> Warnings);
 
 /// <summary>BCL-only XLSX extractor and minimal cell patcher. Formulas are classified, never evaluated.</summary>
-public sealed class XlsxAdapter
+public sealed partial class XlsxAdapter
 {
     private const int MaxExcelRows = 1_048_576;
     private const int MaxExcelColumns = 16_384;
     private const long MaxChartResolutionCells = 100_000;
+    // The tallest sheet Excel can hold is some 5.5e12 EMU (1,048,576 rows of 409.5 pt). A damaged drawing can name numbers far
+    // beyond that, up to the limit of a long, which cannot even be added to each other: such a shape is given no bounds.
+    private const long MaxSheetEmu = 1L << 50;
     public TimeSpan? VisualInferenceTimeout { get; init; } = TimeSpan.FromSeconds(5);
 
     private static readonly Regex ChartCellReference = new(
@@ -328,6 +377,7 @@ public sealed class XlsxAdapter
                 ? (sheet.IsHidden, Rows: ReadHiddenRows(worksheetXml), Columns: ReadHiddenColumns(worksheetXml))
                 : (sheet.IsHidden, Rows: (IReadOnlySet<int>)new HashSet<int>(), Columns: (IReadOnlySet<int>)new HashSet<int>()),
             StringComparer.OrdinalIgnoreCase);
+        IReadOnlyList<CellTextStyle>? textStyles = null;
         foreach (var sheet in workbook.Sheets)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -344,10 +394,22 @@ public sealed class XlsxAdapter
             var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells, sheetVisibility, warnings);
             var worksheet = new XlsxWorksheetRecord(sheet.Name, sheet.PartUri, cells, used.Range, used.MinRow, used.MaxRow, used.MinColumn, used.MaxColumn, mergedRanges, drawingShapes, pictures, charts, sheet.State, hiddenRows, hiddenColumns, metrics, tables);
             worksheets.Add(worksheet);
+            // Lines drawn over cell text are text formatting (XlsxAdapter.DrawnLines.cs). The worksheet record
+            // above keeps every shape; from here on the lines taken as formatting are not shapes of the sheet,
+            // so none of them also becomes an overlay symbol or a diagram edge.
+            var drawnLines = drawingShapes.Count == 0 ? DrawnLineDecorations.None
+                : FindDrawnLineDecorations(cells, drawingShapes, metrics, textStyles ??= ReadCellTextStyles(package));
+            if (drawnLines.Consumed.Count > 0)
+            {
+                drawingShapes = drawingShapes.Where(shape => !drawnLines.Consumed.Contains(shape)).ToList();
+                worksheet = worksheet with { DrawingShapes = drawingShapes };
+            }
             var nodes = cells
                 .Where(cell => !string.IsNullOrWhiteSpace(cell.Value) || !string.IsNullOrWhiteSpace(cell.Formula))
                 .Select((cell, index) => ToNode(cell, sheet.PartUri, index))
                 .ToList();
+            nodes = ApplyDrawnLineDecorations(nodes, drawnLines);
+            if (DrawnLineWarning(sheet.Name, drawnLines) is { } drawnLineWarning) warnings.Add(drawnLineWarning);
             var diagrams = XlsxMermaidProjection.TryCreateAll(worksheet, nodes.Count, VisualInferenceTimeout, cancellationToken);
             if (diagrams.Count > 0)
             {
@@ -582,17 +644,25 @@ public sealed class XlsxAdapter
             if (cell.DisplayStyle.NumberFormat is not null) extension["number_format"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.NumberFormat);
         }
         // Struck-through text: "strike" when the whole value is struck (it holds for the displayed
-        // value too), else the struck character ranges [start, end) of the value.
-        if (cell.StruckRanges is [{ Start: 0 } whole] && whole.End >= (cell.Value?.Length ?? 0))
-            extension["strike"] = JsonSerializer.SerializeToElement(true);
-        else if (cell.StruckRanges is { Count: > 0 } struck)
-            extension["strike_ranges"] = JsonSerializer.SerializeToElement(struck.Select(range => new[] { range.Start, range.End }).ToArray());
+        // value too), else the struck character ranges [start, end) of the value. Underlined text is
+        // recorded the same way as "underline" and "underline_ranges".
+        AddMarkedRanges(extension, cell, cell.StruckRanges, "strike", "strike_ranges");
+        AddMarkedRanges(extension, cell, cell.UnderlinedRanges, "underline", "underline_ranges");
         var layer = cell.IsHiddenRow || cell.IsHiddenColumn || !string.Equals(cell.SheetState, "visible", StringComparison.OrdinalIgnoreCase)
             ? ContentLayer.Hidden
             : ContentLayer.Body;
         return new($"n_{Hash(cell.SheetName + "!" + cell.CellReference)[..16]}", NodeKind.Cell, null, order,
             layer, new TextNodeContent(cell.Value ?? string.Empty),
             new SourceAnchor("xlsx", partUri, [new AnchorLocator("cell_address", cell.CellReference)]), Extensions: extension);
+    }
+
+    private static void AddMarkedRanges(Dictionary<string, JsonElement> extension, XlsxCellRecord cell, IReadOnlyList<TextRange>? marked,
+        string wholeKey, string rangesKey)
+    {
+        if (marked is [{ Start: 0 } whole] && whole.End >= (cell.Value?.Length ?? 0))
+            extension[wholeKey] = JsonSerializer.SerializeToElement(true);
+        else if (marked is { Count: > 0 })
+            extension[rangesKey] = JsonSerializer.SerializeToElement(marked.Select(range => new[] { range.Start, range.End }).ToArray());
     }
 
     private static DocumentNode ToPictureNode(SheetInfo sheet, XlsxPictureRecord picture, int order)
@@ -747,7 +817,10 @@ public sealed class XlsxAdapter
         var wiredShapeIds = shapes.Where(shape => shape.IsConnector)
             .SelectMany(shape => new[] { shape.StartConnectionId, shape.EndConnectionId })
             .Where(id => id is not null).Cast<string>().ToHashSet(StringComparer.Ordinal);
-        var mergeOrigins = BuildSheetMergeOriginLookup(worksheet.Cells);
+        // A merge or a shape can span the whole sheet, so nothing below visits the cells of one: merges are
+        // kept as rectangles, and the cells that hold something are indexed once, by row.
+        var merges = ReadSheetMerges(worksheet.Cells);
+        IReadOnlyDictionary<int, int[]>? visibleColumns = null;
 
         var overlays = new List<(XlsxSheetOverlay Overlay, XlsxDrawingShapeRecord Shape)>();
         var overlayShapeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -773,17 +846,10 @@ public sealed class XlsxAdapter
             // Spec "結合セル": a covered cell inside a merged range is assigned to that range's
             // origin cell; the overlay's final range is the bounding box of every covered cell's
             // resolved origin (a no-op whenever nothing in the raw band is merged).
-            var rows = new List<int>(); var columns = new List<int>();
-            for (var row = rawStartRow; row <= rawEndRow; row++)
-            for (var column = rawStartColumn; column <= rawEndColumn; column++)
-            {
-                var origin = mergeOrigins.TryGetValue((row, column), out var mapped) ? mapped : (Row: row, Column: column);
-                rows.Add(origin.Row); columns.Add(origin.Column);
-            }
-            var startRow = rows.Min(); var endRow = rows.Max();
-            var startColumn = columns.Min(); var endColumn = columns.Max();
+            var (startRow, endRow, startColumn, endColumn) = ResolveSheetMergedBand(rawStartRow, rawEndRow, rawStartColumn, rawEndColumn, merges);
 
-            if (!IsSheetOverlayOnTable(startRow, endRow, startColumn, endColumn, worksheet.Cells)) continue;
+            visibleColumns ??= ReadVisibleColumnsByRow(worksheet.Cells);
+            if (!IsSheetOverlayOnTable(startRow, endRow, startColumn, endColumn, visibleColumns)) continue;
 
             overlays.Add((ClassifySheetOverlay(shape, startRow, endRow, startColumn, endColumn), shape));
             overlayShapeIds.Add(shape.Id);
@@ -812,20 +878,91 @@ public sealed class XlsxAdapter
         }
     }
 
+    /// <summary>A merged range: its origin cell and the last row and column it covers.</summary>
+    private readonly record struct SheetMerge(int Row, int Column, int LastRow, int LastColumn);
+
+    /// <summary>Part of an axis covered across a stretch of the other axis: rows Start..End across the columns
+    /// CrossStart..CrossEnd (or the other way round).</summary>
+    private readonly record struct CoverSpan(int Start, int End, int CrossStart, int CrossEnd);
+
     // Spec "結合セル": every cell inside a merged range maps to that range's origin (RowIndex,
     // ColumnIndex); a cell with its own MergedToRow/MergedToColumn set (ApplyMergedRanges stamps
     // these on the range's origin cell only) is that range's origin.
-    private static IReadOnlyDictionary<(int Row, int Column), (int Row, int Column)> BuildSheetMergeOriginLookup(IReadOnlyList<XlsxCellRecord> cells)
+    private static SheetMerge[] ReadSheetMerges(IReadOnlyList<XlsxCellRecord> cells) => cells
+        .Where(cell => cell.MergedToRow is not null && cell.MergedToColumn is not null)
+        .Select(cell => new SheetMerge(cell.RowIndex, cell.ColumnIndex, cell.MergedToRow!.Value, cell.MergedToColumn!.Value))
+        .ToArray();
+
+    // The bounding box of the origins of the cells of a band: a cell outside every merged range is its own
+    // origin, one inside a range has that range's origin. It is what visiting each cell of the band gives,
+    // found from the merges instead, since a band can span the whole sheet and a merge can too. The box reaches
+    // the origin of every merge the band touches, and the first and last row and column that have a cell no
+    // merge covers. (Merged ranges do not overlap in a valid workbook, and this does not try to give what the
+    // last of several overlapping ones would: it is the box that all of them together make.)
+    private static (int StartRow, int EndRow, int StartColumn, int EndColumn) ResolveSheetMergedBand(
+        int startRow, int endRow, int startColumn, int endColumn, IReadOnlyList<SheetMerge> merges)
     {
-        var lookup = new Dictionary<(int Row, int Column), (int Row, int Column)>();
-        foreach (var cell in cells)
+        var touching = merges.Where(merge => merge.Row <= endRow && merge.LastRow >= startRow &&
+            merge.Column <= endColumn && merge.LastColumn >= startColumn).ToArray();
+        if (touching.Length == 0) return (startRow, endRow, startColumn, endColumn);
+
+        var rowSpans = touching.Select(merge => new CoverSpan(merge.Row, merge.LastRow, merge.Column, merge.LastColumn)).ToArray();
+        var columnSpans = touching.Select(merge => new CoverSpan(merge.Column, merge.LastColumn, merge.Row, merge.LastRow)).ToArray();
+        // The last index is the first one counted from the far end, which is the first of the negated axis.
+        static CoverSpan[] Negated(CoverSpan[] spans) => spans.Select(span => span with { Start = -span.End, End = -span.Start }).ToArray();
+        static int? Back(int? negated) => negated is { } index ? -index : null;
+        var firstRow = FirstUncoveredIndex(startRow, endRow, startColumn, endColumn, rowSpans);
+        var lastRow = Back(FirstUncoveredIndex(-endRow, -startRow, startColumn, endColumn, Negated(rowSpans)));
+        var firstColumn = FirstUncoveredIndex(startColumn, endColumn, startRow, endRow, columnSpans);
+        var lastColumn = Back(FirstUncoveredIndex(-endColumn, -startColumn, startRow, endRow, Negated(columnSpans)));
+        return (Math.Min(touching.Min(merge => merge.Row), firstRow ?? int.MaxValue),
+            Math.Max(touching.Max(merge => merge.Row), lastRow ?? int.MinValue),
+            Math.Min(touching.Min(merge => merge.Column), firstColumn ?? int.MaxValue),
+            Math.Max(touching.Max(merge => merge.Column), lastColumn ?? int.MinValue));
+    }
+
+    // The first index in from..to at which some of crossFrom..crossTo is covered by none of the spans, or null
+    // when the spans cover all of it at every index. How much of the cross range is covered only changes where
+    // a span starts or ends, so the sweep visits those places in order instead of every index (spans are
+    // taken not to overlap, so their widths add up).
+    private static int? FirstUncoveredIndex(int from, int to, int crossFrom, int crossTo, IReadOnlyList<CoverSpan> spans)
+    {
+        var width = (long)crossTo - crossFrom + 1;
+        var changes = new List<(int At, long Covered)>();
+        foreach (var span in spans)
         {
-            if (cell.MergedToRow is not { } maxRow || cell.MergedToColumn is not { } maxColumn) continue;
-            for (var row = cell.RowIndex; row <= maxRow; row++)
-            for (var column = cell.ColumnIndex; column <= maxColumn; column++)
-                lookup[(row, column)] = (cell.RowIndex, cell.ColumnIndex);
+            var covered = (long)Math.Min(span.CrossEnd, crossTo) - Math.Max(span.CrossStart, crossFrom) + 1;
+            if (covered <= 0 || span.End < from || span.Start > to) continue;
+            changes.Add((Math.Max(span.Start, from), covered));
+            if (span.End < to) changes.Add((span.End + 1, -covered));
         }
-        return lookup;
+        changes.Sort((left, right) => left.At.CompareTo(right.At));
+        long coveredNow = 0;
+        var next = 0;
+        for (var index = from; ; index = changes[next].At)
+        {
+            while (next < changes.Count && changes[next].At <= index) coveredNow += changes[next++].Covered;
+            if (coveredNow < width) return index;
+            if (next == changes.Count) return null;
+        }
+    }
+
+    // The columns of the cells that hold something and are shown, by row, in order.
+    private static Dictionary<int, int[]> ReadVisibleColumnsByRow(IReadOnlyList<XlsxCellRecord> cells) => cells
+        .Where(cell => !cell.IsBlank && !cell.IsHiddenRow && !cell.IsHiddenColumn)
+        .GroupBy(cell => cell.RowIndex)
+        .ToDictionary(group => group.Key, group => group.Select(cell => cell.ColumnIndex).Distinct().Order().ToArray());
+
+    // How many of the sorted, distinct values lie in from..to.
+    private static int CountInRange(int[] sorted, int from, int to)
+    {
+        if (from > to) return 0;
+        static int LowerBound(int[] values, int value)
+        {
+            var index = Array.BinarySearch(values, value);
+            return index < 0 ? ~index : index;
+        }
+        return LowerBound(sorted, to + 1) - LowerBound(sorted, from);
     }
 
     // "「表の上にある」判定（XLSX固有）" -- XLSX has no native table element to test AABB
@@ -837,7 +974,7 @@ public sealed class XlsxAdapter
     // header's top edge down through the last data row), so the header cell itself must count as
     // "the date header" evidence -- otherwise a connector that begins at the header would be
     // rejected purely because nothing exists above row 1.
-    private static bool IsSheetOverlayOnTable(int startRow, int endRow, int startColumn, int endColumn, IReadOnlyList<XlsxCellRecord> cells)
+    private static bool IsSheetOverlayOnTable(int startRow, int endRow, int startColumn, int endColumn, IReadOnlyDictionary<int, int[]> visibleColumns)
     {
         // X2: the original rule (some non-blank cell anywhere to the left of the covered rows,
         // AND some non-blank cell anywhere above the covered columns within 20 rows) folded
@@ -847,10 +984,8 @@ public sealed class XlsxAdapter
         // to actually look like a schedule table instead: most of the covered COLUMNS must share
         // one real header row above the shape, AND at least one covered ROW must have a label
         // immediately (within 6 columns) to the left. Cells in hidden rows/columns never count as
-        // evidence either way.
-        bool IsVisible(XlsxCellRecord cell) => !cell.IsBlank && !cell.IsHiddenRow && !cell.IsHiddenColumn;
-        var visible = cells.Where(IsVisible).Select(cell => (cell.RowIndex, cell.ColumnIndex)).ToHashSet();
-
+        // evidence either way. (visibleColumns lists the cells that count, by row, so the checks
+        // look at the cells that exist and not at every position of a band that may span the sheet.)
         var coveredColumns = endColumn - startColumn + 1;
         var headerThreshold = Math.Min(3, coveredColumns);
         var hasHeaderRow = false;
@@ -858,17 +993,13 @@ public sealed class XlsxAdapter
         // schedule's vertical "today" line) starts at the TOP of the header row, not below it --
         // the header row IS the shape's own StartRow in that case, same as the pre-X2 rule's `<=`.
         for (var headerRow = Math.Max(1, startRow - 20); headerRow <= startRow && !hasHeaderRow; headerRow++)
-        {
-            var hits = 0;
-            for (var column = startColumn; column <= endColumn; column++)
-                if (visible.Contains((headerRow, column))) hits++;
-            if (hits >= headerThreshold) hasHeaderRow = true;
-        }
+            hasHeaderRow = visibleColumns.TryGetValue(headerRow, out var headerColumns) &&
+                           CountInRange(headerColumns, startColumn, endColumn) >= headerThreshold;
         if (!hasHeaderRow) return false;
 
-        for (var row = startRow; row <= endRow; row++)
-        for (var column = Math.Max(1, startColumn - 6); column < startColumn; column++)
-            if (visible.Contains((row, column))) return true;
+        var labelColumn = Math.Max(1, startColumn - 6);
+        foreach (var (row, columns) in visibleColumns)
+            if (row >= startRow && row <= endRow && CountInRange(columns, labelColumn, startColumn - 1) > 0) return true;
         return false;
     }
 
@@ -898,16 +1029,25 @@ public sealed class XlsxAdapter
 
         var approxStart = Math.Max(1, (int)Math.Floor(FromEmu(min)) - 2);
         var approxEnd = Math.Min(maxIndex, (int)Math.Ceiling(FromEmu(max)) + 2);
-        var covered = new List<int>();
-        for (var index = approxStart; index <= approxEnd; index++)
+        bool IsCovered(int index)
         {
             var bandStart = Boundary(index); var bandEnd = Boundary(index + 1);
             var bandWidth = bandEnd - bandStart;
-            if (bandWidth <= 0) continue;
+            if (bandWidth <= 0) return false;
             var overlap = Math.Max(0, Math.Min(max, bandEnd) - Math.Max(min, bandStart));
-            if (overlap >= bandWidth * 0.5) covered.Add(index);
+            return overlap >= bandWidth * 0.5;
         }
-        if (covered.Count > 0) return (covered[0], covered[^1]);
+        // Only the first and the last covered band are wanted, and the bands between the two ends of a long
+        // shape that have any width are covered too: each end is looked for from its own side of the window,
+        // so the bands in the middle of a shape as large as the sheet are never visited.
+        var first = approxStart;
+        while (first <= approxEnd && !IsCovered(first)) first++;
+        if (first <= approxEnd)
+        {
+            var last = approxEnd;
+            while (last > first && !IsCovered(last)) last--;
+            return (first, last);
+        }
 
         var clamped = Math.Clamp((min + max) / 2, Boundary(1), Boundary(maxIndex + 1));
         for (var index = approxStart; index <= approxEnd; index++)
@@ -1066,23 +1206,26 @@ public sealed class XlsxAdapter
         return result;
     }
 
-    /// <summary>A worksheet string, shared (si) or inline (is): its text and, for rich text, each run's
-    /// place in it and whether the run is struck through (null for a run without properties of its own,
-    /// which takes the cell's font).</summary>
-    private sealed record XlsxString(string Text, IReadOnlyList<(int Start, int End, bool? Strike)> Runs);
+    /// <summary>A worksheet string, shared (si) or inline (is): its text and, for rich text, each run.</summary>
+    private sealed record XlsxString(string Text, IReadOnlyList<XlsxRun> Runs);
+
+    /// <summary>A run of rich text: its place in the string and whether it is struck through and
+    /// underlined (null for a run without properties of its own, which takes the cell's font).</summary>
+    private sealed record XlsxRun(int Start, int End, bool? Strike, bool? Underline);
 
     // Reads the si or is element the reader is on. The text is every t outside the phonetic guide
     // (rPh), whitespace-only runs included: a run that is just a space separates the words around it.
     private static XlsxString ReadRichString(XmlReader reader)
     {
         var text = new StringBuilder();
-        var runs = new List<(int Start, int End, bool? Strike)>();
+        var runs = new List<XlsxRun>();
         using var sub = reader.ReadSubtree();
         var phoneticDepth = -1;
         var inText = false;
         var inRunProperties = false;
         int? runStart = null;
         bool? runStrike = null;
+        bool? runUnderline = null;
         while (sub.Read())
         {
             if (phoneticDepth >= 0)
@@ -1098,14 +1241,19 @@ public sealed class XlsxAdapter
                 case XmlNodeType.Element when sub.LocalName == "r":
                     runStart = text.Length;
                     runStrike = null;
+                    runUnderline = null;
                     break;
                 case XmlNodeType.Element when sub.LocalName == "rPr" && runStart is not null:
-                    // A run's own properties replace the cell's font: struck only if they say so.
+                    // A run's own properties replace the cell's font: struck or underlined only if they say so.
                     runStrike = false;
+                    runUnderline = false;
                     inRunProperties = !sub.IsEmptyElement;
                     break;
                 case XmlNodeType.Element when sub.LocalName == "strike" && inRunProperties:
                     runStrike = IsOn(sub.GetAttribute("val"));
+                    break;
+                case XmlNodeType.Element when sub.LocalName == "u" && inRunProperties:
+                    runUnderline = IsUnderline(sub.GetAttribute("val"));
                     break;
                 case XmlNodeType.Element when sub.LocalName == "t":
                     inText = !sub.IsEmptyElement;
@@ -1117,7 +1265,7 @@ public sealed class XlsxAdapter
                     inRunProperties = false;
                     break;
                 case XmlNodeType.EndElement when sub.LocalName == "r" && runStart is { } start:
-                    runs.Add((start, text.Length, runStrike));
+                    runs.Add(new XlsxRun(start, text.Length, runStrike, runUnderline));
                     runStart = null;
                     break;
                 case XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.SignificantWhitespace or XmlNodeType.Whitespace when inText:
@@ -1131,18 +1279,23 @@ public sealed class XlsxAdapter
     // A SpreadsheetML boolean property such as <strike/>: on unless val says 0 or false.
     private static bool IsOn(string? value) => value is null || !(value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase));
 
-    // What is struck in a cell's value: its runs where they say so, else the whole value when the
-    // cell's font strikes it. Overlapping or touching ranges are merged.
-    private static IReadOnlyList<TextRange>? StruckRanges(string? value, IReadOnlyList<(int Start, int End, bool? Strike)>? runs, bool fontStrike)
+    // A SpreadsheetML underline property: <u/> is a single underline and val="none" is none; single,
+    // double, singleAccounting and doubleAccounting are all underlines.
+    private static bool IsUnderline(string? value) => !string.Equals(value, "none", StringComparison.OrdinalIgnoreCase);
+
+    // What is marked in a cell's value (struck through or underlined, as mark says of a run): its runs
+    // where they say so, else the whole value when the cell's font marks it. Overlapping or touching
+    // ranges are merged.
+    private static IReadOnlyList<TextRange>? MarkedRanges(string? value, IReadOnlyList<XlsxRun>? runs, Func<XlsxRun, bool?> mark, bool fontMarks)
     {
         if (string.IsNullOrEmpty(value)) return null;
-        if (runs is not { Count: > 0 }) return fontStrike ? [new TextRange(0, value.Length)] : null;
+        if (runs is not { Count: > 0 }) return fontMarks ? [new TextRange(0, value.Length)] : null;
         var ranges = new List<TextRange>();
-        foreach (var (start, end, strike) in runs)
+        foreach (var run in runs)
         {
-            if (!(strike ?? fontStrike) || end <= start) continue;
-            if (ranges.Count > 0 && ranges[^1].End >= start) ranges[^1] = ranges[^1] with { End = Math.Max(ranges[^1].End, end) };
-            else ranges.Add(new TextRange(start, end));
+            if (!(mark(run) ?? fontMarks) || run.End <= run.Start) continue;
+            if (ranges.Count > 0 && ranges[^1].End >= run.Start) ranges[^1] = ranges[^1] with { End = Math.Max(ranges[^1].End, run.End) };
+            else ranges.Add(new TextRange(run.Start, run.End));
         }
         return ranges.Count == 0 ? null : ranges;
     }
@@ -1240,13 +1393,109 @@ public sealed class XlsxAdapter
 
     private static bool IsHiddenFlag(string? value) => value is "1" || bool.TryParse(value, out var parsed) && parsed;
 
+    // The cells a worksheet's <hyperlinks> entries cover (a ref is one cell or a range). Their underline
+    // is how a link looks, not emphasis.
+    private static Func<int, int, bool> ReadHyperlinkCells(byte[] bytes)
+    {
+        // Most sheets have none: do not read the XML again to find that out.
+        if (bytes.AsSpan().IndexOf("hyperlink"u8) < 0) return (_, _) => false;
+        var cells = new HashSet<(int Row, int Column)>();
+        var areas = new List<(int MinRow, int MaxRow, int MinColumn, int MaxColumn)>();
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read())
+            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "hyperlink" && ParseRange(reader.GetAttribute("ref")) is { } area)
+            {
+                if (area.MinRow == area.MaxRow && area.MinColumn == area.MaxColumn) cells.Add((area.MinRow, area.MinColumn));
+                else areas.Add(area);
+            }
+        var index = areas.Count > 0 ? new LinkAreaIndex(areas) : null;
+        return (row, column) => cells.Contains((row, column)) || index?.Covers(row, column) == true;
+    }
+
+    // The ranges of a sheet's links, so that whether one covers a cell is found without looking at every range (a sheet can link a range in
+    // each of its ten thousands of rows, and asks for every cell it has). The rows are cut where a range begins and after where it ends; a range
+    // fills the bands between the cuts, and is filed under the few nodes of a binary tree over the bands that its rows fill exactly. A node keeps
+    // the column spans filed under it joined and in order, so a cell is looked up with one search for each level of the tree.
+    private sealed class LinkAreaIndex
+    {
+        private readonly int[] cuts;
+        // The children of node n are 2n and 2n + 1; the root is 1.
+        private readonly Dictionary<int, List<(int From, int To)>> spans = [];
+
+        public LinkAreaIndex(IReadOnlyList<(int MinRow, int MaxRow, int MinColumn, int MaxColumn)> areas)
+        {
+            cuts = areas.SelectMany(area => new[] { area.MinRow, area.MaxRow + 1 }).Distinct().Order().ToArray();
+            foreach (var area in areas)
+                Add(1, 0, cuts.Length - 2, Array.BinarySearch(cuts, area.MinRow), Array.BinarySearch(cuts, area.MaxRow + 1) - 1, (area.MinColumn, area.MaxColumn));
+            foreach (var (node, list) in spans.ToArray())
+            {
+                list.Sort();
+                var joined = new List<(int From, int To)> { list[0] };
+                foreach (var span in list.Skip(1))
+                    if (span.From <= joined[^1].To + 1) joined[^1] = (joined[^1].From, Math.Max(joined[^1].To, span.To));
+                    else joined.Add(span);
+                spans[node] = joined;
+            }
+        }
+
+        // Files a column span under the nodes of the tree (over the bands low to high) that the bands from to to fill exactly.
+        private void Add(int node, int low, int high, int from, int to, (int From, int To) span)
+        {
+            if (from <= low && high <= to)
+            {
+                if (!spans.TryGetValue(node, out var list)) spans[node] = list = [];
+                list.Add(span);
+                return;
+            }
+            var middle = (low + high) / 2;
+            if (from <= middle) Add(2 * node, low, middle, from, to, span);
+            if (to > middle) Add(2 * node + 1, middle + 1, high, from, to, span);
+        }
+
+        public bool Covers(int row, int column)
+        {
+            var band = Array.BinarySearch(cuts, row);
+            if (band < 0) band = ~band - 1;
+            if (band < 0 || band >= cuts.Length - 1) return false;
+            for (int node = 1, low = 0, high = cuts.Length - 2; ;)
+            {
+                if (spans.TryGetValue(node, out var list) && Holds(list, column)) return true;
+                if (low == high) return false;
+                var middle = (low + high) / 2;
+                if (band <= middle) (node, high) = (2 * node, middle);
+                else (node, low) = (2 * node + 1, middle + 1);
+            }
+        }
+
+        private static bool Holds(List<(int From, int To)> joined, int column)
+        {
+            int low = 0, high = joined.Count - 1;
+            while (low <= high)
+            {
+                var middle = (low + high) / 2;
+                if (joined[middle].To < column) low = middle + 1;
+                else if (joined[middle].From > column) high = middle - 1;
+                else return true;
+            }
+            return false;
+        }
+    }
+
+    // A cell whose formula calls HYPERLINK shows a link.
+    private static readonly Regex HyperlinkFormula = new(@"(?<![\w.])HYPERLINK\s*\(",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
     private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, XlsxString> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
     {
         var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        var isHyperlinkCell = ReadHyperlinkCells(bytes);
+        // The cells filled from a shared formula carry no formula text of their own, only its index.
+        var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
         {
             var reference = reader.GetAttribute("r") ?? ""; var type = reader.GetAttribute("t"); var style = reader.GetAttribute("s"); string? formula = null; string? value = null;
-            IReadOnlyList<(int Start, int End, bool? Strike)>? runs = null;
+            string? sharedFormula = null;
+            IReadOnlyList<XlsxRun>? runs = null;
             using var sub = reader.ReadSubtree();
             sub.Read();
             while (!sub.EOF)
@@ -1261,6 +1510,7 @@ public sealed class XlsxAdapter
                 else if (sub.NodeType == XmlNodeType.Element && sub.LocalName is "f" or "v" or "t")
                 {
                     var local = sub.LocalName;
+                    if (local == "f" && sub.GetAttribute("t") == "shared") sharedFormula = sub.GetAttribute("si");
                     var content = sub.ReadElementContentAsString();
                     if (local == "f") formula = content;
                     else if (local == "v") value = content;
@@ -1282,10 +1532,20 @@ public sealed class XlsxAdapter
                 ? styles[styleIndex]
                 : null;
             var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
+            var richRuns = type is "s" or "inlineStr" ? runs : null;
+            var formulaLinks = false;
+            if (sharedFormula is not null && string.IsNullOrWhiteSpace(formula)) formulaLinks = sharedLinks.GetValueOrDefault(sharedFormula);
+            else if (formula is not null)
+            {
+                formulaLinks = HyperlinkFormula.IsMatch(formula);
+                if (sharedFormula is not null) sharedLinks[sharedFormula] = formulaLinks;
+            }
+            var isLink = formulaLinks || isHyperlinkCell(row, column);
             result.Add(new(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
                 IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState)
             {
-                StruckRanges = StruckRanges(value, type is "s" or "inlineStr" ? runs : null, displayStyle?.IsStrike == true),
+                StruckRanges = MarkedRanges(value, richRuns, run => run.Strike, displayStyle?.IsStrike == true),
+                UnderlinedRanges = isLink ? null : MarkedRanges(value, richRuns, run => run.Underline, displayStyle?.IsUnderline == true),
             });
         }
         return result;
@@ -1305,6 +1565,7 @@ public sealed class XlsxAdapter
             {
                 Bold = DirectChild(font, "b") is not null,
                 Strike = DirectChild(font, "strike") is { } strike && IsOn(strike.GetAttribute("val") is { Length: > 0 } val ? val : null),
+                Underline = DirectChild(font, "u") is { } underline && IsUnderline(underline.GetAttribute("val")),
                 Size = double.TryParse(DirectChild(font, "sz")?.GetAttribute("val"), NumberStyles.Float, CultureInfo.InvariantCulture, out var size) ? size : (double?)null
             }).ToArray() ?? [];
         var fills = DirectChild(root, "fills")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "fill")
@@ -1331,7 +1592,8 @@ public sealed class XlsxAdapter
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length ? fonts[fontId.Value].Size : null,
                 numberFormatId is null ? null : ResolveNumberFormat(numberFormatId.Value, formats),
                 alignment == "centerContinuous",
-                fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Strike);
+                fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Strike,
+                fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Underline);
         }).ToArray();
     }
 
@@ -2461,14 +2723,16 @@ public sealed class XlsxAdapter
         List<XlsxCellRecord> cells,
         IReadOnlyList<string> mergedRanges)
     {
-        var byCoordinate = cells.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex));
+        // Where each cell is in the list: searching the list for the origin of every merge would cost as many steps as there
+        // are cells for each merge, which a sheet drawn in thousands of merged cells cannot afford.
+        var indexByCoordinate = new Dictionary<(int Row, int Column), int>(cells.Count);
+        for (var index = 0; index < cells.Count; index++)
+            indexByCoordinate.Add((cells[index].RowIndex, cells[index].ColumnIndex), index);
         foreach (var reference in mergedRanges)
         {
             var range = ParseRange(reference);
-            if (range is null || !byCoordinate.TryGetValue((range.Value.MinRow, range.Value.MinColumn), out var cell)) continue;
-            var merged = cell with { MergedToRow = range.Value.MaxRow, MergedToColumn = range.Value.MaxColumn };
-            cells[cells.IndexOf(cell)] = merged;
-            byCoordinate[(merged.RowIndex, merged.ColumnIndex)] = merged;
+            if (range is null || !indexByCoordinate.TryGetValue((range.Value.MinRow, range.Value.MinColumn), out var origin)) continue;
+            cells[origin] = cells[origin] with { MergedToRow = range.Value.MaxRow, MergedToColumn = range.Value.MaxColumn };
         }
         return cells;
     }
@@ -2497,6 +2761,31 @@ public sealed class XlsxAdapter
 
     private static bool IsDrawingAnchorElement(XmlElement element) =>
         element.LocalName is "twoCellAnchor" or "oneCellAnchor" or "absoluteAnchor";
+
+    // A shape wrapped in mc:AlternateContent inside its anchor is still the anchor's own shape, placed by the
+    // anchor and not by a group.
+    private static bool IsDirectlyUnderAnchor(XmlElement shape, XmlElement anchor)
+    {
+        for (var node = shape.ParentNode as XmlElement; node is not null; node = node.ParentNode as XmlElement)
+        {
+            if (ReferenceEquals(node, anchor)) return true;
+            if (node.LocalName is not ("AlternateContent" or "Choice" or "Fallback")) return false;
+        }
+        return false;
+    }
+
+    // The fallback of an mc:AlternateContent whose choice draws shapes of its own holds the same drawing for
+    // readers that do not know the choice: reading both would count it twice. (A choice with no shape, such as
+    // a slicer's, leaves its fallback as the only shape there is.)
+    private static bool IsFallbackOfDrawnChoice(XmlElement shape)
+    {
+        for (var node = shape.ParentNode as XmlElement; node is not null; node = node.ParentNode as XmlElement)
+            if (node.LocalName == "Fallback" && node.ParentNode is XmlElement { LocalName: "AlternateContent" } alternate &&
+                alternate.ChildNodes.OfType<XmlElement>().Any(choice => choice.LocalName == "Choice" &&
+                    choice.SelectNodes(".//*[local-name()='sp' or local-name()='cxnSp']")?.Count > 0))
+                return true;
+        return false;
+    }
 
     // X6: walks upward from `node` (NOT including the shape itself) looking for another grpSp
     // ancestor -- used to detect a shape nested two or more group levels deep.
@@ -2550,10 +2839,10 @@ public sealed class XlsxAdapter
                 var anchorBottom = anchor.LocalName == "twoCellAnchor" && anchorTo is not null
                     ? metrics.RowStartEmu(ChildInt(anchorTo, "row") + 1) + toRowOffset : anchorY + anchorHeight;
                 var drawingElements = anchor.SelectNodes(".//*[local-name()='sp' or local-name()='cxnSp']")
-                    ?.OfType<XmlElement>().ToArray() ?? [];
+                    ?.OfType<XmlElement>().Where(element => !IsFallbackOfDrawnChoice(element)).ToArray() ?? [];
                 foreach (var shape in drawingElements)
                 {
-                    var isTopLevel = ReferenceEquals(shape.ParentNode, anchor);
+                    var isTopLevel = IsDirectlyUnderAnchor(shape, anchor);
                     var isConnector = shape.LocalName == "cxnSp";
                     var properties = Descendant(shape, "cNvPr");
                     var transform = Descendant(shape, "xfrm");
@@ -2594,15 +2883,24 @@ public sealed class XlsxAdapter
                     var lineDash = lineProperties is null || DirectChild(lineProperties, "noFill") is not null ? null
                         : DirectChild(lineProperties, "custDash") is not null ? "custDash"
                         : DirectChild(lineProperties, "prstDash")?.GetAttribute("val");
+                    // Nothing is painted when the outline has no fill and neither has the shape (a line has
+                    // no area to fill).
+                    var isUnpainted = lineProperties is not null && DirectChild(lineProperties, "noFill") is not null &&
+                        (DirectChild(shape, "spPr") is { } fillOwner && DirectChild(fillOwner, "noFill") is not null ||
+                         geometry.Equals("line", StringComparison.OrdinalIgnoreCase) ||
+                         geometry.Equals("straightConnector1", StringComparison.OrdinalIgnoreCase));
                     var isTextBox = IsHiddenFlag(Descendant(shape, "cNvSpPr")?.GetAttribute("txBox"));
                     var isHiddenShape = IsHiddenFlag(properties?.GetAttribute("hidden"));
                     var groupTransform = group is null ? null : Descendant(group, "xfrm");
+                    var isInTransformedGroup = groupTransform is not null && (AttributeLong(groupTransform, "rot") != 0 ||
+                        IsHiddenFlag(groupTransform.GetAttribute("flipH")) || IsHiddenFlag(groupTransform.GetAttribute("flipV")));
                     var groupExtent = groupTransform is null ? null : DirectChild(groupTransform, "ext");
                     var groupChildOffset = groupTransform is null ? null : DirectChild(groupTransform, "chOff");
                     var groupChildExtent = groupTransform is null ? null : DirectChild(groupTransform, "chExt");
-                    var groupScaleX = Math.Abs(AttributeLong(groupChildExtent, "cx")) > 0 && Math.Abs(AttributeLong(groupExtent, "cx")) > 0
+                    // An extent of zero gives no scale. (It is compared with zero as it is: Math.Abs of the smallest long throws.)
+                    var groupScaleX = AttributeLong(groupChildExtent, "cx") != 0 && AttributeLong(groupExtent, "cx") != 0
                         ? AttributeLong(groupExtent, "cx") / (double)AttributeLong(groupChildExtent, "cx") : 1d;
-                    var groupScaleY = Math.Abs(AttributeLong(groupChildExtent, "cy")) > 0 && Math.Abs(AttributeLong(groupExtent, "cy")) > 0
+                    var groupScaleY = AttributeLong(groupChildExtent, "cy") != 0 && AttributeLong(groupExtent, "cy") != 0
                         ? AttributeLong(groupExtent, "cy") / (double)AttributeLong(groupChildExtent, "cy") : 1d;
                     var localX = AttributeLong(shapeOffset, "x");
                     var localY = AttributeLong(shapeOffset, "y");
@@ -2625,6 +2923,11 @@ public sealed class XlsxAdapter
                     var topLevelHeight = anchorHeight > 0 ? anchorHeight : AttributeLong(shapeExtent, "cy");
                     var shapeWidth = isTopLevel ? Math.Max(anchorRight - anchorX, topLevelWidth) : (long)Math.Round(AttributeLong(shapeExtent, "cx") * groupScaleX);
                     var shapeHeight = isTopLevel ? Math.Max(anchorBottom - anchorY, topLevelHeight) : (long)Math.Round(AttributeLong(shapeExtent, "cy") * groupScaleY);
+                    // A shape that no sheet could hold (a damaged drawing) is kept, but without bounds: nothing is placed by them.
+                    var (absoluteX, absoluteY, absoluteWidth, absoluteHeight) =
+                        IsWithinSheet(shapeX) && IsWithinSheet(shapeY) && IsWithinSheet(shapeWidth) && IsWithinSheet(shapeHeight)
+                            ? ((long)Math.Round(shapeX), (long)Math.Round(shapeY), shapeWidth, shapeHeight)
+                            : (0L, 0L, 0L, 0L);
                     result.Add(new XlsxDrawingShapeRecord(
                         properties?.GetAttribute("id") ?? $"shape-{result.Count + 1}",
                         properties?.GetAttribute("name") ?? $"shape-{result.Count + 1}",
@@ -2646,10 +2949,10 @@ public sealed class XlsxAdapter
                         string.IsNullOrWhiteSpace(endConnection) ? null : endConnection,
                         string.IsNullOrWhiteSpace(groupId) ? null : groupId,
                         anchor.LocalName,
-                        checked((long)Math.Round(shapeX)),
-                        checked((long)Math.Round(shapeY)),
-                        shapeWidth,
-                        shapeHeight,
+                        absoluteX,
+                        absoluteY,
+                        absoluteWidth,
+                        absoluteHeight,
                         toColumnOffset,
                         toRowOffset,
                         drawingPart,
@@ -2659,7 +2962,9 @@ public sealed class XlsxAdapter
                         string.IsNullOrWhiteSpace(tailArrow) ? null : tailArrow,
                         isTextBox,
                         isHiddenShape,
-                        isInNestedGroup));
+                        isInNestedGroup,
+                        isInTransformedGroup,
+                        isUnpainted));
                 }
             }
         }
@@ -2683,6 +2988,8 @@ public sealed class XlsxAdapter
 
     private static long AttributeLong(XmlElement? element, string attribute) =>
         long.TryParse(element?.GetAttribute(attribute), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
+
+    private static bool IsWithinSheet(double emu) => emu is >= -MaxSheetEmu and <= MaxSheetEmu;
 
     private static string? ReadDeclaredDimension(byte[] bytes)
     {
