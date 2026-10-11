@@ -602,8 +602,13 @@ public sealed partial class PptxAdapter
             var tableStruckCells = new List<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>();
             var tableUnderlinedCells = new List<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>();
             var autoNumCounters = new Dictionary<int, int>();
+            // The flat reader also visits tab-stop definitions. Their <a:tab> has a different
+            // meaning from the explicit tab character in paragraph content.
+            var tabListDepth = -1;
             while (subtree.Read())
             {
+                if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tabLst") { tabListDepth = subtree.IsEmptyElement ? -1 : subtree.Depth; continue; }
+                if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tabLst") { tabListDepth = -1; continue; }
                 if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); shapeHidden = IsOn(subtree.GetAttribute("hidden")); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvSpPr") isTextBox = IsOn(subtree.GetAttribute("txBox"));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ph") { placeholderType = subtree.GetAttribute("type") ?? "body"; placeholderIdx = subtree.GetAttribute("idx"); }
@@ -683,7 +688,7 @@ public sealed partial class PptxAdapter
                 {
                     tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\n');
                 }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tab" && inTableCell)
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tab" && inTableCell && tabListDepth < 0)
                 {
                     tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\t');
                 }

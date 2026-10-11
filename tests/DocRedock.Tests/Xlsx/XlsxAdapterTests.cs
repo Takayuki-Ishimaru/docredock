@@ -108,6 +108,93 @@ public sealed class XlsxAdapterTests
             warning.StartsWith("XlsxFormulaCachedValueMissing: Formula cell Sheet1!B1", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData("<conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><formula>1</formula></cfRule></conditionalFormatting>")]
+    [InlineData("<x:conditionalFormatting xmlns:x=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" sqref=\"A1\"><x:cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><x:formula>1</x:formula></x:cfRule></x:conditionalFormatting>")]
+    public void Conditional_strike_dxf_is_reported_without_applying_unevaluated_formatting(string rules)
+    {
+        var bytes = WithConditionalFormatting(
+            "<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>",
+            rules);
+        var result = new XlsxAdapter().Extract(new MemoryStream(bytes));
+        var cell = Assert.Single(result.Worksheets).Cells.Single(item => item.CellReference == "A1");
+
+        Assert.Null(cell.StruckRanges);
+        Assert.False(cell.DisplayStyle!.IsStrike);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
+    }
+
+    [Theory]
+    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
+    [InlineData("<dxfs count=\"2\"><dxf><font><strike /></font></dxf><dxf><font><b /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
+    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"\"><cfRule dxfId=\"0\" /></conditionalFormatting>")]
+    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><x:cfRule xmlns:x=\"urn:unrelated\" dxfId=\"0\" /></conditionalFormatting>")]
+    public void Conditional_formatting_without_a_referenced_strike_dxf_has_no_warning(string dxfs, string rules)
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(WithConditionalFormatting(dxfs, rules)));
+
+        Assert.DoesNotContain(result.Warnings, warning => warning.StartsWith(
+            "XlsxConditionalStrikeNotEvaluated:", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Duplicate_cell_references_keep_the_last_cell_and_preserve_other_cells()
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData>" +
+            "<row r=\"1\"><c r=\"A1\" t=\"inlineStr\"><is><t>Earlier</t></is></c>" +
+            "<c r=\"B1\" t=\"inlineStr\"><is><t>Keep B1</t></is></c>" +
+            "<c r=\"A1\" t=\"inlineStr\"><is><t>Later</t></is></c></row></sheetData></worksheet>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var cells = Assert.Single(result.Worksheets).Cells;
+
+        Assert.Equal("Later", Assert.Single(cells, cell => cell.CellReference == "A1").Value);
+        Assert.Equal("Keep B1", Assert.Single(cells, cell => cell.CellReference == "B1").Value);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxDuplicateCellReference: Sheet1!A1 occurred more than once; the last cell was retained.");
+    }
+
+    [Theory]
+    [InlineData("defaultRowHeight", "NaN")]
+    [InlineData("defaultRowHeight", "Infinity")]
+    [InlineData("defaultRowHeight", "1e300")]
+    [InlineData("ht", "NaN")]
+    [InlineData("ht", "Infinity")]
+    [InlineData("ht", "1e300")]
+    [InlineData("defaultColWidth", "NaN")]
+    [InlineData("defaultColWidth", "Infinity")]
+    [InlineData("defaultColWidth", "1e300")]
+    [InlineData("width", "NaN")]
+    [InlineData("width", "Infinity")]
+    [InlineData("width", "1e300")]
+    public void Invalid_or_oversized_worksheet_dimensions_use_defaults_and_warn(string attribute, string value)
+    {
+        var entries = Entries(CreatePicturePackage());
+        var defaultRowHeight = attribute == "defaultRowHeight" ? value : "15";
+        var rowHeight = attribute == "ht" ? value : "20";
+        var defaultColumnWidth = attribute == "defaultColWidth" ? value : "8.43";
+        var columnWidth = attribute == "width" ? value : "18.5";
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">" +
+            $"<sheetFormatPr defaultRowHeight=\"{defaultRowHeight}\" defaultColWidth=\"{defaultColumnWidth}\"/>" +
+            $"<cols><col min=\"1\" max=\"1\" width=\"{columnWidth}\"/></cols>" +
+            "<sheetData><row r=\"1\" ht=\"" + rowHeight + "\"><c r=\"A1\" t=\"inlineStr\"><is><t>Keep A1</t></is></c>" +
+            "<c r=\"B1\" t=\"inlineStr\"><is><t>Keep B1</t></is></c></row></sheetData><drawing r:id=\"rDrawing\"/></worksheet>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var worksheet = Assert.Single(result.Worksheets);
+
+        Assert.Equal("Keep A1", worksheet.Cells.Single(cell => cell.CellReference == "A1").Value);
+        Assert.Equal("Keep B1", worksheet.Cells.Single(cell => cell.CellReference == "B1").Value);
+        Assert.Contains(result.Warnings, warning => warning.StartsWith(
+            "XlsxInvalidWorksheetDimension: Sheet1 ", StringComparison.Ordinal) && warning.Contains("@" + attribute, StringComparison.Ordinal));
+        Assert.Equal(15d, worksheet.Metrics!.DefaultRowHeight);
+        Assert.Equal(8.43d, worksheet.Metrics.DefaultColumnWidth);
+        Assert.InRange(XlsxWorksheetMetrics.RowHeightToEmu(worksheet.Metrics.RowHeight(1)), 0L, long.MaxValue);
+        Assert.InRange(XlsxWorksheetMetrics.ColumnWidthToEmu(worksheet.Metrics.ColumnWidth(1)), 0L, long.MaxValue);
+    }
+
     [Fact]
     public void Formula_with_empty_cached_value_element_is_reported_as_a_stable_warning()
     {
@@ -1704,5 +1791,27 @@ public sealed class XlsxAdapterTests
     {
         using var input = new MemoryStream(bytes); using var zip = new ZipArchive(input); var result = new Dictionary<string, byte[]>(); foreach (var entry in zip.Entries) using (var source = entry.Open()) using (var output = new MemoryStream()) { source.CopyTo(output); result[entry.FullName] = output.ToArray(); }
         return result;
+    }
+
+    private static byte[] WithConditionalFormatting(string dxfs, string rules)
+    {
+        var entries = Entries(CreatePackage());
+        var styles = Encoding.UTF8.GetString(entries["xl/styles.xml"]);
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(styles.Replace("</styleSheet>", dxfs + "</styleSheet>", StringComparison.Ordinal));
+        var worksheet = Encoding.UTF8.GetString(entries["xl/worksheets/sheet1.xml"]);
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(worksheet.Replace("</worksheet>", rules + "</worksheet>", StringComparison.Ordinal));
+        return Pack(entries);
+    }
+
+    private static byte[] Pack(Dictionary<string, byte[]> entries)
+    {
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true))
+            foreach (var (name, bytes) in entries)
+            {
+                using var entry = zip.CreateEntry(name).Open();
+                entry.Write(bytes);
+            }
+        return output.ToArray();
     }
 }

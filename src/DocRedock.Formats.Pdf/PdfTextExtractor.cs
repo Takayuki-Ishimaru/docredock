@@ -382,6 +382,7 @@ public static partial class PdfTextExtractor
             IReadOnlyDictionary<int, string> visualLabelNodeIds = new Dictionary<int, string>();
             VisualGraph? visualGraph = vector
                 ? BuildVisualGraph(pageNumber, content, regions, diagnostics, options.EffectiveVisualInferenceTimeout,
+                    attributes?.CropBox ?? attributes?.MediaBox,
                     cancellationToken, out visualLabelNodeIds)
                 : null;
             cancellationToken.ThrowIfCancellationRequested();
@@ -662,7 +663,7 @@ public static partial class PdfTextExtractor
     }
 
     private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions,
-        List<string> diagnostics, TimeSpan? inferenceTimeout, CancellationToken cancellationToken,
+        List<string> diagnostics, TimeSpan? inferenceTimeout, Geometry? pageBounds, CancellationToken cancellationToken,
         out IReadOnlyDictionary<int, string> visualLabelNodeIds)
     {
         var allowGeometryInference = VisualInferenceContext.Current != VisualInferenceMode.NativeOnly;
@@ -2225,6 +2226,16 @@ public static partial class PdfTextExtractor
             var maxX = subpath.Max(point => point.X); var maxY = subpath.Max(point => point.Y);
             var width = maxX - minX; var height = maxY - minY;
             var geometry = new Geometry("pdf-user-space", minX, minY, width, height);
+            if (pageBounds is { Width: > 0, Height: > 0 } page && paths.Count > 0 && paths[^1].IsFilled == true &&
+                paths[^1].Points is { } filledPoints && IsAxisAlignedRectangle(filledPoints) &&
+                width >= page.Width * 0.95 && height >= page.Height * 0.95 &&
+                minX <= page.X + page.Width * 0.025 && minY <= page.Y + page.Height * 0.025 &&
+                maxX >= page.X + page.Width * 0.975 && maxY >= page.Y + page.Height * 0.975)
+            {
+                // A nearly page-sized fill is page furniture, not an unlabeled diagram node.
+                paths.RemoveAt(paths.Count - 1);
+                return;
+            }
             // Canonicalize repeated paint operations for the same visual box.
             if (nodes.Any(node => IoU(node.Geometry, geometry) >= 0.90))
             {
@@ -2266,6 +2277,25 @@ public static partial class PdfTextExtractor
             nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
                 Geometry: geometry, SourceAnchor: anchor));
             RecordNodeLabel(labelCandidate[0].index, nodes[^1].Id);
+        }
+
+        static bool IsAxisAlignedRectangle(IReadOnlyList<VisualPathPoint> points)
+        {
+            // PDF close-path operators and repeated paint operations can leave the start
+            // point present more than once at the end of the path. Collapse only adjacent
+            // duplicates, then remove the closing copy before validating the four corners.
+            var corners = new List<VisualPathPoint>(points.Count);
+            foreach (var point in points)
+            {
+                if (corners.Count == 0 || corners[^1] != point) corners.Add(point);
+            }
+            while (corners.Count > 1 && corners[^1] == corners[0]) corners.RemoveAt(corners.Count - 1);
+            if (corners.Count != 4) return false;
+            if (corners.Distinct().Count() != 4) return false;
+            var minX = corners.Min(point => point.X); var minY = corners.Min(point => point.Y);
+            var maxX = corners.Max(point => point.X); var maxY = corners.Max(point => point.Y);
+            return corners.All(point => (point.X == minX || point.X == maxX) && (point.Y == minY || point.Y == maxY)) &&
+                Enumerable.Range(0, 4).All(index => corners[index].X == corners[(index + 1) % 4].X || corners[index].Y == corners[(index + 1) % 4].Y);
         }
 
         // A text region should only "win" a label slot when it is actually near the shape it
@@ -3419,8 +3449,11 @@ public static partial class PdfTextExtractor
     private static double? UprightFontSize(double? size, PdfMatrix textMatrix, PdfMatrix ctm)
     {
         var drawnBy = ctm.Concat(textMatrix);
+        // Synthetic italic uses a small shear in the glyph's vertical axis (C) while its baseline
+        // stays horizontal. That changes the glyph tops but not the height or horizontal placement
+        // needed to attach a drawn strike/underline. A rotation also changes B and remains excluded.
         var upright = drawnBy.A > 0 && drawnBy.D > 0 &&
-            Math.Abs(drawnBy.B) <= drawnBy.A * 1e-3 && Math.Abs(drawnBy.C) <= drawnBy.D * 1e-3;
+            Math.Abs(drawnBy.B) <= drawnBy.A * 1e-3 && Math.Abs(drawnBy.C) <= drawnBy.D * 0.35;
         if (size is not { } value || value <= 0 || !upright) return null;
         var drawn = value * drawnBy.D;
         return double.IsFinite(drawn) && drawn > 0 ? drawn : null;
@@ -3556,6 +3589,7 @@ public static partial class PdfTextExtractor
         // Shows of one glyph each, spaced out letter by letter (a heading tracked by a quarter of an em), keep that gap
         // between all their glyphs: a word space is a gap beyond it.
         var typical = PdfTextRuns.TypicalGaps(ordered);
+        var cellBoundaries = RepeatedAlignedCellBoundaries(ordered);
         for (var position = 0; position < ordered.Count; position++)
         {
             var region = ordered[position];
@@ -3593,7 +3627,10 @@ public static partial class PdfTextExtractor
                 continue;
             }
             // The tail's own edge is the one a word gap is measured from only when it is the line's end.
-            var wide = gap > Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height) * 1.5 ||
+            var itemSeparator = IsDigit(tail.Text) && IsDigit(region.Text) &&
+                gap >= Math.Max(previous.FontSize ?? previous.BoundingBox.Height, region.FontSize ?? region.BoundingBox.Height) * 0.75;
+            var cellSeparator = cellBoundaries.Contains((tail.SourceTextIds[0], region.SourceTextIds[0]));
+            var wide = itemSeparator || cellSeparator || gap > Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height) * 1.5 ||
                 Math.Abs(tail.BoundingBox.X + tail.BoundingBox.Width - previousRight) < 1e-6 && PdfTextRuns.IsWordGap(tail, region, gap, typical[position]);
             var separator = wide ? " " : string.Empty;
             var right = Math.Max(previousRight, region.BoundingBox.X + region.BoundingBox.Width);
@@ -3609,6 +3646,38 @@ public static partial class PdfTextExtractor
             tail = region;
         }
         return lines;
+
+        static bool IsDigit(string text) => text.Length == 1 && char.IsAsciiDigit(text[0]);
+
+        static HashSet<(int Left, int Right)> RepeatedAlignedCellBoundaries(IReadOnlyList<PdfTextRegion> fragments)
+        {
+            var candidates = new List<(int Left, int Right, double Y, double PreviousRight, double NextLeft, double Height)>();
+            for (var index = 0; index + 1 < fragments.Count; index++)
+            {
+                var left = fragments[index]; var right = fragments[index + 1];
+                var height = Math.Max(left.BoundingBox.Height, right.BoundingBox.Height);
+                var gap = right.BoundingBox.X - (left.BoundingBox.X + left.BoundingBox.Width);
+                if (height <= 0 || Math.Abs(left.BoundingBox.Y - right.BoundingBox.Y) > Math.Max(1, height * 0.35) ||
+                    gap <= 0 || gap > height * 0.5 ||
+                    left.Text.Length == 0 || !left.Text.All(char.IsAsciiDigit) ||
+                    right.Text.Length == 0 || !char.IsAsciiLetter(right.Text[0])) continue;
+                candidates.Add((left.SourceTextIds[0], right.SourceTextIds[0],
+                    (left.BoundingBox.Y + right.BoundingBox.Y) / 2,
+                    left.BoundingBox.X + left.BoundingBox.Width, right.BoundingBox.X, height));
+            }
+
+            var boundaries = new HashSet<(int Left, int Right)>();
+            for (var index = 0; index < candidates.Count; index++)
+            {
+                var candidate = candidates[index];
+                if (candidates.Where((_, other) => other != index).Any(other =>
+                    Math.Abs(candidate.Y - other.Y) > Math.Max(candidate.Height, other.Height) * 0.75 &&
+                    Math.Abs(candidate.PreviousRight - other.PreviousRight) <= 3 &&
+                    Math.Abs(candidate.NextLeft - other.NextLeft) <= 1))
+                    boundaries.Add((candidate.Left, candidate.Right));
+            }
+            return boundaries;
+        }
     }
 
     /// <summary>How a fragment sits relative to a candidate gutter interval [start, end).</summary>
@@ -4065,6 +4134,9 @@ public static partial class PdfTextExtractor
             foreach (var part in code) value = value << 8 | part;
             if (value == 0) return string.Empty;
             if (value > 0x20) return null;
+            // Identity-H uses CIDs, not Unicode code points. Even CID 32 can be a letter or digit in a
+            // subset font, so a partial ToUnicode map cannot make it a space from its number or width.
+            // Keep the ambiguity visible unless its explicit advance falls in the usual space range.
             return code.Length == 1 || widths?.Width(value) is >= SpaceWidthFromEm and <= SpaceWidthToEm ? " " : null;
         }
 

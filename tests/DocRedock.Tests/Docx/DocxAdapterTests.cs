@@ -382,6 +382,31 @@ public sealed class DocxAdapterTests
     }
 
     [Fact]
+    public async Task Readable_markdown_keeps_a_nested_table_when_its_one_by_one_host_has_no_text()
+    {
+        var source = await WriteDocxAsync("nested-table-in-empty-1x1.docx", """
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+              <w:p><w:r><w:t>Before the table.</w:t></w:r></w:p>
+              <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="9000"/></w:tblGrid><w:tr><w:tc><w:tcPr/>
+                <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="4500"/><w:gridCol w:w="4500"/></w:tblGrid>
+                  <w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc><w:tc><w:tcPr/><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr>
+                  <w:tr><w:tc><w:tcPr/><w:p><w:r><w:t>Alpha</w:t></w:r></w:p></w:tc><w:tc><w:tcPr/><w:p><w:r><w:t>10</w:t></w:r></w:p></w:tc></w:tr>
+                </w:tbl>
+              </w:tc></w:tr></w:tbl>
+              <w:p><w:r><w:t>After the table.</w:t></w:r></w:p><w:sectPr/>
+            </w:body></w:document>
+            """);
+        var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(
+            source, Path.Combine(Path.GetDirectoryName(source)!, "nested-table-in-empty-1x1-readable.md")));
+
+        var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+        Assert.Contains("Before the table.", markdown, StringComparison.Ordinal);
+        Assert.Contains("Name / Value<br>Alpha / 10", markdown, StringComparison.Ordinal);
+        Assert.Contains("After the table.", markdown, StringComparison.Ordinal);
+        Assert.Equal(1, result.RenderedTables);
+    }
+
+    [Fact]
     public async Task Wps_drawingml_native_connector_projects_a_visual_graph_and_mermaid_edge()
     {
         var source = await CreateVisualTopologyDocxAsync(WpsShape("start", "START", 0, 0) +

@@ -155,6 +155,93 @@ public sealed class PdfTextPositionOperatorTests
         Assert.DoesNotContain(result.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("PdfStrikethroughUnplaced", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_small_shear_does_not_prevent_a_strikethrough_from_matching_its_text(bool hasWidths)
+    {
+        var fontResources = hasWidths ? Resources : "<< /Font << /F1 4 0 R >> >>";
+        IReadOnlyDictionary<int, string>? fontObjects = hasWidths ? null : new Dictionary<int, string>
+        {
+            [4] = "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+        };
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n",
+            "BT /F1 12 Tf 1 0 0.25 1 72 720 Tm (Cancelled) Tj ET",
+            "0.8 w 72 723.6 m 128 723.6 l S"), fontResources, fontObjects));
+
+        var line = Assert.Single(result.Pages[0].Regions);
+        Assert.Equal("Cancelled", line.Text);
+        Assert.Equal([new TextRange(0, line.Text.Length)], line.Struck);
+        Assert.DoesNotContain(result.Diagnostics ?? [], diagnostic => diagnostic.StartsWith("PdfStrikethroughUnplaced", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("0 1 -1 0")]
+    [InlineData("1 0 0.36 1")]
+    public void A_rotated_or_over_threshold_shear_still_does_not_accept_a_horizontal_strikethrough(string matrix)
+    {
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n",
+            $"BT /F1 12 Tf {matrix} 72 720 Tm (Cancelled) Tj ET",
+            "0.8 w 72 723.6 m 128 723.6 l S")));
+
+        Assert.Null(Assert.Single(result.Pages[0].Regions).FontSize);
+    }
+
+    [Fact]
+    public void Touching_same_height_underline_segments_join_across_a_text_boundary()
+    {
+        var split = 72 + MeasuredPdf.Width("A", 12);
+        var end = 72 + MeasuredPdf.Width("AB", 12);
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n",
+            "BT /F1 12 Tf 1 0 0 1 72 700 Tm (AB) Tj ET",
+            $"0.7 w 72 698 m {N(split)} 698 l S",
+            $"{N(split)} 698 m {N(end)} 698 l S")));
+
+        Assert.Equal([new TextRange(0, 2)], Assert.Single(result.Pages[0].Regions).Underlined);
+    }
+
+    [Fact]
+    public void Disconnected_underline_segments_do_not_bridge_the_unmarked_text_between_them()
+    {
+        var firstEnd = 72 + MeasuredPdf.Width("A", 12);
+        var thirdStart = 72 + MeasuredPdf.Width("AB", 12);
+        var thirdEnd = 72 + MeasuredPdf.Width("ABC", 12);
+        var result = PdfTextExtractor.Extract(Page(string.Join("\n",
+            "BT /F1 12 Tf 1 0 0 1 72 700 Tm (ABC) Tj ET",
+            $"0.7 w 72 698 m {N(firstEnd)} 698 l S",
+            $"{N(thirdStart)} 698 m {N(thirdEnd)} 698 l S")));
+
+        Assert.Equal([new TextRange(0, 1), new TextRange(2, 3)], Assert.Single(result.Pages[0].Regions).Underlined);
+    }
+
+    [Fact]
+    public void A_table_border_with_no_text_is_not_a_text_underline()
+    {
+        var result = PdfTextExtractor.Extract(Page(
+            "0.7 w 72 650 m 190 650 l S 72 650 m 72 700 l S 130 650 m 130 700 l S 190 650 m 190 700 l S"));
+
+        Assert.DoesNotContain(result.Pages[0].Regions, region => region.Underlined is { Count: > 0 });
+        Assert.Null(result.Pages[0].UncertainText);
+        Assert.NotEmpty(result.VisualGraphs![1].Paths!);
+    }
+
+    [Fact]
+    public void Touching_cell_borders_with_text_do_not_become_header_underlines()
+    {
+        var content = string.Join("\n",
+            "BT /F1 11 Tf 1 0 0 1 80 700 Tm (Item) Tj ET",
+            "BT /F1 11 Tf 1 0 0 1 200 700 Tm (Qty) Tj ET",
+            "BT /F1 11 Tf 1 0 0 1 330 700 Tm (Note) Tj ET",
+            "0.8 w 72 698 m 190 698 l S 190 698 m 320 698 l S 320 698 m 450 698 l S",
+            "72 680 m 190 680 l S 190 680 m 320 680 l S 320 680 m 450 680 l S",
+            "72 680 m 72 710 l S 190 680 m 190 710 l S 320 680 m 320 710 l S 450 680 m 450 710 l S");
+        var result = PdfTextExtractor.Extract(Page(content));
+
+        Assert.Equal("Item Qty Note", Assert.Single(result.Pages[0].Regions).Text);
+        Assert.All(result.Pages[0].Regions, region => Assert.Null(region.Underlined));
+        Assert.NotEmpty(result.VisualGraphs![1].Paths!);
+    }
+
     [Fact]
     public void Table_cells_drawn_with_quote_operators_are_in_the_table()
     {
