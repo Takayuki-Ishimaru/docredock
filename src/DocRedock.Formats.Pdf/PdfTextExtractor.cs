@@ -3581,7 +3581,7 @@ public static partial class PdfTextExtractor
     /// unrolling - by controlling the order of <paramref name="ordered"/>. A fragment in
     /// <paramref name="isolated"/> is never merged with another.</summary>
     private static List<PdfTextRegion> MergeAdjacentIntoLines(IReadOnlyList<PdfTextRegion> ordered,
-        IReadOnlySet<int>? tableSourceIds, IReadOnlySet<int>? isolated = null)
+        IReadOnlySet<int>? tableSourceIds, IReadOnlySet<int>? isolated = null, IReadOnlyList<PdfTextRegion>? cellBoundaryEvidence = null)
     {
         var lines = new List<PdfTextRegion>();
         // The fragment last joined to the current line: its font and measured edge say what a gap after it is.
@@ -3589,7 +3589,7 @@ public static partial class PdfTextExtractor
         // Shows of one glyph each, spaced out letter by letter (a heading tracked by a quarter of an em), keep that gap
         // between all their glyphs: a word space is a gap beyond it.
         var typical = PdfTextRuns.TypicalGaps(ordered);
-        var cellBoundaries = RepeatedAlignedCellBoundaries(ordered);
+        var cellBoundaries = RepeatedAlignedCellBoundaries(cellBoundaryEvidence ?? ordered);
         for (var position = 0; position < ordered.Count; position++)
         {
             var region = ordered[position];
@@ -3651,7 +3651,7 @@ public static partial class PdfTextExtractor
 
         static HashSet<(int Left, int Right)> RepeatedAlignedCellBoundaries(IReadOnlyList<PdfTextRegion> fragments)
         {
-            var candidates = new List<(int Left, int Right, double Y, double PreviousRight, double NextLeft, double Height)>();
+            var candidates = new List<(int Left, int Right, double Y, double PreviousRight, double NextLeft, double LabelLeft, double Height, string RightText)>();
             for (var index = 0; index + 1 < fragments.Count; index++)
             {
                 var left = fragments[index]; var right = fragments[index + 1];
@@ -3660,10 +3660,25 @@ public static partial class PdfTextExtractor
                 if (height <= 0 || Math.Abs(left.BoundingBox.Y - right.BoundingBox.Y) > Math.Max(1, height * 0.35) ||
                     gap <= 0 || gap > height * 0.5 ||
                     left.Text.Length == 0 || !left.Text.All(char.IsAsciiDigit) ||
-                    right.Text.Length == 0 || !char.IsAsciiLetter(right.Text[0])) continue;
+                    right.Text.Trim().Length < 3 || !char.IsAsciiLetter(right.Text.TrimStart()[0])) continue;
+                // A repeated numeric-to-letter seam alone also describes real tokens such as 4K,
+                // 8K, 10mm, and 20cm. Require independent evidence that the number starts another
+                // column: a preceding same-row text label, separated by a cell-sized gap and aligned
+                // with the labels on other rows. Distinct, multi-character right values, including
+                // one with punctuation, support a notes column (as in Widget | 1000 | N/A).
+                // Letter-only values can still be different units such as kWh and mAh.
+                // These signals reduce ambiguity; they cannot prove cell semantics for every PDF.
+                if (index == 0) continue;
+                var label = fragments[index - 1];
+                var labelGap = left.BoundingBox.X - (label.BoundingBox.X + label.BoundingBox.Width);
+                if (string.IsNullOrWhiteSpace(label.Text) ||
+                    label.Text.All(char.IsAsciiDigit) ||
+                    Math.Abs(label.BoundingBox.Y - left.BoundingBox.Y) > Math.Max(1, height * 0.35) ||
+                    labelGap <= height * 1.5) continue;
                 candidates.Add((left.SourceTextIds[0], right.SourceTextIds[0],
                     (left.BoundingBox.Y + right.BoundingBox.Y) / 2,
-                    left.BoundingBox.X + left.BoundingBox.Width, right.BoundingBox.X, height));
+                    left.BoundingBox.X + left.BoundingBox.Width, right.BoundingBox.X,
+                    label.BoundingBox.X, height, right.Text.Trim()));
             }
 
             var boundaries = new HashSet<(int Left, int Right)>();
@@ -3673,7 +3688,11 @@ public static partial class PdfTextExtractor
                 if (candidates.Where((_, other) => other != index).Any(other =>
                     Math.Abs(candidate.Y - other.Y) > Math.Max(candidate.Height, other.Height) * 0.75 &&
                     Math.Abs(candidate.PreviousRight - other.PreviousRight) <= 3 &&
-                    Math.Abs(candidate.NextLeft - other.NextLeft) <= 1))
+                    Math.Abs(candidate.NextLeft - other.NextLeft) <= 1 &&
+                    Math.Abs(candidate.LabelLeft - other.LabelLeft) <= 3 &&
+                    !StringComparer.OrdinalIgnoreCase.Equals(candidate.RightText, other.RightText) &&
+                    (candidate.RightText.Any(character => !char.IsAsciiLetterOrDigit(character)) ||
+                     other.RightText.Any(character => !char.IsAsciiLetterOrDigit(character)))))
                     boundaries.Add((candidate.Left, candidate.Right));
             }
             return boundaries;
@@ -3890,7 +3909,9 @@ public static partial class PdfTextExtractor
         // Finish each body line before inserting table fragments. Otherwise a table slot
         // can split two fragments that became adjacent when the columns were reordered.
         // Emit a whole line at its first fragment's slot and skip its consumed fragments.
-        var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds, isolated)
+        // Column unrolling separates a row's label from its values. Retain the original row
+        // geometry as evidence for the numeric/text seam while preserving column reading order.
+        var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds, isolated, geometric)
             .ToDictionary(line => line.SourceTextIds[0]);
         var result = new List<PdfTextRegion>(geometric.Count);
         var flowCursor = 0;

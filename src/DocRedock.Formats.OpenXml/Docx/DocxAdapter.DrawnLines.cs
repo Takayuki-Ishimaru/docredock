@@ -123,6 +123,14 @@ public sealed partial class DocxAdapter
     private static double? DrawnTwips(string? value) =>
         double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var twips) && double.IsFinite(twips) ? twips / DrawnTwipsPerPoint : null;
 
+    // w:linePitch is ST_DecimalNumber: reject fractional and exponent spellings instead of treating them as twips.
+    private static double? DrawnLinePitch(string? value) =>
+        int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var twips) && twips > 0 ? twips / DrawnTwipsPerPoint : null;
+
+    private static bool IsDocxExplicitOn(XElement element) =>
+        (string?)element.Attribute(W + "val") is not { } value || value.Equals("1", StringComparison.Ordinal) ||
+        value.Equals("true", StringComparison.OrdinalIgnoreCase) || value.Equals("on", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>What sets a paragraph's line: its spacing and the space before it, its indents and its alignment; null for a
     /// paragraph whose lines cannot be placed (in a list, in a frame, with a border, right to left, in a spacing of exact
     /// height, indented in characters).</summary>
@@ -181,10 +189,11 @@ public sealed partial class DocxAdapter
 
     // The width of the column a section sets text in, or null when the section has several columns or no page. A line
     // grid supplies the line height used to place paragraphs that snap to it.
-    private static double? DrawnColumnWidth(XElement? section, out double? linePitch, out bool hasLineGrid)
+    private static double? DrawnColumnWidth(XElement? section, out double? linePitch, out bool hasLineGrid, out bool hasUnsupportedCharacterGrid)
     {
         linePitch = null;
         hasLineGrid = false;
+        hasUnsupportedCharacterGrid = false;
         var page = section?.Element(W + "pgSz");
         var margins = section?.Element(W + "pgMar");
         if (DrawnTwips((string?)page?.Attribute(W + "w")) is not { } width ||
@@ -195,9 +204,11 @@ public sealed partial class DocxAdapter
         if (docGrid is not null && ((string?)docGrid.Attribute(W + "type") is "lines" or "linesAndChars"))
         {
             hasLineGrid = true;
-            var pitch = DrawnTwips((string?)docGrid.Attribute(W + "linePitch"));
-            linePitch = pitch is > 0 ? pitch : null;
+            linePitch = DrawnLinePitch((string?)docGrid.Attribute(W + "linePitch"));
         }
+        hasUnsupportedCharacterGrid = (string?)docGrid?.Attribute(W + "type") is "linesAndChars" or "snapToChars" &&
+            (string?)docGrid?.Attribute(W + "charSpace") is { } characterSpace &&
+            (!int.TryParse(characterSpace, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedCharacterSpace) || parsedCharacterSpace != 0);
         return Math.Max(0, width - left - right);
     }
 
@@ -240,13 +251,13 @@ public sealed partial class DocxAdapter
 
     /// <summary>One line of text: its place in the paragraph's frame, in points (x from the left edge of the column, y from
     /// the top of the line), and the text.</summary>
-    private sealed record DocxDrawnLine(DrawnTextExtent Extent, double TextLeft, bool BeforeUnknown, bool AlreadyStruck);
+    private sealed record DocxDrawnLine(DrawnTextExtent Extent, double TextLeft, bool BeforeUnknown, bool AlreadyStruck, bool WidthUnsupported = false);
 
     // The line a paragraph of one line is set in, or null when the paragraph is not placed: it is empty, in a list, of
     // more than one line, with a tab, an equation or a line break in it, in a section with an unusable line grid, or
     // sized in a way the styles do not give.
-    private static DocxDrawnLine? DrawnParagraphLine(XElement paragraph, DocxDrawnSpace space, double? linePitch, bool hasLineGrid, DocxDrawnStyles styles,
-        DocxHiddenStyles hiddenStyles)
+    private static DocxDrawnLine? DrawnParagraphLine(XElement paragraph, DocxDrawnSpace space, double? linePitch, bool hasLineGrid,
+        bool hasUnsupportedCharacterGrid, DocxDrawnStyles styles, DocxHiddenStyles hiddenStyles)
     {
         var properties = styles.ParagraphProperties(paragraph, space.TableStyle);
         if (ReadDocxDrawnFormat(properties) is not { } format || format.SnapsToGrid && hasLineGrid && linePitch is null) return null;
@@ -254,6 +265,7 @@ public sealed partial class DocxAdapter
         var text = new System.Text.StringBuilder();
         var size = 0.0;
         var width = 0.0;
+        var widthUnsupported = false;
         var allStruck = true;
         foreach (var element in RelevantDescendants(paragraph))
         {
@@ -264,6 +276,13 @@ public sealed partial class DocxAdapter
             var half = DrawnAttribute(runProperties, "sz", "val");
             var runSize = double.TryParse(half, NumberStyles.Float, CultureInfo.InvariantCulture, out var halfPoints) && halfPoints > 0 ? halfPoints / 2 : DrawnDefaultSize;
             var value = element.Value;
+            // Paragraph snapToGrid controls line pitch; the run property independently controls
+            // character pitch. Resolve the nearest run declaration before trusting natural widths.
+            var snap = runProperties.Select(item => item.Element(W + "snapToGrid")).FirstOrDefault(item => item is not null);
+            var snapValue = (string?)snap?.Attribute(W + "val");
+            var snapsToCharacters = snapValue != "0" && !string.Equals(snapValue, "false", StringComparison.OrdinalIgnoreCase) &&
+                                    !string.Equals(snapValue, "off", StringComparison.OrdinalIgnoreCase);
+            widthUnsupported |= hasUnsupportedCharacterGrid && snapsToCharacters && value.Length > 0;
             text.Append(value);
             if (value.Any(char.IsLetterOrDigit))
             {
@@ -284,8 +303,13 @@ public sealed partial class DocxAdapter
                        (lineHeight - naturalLineHeight) / 2;
         var textLeft = format.LeftPoints + format.FirstLinePoints;
         var areaLeft = format.Alignment == DrawnAlignment.Center ? format.LeftPoints : textLeft;
-        var extent = DrawnLineRules.SingleLine(size, lineHeight, areaLeft, space.Width - format.RightPoints, width, format.Alignment, baseline);
-        return new DocxDrawnLine(extent, textLeft, format.BeforeUnknown || format.BeforePoints > 0, allStruck);
+        var areaRight = space.Width - format.RightPoints;
+        // Unknown character pitch leaves only a broad candidate span: a strike requires review.
+        var extent = widthUnsupported
+            ? new DrawnTextExtent(size, lineHeight, areaLeft, areaRight, 0, 0, [baseline], false)
+            : DrawnLineRules.SingleLine(size, lineHeight, areaLeft, areaRight, width, format.Alignment, baseline);
+        return new DocxDrawnLine(extent, textLeft, format.BeforeUnknown || format.BeforePoints > 0, allStruck,
+            widthUnsupported);
     }
 
     // ------------------------------------------------------------------------------------------------ the shapes
@@ -419,7 +443,7 @@ public sealed partial class DocxAdapter
     /// strikes nothing and is reported for review (strike) or ignored (underline), and a line over no text, or over text whose
     /// place is not known, is left as it is. A line that connects shapes, or has an arrowhead, is no decoration.</summary>
     private static DocxDrawnLines FindDocxDrawnLines(XDocument document, IReadOnlyList<XElement> bodyElements, XDocument? styleDocument,
-        DocxHiddenStyles hiddenStyles)
+        DocxHiddenStyles hiddenStyles, bool adjustLineHeightInTable)
     {
         // Quick exit: most documents have no line shape at all.
         var anchored = bodyElements.SelectMany(element => element.Descendants().Where(IsDocxOverlayOwnerElement)).ToList();
@@ -444,9 +468,12 @@ public sealed partial class DocxAdapter
                 // A paragraph in a text box has the text box's own frame.
                 if (paragraph.Ancestors(W + "txbxContent").Any()) continue;
                 var cell = paragraph.Ancestors(W + "tc").FirstOrDefault();
-                if (DrawnColumnWidth(sections[index], out var linePitch, out var hasLineGrid) is not { } columnWidth) continue;
+                if (DrawnColumnWidth(sections[index], out var linePitch, out var hasLineGrid, out var hasUnsupportedCharacterGrid) is not { } columnWidth) continue;
                 var space = cell is null ? new DocxDrawnSpace(columnWidth, null, false) : DrawnCellSpace(cell, styles);
-                if (space is null || DrawnParagraphLine(paragraph, space, linePitch, hasLineGrid, styles, hiddenStyles) is not { } line) continue;
+                if (space is null) continue;
+                var applyGridPitch = !space.InCell || adjustLineHeightInTable;
+                if (DrawnParagraphLine(paragraph, space, applyGridPitch ? linePitch : null, hasLineGrid && applyGridPitch,
+                    hasUnsupportedCharacterGrid, styles, hiddenStyles) is not { } line) continue;
 
                 var shapes = owners.Select(owner => ReadDocxDrawnShape(owner, paragraph, line, cell is not null, hiddenStyles)).ToList();
                 var obstacles = shapes.Where(shape => shape.Obstacle is not null).ToList();
@@ -456,14 +483,17 @@ public sealed partial class DocxAdapter
                 foreach (var shape in shapes)
                 {
                     if (shape.Stroke is not { } stroke || shape.Candidate is not { } candidate || DrawnLineRules.Match(stroke, line.Extent) is not { } match) continue;
+                    // Unknown character pitch cannot establish an underline's coverage. Keep the
+                    // drawing available to the existing visual fallback instead of consuming it.
+                    if (line.WidthUnsupported && match.Kind == DrawnKind.Underline) continue;
                     // A paragraph-relative line of a paragraph with space before it lies where the layout says: not known here.
                     if (candidate.VerticalRelativeFrom == "paragraph" && line.BeforeUnknown) continue;
                     var others = obstacles.Where(other => !ReferenceEquals(other, shape)).Select(other => other.Obstacle!);
                     if (DrawnLineRules.MeetsAnother(stroke, line.Extent.Size, others)) continue;
                     consumed.Add(candidate.Owner);
                     any = true;
-                    if (match.Kind == DrawnKind.Strike) { if (match.Whole) decoration.Strike = true; else partialStrike = true; }
-                    else if (match.Whole) decoration.Underline = true;
+                    if (match.Kind == DrawnKind.Strike) { if (match.Whole && !line.WidthUnsupported) decoration.Strike = true; else partialStrike = true; }
+                    else if (match.Whole && !line.WidthUnsupported) decoration.Underline = true;
                 }
                 if (!any) continue;
                 // A paragraph the runs already strike whole needs no review for a line across part of it.

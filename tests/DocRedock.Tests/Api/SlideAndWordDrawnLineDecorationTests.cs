@@ -1381,6 +1381,78 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests : IDisposable
     }
 
     [Fact]
+    public async Task A_table_doc_grid_applies_line_pitch_only_when_compatibility_enables_it()
+    {
+        var gridSection = SectionProperties.Replace("</w:sectPr>", "<w:docGrid w:type=\"lines\" w:linePitch=\"480\"/></w:sectPr>", StringComparison.Ordinal);
+        var table = () => WordTable(
+            $"<w:tr>{WordCell(WordParagraph("Table price 1000 yen", WordLine(-2, 12, 104)))}</w:tr>",
+            grid: "<w:gridCol w:w=\"4680\"/>");
+        var settings = (string element) => new Dictionary<string, string>
+        {
+            ["word/settings.xml"] = $"<w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:compat>{element}</w:compat></w:settings>",
+        };
+
+        // Without the compatibility switch, a cell uses natural line height: this is an underline.
+        var missing = Document("table-grid-missing.docx", table(), section: gridSection);
+        Assert.Contains("<u>Table price 1000 yen</u>", (await Export(missing)).Markdown, StringComparison.Ordinal);
+        var off = Document("table-grid-off.docx", table(), parts: settings("<w:adjustLineHeightInTable w:val=\"0\"/>"), section: gridSection);
+        Assert.Contains("<u>Table price 1000 yen</u>", (await Export(off)).Markdown, StringComparison.Ordinal);
+
+        // The explicit on setting applies the 24 pt grid pitch and moves the same line into the strike zone.
+        var on = Document("table-grid-on.docx", table(), parts: settings("<w:adjustLineHeightInTable/>"), section: gridSection);
+        Assert.Contains("~~Table price 1000 yen~~", (await Export(on)).Markdown, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("linesAndChars", 12)]
+    [InlineData("snapToChars", 7)]
+    public async Task A_character_spaced_grid_partial_strike_is_unplaced_and_snap_to_grid_off_keeps_natural_placement(string gridType, double y)
+    {
+        var section = SectionProperties.Replace("</w:sectPr>", $"<w:docGrid w:type=\"{gridType}\" w:linePitch=\"480\" w:charSpace=\"40960\"/></w:sectPr>", StringComparison.Ordinal);
+        var partial = Document("char-grid-partial.docx", WordParagraph("東京都", WordLine(-2, y, 42)), section: section);
+        var node = ParagraphNodes(ExtractDocument(partial)).Single();
+        Assert.Null(Extension(node, "strike_ranges"));
+        Assert.Equal("true", Extension(node, ReviewExtensionKeys.StrikeUnplaced));
+        var (markdown, result) = await Export(partial);
+        Assert.DoesNotContain("~~", markdown, StringComparison.Ordinal);
+        Assert.Equal(ReviewElementKind.StrikethroughUnplaced,
+            Assert.Single(Assert.Single(ExportReviewBuilder.Build(result.Graph, result.Diagnostics).Pages).Elements).Kind);
+
+        var snapOff = Document("char-grid-snap-off.docx",
+            WordParagraph("東京都", WordLine(-2, 7, 42), "<w:snapToGrid w:val=\"0\"/>", "<w:snapToGrid w:val=\"0\"/>"), section: section);
+        Assert.Contains("~~東京都~~", (await Export(snapOff)).Markdown, StringComparison.Ordinal);
+
+        // Disabling paragraph line pitch alone leaves character pitch active on the run.
+        var paragraphSnapOff = Document("char-grid-paragraph-snap-off.docx",
+            WordParagraph("東京都", WordLine(-2, 7, 42), "<w:snapToGrid w:val=\"0\"/>"), section: section);
+        var paragraphNode = ParagraphNodes(ExtractDocument(paragraphSnapOff)).Single();
+        Assert.Equal("true", Extension(paragraphNode, ReviewExtensionKeys.StrikeUnplaced));
+        Assert.DoesNotContain("~~", (await Export(paragraphSnapOff)).Markdown, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("480.5")]
+    [InlineData("4.8e2")]
+    public async Task A_doc_grid_line_pitch_must_be_a_positive_invariant_integer(string linePitch)
+    {
+        var section = SectionProperties.Replace("</w:sectPr>", $"<w:docGrid w:type=\"lines\" w:linePitch=\"{linePitch}\"/></w:sectPr>", StringComparison.Ordinal);
+        var source = Document("invalid-grid-pitch.docx", WordParagraph("Old price 1000 yen", WordLine(-2, 12, 104)), section: section);
+        Assert.DoesNotContain("~~", (await Export(source)).Markdown, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("linesAndChars", 17)]
+    [InlineData("snapToChars", 12)]
+    public async Task A_character_grid_underline_of_unknown_width_remains_a_drawing(string gridType, double y)
+    {
+        var section = SectionProperties.Replace("</w:sectPr>", $"<w:docGrid w:type=\"{gridType}\" w:linePitch=\"480\" w:charSpace=\"40960\"/></w:sectPr>", StringComparison.Ordinal);
+        var source = Document("char-grid-underline.docx", WordParagraph("東京都", WordLine(-2, y, 42)), section: section);
+
+        Assert.True(HasUnresolvedLine(ExtractDocument(source)));
+        Assert.DoesNotContain("<u>", (await Export(source)).Markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task The_size_and_spacing_come_from_the_styles_of_the_paragraph_and_the_defaults_of_the_document()
     {
         // 24 pt text in a style: the baseline is 21.1 pt under the top, and a line 14 pt under it a strikethrough (0.3 em above the

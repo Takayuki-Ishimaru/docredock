@@ -75,7 +75,7 @@ public static class MarkdownInlineParser
     private const char PlaceholderLast = '\uFDEF';
 
     private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>[^*]+)\*|_(?<emUnderscore>[^_\r\n]+)_",
+        @"(?<safeTag><br\s*/?>|</?(?:u|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
         RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     /// <summary>Reads one run of inline Markdown into the shared syntax tree.</summary>

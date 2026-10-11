@@ -119,12 +119,98 @@ public sealed class PdfMeasuredLineTests : IDisposable
     {
         const int size = 11;
         const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
-        var rows = Enumerable.Range(0, 3).Select(index => string.Join("\n",
-            Show(index == 2 ? 74.07 : 72, 700 - index * 15, size, (1000 + index * 1000).ToString(System.Globalization.CultureInfo.InvariantCulture)),
-            Show(98.391, 700 - index * 15, size, index == 0 ? "N/A" : index == 1 ? "struck" : "link")));
+        var labels = new[] { "Widget", "Gadget", "Plain", "Terms" };
+        var notes = new[] { "N/A", "struck", "literal", "link" };
+        var amounts = new[] { 1000, 2000, 3000, 5000 };
+        var rows = Enumerable.Range(0, labels.Length).Select(index => string.Join("\n",
+            Show(72, 700 - index * 15, size, labels[index]),
+            Show(index >= 2 ? 152.07 : 150, 700 - index * 15, size, amounts[index].ToString(System.Globalization.CultureInfo.InvariantCulture)),
+            Show(176.391, 700 - index * 15, size, notes[index])));
         var lines = Lines(string.Join("\n", rows), resources);
 
-        Assert.Equal(["1000 N/A", "2000 struck", "3000 link"], lines.Select(line => line.Text));
+        Assert.Equal(["Widget", "Gadget", "Plain", "Terms", "1000 N/A", "2000 struck", "3000 literal", "5000 link"], lines.Select(line => line.Text));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Repeated_short_numeric_suffixes_stay_one_token_with_or_without_a_leading_label(bool hasLabel)
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var rows = Enumerable.Range(0, 3).Select(index => string.Join("\n",
+            hasLabel ? Show(72, 700 - index * 15, size, "Model") : string.Empty,
+            Show(hasLabel ? 140 : 72, 700 - index * 15, size, new[] { "4", "8", "9" }[index]),
+            Show(hasLabel ? 147.5 : 79.5, 700 - index * 15, size, "K")));
+
+        var lines = Lines(string.Join("\n", rows), resources).Select(line => line.Text);
+        var expected = hasLabel ? new[] { "Model", "Model", "Model", "4K", "8K", "9K" } : new[] { "4K", "8K", "9K" };
+        Assert.Equal(expected, lines);
+    }
+
+    [Fact]
+    public void Repeated_short_units_keep_their_numeric_suffix_together_after_a_leading_label()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n",
+            Show(72, 700, size, "Bolt"), Show(140, 700, size, "10"), Show(153, 700, size, "mm"),
+            Show(72, 685, size, "Pipe"), Show(140, 685, size, "20"), Show(153, 685, size, "cm"),
+            Show(72, 670, size, "Wire"), Show(140, 670, size, "30"), Show(153, 670, size, "mm"));
+
+        Assert.Equal(["Bolt", "Pipe", "Wire", "10mm", "20cm", "30mm"], Lines(content, resources).Select(line => line.Text));
+    }
+
+    [Fact]
+    public void Repeated_long_same_units_stay_attached_to_their_numbers()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n",
+            Show(72, 700, size, "Bolt"), Show(140, 700, size, "10"), Show(153, 700, size, "kWh"),
+            Show(72, 685, size, "Pipe"), Show(140, 685, size, "20"), Show(153, 685, size, "kWh"),
+            Show(72, 670, size, "Wire"), Show(140, 670, size, "30"), Show(153, 670, size, "kWh"));
+
+        Assert.Equal(["Bolt", "Pipe", "Wire", "10kWh", "20kWh", "30kWh"], Lines(content, resources).Select(line => line.Text));
+    }
+
+    [Fact]
+    public void Different_long_letter_units_stay_attached_to_their_numbers()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n",
+            Show(72, 700, size, "Bolt"), Show(140, 700, size, "10"), Show(153, 700, size, "kWh"),
+            Show(72, 685, size, "Pipe"), Show(140, 685, size, "20"), Show(153, 685, size, "mAh"),
+            Show(72, 670, size, "Wire"), Show(140, 670, size, "30"), Show(153, 670, size, "rpm"));
+
+        Assert.Equal(["Bolt", "Pipe", "Wire", "10kWh", "20mAh", "30rpm"], Lines(content, resources).Select(line => line.Text));
+    }
+
+    [Fact]
+    public void Repeated_numeric_text_boundaries_with_unaligned_preceding_labels_do_not_split()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n",
+            Show(72, 700, size, "Model"), Show(150, 700, size, "1000"), Show(176.391, 700, size, "N/A"),
+            Show(80, 685, size, "Device"), Show(150, 685, size, "2000"), Show(176.391, 685, size, "struck"),
+            Show(88, 670, size, "Screen"), Show(150, 670, size, "3000"), Show(176.391, 670, size, "link"));
+
+        Assert.Equal(["Model 1000N/A", "Device 2000struck", "Screen 3000link"], Lines(content, resources).Select(line => line.Text));
+    }
+
+    [Fact]
+    public void Numeric_only_preceding_fragments_do_not_count_as_an_independent_label_column()
+    {
+        const int size = 11;
+        const string resources = "<< /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >>";
+        var content = string.Join("\n",
+            Show(72, 700, size, "2026"), Show(150, 700, size, "1000"), Show(176.391, 700, size, "N/A"),
+            Show(72, 685, size, "2027"), Show(150, 685, size, "2000"), Show(176.391, 685, size, "struck"),
+            Show(72, 670, size, "2028"), Show(150, 670, size, "3000"), Show(176.391, 670, size, "link"));
+
+        Assert.Equal(["2026", "2027", "2028", "1000N/A", "2000struck", "3000link"], Lines(content, resources).Select(line => line.Text));
     }
 
     [Theory]

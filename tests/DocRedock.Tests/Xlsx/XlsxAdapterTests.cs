@@ -119,8 +119,29 @@ public sealed class XlsxAdapterTests
         var result = new XlsxAdapter().Extract(new MemoryStream(bytes));
         var cell = Assert.Single(result.Worksheets).Cells.Single(item => item.CellReference == "A1");
 
-        Assert.Null(cell.StruckRanges);
-        Assert.False(cell.DisplayStyle!.IsStrike);
+        Assert.True(cell.DisplayStyle!.IsStrike);
+        var strike = Assert.Single(cell.StruckRanges!);
+        Assert.Equal(0, strike.Start);
+        Assert.Equal(cell.Value!.Length, strike.End);
+        Assert.Contains(result.Warnings, warning => warning ==
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("false")]
+    public void Referenced_conditional_strike_off_dxf_is_reported_without_applying_unevaluated_formatting(string value)
+    {
+        var bytes = WithConditionalFormatting(
+            $"<dxfs count=\"1\"><dxf><font><strike val=\"{value}\" /></font></dxf></dxfs>",
+            "<conditionalFormatting sqref=\"A1\"><cfRule type=\"cellIs\" dxfId=\"0\" priority=\"1\" operator=\"equal\"><formula>1</formula></cfRule></conditionalFormatting>");
+        var result = new XlsxAdapter().Extract(new MemoryStream(bytes));
+        var cell = Assert.Single(result.Worksheets).Cells.Single(item => item.CellReference == "A1");
+
+        Assert.True(cell.DisplayStyle!.IsStrike);
+        var strike = Assert.Single(cell.StruckRanges!);
+        Assert.Equal(0, strike.Start);
+        Assert.Equal(cell.Value!.Length, strike.End);
         Assert.Contains(result.Warnings, warning => warning ==
             "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
     }
@@ -154,6 +175,58 @@ public sealed class XlsxAdapterTests
         Assert.Equal("Keep B1", Assert.Single(cells, cell => cell.CellReference == "B1").Value);
         Assert.Contains(result.Warnings, warning => warning ==
             "XlsxDuplicateCellReference: Sheet1!A1 occurred more than once; the last cell was retained.");
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Discarded_shared_hyperlink_master_does_not_suppress_member_underline(bool duplicateWinnerAppearsAfterMember)
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"2\">" +
+            "<font><name val=\"Calibri\"/></font><font><name val=\"Calibri\"/><u/></font></fonts>" +
+            "<cellXfs count=\"2\"><xf fontId=\"0\"/><xf fontId=\"1\" applyFont=\"1\"/></cellXfs></styleSheet>");
+        const string master = "<c r=\"A1\"><f t=\"shared\" ref=\"A1:B1\" si=\"0\">HYPERLINK(&quot;https://example.invalid&quot;,&quot;source link&quot;)</f><v>master cached</v></c>";
+        const string replacement = "<c r=\"A1\" t=\"inlineStr\"><is><t>last cell kept</t></is></c>";
+        const string member = "<c r=\"B1\" s=\"1\" t=\"str\"><f t=\"shared\" si=\"0\"/><v>ordinary underlined text</v></c>";
+        var cells = duplicateWinnerAppearsAfterMember ? master + member + replacement : master + replacement + member;
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">" +
+            cells + "</row></sheetData></worksheet>");
+
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var worksheet = Assert.Single(result.Worksheets);
+        var retainedA1 = Assert.Single(worksheet.Cells, cell => cell.CellReference == "A1");
+        var memberCell = Assert.Single(worksheet.Cells, cell => cell.CellReference == "B1");
+
+        Assert.Equal("last cell kept", retainedA1.Value);
+        Assert.NotNull(memberCell.UnderlinedRanges);
+        Assert.Contains(memberCell.UnderlinedRanges!, range => range.Start == 0 && range.End == "ordinary underlined text".Length);
+        Assert.Contains(result.FormulaDiagnostics, diagnostic => diagnostic.CellReference == "A1" && diagnostic.Safety == XlsxFormulaSafety.Suspicious);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Retained_shared_hyperlink_master_suppresses_member_static_underline(bool masterAppearsAfterMember)
+    {
+        var entries = Entries(CreatePackage());
+        entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(
+            "<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><fonts count=\"2\">" +
+            "<font><name val=\"Calibri\"/></font><font><name val=\"Calibri\"/><u/></font></fonts>" +
+            "<cellXfs count=\"2\"><xf fontId=\"0\"/><xf fontId=\"1\" applyFont=\"1\"/></cellXfs></styleSheet>");
+        const string master = "<c r=\"A1\"><f t=\"shared\" ref=\"A1:B1\" si=\"0\">HYPERLINK(&quot;https://example.invalid&quot;,&quot;source link&quot;)</f><v>master cached</v></c>";
+        const string member = "<c r=\"B1\" s=\"1\" t=\"str\"><f t=\"shared\" si=\"0\"/><v>ordinary underlined text</v></c>";
+        var cells = masterAppearsAfterMember ? member + master : master + member;
+        entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(
+            "<worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><sheetData><row r=\"1\">" +
+            cells + "</row></sheetData></worksheet>");
+
+        var result = new XlsxAdapter().Extract(new MemoryStream(Pack(entries)));
+        var memberCell = Assert.Single(Assert.Single(result.Worksheets).Cells, cell => cell.CellReference == "B1");
+
+        Assert.Null(memberCell.UnderlinedRanges);
     }
 
     [Theory]
@@ -1796,7 +1869,10 @@ public sealed class XlsxAdapterTests
     private static byte[] WithConditionalFormatting(string dxfs, string rules)
     {
         var entries = Entries(CreatePackage());
-        var styles = Encoding.UTF8.GetString(entries["xl/styles.xml"]);
+        var styles = Encoding.UTF8.GetString(entries["xl/styles.xml"])
+            .Replace("<fonts count=\"1\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font></fonts>",
+                "<fonts count=\"2\"><font><name val=\"BIZ UDPGothic\" /><sz val=\"11\" /></font><font><strike /></font></fonts>", StringComparison.Ordinal)
+            .Replace("<xf fontId=\"0\" applyFont=\"1\" />", "<xf fontId=\"1\" applyFont=\"1\" />", StringComparison.Ordinal);
         entries["xl/styles.xml"] = Encoding.UTF8.GetBytes(styles.Replace("</styleSheet>", dxfs + "</styleSheet>", StringComparison.Ordinal));
         var worksheet = Encoding.UTF8.GetString(entries["xl/worksheets/sheet1.xml"]);
         entries["xl/worksheets/sheet1.xml"] = Encoding.UTF8.GetBytes(worksheet.Replace("</worksheet>", rules + "</worksheet>", StringComparison.Ordinal));

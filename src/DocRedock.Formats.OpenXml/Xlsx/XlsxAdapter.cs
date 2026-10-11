@@ -67,7 +67,7 @@ public sealed record XlsxCellStyle(
     bool IsStrike = false,
     bool IsUnderline = false);
 
-internal sealed record XlsxStyleData(IReadOnlyList<XlsxCellStyle> CellStyles, IReadOnlySet<int> StruckDifferentialStyleIds);
+internal sealed record XlsxStyleData(IReadOnlyList<XlsxCellStyle> CellStyles, IReadOnlySet<int> StrikeDifferentialStyleIds);
 
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
@@ -338,6 +338,10 @@ public sealed record XlsxRestoreResult(byte[] Bytes, bool IsByteIdentical, XlsxP
 /// <summary>BCL-only XLSX extractor and minimal cell patcher. Formulas are classified, never evaluated.</summary>
 public sealed partial class XlsxAdapter
 {
+    private sealed record ParsedWorksheetCell(
+        string Reference, string? Type, string? Style, string? Formula, string? Value, string? SharedFormula,
+        IReadOnlyList<XlsxRun>? Runs, int Row, int Column, int SourceOrder);
+
     private const int MaxExcelRows = 1_048_576;
     private const int MaxExcelColumns = 16_384;
     private const long MaxChartResolutionCells = 100_000;
@@ -394,7 +398,7 @@ public sealed partial class XlsxAdapter
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml, sheet.Name, warnings);
-            if (ReferencesConditionalStrike(xml, styleData.StruckDifferentialStyleIds))
+            if (ReferencesConditionalStrike(xml, styleData.StrikeDifferentialStyleIds))
                 warnings.Add($"XlsxConditionalStrikeNotEvaluated: {sheet.Name} has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
             var tables = ReadTables(package, sheet.PartUri, xml);
             var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
@@ -1497,11 +1501,11 @@ public sealed partial class XlsxAdapter
 
     private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, XlsxString> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
     {
-        var result = new List<XlsxCellRecord>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        var isHyperlinkCell = ReadHyperlinkCells(bytes);
-        // The cells filled from a shared formula carry no formula text of their own, only its index.
-        var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var retainedCells = new List<ParsedWorksheetCell>();
         var indexByCoordinate = new Dictionary<(int Row, int Column), int>();
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        var isHyperlinkCell = ReadHyperlinkCells(bytes);
+        var sourceOrder = 0;
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
         {
             var reference = reader.GetAttribute("r") ?? ""; var type = reader.GetAttribute("t"); var style = reader.GetAttribute("s"); string? formula = null; string? value = null;
@@ -1532,13 +1536,54 @@ public sealed partial class XlsxAdapter
             }
             var (row, column) = ParseCellReference(reference);
             if (row == 0 || column == 0) continue;
-            if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) (value, runs) = (sharedValue.Text, sharedValue.Runs);
             if (formula is not null)
             {
                 diagnostics.Add(ClassifyFormula(reference, formula) with { SheetName = sheet });
-                if (string.IsNullOrWhiteSpace(value))
+                var cachedValue = value;
+                if (type == "s" && cachedValue is not null && shared.TryGetValue(cachedValue, out var cachedSharedValue))
+                    cachedValue = cachedSharedValue.Text;
+                if (string.IsNullOrWhiteSpace(cachedValue))
                     warnings.Add($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!{reference} has no cached value; DocRedock did not evaluate it.");
             }
+
+            var coordinate = (row, column);
+            var parsed = new ParsedWorksheetCell(reference, type, style, formula, value, sharedFormula, runs,
+                row, column, sourceOrder);
+            sourceOrder++;
+            if (indexByCoordinate.TryGetValue(coordinate, out var existing))
+            {
+                warnings.Add($"XlsxDuplicateCellReference: {sheet}!{reference} occurred more than once; the last cell was retained.");
+                retainedCells[existing] = parsed;
+            }
+            else
+            {
+                indexByCoordinate.Add(coordinate, retainedCells.Count);
+                retainedCells.Add(parsed);
+            }
+        }
+
+        // Resolve shared-formula link flags only from the winning record at each coordinate. A
+        // discarded duplicate master must not mark a surviving shared-formula member as a link.
+        // Build the map before creating any cells so XML order (including a winning master that
+        // appears after its member) cannot change the result.
+        var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
+        foreach (var cell in retainedCells.OrderBy(cell => cell.SourceOrder))
+            if (cell.SharedFormula is not null && !string.IsNullOrWhiteSpace(cell.Formula))
+                sharedLinks[cell.SharedFormula] = HyperlinkFormula.IsMatch(cell.Formula);
+
+        var result = new List<XlsxCellRecord>(retainedCells.Count);
+        foreach (var sourceCell in retainedCells)
+        {
+            var reference = sourceCell.Reference;
+            var type = sourceCell.Type;
+            var style = sourceCell.Style;
+            var formula = sourceCell.Formula;
+            var sharedFormula = sourceCell.SharedFormula;
+            var row = sourceCell.Row;
+            var column = sourceCell.Column;
+            var value = sourceCell.Value;
+            var runs = sourceCell.Runs;
+            if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) (value, runs) = (sharedValue.Text, sharedValue.Runs);
             var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
                 ? styles[styleIndex]
                 : null;
@@ -1549,7 +1594,6 @@ public sealed partial class XlsxAdapter
             else if (formula is not null)
             {
                 formulaLinks = HyperlinkFormula.IsMatch(formula);
-                if (sharedFormula is not null) sharedLinks[sharedFormula] = formulaLinks;
             }
             var isLink = formulaLinks || isHyperlinkCell(row, column);
             var cell = new XlsxCellRecord(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
@@ -1558,17 +1602,7 @@ public sealed partial class XlsxAdapter
                 StruckRanges = MarkedRanges(value, richRuns, run => run.Strike, displayStyle?.IsStrike == true),
                 UnderlinedRanges = isLink ? null : MarkedRanges(value, richRuns, run => run.Underline, displayStyle?.IsUnderline == true),
             };
-            var coordinate = (row, column);
-            if (indexByCoordinate.TryGetValue(coordinate, out var existing))
-            {
-                warnings.Add($"XlsxDuplicateCellReference: {sheet}!{reference} occurred more than once; the last cell was retained.");
-                result[existing] = cell;
-            }
-            else
-            {
-                indexByCoordinate.Add(coordinate, result.Count);
-                result.Add(cell);
-            }
+            result.Add(cell);
         }
         return result;
     }
@@ -1597,10 +1631,11 @@ public sealed partial class XlsxAdapter
         var formats = DirectChild(root, "numFmts")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "numFmt")
             .Select(format => (Id: int.TryParse(format.GetAttribute("numFmtId"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) ? id : -1, Format: format.GetAttribute("formatCode")))
             .Where(item => item.Id >= 0).ToDictionary(item => item.Id, item => item.Format) ?? new Dictionary<int, string>();
-        var struckDifferentialStyleIds = (DirectChild(root, "dxfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "dxf") ?? [])
+        var strikeDifferentialStyleIds = (DirectChild(root, "dxfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "dxf") ?? [])
             .Select((dxf, index) => (Dxf: dxf, Index: index))
-            .Where(item => DirectChild(item.Dxf, "font") is { } font && DirectChild(font, "strike") is { } strike &&
-                           IsOn(strike.GetAttribute("val") is { Length: > 0 } val ? val : null))
+            // Presence matters even when val="0"/"false": a conditional dxf can clear a
+            // strike inherited from the cell style, and its condition is not evaluated here.
+            .Where(item => DirectChild(item.Dxf, "font") is { } font && DirectChild(font, "strike") is not null)
             .Select(item => item.Index).ToHashSet();
 
         var xfs = DirectChild(root, "cellXfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "xf") ?? [];
@@ -1622,12 +1657,12 @@ public sealed partial class XlsxAdapter
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Strike,
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Underline);
         }).ToArray();
-        return new(cellStyles, struckDifferentialStyleIds);
+        return new(cellStyles, strikeDifferentialStyleIds);
     }
 
-    private static bool ReferencesConditionalStrike(byte[] worksheetXml, IReadOnlySet<int> struckDifferentialStyleIds)
+    private static bool ReferencesConditionalStrike(byte[] worksheetXml, IReadOnlySet<int> strikeDifferentialStyleIds)
     {
-        if (struckDifferentialStyleIds.Count == 0) return false;
+        if (strikeDifferentialStyleIds.Count == 0) return false;
         var document = new XmlDocument();
         using var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml);
         document.Load(reader);
@@ -1636,7 +1671,7 @@ public sealed partial class XlsxAdapter
         {
             if (string.IsNullOrWhiteSpace(formatting.GetAttribute("sqref"))) continue;
             foreach (var rule in formatting.ChildNodes.OfType<XmlElement>().Where(element => element.LocalName == "cfRule" && element.NamespaceURI == worksheetNamespace))
-                if (AttributeInt(rule, "dxfId") is { } id && struckDifferentialStyleIds.Contains(id)) return true;
+                if (AttributeInt(rule, "dxfId") is { } id && strikeDifferentialStyleIds.Contains(id)) return true;
         }
         return false;
     }

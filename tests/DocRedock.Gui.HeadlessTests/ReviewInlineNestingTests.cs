@@ -23,4 +23,17 @@ public sealed class ReviewInlineNestingTests
         Assert.Contains(Assert.Single(runs, run => run.Text == "下線").TextDecorations!, decoration => decoration.Location == TextDecorationLocation.Underline);
         Assert.All(runs, run => Assert.Contains(run.TextDecorations!, decoration => decoration.Location == TextDecorationLocation.Strikethrough));
     }
+
+    [AvaloniaFact]
+    public void Preview_preserves_bold_and_code_nested_inside_italic_strikethrough()
+    {
+        var preview = ReviewMarkdownPreview.Build("~~*italic **bold** `a*b` more* _`a_b`_~~");
+        var block = Assert.Single(preview.GetLogicalDescendants().OfType<SelectableTextBlock>());
+        var runs = block.Inlines!.OfType<Run>().ToArray();
+        Assert.Equal("italic bold a*b more a_b", string.Concat(runs.Select(run => run.Text)));
+        Assert.Equal(FontWeight.SemiBold, Assert.Single(runs, run => run.Text == "bold").FontWeight);
+        Assert.All(runs.Where(run => run.Text is "a*b" or "a_b"), run => Assert.Equal("Menlo", run.FontFamily!.Name));
+        Assert.All(runs.Where(run => run.Text != " "), run => Assert.Equal(FontStyle.Italic, run.FontStyle));
+        Assert.All(runs, run => Assert.Contains(run.TextDecorations!, decoration => decoration.Location == TextDecorationLocation.Strikethrough));
+    }
 }

@@ -179,6 +179,10 @@ public sealed partial class DocxAdapter : IFormatProbe
         var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
         var readabilityStyles = archive.GetEntry("word/styles.xml") is { } readabilityStylesEntry
             ? SafeXml.LoadDocument(await ReadEntryAsync(readabilityStylesEntry, cancellationToken).ConfigureAwait(false)) : null;
+        var settingsDocument = archive.GetEntry("word/settings.xml") is { } settingsEntry
+            ? SafeXml.LoadDocument(await ReadEntryAsync(settingsEntry, cancellationToken).ConfigureAwait(false)) : null;
+        var adjustLineHeightInTable = settingsDocument?.Descendants(W + "compat").Elements(W + "adjustLineHeightInTable")
+            .Any(IsDocxExplicitOn) == true;
         var readability = new DocxReadability(readabilityStyles, bodyElements, element => IsHiddenContentElement(element, hiddenStyles));
         var landscapeSectionStarts = FindLandscapeSectionStarts(doc, bodyElements);
         // P-Overlay: every shape any table's DetectDocxTableOverlays folded into a cell -- (A)
@@ -189,7 +193,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         // Lines drawn over the text of a paragraph are text formatting (DocxAdapter.DrawnLines.cs): such a line is no
         // overlay, no diagram edge and no unresolved line, so it joins the shapes the visual canvas leaves out, and the
         // paragraph or cell it decorates carries the mark.
-        var drawnLines = FindDocxDrawnLines(doc, bodyElements, readabilityStyles, hiddenStyles);
+        var drawnLines = FindDocxDrawnLines(doc, bodyElements, readabilityStyles, hiddenStyles, adjustLineHeightInTable);
         overlayExcludedShapes.UnionWith(drawnLines.Consumed);
         // D5: the most recently processed paragraph's own `order` value (the `ordinal` counter's
         // value at the moment it was assigned) -- kept so a table immediately following one can
@@ -280,8 +284,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
 
         var sourceHash = await HashFileAsync(sourcePath, cancellationToken).ConfigureAwait(false);
-        var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() ||
-            await HasDocumentProtectionAsync(archive, cancellationToken).ConfigureAwait(false);
+        var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() || settingsDocument?.Descendants(W + "documentProtection").Any() == true;
         var hasTrackedRevisions = doc.Descendants(W + "ins").Any() || doc.Descendants(W + "del").Any();
         var index = new DocxSourceIndex(sourcePath, sourceHash, sliceMap, runMaps, slices.BodyEndTagStart,
             archive.GetEntry("word/vbaProject.bin") is not null,
@@ -3354,14 +3357,6 @@ public sealed partial class DocxAdapter : IFormatProbe
             baseSegments.Add(part);
         }
         return string.Join('/', baseSegments);
-    }
-
-    private static async Task<bool> HasDocumentProtectionAsync(ZipArchive archive, CancellationToken cancellationToken)
-    {
-        var settings = archive.GetEntry("word/settings.xml");
-        if (settings is null) return false;
-        var xml = SafeXml.LoadDocument(await ReadEntryAsync(settings, cancellationToken).ConfigureAwait(false));
-        return xml.Descendants(W + "documentProtection").Any();
     }
 
     private static string NormalizeEntryName(string name) => name.TrimStart('/');

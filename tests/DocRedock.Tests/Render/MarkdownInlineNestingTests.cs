@@ -12,6 +12,9 @@ public sealed class MarkdownInlineNestingTests
     [InlineData("**~~*nested*~~**", "<strong><del><em>nested</em></del></strong>", "nested")]
     [InlineData("~~`a~~b`~~", "<del><code>a~~b</code></del>", "a~~b")]
     [InlineData("~~**bold and *nested italic***~~", "<del><strong>bold and <em>nested italic</em></strong></del>", "bold and nested italic")]
+    [InlineData("~~*italic **bold** more*~~", "<del><em>italic <strong>bold</strong> more</em></del>", "italic bold more")]
+    [InlineData("~~*`a*b`*~~", "<del><em><code>a*b</code></em></del>", "a*b")]
+    [InlineData("~~_`a_b`_~~", "<del><em><code>a_b</code></em></del>", "a_b")]
     public void Nested_styles_are_read_once_without_reinterpreting_escaped_text(string markdown, string html, string plain)
     {
         Assert.Equal(html, MarkdownInlineParser.Html(markdown));
@@ -34,10 +37,23 @@ public sealed class MarkdownInlineNestingTests
     }
 
     [Fact]
-    public async Task An_unclosed_strike_with_many_code_spans_does_not_backtrack_through_every_token_choice()
+    public void Italic_children_keep_bold_and_literal_code_delimiters()
     {
-        var markdown = "~~" + string.Concat(Enumerable.Repeat("`code` ", 2000));
+        var runs = MarkdownInlineParser.Runs("~~*italic **bold** `a*b` more* _`a_b`_~~");
+        Assert.True(Assert.Single(runs, run => run.Text == "bold").Bold);
+        Assert.All(runs.Where(run => run.Text is "a*b" or "a_b"), run => Assert.True(run.Code));
+        Assert.All(runs.Where(run => run.Text != " "), run => Assert.True(run.Italic));
+        Assert.All(runs, run => Assert.True(run.Strike));
+    }
+
+    [Theory]
+    [InlineData("~~")]
+    [InlineData("*")]
+    [InlineData("_")]
+    public async Task An_unclosed_style_with_many_code_spans_does_not_backtrack_through_every_token_choice(string delimiter)
+    {
+        var markdown = delimiter + string.Concat(Enumerable.Repeat("`code` ", 2000));
         var plain = await Task.Run(() => MarkdownInlineParser.PlainText(markdown)).WaitAsync(TimeSpan.FromSeconds(3));
-        Assert.Equal("~~" + string.Concat(Enumerable.Repeat("code ", 2000)), plain);
+        Assert.Equal(delimiter + string.Concat(Enumerable.Repeat("code ", 2000)), plain);
     }
 }
