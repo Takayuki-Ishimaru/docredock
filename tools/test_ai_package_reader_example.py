@@ -26,6 +26,10 @@ EXPECTED = {
 
 
 class ReaderContracts(unittest.TestCase):
+    def test_insert_revision_markup_is_ignored_for_search_but_escaped_literal_tags_are_preserved(self):
+        self.assertEqual("before added after", reader._searchable("before <ins>**added**</ins> after"))
+        self.assertEqual("<ins>literal</ins>", reader._searchable("&lt;ins&gt;literal&lt;/ins&gt;"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

@@ -56,6 +56,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 "pack" => await PackAsync(parsed, cancellationToken),
                 "unpack" => await UnpackAsync(parsed, cancellationToken),
                 "rules" => await RulesAsync(parsed, cancellationToken),
+                "licenses" => await LicensesAsync(parsed, cancellationToken),
                 "migrate" => await MigrateAsync(parsed, cancellationToken),
                 "doctor" => await DoctorAsync(parsed),
                 _ => Invalid($"Unknown command '{args[0]}'."),
@@ -131,6 +132,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
             "doctor" => "doctor [--json] [--strict]",
+            "licenses" => "licenses [--json] [--verify] (packages and bundled source data; verification requires the source repository)",
             "inspect" => "inspect <source-or-file.md>",
             "diff" => "diff <file.md> [--json]",
             "verify" => "verify <file.md|file.drmd|file.drmdpkg>",
@@ -648,14 +650,33 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private async Task<int> LicensesAsync(Arguments args, CancellationToken token)
     {
         if (args.Positionals.Count != 0) return Invalid("licenses does not accept an input file.");
-        var root = FindRepositoryRoot(); var path = Path.Combine(root, "licenses", "allowlist.json"); if (!File.Exists(path)) return LicenseFailure("License allowlist was not found.");
-        using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path, token)); var packages = document.RootElement.GetProperty("packages").EnumerateArray().ToArray();
+        string? root = null;
+        try { root = FindRepositoryRoot(); } catch (FileNotFoundException) { }
+        var path = root is null ? null : Path.Combine(root, "licenses", "allowlist.json");
+        await using var stream = path is not null && File.Exists(path) ? File.OpenRead(path) :
+            typeof(CliApplication).Assembly.GetManifestResourceStream("DocRedock.LicenseAllowlist.json");
+        if (stream is null) return LicenseFailure("License allowlist was not found.");
+        using var document = await JsonDocument.ParseAsync(stream, cancellationToken: token);
+        var packages = document.RootElement.GetProperty("packages").EnumerateArray().ToArray();
         if (args.HasFlag("json")) await output.WriteLineAsync(document.RootElement.GetRawText());
-        else { await output.WriteLineAsync($"Allowlisted dependencies: {packages.Length}"); foreach (var item in packages.OrderBy(item => item.GetProperty("id").GetString(), StringComparer.OrdinalIgnoreCase)) await output.WriteLineAsync($"{item.GetProperty("id").GetString()} {item.GetProperty("version").GetString()} — {item.GetProperty("license").GetString()}"); }
+        else
+        {
+            await output.WriteLineAsync($"Allowlisted dependencies: {packages.Length}");
+            foreach (var item in packages.OrderBy(item => item.GetProperty("id").GetString(), StringComparer.OrdinalIgnoreCase))
+                await output.WriteLineAsync($"{item.GetProperty("id").GetString()} {item.GetProperty("version").GetString()} — {item.GetProperty("license").GetString()}");
+            if (document.RootElement.TryGetProperty("sourceData", out var data))
+            {
+                await output.WriteLineAsync($"Bundled source data: {data.GetArrayLength()}");
+                foreach (var item in data.EnumerateArray())
+                    await output.WriteLineAsync($"{item.GetProperty("id").GetString()} {item.GetProperty("version").GetString()} — {item.GetProperty("license").GetString()} ({item.GetProperty("source").GetString()})");
+            }
+        }
         if (args.HasFlag("verify"))
         {
+            if (root is null) return LicenseFailure("License verification requires the source repository and package lock files.");
             var violations = VerifyLockedPackages(root, packages); foreach (var item in violations) await error.WriteLineAsync(item);
-            if (violations.Count > 0) return 9; await output.WriteLineAsync("License verification: passed");
+            if (violations.Count > 0) return 9;
+            if (!args.HasFlag("json")) await output.WriteLineAsync("License verification: passed");
         }
         return 0;
     }
@@ -768,6 +789,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock unpack <file.drmdpkg> [--output directory]
           docredock unpack <file.drmd> (--in-place | --output directory)
           docredock rules
+          docredock licenses [--json] [--verify]
           docredock migrate <file.md> --to-schema 1.1
           docredock doctor [--json] [--strict]
 

@@ -8,7 +8,7 @@ using static DocRedock.Tests.Pdf.PdfFontResourceScopeTests;
 
 namespace DocRedock.Tests.Pdf;
 
-/// <summary>Japanese text drawn by macOS Quartz in Hiragino (a CID-keyed CFF font written as a Type0
+/// <summary>Text in an unspecified CID collection (a CID-keyed CFF font written as a Type0
 /// font, Identity-H, no ToUnicode map) came out as Latin-1 noise with exit code 0 and no warning: its
 /// codes are glyph indexes, and only a ToUnicode map can say which characters they are. A font whose
 /// codes the file gives no way to read is now never silently trusted: its text is kept and asks for
@@ -22,10 +22,10 @@ public sealed class PdfUndecodableTextTests
     private static byte[] Pdf(string fonts, string content, params string[] objects) =>
         Document([Page(fonts), Stream(2, "", content), .. objects]);
 
-    /// <summary>A Type0 font like Quartz writes for Hiragino: a CID-keyed CFF descendant font.</summary>
+    /// <summary>An unspecified CID collection in a Type0 font: a CID-keyed CFF descendant font.</summary>
     private static string Composite(int id, string entries = "/Encoding /Identity-H") => Object(id,
         $"<< /Type /Font /Subtype /Type0 /BaseFont /AAAAAB+HiraginoSans-W3 {entries} /DescendantFonts [<< /Type /Font /Subtype /CIDFontType0 " +
-        "/BaseFont /AAAAAB+HiraginoSans-W3 /CIDSystemInfo << /Registry (Adobe) /Ordering (Japan1) /Supplement 7 >> /DW 1000 >>] >>");
+        "/BaseFont /AAAAAB+HiraginoSans-W3 /CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 7 >> /DW 1000 >>] >>");
 
     private static string Descriptor(int id, int flags) =>
         Object(id, $"<< /Type /FontDescriptor /FontName /AAAAAB+Subset /Flags {flags} /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 800 /Descent -200 /CapHeight 700 /StemV 80 >>");
@@ -43,7 +43,7 @@ public sealed class PdfUndecodableTextTests
     [Fact]
     public void A_composite_font_without_a_to_unicode_map_is_kept_and_asks_for_source_comparison()
     {
-        // Quartz's Hiragino: Type0, Identity-H, CIDFontType0 with a CFF program, no ToUnicode.
+        // An Identity CID collection requires its own ToUnicode map.
         var pdf = Pdf("/F1 10 0 R", "BT /F1 18 Tf 50 780 Td <00410042> Tj ET", Composite(10));
 
         var result = PdfTextExtractor.Extract(pdf);

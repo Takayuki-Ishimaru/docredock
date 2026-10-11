@@ -10,7 +10,7 @@ using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.Xlsx;
 
-public sealed class XlsxAdapterTests
+public sealed partial class XlsxAdapterTests
 {
     [Theory]
     [InlineData("centerContinuous", true, 3)]
@@ -124,7 +124,7 @@ public sealed class XlsxAdapterTests
         Assert.Equal(0, strike.Start);
         Assert.Equal(cell.Value!.Length, strike.End);
         Assert.Contains(result.Warnings, warning => warning ==
-            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional strikethrough rule(s) whose conditions, priority or ranges could not be evaluated; ordinary formatting was retained for affected cells.");
     }
 
     [Theory]
@@ -143,13 +143,12 @@ public sealed class XlsxAdapterTests
         Assert.Equal(0, strike.Start);
         Assert.Equal(cell.Value!.Length, strike.End);
         Assert.Contains(result.Warnings, warning => warning ==
-            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
+            "XlsxConditionalStrikeNotEvaluated: Sheet1 has conditional strikethrough rule(s) whose conditions, priority or ranges could not be evaluated; ordinary formatting was retained for affected cells.");
     }
 
     [Theory]
     [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
     [InlineData("<dxfs count=\"2\"><dxf><font><strike /></font></dxf><dxf><font><b /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><cfRule dxfId=\"1\" /></conditionalFormatting>")]
-    [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"\"><cfRule dxfId=\"0\" /></conditionalFormatting>")]
     [InlineData("<dxfs count=\"1\"><dxf><font><strike /></font></dxf></dxfs>", "<conditionalFormatting sqref=\"A1\"><x:cfRule xmlns:x=\"urn:unrelated\" dxfId=\"0\" /></conditionalFormatting>")]
     public void Conditional_formatting_without_a_referenced_strike_dxf_has_no_warning(string dxfs, string rules)
     {

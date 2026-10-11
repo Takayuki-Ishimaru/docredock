@@ -4,7 +4,8 @@ using DocRedock.Core.Reporting;
 
 namespace DocRedock.Formats.OpenXml.Docx;
 
-public sealed record DocxExportOptions(bool IncludeFurniture = true, bool IncludeFootnotes = true, bool StrictSecurity = true);
+public sealed record DocxExportOptions(bool IncludeFurniture = true, bool IncludeFootnotes = true, bool StrictSecurity = true,
+    bool ShowTrackedRevisions = false);
 public sealed record DocxRestoreOptions(bool Strict = true, bool AllowInsertParagraph = true);
 public sealed record RunCharacterSpan(int Start, int End, int RunOrdinal, string Text);
 public sealed record DocxRunCharacterMap(string NodeId, IReadOnlyList<RunCharacterSpan> Spans);

@@ -67,7 +67,7 @@ public sealed record XlsxCellStyle(
     bool IsStrike = false,
     bool IsUnderline = false);
 
-internal sealed record XlsxStyleData(IReadOnlyList<XlsxCellStyle> CellStyles, IReadOnlySet<int> StrikeDifferentialStyleIds);
+internal sealed record XlsxStyleData(IReadOnlyList<XlsxCellStyle> CellStyles, IReadOnlyDictionary<int, bool> StrikeDifferentialStyles);
 
 /// <summary>A DrawingML shape anchored to worksheet coordinates.</summary>
 public sealed record XlsxDrawingShapeRecord(
@@ -398,10 +398,9 @@ public sealed partial class XlsxAdapter
             var hiddenRows = ReadHiddenRows(xml);
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml, sheet.Name, warnings);
-            if (ReferencesConditionalStrike(xml, styleData.StrikeDifferentialStyleIds))
-                warnings.Add($"XlsxConditionalStrikeNotEvaluated: {sheet.Name} has conditional formatting rule(s) that reference strikethrough differential style(s); their conditions were not evaluated.");
             var tables = ReadTables(package, sheet.PartUri, xml);
             var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
+            cells = ApplyConditionalStrike(xml, sheet.Name, cells, styleData.StrikeDifferentialStyles, warnings, cancellationToken);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
@@ -1609,12 +1608,12 @@ public sealed partial class XlsxAdapter
 
     private static XlsxStyleData ReadStyles(Dictionary<string, byte[]> package)
     {
-        if (!package.TryGetValue("xl/styles.xml", out var bytes)) return new([], new HashSet<int>());
+        if (!package.TryGetValue("xl/styles.xml", out var bytes)) return new([], new Dictionary<int, bool>());
         var document = new XmlDocument();
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         document.Load(reader);
         var root = document.DocumentElement;
-        if (root is null) return new([], new HashSet<int>());
+        if (root is null) return new([], new Dictionary<int, bool>());
 
         var fonts = DirectChild(root, "fonts")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "font")
             .Select(font => new
@@ -1633,10 +1632,9 @@ public sealed partial class XlsxAdapter
             .Where(item => item.Id >= 0).ToDictionary(item => item.Id, item => item.Format) ?? new Dictionary<int, string>();
         var strikeDifferentialStyleIds = (DirectChild(root, "dxfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "dxf") ?? [])
             .Select((dxf, index) => (Dxf: dxf, Index: index))
-            // Presence matters even when val="0"/"false": a conditional dxf can clear a
-            // strike inherited from the cell style, and its condition is not evaluated here.
+            // An omitted strike property keeps the underlying style; explicit false clears it.
             .Where(item => DirectChild(item.Dxf, "font") is { } font && DirectChild(font, "strike") is not null)
-            .Select(item => item.Index).ToHashSet();
+            .ToDictionary(item => item.Index, item => IsOn(DirectChild(DirectChild(item.Dxf, "font")!, "strike")!.GetAttribute("val") is { Length: > 0 } value ? value : null));
 
         var xfs = DirectChild(root, "cellXfs")?.ChildNodes.OfType<XmlElement>().Where(x => x.LocalName == "xf") ?? [];
         var cellStyles = xfs.Select(xf =>
@@ -1658,22 +1656,6 @@ public sealed partial class XlsxAdapter
                 fontId.HasValue && fontId.Value >= 0 && fontId.Value < fonts.Length && fonts[fontId.Value].Underline);
         }).ToArray();
         return new(cellStyles, strikeDifferentialStyleIds);
-    }
-
-    private static bool ReferencesConditionalStrike(byte[] worksheetXml, IReadOnlySet<int> strikeDifferentialStyleIds)
-    {
-        if (strikeDifferentialStyleIds.Count == 0) return false;
-        var document = new XmlDocument();
-        using var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml);
-        document.Load(reader);
-        var worksheetNamespace = document.DocumentElement?.NamespaceURI ?? string.Empty;
-        foreach (var formatting in document.GetElementsByTagName("conditionalFormatting", worksheetNamespace).OfType<XmlElement>())
-        {
-            if (string.IsNullOrWhiteSpace(formatting.GetAttribute("sqref"))) continue;
-            foreach (var rule in formatting.ChildNodes.OfType<XmlElement>().Where(element => element.LocalName == "cfRule" && element.NamespaceURI == worksheetNamespace))
-                if (AttributeInt(rule, "dxfId") is { } id && strikeDifferentialStyleIds.Contains(id)) return true;
-        }
-        return false;
     }
 
     private static int? AttributeInt(XmlElement element, string attribute) =>

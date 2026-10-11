@@ -570,7 +570,7 @@ public sealed partial class ReadableMarkdownSerializer
                         WriteQuote(output, displayText);
                         break;
                     case NodeKind.CodeBlock when ExtensionRanges(node, "strike_ranges") is not null || ExtensionRanges(node, "underline_ranges") is not null ||
-                                                  node.Content is RichTextNodeContent markedCode && markedCode.Runs.Any(run => run.Strike || run.Underline):
+                                                  node.Content is RichTextNodeContent markedCode && markedCode.Runs.Any(run => run.Strike || run.Underline || run.Inserted):
                         // A code fence is verbatim and has no place for a mark: text struck or underlined (a line drawn over a code-style
                         // paragraph) is written as a paragraph with its marks, as an Excel cell of code is.
                         WriteParagraph(output, displayText);
@@ -3386,6 +3386,21 @@ public sealed partial class ReadableMarkdownSerializer
     // profile — which reuses that same shared serializer — renders exactly as it did before.
     private static string ReadableInlineText(IReadOnlyList<TextRun> runs)
     {
+        if (runs.Any(run => run.Inserted))
+        {
+            // Keep revision wrappers outside the run formatting, so an insertion split by
+            // bold/code/colour still reads as one addition. Round-trip inline-v1 ignores it.
+            var output = new StringBuilder();
+            for (var from = 0; from < runs.Count;)
+            {
+                var to = from + 1;
+                while (to < runs.Count && runs[to].Inserted == runs[from].Inserted) to++;
+                var segment = ReadableInlineText(runs.Skip(from).Take(to - from).Select(run => run with { Inserted = false }).ToArray());
+                output.Append(runs[from].Inserted ? Delimited(segment, "<ins>", "</ins>") : segment);
+                from = to;
+            }
+            return output.ToString();
+        }
         var needsDecoration = runs.Any(run =>
             run.LinkTarget is not null ||
             !string.IsNullOrWhiteSpace(run.Color) ||
@@ -3590,6 +3605,12 @@ public sealed partial class ReadableMarkdownSerializer
                 case UnderlineClose:
                     output.Append("</u>");
                     break;
+                case InsertedOpen:
+                    output.Append("<ins>");
+                    break;
+                case InsertedClose:
+                    output.Append("</ins>");
+                    break;
                 default:
                     output.Append(character);
                     break;
@@ -3607,13 +3628,15 @@ public sealed partial class ReadableMarkdownSerializer
     private const char StruckClose = '\uFDD1';
     private const char UnderlineOpen = '\uFDD2';
     private const char UnderlineClose = '\uFDD3';
+    private const char InsertedOpen = '\uFDD4';
+    private const char InsertedClose = '\uFDD5';
 
-    private static bool IsMarker(char character) => character is >= StruckOpen and <= UnderlineClose;
+    private static bool IsMarker(char character) => character is >= StruckOpen and <= InsertedClose;
 
     // The same four noncharacters in the document itself read as U+FFFD, so that only the markers
     // turn into ~~ and <u>. Every string the serializer writes comes from a node of the projected
     // graph, an extension value, a sheet name or the given title, and each is cleaned where it is read.
-    private static bool HasMarker(string? value) => value is not null && value.AsSpan().IndexOfAnyInRange(StruckOpen, UnderlineClose) >= 0;
+    private static bool HasMarker(string? value) => value is not null && value.AsSpan().IndexOfAnyInRange(StruckOpen, InsertedClose) >= 0;
 
     [return: System.Diagnostics.CodeAnalysis.NotNullIfNotNull(nameof(value))]
     private static string? WithoutMarkers(string? value) =>
@@ -3665,8 +3688,33 @@ public sealed partial class ReadableMarkdownSerializer
     /// outside, so renderers see the delimiters (GFM ignores "~~ word~~"). Where both cover the same
     /// characters underline goes outside (&lt;u&gt;~~text~~&lt;/u&gt;), as for Word runs; a range of one that
     /// crosses the edge of a range of the other is cut there, so that the markers stay balanced.</summary>
-    private static string MarkedText(string text, IReadOnlyList<MarkedSpan>? struck, IReadOnlyList<MarkedSpan>? underlined = null)
+    private static string MarkedText(string text, IReadOnlyList<MarkedSpan>? struck, IReadOnlyList<MarkedSpan>? underlined = null,
+        IReadOnlyList<MarkedSpan>? inserted = null)
     {
+        if (inserted is { Count: > 0 } && MarkedRuns(text, inserted) is { Count: > 0 } additions)
+        {
+            var additionOutput = new StringBuilder();
+            var from = 0;
+            foreach (var (start, end) in additions)
+            {
+                Write(from, start, false);
+                Write(start, end, true);
+                from = end;
+            }
+            Write(from, text.Length, false);
+            return additionOutput.ToString();
+
+            void Write(int start, int end, bool added)
+            {
+                if (end == start) return;
+                IReadOnlyList<MarkedSpan>? Shift(IReadOnlyList<MarkedSpan>? ranges) => ranges?
+                    .Where(range => range.Start < end && range.End > start)
+                    .Select(range => new MarkedSpan(Math.Max(start, range.Start) - start, Math.Min(end, range.End) - start)).ToArray();
+                if (added) additionOutput.Append(InsertedOpen);
+                additionOutput.Append(MarkedText(text[start..end], Shift(struck), Shift(underlined)));
+                if (added) additionOutput.Append(InsertedClose);
+            }
+        }
         if (struck is not { Count: > 0 } && underlined is not { Count: > 0 } || text.Length == 0) return text;
         var underlines = MarkedRuns(text, underlined);
         var strikes = MarkedRuns(text, struck);
@@ -3772,12 +3820,13 @@ public sealed partial class ReadableMarkdownSerializer
     {
         var struck = CellRanges(node, "strike_cells", rows);
         var underlined = CellRanges(node, "underline_cells", rows);
-        if (struck.Count == 0 && underlined.Count == 0) return rows;
+        var inserted = CellRanges(node, "insert_cells", rows);
+        if (struck.Count == 0 && underlined.Count == 0 && inserted.Count == 0) return rows;
         var copy = rows.Select(row => row.ToArray()).ToArray();
-        foreach (var (row, column) in struck.Keys.Union(underlined.Keys))
+        foreach (var (row, column) in struck.Keys.Union(underlined.Keys).Union(inserted.Keys))
             copy[row][column] = copy[row][column] with
             {
-                Text = MarkedText(copy[row][column].Text, struck.GetValueOrDefault((row, column)), underlined.GetValueOrDefault((row, column)))
+                Text = MarkedText(copy[row][column].Text, struck.GetValueOrDefault((row, column)), underlined.GetValueOrDefault((row, column)), inserted.GetValueOrDefault((row, column)))
             };
         return copy;
     }
@@ -3827,13 +3876,14 @@ public sealed partial class ReadableMarkdownSerializer
         if (node.Content is not TextNodeContent { Text: var text }) return rawText;
         var struck = ExtensionRanges(node, "strike_ranges");
         var underlined = IsHeadingLike(node) ? null : ExtensionRanges(node, "underline_ranges");
-        if (struck is null && underlined is null) return rawText;
+        var inserted = ExtensionRanges(node, "insert_ranges");
+        if (struck is null && underlined is null && inserted is null) return rawText;
         var leading = text.Length - text.TrimStart().Length;
         if (rawText != text && rawText != text.Trim()) return rawText;
         var shift = rawText == text ? 0 : leading;
         IReadOnlyList<MarkedSpan>? Shifted(IReadOnlyList<MarkedSpan>? ranges) =>
             ranges?.Select(range => new MarkedSpan(range.Start - shift, range.End - shift)).ToArray();
-        return MarkedText(rawText, Shifted(struck), Shifted(underlined));
+        return MarkedText(rawText, Shifted(struck), Shifted(underlined), Shifted(inserted));
     }
 
     // A heading or a title names what follows it; underline there is styling more than emphasis, and

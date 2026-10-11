@@ -539,7 +539,7 @@ public sealed partial class DocxAdapter
     /// <summary>The text a node of plain text holds, with the characters its struck-through and underlined runs hold, as [start, end)
     /// offsets into it: headers and footers, footnotes and endnotes, and text boxes (<see cref="MarkedParagraphText"/> for each
     /// of their paragraphs, joined with line breaks as <see cref="TextBoxText"/> joins them).</summary>
-    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined) MarkedTextBoxText(
+    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined, IReadOnlyList<(int Start, int End)> Inserted) MarkedTextBoxText(
         XElement textBox, DocxHiddenStyles hiddenStyles)
     {
         var boxes = textBox.Name == W + "txbxContent" ? [textBox] : textBox.Descendants(W + "txbxContent").ToArray();
@@ -548,35 +548,39 @@ public sealed partial class DocxAdapter
         var text = new System.Text.StringBuilder();
         var struck = new List<(int Start, int End)>();
         var underlined = new List<(int Start, int End)>();
+        var inserted = new List<(int Start, int End)>();
         for (var index = 0; index < paragraphs.Length; index++)
         {
             if (index > 0) text.Append('\n');
             var marked = MarkedParagraphText(paragraphs[index], hiddenStyles);
             struck.AddRange(marked.Struck.Select(range => (range.Start + text.Length, range.End + text.Length)));
             underlined.AddRange(marked.Underlined.Select(range => (range.Start + text.Length, range.End + text.Length)));
+            inserted.AddRange(marked.Inserted.Select(range => (range.Start + text.Length, range.End + text.Length)));
             text.Append(marked.Text);
         }
-        return (text.ToString(), struck, underlined);
+        return (text.ToString(), struck, underlined, inserted);
     }
 
-    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined) MarkedParagraphTextOf(
+    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined, IReadOnlyList<(int Start, int End)> Inserted) MarkedParagraphTextOf(
         XContainer container, DocxHiddenStyles hiddenStyles)
     {
         var marked = MarkedParagraphText(container, hiddenStyles);
-        return (marked.Text, marked.Struck, marked.Underlined);
+        return (marked.Text, marked.Struck, marked.Underlined, marked.Inserted);
     }
 
     // Node extensions for the ranges the formatting of a text gives (nothing when there is none, or when the text is not the
     // text the node holds).
     private static Dictionary<string, JsonElement>? WithMarkedRanges(Dictionary<string, JsonElement>? extensions, string nodeText,
-        (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined) marked)
+        (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined, IReadOnlyList<(int Start, int End)> Inserted) marked)
     {
-        if (marked.Text != nodeText || marked.Struck.Count == 0 && marked.Underlined.Count == 0) return extensions;
+        if (marked.Text != nodeText || marked.Struck.Count == 0 && marked.Underlined.Count == 0 && marked.Inserted.Count == 0) return extensions;
         extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         if (marked.Struck.Count > 0)
             extensions["strike_ranges"] = JsonSerializer.SerializeToElement(marked.Struck.Select(range => new[] { range.Start, range.End }).ToArray());
         if (marked.Underlined.Count > 0)
             extensions["underline_ranges"] = JsonSerializer.SerializeToElement(marked.Underlined.Select(range => new[] { range.Start, range.End }).ToArray());
+        if (marked.Inserted.Count > 0)
+            extensions["insert_ranges"] = JsonSerializer.SerializeToElement(marked.Inserted.Select(range => new[] { range.Start, range.End }).ToArray());
         return extensions;
     }
 }
