@@ -238,8 +238,10 @@ public sealed class DocxAdapterTests
         Assert.True((await adapter.RestoreAsync(export, edited, output)).Succeeded);
         var documentXml = ReadDocumentXml(output);
         // Only the run that was struck twice is struck after the edit.
-        Assert.Single(System.Text.RegularExpressions.Regex.Matches(documentXml, "<w:dstrike"));
-        Assert.DoesNotContain("<w:strike", documentXml, StringComparison.Ordinal);
+        var restored = await adapter.ExtractAsync(output);
+        var restoredRuns = restored.Graph.Nodes.SelectMany(node => node.Content is RichTextNodeContent rich ? rich.Runs : []).ToArray();
+        Assert.Equal("消す", Assert.Single(restoredRuns, run => run.Strike).Text);
+        Assert.All(restoredRuns.Where(run => run.Text.StartsWith("消さない", StringComparison.Ordinal)), run => Assert.False(run.Strike));
         Assert.DoesNotContain("<w:b ", documentXml, StringComparison.Ordinal);
         Assert.DoesNotContain("<w:b/>", documentXml, StringComparison.Ordinal);
     }

@@ -294,6 +294,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (options.IncludeFootnotes && archive.GetEntry("word/comments.xml") is { } comments)
             AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
 
+        hiddenStyles.Decorations.AddDiagnostics(diagnostics);
         var sourceHash = await HashFileAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() || settingsDocument?.Descendants(W + "documentProtection").Any() == true;
         var hasTrackedRevisions = doc.Descendants().Any(IsRevisionContainer);
@@ -547,6 +548,11 @@ public sealed partial class DocxAdapter : IFormatProbe
             ? new RichTextNodeContent(richRuns)
             : new TextNodeContent(text);
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (hiddenStyles.Decorations.HasDeclarations)
+        {
+            WithMarkedRanges(extensions, text, MarkedParagraphTextOf(paragraph, hiddenStyles));
+            WithStyleDecorationReview(extensions, paragraph, hiddenStyles);
+        }
         AddRevisionExtensions(extensions, paragraph, hiddenStyles);
         if (extensions.ContainsKey("revision_changes")) projectionLayer = layer;
         if (headingLevel > 0) extensions["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
@@ -660,6 +666,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             // The box's text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
             var boxText = TextBoxText(textBox, hiddenStyles);
             boxExtensions = WithRevisionNotes(textBox, hiddenStyles, WithMarkedRanges(boxExtensions, boxText, MarkedTextBoxText(textBox, hiddenStyles)));
+            boxExtensions = WithStyleDecorationReview(boxExtensions, textBox, hiddenStyles);
             // A bound box owns the bytes of its w:txbxContent, so an edit to its text splices only
             // that element and leaves the shape, the drawing anchor and the host paragraph around
             // it byte-identical. Without a binding - a box in a header, or one the two walks
@@ -1846,6 +1853,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
         AddRevisionExtensions(extensions, table, hiddenStyles);
+        WithStyleDecorationReview(extensions, table, hiddenStyles);
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
         // Table cells are plain text; the readable projection marks these ranges as struck through and underlined.
         if (struckCells.Count > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
@@ -2701,7 +2709,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 output.Append(element.Value);
                 if (output.Length > start && element.Parent is { } run && run.Name == W + "r")
                 {
-                    var properties = ReadRunProperties(run);
+                    var properties = hiddenStyles.Decorations.Resolve(run);
                     if (properties.Strike || hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element)) Mark(struck, start, output.Length);
                     if (properties.Underline && !run.Ancestors(W + "hyperlink").Any()) Mark(underlined, start, output.Length);
                     if (hiddenStyles.ShowTrackedRevisions && IsInsertedRevision(element)) Mark(inserted, start, output.Length);
@@ -2782,7 +2790,8 @@ public sealed partial class DocxAdapter : IFormatProbe
                 // The text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
                 nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(text), anchor,
                     Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                    Extensions: WithRevisionNotes(paragraph, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(paragraph, hiddenStyles)))));
+                    Extensions: WithStyleDecorationReview(WithRevisionNotes(paragraph, hiddenStyles,
+                        WithMarkedRanges(null, text, MarkedParagraphTextOf(paragraph, hiddenStyles))), paragraph, hiddenStyles)));
             }
         }
         return ordinal;
@@ -2840,7 +2849,8 @@ public sealed partial class DocxAdapter : IFormatProbe
             var text = ParagraphText(footnote, hiddenStyles);
             nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                Extensions: WithRevisionNotes(footnote, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(footnote, hiddenStyles)))));
+                Extensions: WithStyleDecorationReview(WithRevisionNotes(footnote, hiddenStyles,
+                    WithMarkedRanges(null, text, MarkedParagraphTextOf(footnote, hiddenStyles))), footnote, hiddenStyles)));
         }
     }
 
@@ -2857,7 +2867,8 @@ public sealed partial class DocxAdapter : IFormatProbe
             var text = ParagraphText(endnote, hiddenStyles);
             nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                Extensions: WithRevisionNotes(endnote, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(endnote, hiddenStyles)))));
+                Extensions: WithStyleDecorationReview(WithRevisionNotes(endnote, hiddenStyles,
+                    WithMarkedRanges(null, text, MarkedParagraphTextOf(endnote, hiddenStyles))), endnote, hiddenStyles)));
         }
     }
 
@@ -3285,10 +3296,11 @@ public sealed partial class DocxAdapter : IFormatProbe
         private readonly IReadOnlyDictionary<string, bool?> characterStyles;
         private readonly string? defaultParagraphStyleId;
         private readonly bool hasStyleVanish;
+        public DocxStyleDecorations Decorations { get; init; } = DocxStyleDecorations.Empty;
         public bool ShowTrackedRevisions { get; private init; }
 
         public DocxHiddenStyles WithTrackedRevisions() =>
-            new(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId) { ShowTrackedRevisions = true };
+            new(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId) { ShowTrackedRevisions = true, Decorations = Decorations };
 
         public DocxHiddenStyles(bool documentDefault, IReadOnlyDictionary<string, bool?> paragraphStyles,
             IReadOnlyDictionary<string, bool?> characterStyles, string? defaultParagraphStyleId)
@@ -3351,7 +3363,10 @@ public sealed partial class DocxAdapter : IFormatProbe
             if (StringComparer.OrdinalIgnoreCase.Equals(style.Type, "character")) characterStyles[styleId] = value;
             else if (style.Type is null || StringComparer.OrdinalIgnoreCase.Equals(style.Type, "paragraph")) paragraphStyles[styleId] = value;
         }
-        return new DocxHiddenStyles(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId);
+        return new DocxHiddenStyles(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId)
+        {
+            Decorations = DocxStyleDecorations.Read(root, defaultParagraphStyleId, cancellationToken)
+        };
 
         // The nearest declaration in a w:basedOn chain wins, so a style that says nothing inherits
         // its base's answer and one that says w:val="0" cancels it.
@@ -3805,6 +3820,11 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (run.Italic) properties.Add(new XElement(W + "i"));
         if (run.Underline) properties.Add(new XElement(W + "u", new XAttribute(W + "val", "single")));
         if (run.Strike) properties.Add(new XElement(W + (doubleStrike ? "dstrike" : "strike")));
+        // Dropping an explicit off would reactivate a style's mark after a text-only F1 edit.
+        foreach (var name in new[] { "u", "strike", "dstrike" })
+            if (originalProperties?.Element(W + name) is { } original &&
+                !IsEnabled(original, name == "u" ? "none" : "0") && properties.Element(W + name) is null)
+                properties.Add(new XElement(original));
         // Word has no semantic inline-code element.  Preserve a code character style when
         // supplied; otherwise emit the conservative portable monospace equivalent.
         if (run.Code && (run.StyleId is null || !run.StyleId.Contains("code", StringComparison.OrdinalIgnoreCase)))
