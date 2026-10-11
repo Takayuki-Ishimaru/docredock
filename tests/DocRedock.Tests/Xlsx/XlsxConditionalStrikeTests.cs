@@ -73,7 +73,7 @@ public sealed partial class XlsxAdapterTests
     }
 
     [Theory]
-    [InlineData("SUM(A1:A2)&gt;0")]
+    [InlineData("UNSUPPORTED(A1)&gt;0")]
     [InlineData("Other!A1=1")]
     [InlineData("&quot;")]
     [InlineData("==1")]

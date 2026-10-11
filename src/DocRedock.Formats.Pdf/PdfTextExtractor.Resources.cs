@@ -242,7 +242,7 @@ public static partial class PdfTextExtractor
     /// <see cref="Codes"/> says what its codes stand for without a ToUnicode map, and
     /// <see cref="Encoding"/> what a simple font's <c>/Encoding</c> makes of them (null without one).</summary>
     private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical, PdfGlyphWidths? Widths = null,
-        PdfFontCodes Codes = PdfFontCodes.Latin1, PdfFontEncoding? Encoding = null, bool Japan1Identity = false);
+        PdfFontCodes Codes = PdfFontCodes.Latin1, PdfFontEncoding? Encoding = null, bool Japan1Identity = false, string Dictionary = "");
 
     /// <summary>Reads each font a resource dictionary names once, and remembers under which names
     /// the document's resource dictionaries offer it - the evidence a name that cannot be resolved
@@ -303,7 +303,7 @@ public static partial class PdfTextExtractor
             // Only a simple font's codes are read through an /Encoding; a composite font's /Encoding is a CMap.
             var simple = ReadName(EntryValue(entries, "Subtype")) is "Type1" or "MMType1" or "TrueType" or "Type3";
             return new PdfFontResource(identity, toUnicode, vertical, vertical ? null : ReadGlyphWidths(entries, objects), ReadCodes(entries, encoding),
-                simple ? ReadFontEncoding(encoding, objects) : null, IsJapan1Identity(entries, encoding));
+                simple ? ReadFontEncoding(encoding, objects) : null, IsJapan1Identity(entries, encoding), dictionary);
         }
 
         private bool IsJapan1Identity(IReadOnlyList<(string Key, string Value)> font, string? encoding)
@@ -364,13 +364,16 @@ public static partial class PdfTextExtractor
     /// <summary>The document's ToUnicode CMaps by object, and for each resource name the distinct
     /// maps the fonts offered under that name decode with.</summary>
     private sealed class PdfFontTable(IReadOnlyDictionary<int, PdfToUnicodeMap> maps,
-        IReadOnlyDictionary<string, IReadOnlyList<PdfToUnicodeMap>> candidates)
+        IReadOnlyDictionary<string, IReadOnlyList<PdfToUnicodeMap>> candidates,
+        IReadOnlyDictionary<string, PdfToUnicodeMap> fallbackMaps)
     {
         public PdfToUnicodeMap? MapFor(int? toUnicodeObject) =>
             toUnicodeObject is { } id && maps.TryGetValue(id, out var map) ? map : null;
 
         public IReadOnlyList<PdfToUnicodeMap> CandidatesFor(string name) =>
             candidates.TryGetValue(name, out var found) ? found : [];
+
+        public PdfToUnicodeMap? FallbackFor(PdfFontResource font) => fallbackMaps.GetValueOrDefault(font.Identity);
     }
 
     /// <summary>A font as the rewritten content names it: <see cref="Ambiguous"/> marks a name that
@@ -405,7 +408,7 @@ public static partial class PdfTextExtractor
                 // copy of its ToUnicode map and what its encoding adds) is built once for an identity, not for each Tf.
                 if (tokens.TryGetValue(identity, out var known)) return known;
                 var map = table.MapFor(font.ToUnicodeObject);
-                if (map is null && font.ToUnicodeObject is null && font.Japan1Identity) map = Japan1Unicode.Value;
+                if (map is null && font.ToUnicodeObject is null) map = table.FallbackFor(font);
                 // A simple font's encoding reads the codes its ToUnicode map leaves out. A font whose codes
                 // only a map can read answers for the codes it lacks (see PdfToUnicodeMap.Decode).
                 if (font.Encoding is { } encoding) map = PdfToUnicodeMap.WithEncoding(map, encoding);
@@ -459,6 +462,7 @@ public static partial class PdfTextExtractor
                 var cmap = PdfToUnicodeMap.Parse(stream.Payload, timeout);
                 if (cmap.Count > 0) maps[objectId] = cmap;
             }
+        var fallbackMaps = ReadCustomFontMaps(bytes, latin, options, objects, catalog);
         var candidates = new Dictionary<string, List<PdfToUnicodeMap>>(StringComparer.Ordinal);
         void Offer(string name, PdfToUnicodeMap map)
         {
@@ -469,7 +473,7 @@ public static partial class PdfTextExtractor
         foreach (var (name, fonts) in catalog.Named)
             foreach (var font in fonts)
                 if (font.ToUnicodeObject is { } cmapObject && maps.TryGetValue(cmapObject, out var map)) Offer(name, map);
-                else if (font.ToUnicodeObject is null && font.Japan1Identity) Offer(name, Japan1Unicode.Value);
+                else if (font.ToUnicodeObject is null && fallbackMaps.TryGetValue(font.Identity, out var fallback)) Offer(name, fallback);
         // And, as before scoped resolution existed, every "/Name N 0 R" that points at an object
         // with a map, plus a font's own /Name: dictionaries the scoped reading could not reach
         // (an annotation's resources, an unreadable page tree) still count as evidence.
@@ -483,7 +487,7 @@ public static partial class PdfTextExtractor
             var fontName = Regex.Match(objects[id], @"/Name\s+/(?<alias>[A-Za-z][A-Za-z0-9_.+-]*)", RegexOptions.None, timeout);
             if (fontName.Success) Offer(fontName.Groups["alias"].Value, map);
         }
-        return new PdfFontTable(maps, candidates.ToDictionary(entry => entry.Key, entry => (IReadOnlyList<PdfToUnicodeMap>)entry.Value, StringComparer.Ordinal));
+        return new PdfFontTable(maps, candidates.ToDictionary(entry => entry.Key, entry => (IReadOnlyList<PdfToUnicodeMap>)entry.Value, StringComparer.Ordinal), fallbackMaps);
     }
 
     /// <summary>Whether content drawn under an optional content group (a layer) is shown.</summary>

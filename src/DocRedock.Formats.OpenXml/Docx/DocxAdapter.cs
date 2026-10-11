@@ -265,6 +265,16 @@ public sealed partial class DocxAdapter : IFormatProbe
                 // Paragraph node rather than folding it into an unrelated neighbouring block.
                 AddMathParagraph(element, "/word/document.xml", entry.Slice, ordinal++, nodes, sliceMap, entry.Control);
             }
+            else if (element.Name == W + "sectPr" && options.ShowTrackedRevisions)
+            {
+                var extensions = WithRevisionNotes(element, hiddenStyles, null);
+                if (extensions is not null)
+                {
+                    var anchor = new SourceAnchor("docx", "/word/document.xml", [new("body_child_ordinal", ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture))], ordinal);
+                    nodes.Add(new(NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor), NodeKind.Section,
+                        null, ordinal++, ContentLayer.Body, new TextNodeContent(""), anchor, Editability: NodeEditability.Protected, Extensions: extensions));
+                }
+            }
             await AddChartsAsync(archive, element, relationships, nodes, diagnostics,
                 blockOrder, nodes.Skip(firstBlockNode).FirstOrDefault()?.Id, hiddenStyles, cancellationToken).ConfigureAwait(false);
         }
@@ -306,7 +316,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (index.HasDocumentProtection) diagnostics.Add(new("DocumentProtected", "DOCX has document protection; protected edits are strict-rejected.", DiagnosticSeverity.Warning));
         if (index.HasTrackedRevisions) diagnostics.Add(new("TrackedRevisionsPresent",
             options.ShowTrackedRevisions
-                ? "DOCX contains tracked revisions; readable output marks insertions as additions and deletions as strikethrough. Edits crossing revision markup are strict-rejected."
+                ? "DOCX contains tracked revisions; readable output marks inserted/deleted text, rows and cells, and annotates formatting and structure changes. Edits crossing revision markup are strict-rejected."
                 : "DOCX contains tracked revisions; extracted body follows Word's final view (insertions shown, deletions retained as hidden content), and edits crossing revision markup are strict-rejected.",
             DiagnosticSeverity.Warning));
         // One document-level notice, not one per equation: OMML is structured markup that only
@@ -537,6 +547,8 @@ public sealed partial class DocxAdapter : IFormatProbe
             ? new RichTextNodeContent(richRuns)
             : new TextNodeContent(text);
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        AddRevisionExtensions(extensions, paragraph, hiddenStyles);
+        if (extensions.ContainsKey("revision_changes")) projectionLayer = layer;
         if (headingLevel > 0) extensions["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
         if (isDocumentTitle) extensions["document_title"] = JsonSerializer.SerializeToElement(true);
         if (isList)
@@ -647,7 +659,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 };
             // The box's text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
             var boxText = TextBoxText(textBox, hiddenStyles);
-            boxExtensions = WithMarkedRanges(boxExtensions, boxText, MarkedTextBoxText(textBox, hiddenStyles));
+            boxExtensions = WithRevisionNotes(textBox, hiddenStyles, WithMarkedRanges(boxExtensions, boxText, MarkedTextBoxText(textBox, hiddenStyles)));
             // A bound box owns the bytes of its w:txbxContent, so an edit to its text splices only
             // that element and leaves the shape, the drawing anchor and the host paragraph around
             // it byte-identical. Without a binding - a box in a header, or one the two walks
@@ -1768,7 +1780,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         // Tracks, per logical grid column, which (row, cell) in `grid` is the still-open vMerge
         // origin so a later continuation cell can add itself to that origin's RowSpan count.
         var openVerticalMerges = new Dictionary<int, (int RowIndex, int CellIndex)>();
-        foreach (var row in table.Elements(W + "tr"))
+        foreach (var row in RevisionRows(table, hiddenStyles))
         {
             var rowCells = new List<TableCell>();
             // D2: pad this row with empty placeholder cells for any leading grid columns it skips
@@ -1778,7 +1790,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             // columns it skipped.
             var gridColumn = ParseDocxGridBefore(row.Element(W + "trPr"));
             for (var placeholder = 0; placeholder < gridColumn; placeholder++) rowCells.Add(new TableCell(""));
-            foreach (var tc in row.Elements(W + "tc"))
+            foreach (var tc in RevisionCells(row, hiddenStyles))
             {
                 var tcPr = tc.Element(W + "tcPr");
                 var gridSpan = ParsePositiveInt((string?)tcPr?.Element(W + "gridSpan")?.Attribute(W + "val")) ?? 1;
@@ -1815,6 +1827,14 @@ public sealed partial class DocxAdapter : IFormatProbe
             }
             grid.Add(rowCells);
         }
+        // Rejecting tracked cells/rows can leave shorter rows in the current grid.
+        // Preserve their text and column positions when the readable grid is rectangularized.
+        if (table.Descendants().Any(IsRevisionContainer) && grid.Count > 0)
+        {
+            var width = grid.Max(row => row.Sum(cell => cell.ColSpan));
+            foreach (var row in grid)
+                for (var column = row.Sum(cell => cell.ColSpan); column < width; column++) row.Add(new TableCell(""));
+        }
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         AddContentControlExtensions(extensions, contentControl);
         if (nested is not null)
@@ -1825,6 +1845,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             extensions["nested_table_paragraph_offset"] = JsonSerializer.SerializeToElement(nested.ParagraphOffset);
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
+        AddRevisionExtensions(extensions, table, hiddenStyles);
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
         // Table cells are plain text; the readable projection marks these ranges as struck through and underlined.
         if (struckCells.Count > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
@@ -1855,10 +1876,10 @@ public sealed partial class DocxAdapter : IFormatProbe
         // level down here avoids visiting (and re-adding) it twice. Row/column are indices into
         // this table's own TableNodeContent.Rows so a consumer can address the host cell directly.
         var rowIndex = 0;
-        foreach (var row in table.Elements(W + "tr"))
+        foreach (var row in RevisionRows(table, hiddenStyles))
         {
             var cellIndex = 0;
-            foreach (var tc in row.Elements(W + "tc"))
+            foreach (var tc in RevisionCells(row, hiddenStyles))
             {
                 var cellBlocks = CellBlocks(tc).ToArray();
                 var keptParagraph = KeptCellParagraphs(cellBlocks, hiddenStyles);
@@ -2761,7 +2782,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 // The text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
                 nodes.Add(new(id, kind, null, ordinal++, layer, new TextNodeContent(text), anchor,
                     Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                    Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(paragraph, hiddenStyles))));
+                    Extensions: WithRevisionNotes(paragraph, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(paragraph, hiddenStyles)))));
             }
         }
         return ordinal;
@@ -2819,7 +2840,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             var text = ParagraphText(footnote, hiddenStyles);
             nodes.Add(new(id, NodeKind.Footnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(footnote, hiddenStyles))));
+                Extensions: WithRevisionNotes(footnote, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(footnote, hiddenStyles)))));
         }
     }
 
@@ -2836,7 +2857,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             var text = ParagraphText(endnote, hiddenStyles);
             nodes.Add(new(id, NodeKind.Endnote, null, ordinal++, ContentLayer.Body, new TextNodeContent(text), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)],
-                Extensions: WithMarkedRanges(null, text, MarkedParagraphTextOf(endnote, hiddenStyles))));
+                Extensions: WithRevisionNotes(endnote, hiddenStyles, WithMarkedRanges(null, text, MarkedParagraphTextOf(endnote, hiddenStyles)))));
         }
     }
 
@@ -3131,13 +3152,13 @@ public sealed partial class DocxAdapter : IFormatProbe
     }
 
     private static bool IsRevisionContainer(XElement element) => element.Name == W + "ins" || element.Name == W + "del" ||
-        element.Name == W + "moveFrom" || element.Name == W + "moveTo";
+        element.Name == W + "moveFrom" || element.Name == W + "moveTo" || element.Name.Namespace == W && PropertyRevisionNames.Contains(element.Name.LocalName);
 
     private static bool IsDeletedRevision(XElement element) =>
-        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "del" || ancestor.Name == W + "moveFrom");
+        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "del" || ancestor.Name == W + "moveFrom" || DeletedStructure(ancestor));
 
     private static bool IsInsertedRevision(XElement element) =>
-        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "ins" || ancestor.Name == W + "moveTo");
+        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "ins" || ancestor.Name == W + "moveTo" || InsertedStructure(ancestor));
 
     private static bool IsHiddenContentElement(XElement element, DocxHiddenStyles hiddenStyles) =>
         !hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element) ||
@@ -3726,7 +3747,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             throw new InvalidDataException("A field boundary cannot be edited in strict DOCX restore.");
         if (paragraph.Descendants(W + "hyperlink").Any() || paragraph.Descendants(W + "drawing").Any() || paragraph.Descendants(W + "object").Any())
             throw new InvalidDataException("Rich-text editing does not support paragraphs containing hyperlinks, drawings, or embedded objects.");
-        if (paragraph.Descendants(W + "ins").Any() || paragraph.Descendants(W + "del").Any())
+        if (paragraph.Descendants().Any(IsRevisionContainer))
             throw new InvalidDataException("Rich-text editing does not support tracked revisions.");
     }
 
@@ -3736,7 +3757,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             throw new InvalidDataException("A field boundary cannot be edited in strict DOCX restore.");
         if (paragraph.Descendants(W + "hyperlink").Any() || paragraph.Descendants(W + "drawing").Any() || paragraph.Descendants(W + "object").Any())
             throw new InvalidDataException("Text editing does not support paragraphs containing hyperlinks, drawings, or embedded objects.");
-        if (paragraph.Descendants(W + "ins").Any() || paragraph.Descendants(W + "del").Any())
+        if (paragraph.Descendants().Any(IsRevisionContainer))
             throw new InvalidDataException("Text editing does not support tracked revisions.");
     }
 
@@ -3947,6 +3968,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             throw new InvalidDataException("An edited DOCX table must retain table cell content.");
         var table = LoadSliceElement(originalSlice);
         if (table.Descendants(W + "fldChar").Any()) throw new InvalidDataException("A field boundary cannot be edited in a table.");
+        if (table.Descendants().Any(IsRevisionContainer)) throw new InvalidDataException("Table editing does not support tracked revisions.");
         var indexed = IndexSliceElements(originalSlice, table, host);
         var replacements = new List<(RawSliceRef Slice, byte[] Data)>();
         var rows = table.Elements(W + "tr").ToArray();

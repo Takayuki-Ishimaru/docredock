@@ -3979,7 +3979,7 @@ public static partial class PdfTextExtractor
     /// <summary>Decodes the streams of the objects in <paramref name="objectIds"/>. Everything else
     /// is skipped before it is copied or inflated.</summary>
     private static IEnumerable<PdfObjectStream> ReadObjectStreams(byte[] bytes, string latin, PdfExtractionOptions options,
-        IReadOnlySet<int> objectIds)
+        IReadOnlySet<int> objectIds, IReadOnlyDictionary<int, string>? lengthObjects = null)
     {
         var marker = Encoding.ASCII.GetBytes("stream");
         var endMarker = Encoding.ASCII.GetBytes("endstream");
@@ -3997,7 +3997,17 @@ public static partial class PdfTextExtractor
                 offset = end + endMarker.Length;
                 continue;
             }
-            var payload = DecodeFilteredStream(bytes[start..TrimLineEnds(bytes, start, end)], header, options.MaxExpandedStreamBytes);
+            var payloadEnd = TrimLineEnds(bytes, start, end);
+            if (lengthObjects is not null && ReadNumber(ResolveValue(EntryValue(ReadDictionaryEntries(header), "Length"), lengthObjects)) is { } declared &&
+                declared >= 0 && declared <= bytes.Length - start && declared == Math.Truncate(declared))
+            {
+                var declaredEnd = start + (int)declared;
+                var markerAt = declaredEnd;
+                while (markerAt < bytes.Length && bytes[markerAt] is 10 or 13 or 32 or 9) markerAt++;
+                if (markerAt <= bytes.Length - endMarker.Length && bytes.AsSpan(markerAt, endMarker.Length).SequenceEqual(endMarker))
+                { payloadEnd = declaredEnd; end = markerAt; }
+            }
+            var payload = DecodeFilteredStream(bytes[start..payloadEnd], header, options.MaxExpandedStreamBytes);
             yield return new PdfObjectStream(objectId, header, Encoding.Latin1.GetString(payload));
             offset = end + endMarker.Length;
         }
@@ -4035,17 +4045,23 @@ public static partial class PdfTextExtractor
         private readonly bool _utf16;
         private readonly bool _reportsMissing;
         private readonly HashSet<string>? _unresolved;
-        private PdfToUnicodeMap(Dictionary<string, string> entries, bool utf16 = false, bool reportsMissing = false, HashSet<string>? unresolved = null)
+        private readonly IReadOnlyList<(int Bytes, uint First, uint Last)>? _codeSpaces;
+        private PdfToUnicodeMap(Dictionary<string, string> entries, bool utf16 = false, bool reportsMissing = false, HashSet<string>? unresolved = null,
+            IReadOnlyList<(int Bytes, uint First, uint Last)>? codeSpaces = null)
         {
             _entries = entries;
             _utf16 = utf16;
             _reportsMissing = reportsMissing;
             _unresolved = unresolved;
+            _codeSpaces = codeSpaces is { Count: > 0 } ? codeSpaces.OrderBy(space => space.Bytes).ToArray() : null;
             _maxSourceBytes = entries.Keys.Select(key => key.Length / 2).DefaultIfEmpty(1).Max();
             // The length of a code when all the map's codes are alike, which is what a code it lacks is taken to be.
             _codeLength = entries.Keys.Select(key => key.Length / 2).Distinct().Take(2).ToArray() is [var length] ? length : 0;
         }
         public int Count => _entries.Count;
+        public IReadOnlyDictionary<string, string> Entries => _entries;
+        public static PdfToUnicodeMap FromEntries(Dictionary<string, string> entries, IReadOnlyList<(int Bytes, uint First, uint Last)>? spaces = null) =>
+            new(entries, reportsMissing: true, codeSpaces: spaces);
 
         /// <summary>What a composite font encoded with a Unicode CMap (UniJIS-UCS2-H, UniGB-UTF16-H, ...)
         /// decodes with: its codes are the UTF-16 code units of the text, big-endian.</summary>
@@ -4053,7 +4069,7 @@ public static partial class PdfTextExtractor
 
         /// <summary>The map's content, so that two CMap objects that decode alike count as one.</summary>
         public string Signature => _signature ??= string.Join("\u0001", _entries.OrderBy(entry => entry.Key, StringComparer.Ordinal)
-            .Select(entry => entry.Key + "\u0002" + entry.Value));
+            .Select(entry => entry.Key + "\u0002" + entry.Value)) + (_codeSpaces is null ? "" : "\u0003" + string.Join(";", _codeSpaces));
 
         private string? _signature;
 
@@ -4077,7 +4093,7 @@ public static partial class PdfTextExtractor
 
         /// <summary>This map for a font whose codes only a map can read: a code the map lacks is reported
         /// by <c>Decode</c>.</summary>
-        public PdfToUnicodeMap ReportingMissingCodes() => new(_entries, _utf16, reportsMissing: true, _unresolved);
+        public PdfToUnicodeMap ReportingMissingCodes() => new(_entries, _utf16, reportsMissing: true, _unresolved, _codeSpaces);
 
         /// <summary>The characters <paramref name="bytes"/> decode to. <paramref name="sources"/>, when
         /// given, receives for every character the bytes [Start, End) it was decoded from.</summary>
@@ -4099,15 +4115,26 @@ public static partial class PdfTextExtractor
             {
                 string? mapped = null;
                 var consumed = 0;
+                var sourceLength = 0;
+                if (_codeSpaces is not null)
+                    foreach (var space in _codeSpaces)
+                    {
+                        if (space.Bytes > bytes.Length - index) continue;
+                        uint value = 0;
+                        foreach (var part in bytes.Slice(index, space.Bytes)) value = value << 8 | part;
+                        if (value >= space.First && value <= space.Last) { sourceLength = space.Bytes; break; }
+                    }
                 for (var width = Math.Min(_maxSourceBytes, bytes.Length - index); width >= 1; width--)
                 {
+                    if (sourceLength > 0 && width != sourceLength) continue;
+                    if (_codeSpaces is not null && sourceLength == 0) continue;
                     var key = Convert.ToHexString(bytes.Slice(index, width));
                     if (_entries.TryGetValue(key, out mapped)) { consumed = width; break; }
                 }
                 if (consumed == 0)
                 {
                     // The codes of a map that lacks one are all as long as its own, so the code that is missing is too.
-                    var length = _reportsMissing && _codeLength > 1 && bytes.Length - index >= _codeLength ? _codeLength : 1;
+                    var length = sourceLength > 0 ? sourceLength : _reportsMissing && _codeLength > 1 && bytes.Length - index >= _codeLength ? _codeLength : 1;
                     if (_reportsMissing)
                     {
                         if (LeftOut(bytes.Slice(index, length), widths) is { } blank)
