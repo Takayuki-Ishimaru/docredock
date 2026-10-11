@@ -518,6 +518,7 @@ public sealed partial class ReadableMarkdownSerializer
                 .SelectMany(candidate => new[] { ExtensionString(candidate, "shape_id"), candidate.Id })
                 .OfType<string>()
                 .ToHashSet(StringComparer.Ordinal);
+            var writtenRevisionNotes = new HashSet<string>(StringComparer.Ordinal);
             foreach (var node in isPptx
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
@@ -671,8 +672,12 @@ public sealed partial class ReadableMarkdownSerializer
                         WriteParagraph(output, displayText);
                         break;
                 }
+                WriteRevisionChanges(output, node);
+                writtenRevisionNotes.Add(node.Id);
                 previousWasListItem = isListItem;
             }
+            foreach (var annotated in partition.Nodes.Where(node => !writtenRevisionNotes.Contains(node.Id)))
+                WriteRevisionChanges(output, annotated);
             if (previousWasListItem) output.AppendLine();
             previousWasListItem = false;
         }
@@ -680,6 +685,21 @@ public sealed partial class ReadableMarkdownSerializer
         WriteAggregatedSections(output, aggregated);
         if (output.Length == 0) WriteHeading(output, 1, "ドキュメント");
         return Finish(output);
+    }
+
+    private static void WriteRevisionChanges(StringBuilder output, DocumentNode node)
+    {
+        if (node.Extensions?.TryGetValue("revision_changes", out var changes) != true || changes.ValueKind != JsonValueKind.Array) return;
+        foreach (var change in changes.EnumerateArray())
+        {
+            if (change.ValueKind != JsonValueKind.Object || !change.TryGetProperty("description", out var description) || description.ValueKind != JsonValueKind.String) continue;
+            var context = change.TryGetProperty("context", out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : "";
+            if (ExtensionInt(node, "nested_table_row") is { } row && ExtensionInt(node, "nested_table_column") is { } column)
+                context = $"入れ子表（行{row + 1}・セル{column + 1}）・{context}";
+            if (node.Kind is NodeKind.Header or NodeKind.Footer or NodeKind.Footnote or NodeKind.Endnote)
+                context = node.Kind + "・" + context;
+            WriteQuote(output, "変更履歴（" + EscapeLiteral(context ?? "") + "）: " + EscapeLiteral(description.GetString() ?? ""));
+        }
     }
 
     private static void WriteAggregatedSections(StringBuilder output, AggregatedSections aggregated)

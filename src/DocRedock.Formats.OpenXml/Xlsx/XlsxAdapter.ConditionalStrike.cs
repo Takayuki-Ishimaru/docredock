@@ -20,7 +20,7 @@ public sealed partial class XlsxAdapter
         RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     private static List<XlsxCellRecord> ApplyConditionalStrike(byte[] xml, string sheet, List<XlsxCellRecord> cells,
-        IReadOnlyDictionary<int, bool> strikeStyles, List<string> warnings, CancellationToken token)
+        IReadOnlyDictionary<int, bool> strikeStyles, List<string> warnings, CancellationToken token, ConditionalWorkbook workbook)
     {
         if (strikeStyles.Count == 0) return cells;
         var document = new XmlDocument();
@@ -61,7 +61,7 @@ public sealed partial class XlsxAdapter
                 if (work > 2_000_000) { undecided = true; break; }
                 if (!rule.Ranges.Any(range => range.Contains(cell))) continue;
                 if (rule.Strike is null && !rule.Stop) continue;
-                var matched = rule.Valid ? ConditionalMatches(rule, cell, lookup) : null;
+                var matched = rule.Valid ? ConditionalMatches(rule, cell, lookup, workbook, token) : null;
                 if (matched == false) continue;
                 if (matched is null)
                 {
@@ -108,11 +108,21 @@ public sealed partial class XlsxAdapter
     }
 
     private static bool? ConditionalMatches(ConditionalRule rule, XlsxCellRecord cell,
-        IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord> cells)
+        IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord> cells, ConditionalWorkbook workbook, CancellationToken token)
     {
         var formulas = rule.Xml.ChildNodes.OfType<XmlElement>().Where(element => element.LocalName == "formula" &&
             element.NamespaceURI == rule.Xml.NamespaceURI).Select(element => element.InnerText.Trim()).ToArray();
-        ConditionalOperand? Operand(string expression) => ReadConditionalOperand(expression, cell, rule.Ranges[0], cells);
+        ConditionalOperand? Operand(string expression)
+        {
+            var value = EvaluateConditionalFormula(expression, cell, rule.Ranges[0], workbook, token);
+            return value.Kind switch
+            {
+                FormulaValueKind.Number => new(OperandKind.Number, Number: value.Number),
+                FormulaValueKind.Text => new(OperandKind.Text, value.Text),
+                FormulaValueKind.Boolean => new(OperandKind.Boolean, Number: value.Number),
+                FormulaValueKind.Blank => new(OperandKind.Blank), _ => null,
+            };
+        }
         var subject = CellOperand(cell);
         switch (rule.Xml.GetAttribute("type"))
         {
@@ -128,34 +138,28 @@ public sealed partial class XlsxAdapter
                 }
                 return CompareResult(first.Value, op);
             case "expression":
-                if (formulas.Length != 1 || formulas[0].Length > 4096) return null;
-                var expression = formulas[0].StartsWith('=') ? formulas[0][1..] : formulas[0];
-                var quoted = false;
-                for (var index = 0; index < expression.Length; index++)
-                {
-                    if (expression[index] == '"') { quoted = !quoted; continue; }
-                    if (quoted || expression[index] is not ('=' or '<' or '>')) continue;
-                    var length = index + 1 < expression.Length && expression[index + 1] is '=' or '>' ? 2 : 1;
-                    var comparison = CompareOperands(Operand(expression[..index]), Operand(expression[(index + length)..]));
-                    return comparison is null ? null : CompareResult(comparison.Value, expression.Substring(index, length));
-                }
-                return Operand(expression) is { Kind: OperandKind.Boolean or OperandKind.Number } boolean ? boolean.Number != 0 : null;
+                if (formulas.Length != 1) return null;
+                var value = EvaluateConditionalFormula(formulas[0], cell, rule.Ranges[0], workbook, token);
+                return value.Kind is FormulaValueKind.Number or FormulaValueKind.Boolean ? value.Number != 0 : null;
             case "containsText":
             case "notContainsText":
             case "beginsWith":
             case "endsWith":
-                if (subject is not { Kind: OperandKind.Text or OperandKind.Blank } || !rule.Xml.HasAttribute("text")) return null;
+                if (subject is null || !rule.Xml.HasAttribute("text")) return null;
                 var text = rule.Xml.GetAttribute("text");
                 var type = rule.Xml.GetAttribute("type");
-                // SEARCH-based text rules can give wildcard characters special meaning.
-                if (type is "containsText" or "notContainsText" && text.IndexOfAny(['*', '?', '~']) >= 0) return null;
-                return type switch
+                var shown = cell.Value ?? "";
+                if (type is "containsText" or "notContainsText")
                 {
-                    "containsText" => subject.Value.Text.Contains(text, StringComparison.OrdinalIgnoreCase),
-                    "notContainsText" => !subject.Value.Text.Contains(text, StringComparison.OrdinalIgnoreCase),
-                    "beginsWith" => subject.Value.Text.StartsWith(text, StringComparison.OrdinalIgnoreCase),
-                    _ => subject.Value.Text.EndsWith(text, StringComparison.OrdinalIgnoreCase),
-                };
+                    var search = XlsxConditionalFormula.Evaluate("ISNUMBER(SEARCH(\"" + text.Replace("\"", "\"\"", StringComparison.Ordinal) + "\",__cell))",
+                        _ => [FormulaCell(cell)], cell.RowIndex, cell.ColumnIndex, token);
+                    return search.Kind == FormulaValueKind.Boolean ? type == "containsText" ? search.Number != 0 : search.Number == 0 : null;
+                }
+                return type == "beginsWith" ? shown.StartsWith(text, StringComparison.OrdinalIgnoreCase) : shown.EndsWith(text, StringComparison.OrdinalIgnoreCase);
+            case "containsBlanks": return subject is null ? null : string.IsNullOrWhiteSpace(cell.Value);
+            case "notContainsBlanks": return subject is null ? null : !string.IsNullOrWhiteSpace(cell.Value);
+            case "containsErrors": return cell.CellType == "e";
+            case "notContainsErrors": return cell.CellType != "e" && subject is not null;
             default: return null;
         }
     }
@@ -169,31 +173,6 @@ public sealed partial class XlsxAdapter
         if (cell.CellType == "b") return cell.Value is "0" or "1" ? new(OperandKind.Boolean, Number: cell.Value == "1" ? 1 : 0) : null;
         return double.TryParse(cell.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) && double.IsFinite(number)
             ? new(OperandKind.Number, Number: number) : null;
-    }
-
-    private static ConditionalOperand? ReadConditionalOperand(string text, XlsxCellRecord cell, ConditionalRange origin,
-        IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord> cells)
-    {
-        text = text.Trim();
-        if (text.StartsWith('=')) text = text[1..].Trim();
-        if (text.Length == 0 || text.Length > 4096) return null;
-        if (text.Length >= 2 && text[0] == '"' && text[^1] == '"')
-        {
-            var inner = text[1..^1];
-            if (inner.Replace("\"\"", "", StringComparison.Ordinal).Contains('"')) return null;
-            return new(OperandKind.Text, inner.Replace("\"\"", "\"", StringComparison.Ordinal));
-        }
-        if (text.Equals("TRUE", StringComparison.OrdinalIgnoreCase) || text.Equals("TRUE()", StringComparison.OrdinalIgnoreCase)) return new(OperandKind.Boolean, Number: 1);
-        if (text.Equals("FALSE", StringComparison.OrdinalIgnoreCase) || text.Equals("FALSE()", StringComparison.OrdinalIgnoreCase)) return new(OperandKind.Boolean);
-        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) && double.IsFinite(number)) return new(OperandKind.Number, Number: number);
-        var match = ConditionalReference.Match(text);
-        if (!match.Success) return null;
-        var coordinate = ParseCellReference(match.Groups[2].Value + match.Groups[4].Value);
-        if (coordinate.Row <= 0 || coordinate.Column <= 0) return null;
-        var row = coordinate.Row + (match.Groups[3].Length == 0 ? cell.RowIndex - origin.Top : 0);
-        var column = coordinate.Column + (match.Groups[1].Length == 0 ? cell.ColumnIndex - origin.Left : 0);
-        if (row is <= 0 or > MaxExcelRows || column is <= 0 or > MaxExcelColumns) return null;
-        return CellOperand(cells.GetValueOrDefault((row, column)));
     }
 
     private static int? CompareOperands(ConditionalOperand? left, ConditionalOperand? right)

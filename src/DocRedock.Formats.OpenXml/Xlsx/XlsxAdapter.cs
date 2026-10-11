@@ -390,6 +390,19 @@ public sealed partial class XlsxAdapter
                 : (sheet.IsHidden, Rows: (IReadOnlySet<int>)new HashSet<int>(), Columns: (IReadOnlySet<int>)new HashSet<int>()),
             StringComparer.OrdinalIgnoreCase);
         IReadOnlyList<CellTextStyle>? textStyles = null;
+        // Conditional formulas may refer to a later sheet. Read cached cell values once,
+        // before applying any display rules, so sheet order cannot change their result.
+        var cachedSheets = new Dictionary<string, List<XlsxCellRecord>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var sheet in workbook.Sheets)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (package.TryGetValue(sheet.PartUri, out var sheetXml))
+                cachedSheets[sheet.Name] = ReadWorksheet(sheetXml, sheet.Name, richShared, styles, formulaDiagnostics, warnings,
+                    workbook.Uses1904DateSystem, sheetVisibility[sheet.Name].Rows, sheetVisibility[sheet.Name].Columns, sheet.State);
+        }
+        var conditionalWorkbook = new ConditionalWorkbook(cachedSheets.ToDictionary(pair => pair.Key,
+            pair => (IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord>)pair.Value.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex)),
+            StringComparer.OrdinalIgnoreCase), ReadConditionalNames(package, workbook), workbook.Uses1904DateSystem);
         foreach (var sheet in workbook.Sheets)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -399,8 +412,8 @@ public sealed partial class XlsxAdapter
             var hiddenColumns = ReadHiddenColumns(xml);
             var metrics = ReadWorksheetMetrics(xml, sheet.Name, warnings);
             var tables = ReadTables(package, sheet.PartUri, xml);
-            var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(ReadWorksheet(xml, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, hiddenRows, hiddenColumns, sheet.State), mergedRanges)), tables);
-            cells = ApplyConditionalStrike(xml, sheet.Name, cells, styleData.StrikeDifferentialStyles, warnings, cancellationToken);
+            var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(cachedSheets[sheet.Name], mergedRanges)), tables);
+            cells = ApplyConditionalStrike(xml, sheet.Name, cells, styleData.StrikeDifferentialStyles, warnings, cancellationToken, conditionalWorkbook);
             var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
