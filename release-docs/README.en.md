@@ -6,14 +6,21 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.4 Public Beta
+
+- [v0.3.4 release notes](RELEASE_NOTES_v0.3.4.en.md)
+- Search and read AI packages in the GUI/CLI after verification and review
+- Show part-size estimates and actual results
+- Choose Word revision output; add sharing review in report schema 1.2
+
+## Published releases
+
 ### v0.3.3 Public Beta
 
 - [v0.3.3 release notes](RELEASE_NOTES_v0.3.3.en.md)
 - Improved Office/PDF underlines, strikethroughs, text and reading order
 - Added Word revision display, Excel conditional strikethrough and review-required exit options
 - Tightened AI-package reading and repeated table context; updated manifest to schema 2.2
-
-## Published releases
 
 ### v0.3.2 Public Beta
 

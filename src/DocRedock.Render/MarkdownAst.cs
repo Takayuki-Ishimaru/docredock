@@ -89,7 +89,7 @@ public static class MarkdownAstParser
 
     private static bool IsTableHeader(string[] lines, int index) => index + 1 < lines.Length && lines[index].Contains('|', StringComparison.Ordinal) && Regex.IsMatch(lines[index + 1], @"^\s*\|?\s*:?-{3,}");
 
-    private static IReadOnlyList<string> SplitTableRow(string line)
+    private static List<string> SplitTableRow(string line)
     {
         var normalized = line.Trim();
         if (normalized.StartsWith('|')) normalized = normalized[1..];

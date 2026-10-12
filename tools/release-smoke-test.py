@@ -16,7 +16,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from visual_semantics_assertions import assert_expectation, parse_markdown
+from visual_semantics_assertions import parse_markdown
 from visual_semantics_qa import (
     CliRunResult,
     build_evidence,

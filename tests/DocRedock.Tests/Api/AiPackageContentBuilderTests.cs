@@ -34,7 +34,13 @@ public sealed class AiPackageContentBuilderTests
         Assert.Throws<ArgumentNullException>(() => AiPackageContentBuilder.Build(null!, new(), File));
         Assert.Throws<ArgumentNullException>(() => AiPackageContentBuilder.Build(graph, null!, File));
         Assert.Throws<ArgumentException>(() => AiPackageContentBuilder.Build(graph, new(), "   "));
-        Assert.Throws<ArgumentOutOfRangeException>(() => AiPackageContentBuilder.Build(graph, new(), File, 127));
+        var targetError = Assert.Throws<ArgumentOutOfRangeException>(() => AiPackageContentBuilder.Build(graph, new(), File, 127));
+        Assert.Equal("targetCharacters", targetError.ParamName);
+        Assert.Equal(127, targetError.ActualValue);
+        var optionsError = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            AiPackageContentBuilder.Build(graph, new(), File, new AiPackagePartOptions(127)));
+        Assert.Equal("partOptions", optionsError.ParamName);
+        Assert.Equal(127, optionsError.ActualValue);
         Assert.Throws<ArgumentException>(() => AiPackageContentBuilder.Build(graph, new(ContentPolicy: "bogus"), File));
     }
 

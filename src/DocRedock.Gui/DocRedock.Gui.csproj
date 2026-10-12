@@ -9,6 +9,10 @@
     <ProjectReference Include="..\DocRedock.VisualInference\DocRedock.VisualInference.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="DocRedock.Gui.HeadlessTests" />
+  </ItemGroup>
+
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0</TargetFramework>

@@ -47,6 +47,7 @@ public static class WorkerHost
 
     public static async ValueTask<WorkerResponse> HandleLineAsync(string line, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(line);
         if (line.Length > 4_194_304) return new("unknown", false, "TOO_LARGE", Error: "Request exceeds the worker protocol limit.");
         WorkerRequest? request;
         try { request = JsonSerializer.Deserialize<WorkerRequest>(line, JsonOptions); }
@@ -116,7 +117,7 @@ public static class WorkerHost
         foreach (var entry in archive.Entries)
         {
             var name = entry.FullName.Replace('\\', '/');
-            if (Path.IsPathRooted(name) || name.StartsWith("/", StringComparison.Ordinal) || name.Split('/').Any(segment => segment is ".." or ".")) throw new WorkerException("PATH_INVALID", "Package contains an unsafe entry path.");
+            if (Path.IsPathRooted(name) || name.StartsWith('/') || name.Split('/').Any(segment => segment is ".." or ".")) throw new WorkerException("PATH_INVALID", "Package contains an unsafe entry path.");
             expanded = checked(expanded + entry.Length);
             if (entry.Length > 268_435_456 || expanded > 1_073_741_824 || entry.Length > 0 && (entry.CompressedLength == 0 || (double)entry.Length / entry.CompressedLength > 100)) throw new WorkerException("TOO_LARGE", "Package exceeds worker expansion limits.");
         }

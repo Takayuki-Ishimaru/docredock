@@ -73,9 +73,10 @@ public sealed record OcrReviewSummary(int Images, int Regions, int ReviewItems)
 public sealed record ExportReview(IReadOnlyList<ReviewPage> Pages, OcrReviewSummary Ocr,
     IReadOnlyList<ReadableTableBoundaryReview>? TableBoundaries = null)
 {
+    public RevisionSharingReview? SharingReview { get; init; }
     public int ReviewImagePages => Pages.Count(page => page.ReviewImageReference is not null);
     public int Elements => Pages.Sum(page => page.Elements.Count);
-    public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 };
+    public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 } || SharingReview?.Required == true;
 }
 
 /// <summary>Finds an attached review image on disk: next to the readable Markdown (its .assets
@@ -136,13 +137,15 @@ public static class ExportReviewBuilder
                     (StringComparer.Ordinal.Equals(d.PartUri, $"pdf:page:{number}") || StringComparer.Ordinal.Equals(d.PartUri, partition.SourcePartUri))),
                 partition.Nodes.Any(node => node.Kind == NodeKind.Table)));
         }
-        return new ExportReview(pages, BuildOcr(graph), projection?.TableBoundaryReviews ?? []);
+        return new ExportReview(pages, BuildOcr(graph), projection?.TableBoundaryReviews ?? [])
+            { SharingReview = RevisionSharingReview.Build(diagnostics) };
     }
 
     /// <summary>OCR regions whose confidence is below the readable threshold or missing, the same
     /// rule the readable Markdown uses for its default review table.</summary>
     public static OcrReviewSummary BuildOcr(DocumentGraph graph)
     {
+        ArgumentNullException.ThrowIfNull(graph);
         var images = 0; var regions = 0; var review = 0;
         foreach (var node in graph.Nodes.Where(node => node.Kind == NodeKind.ImageText))
         {
@@ -156,7 +159,7 @@ public static class ExportReviewBuilder
         return new OcrReviewSummary(images, regions, review);
     }
 
-    private static IEnumerable<ReviewElement> Classify(VisualGraph graph, IReadOnlyList<Geometry> tables, ReviewImageMapping? mapping)
+    private static Dictionary<string, ReviewElement>.ValueCollection Classify(VisualGraph graph, IReadOnlyList<Geometry> tables, ReviewImageMapping? mapping)
     {
         // Malformed metadata (duplicate or missing path IDs) is reported by the validator; the review
         // list must still be built, so the first path with an ID wins.

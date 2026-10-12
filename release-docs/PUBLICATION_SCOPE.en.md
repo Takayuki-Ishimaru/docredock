@@ -127,6 +127,8 @@ Each OS/architecture-specific distribution should contain only:
 
 Publish each archive's SHA-256 in SHA256SUMS on the release page. Do not include tests, fixtures, source, generators, brand masters, or conversion results in binary distributions.
 
+Public release notes and distributions contain user-facing changes, compatibility, limitations and installation guidance. Keep internal evaluation scores, development metrics and validation notes in CI records, separate from public release assets.
+
 ## Operating rules
 
 1. Build releases from a clean public commit/tag, never by copying the working directory.

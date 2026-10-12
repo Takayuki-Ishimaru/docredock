@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.3 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.4 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -35,7 +35,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.3では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.4では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -43,6 +43,20 @@ docredock export input.xlsx --ai-package zip --sheets Summary,Data --output work
 docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.ai-package.zip
 docredock export input.xlsx --ai-package dir --table-row-blocks --output workbook.ai-package
 ```
+
+GUIの「パッケージを読む」から既存のフォルダー／ZIPを開き、検証と確認事項を確認してから、必要な分割を検索・コピーできます。CLIでも次の操作を利用できます。
+
+```sh
+docredock package search input.ai-package.zip "売上" --json
+docredock package read input.ai-package.zip --part part-0002
+docredock package read input.ai-package.zip --part part-0002 --json --with-sources
+```
+
+どちらのCLI操作も本文を返す前にパッケージ全体を検証し、要確認の場合は本文を出さず終了コード11を返します。`review.md`と該当する内容を確認した後、1回の実行について確認済みとするには`--allow-review`を付けます。`--json --with-sources`で取得した元セル等の出典情報は手元に置き、AIには必要な本文だけを渡せます。検索は対応する装飾・エスケープ、大文字小文字、全角半角を正規化した文字列照合です。
+
+GUIでは、パッケージの出力設定の近くで文字数目安とExcelの行分割を選びます。最初の文書のOCRなしの見積もりと、変換後の実際の分割数・最大文字数・目安超過・全文と分割合計の文字数を確認できます。すべての分割を合わせると、再掲した見出し等で全文より大きくなる場合があります。
+
+Wordの変更履歴はGUIまたは`--revisions final|markup|reject`で選択します。`sanitized`は既定で最終版、`visible`／`complete`は履歴付きです。`sanitized`の履歴付き出力には`--allow-revision-sharing`またはGUIでの共有確認が必要です。manifestは引き続きschema `2.2`、reportはschema `1.2`で共有確認の`sharing_review`を追加します。旧パッケージを扱う共有確認の連携では読み取り側も更新してください。
 
 既定の出力名は`<元ファイル名>.ai-package`または`<元ファイル名>.ai-package.zip`です。
 
@@ -56,7 +70,7 @@ docredock export input.xlsx --ai-package dir --table-row-blocks --output workboo
 | `source-index.json` | 全ノードIDとExcelの元セル座標。詳細が必要なときに読み込む索引 |
 | `report.json` | 変換結果と確認事項、診断コード・件数のJSON |
 
-Wordは見出しと意味のまとまりで分割し、既定のサイズ目安は12,000文字です。表・入れ子の表、図と構成要素、連続するリストはまとめて保持します。PDFはページ、PowerPointはスライド、Excelはシートごとに保持します。大きい単位は目安を超える場合があり、`exceeds_target`と`review.md`に記録されます。文字数の目安であり、AIモデルのトークン上限ではありません。CLIでは`--chunk-chars`、APIでは`TargetCharacters`で128～1,000,000文字を指定でき、GUIでは既定値を使います。各分割には、渡す量の見積もりに使える`estimated_tokens`（ASCII 4文字・その他1文字を1トークンとした概算）も記録します。実際のトークン数はモデルによって異なります。
+Wordは見出しと意味のまとまりで分割し、既定のサイズ目安は12,000文字です。表・入れ子の表、図と構成要素、連続するリストはまとめて保持します。PDFはページ、PowerPointはスライド、Excelはシートごとに保持します。大きい単位は目安を超える場合があり、`exceeds_target`と`review.md`に記録されます。文字数の目安であり、AIモデルのトークン上限ではありません。CLIでは`--chunk-chars`、APIでは`TargetCharacters`で128～1,000,000文字を指定でき、GUIの文字数目安でも同じ範囲を指定できます（既定は12,000文字）。各分割には、渡す量の見積もりに使える`estimated_tokens`（ASCII 4文字・その他1文字を1トークンとした概算）も記録します。実際のトークン数はモデルによって異なります。
 
 大きなExcelの表は、任意で行の区切りで分割できます（既定はオフ）。CLIの`--table-row-blocks`、GUIの「大きなExcelの表を行ブロックに分割」、APIの`TableRowBlocks`で指定します。シートが目安を超えるとき、1つの分割に収まらない表を行ブロックに分けます。各ブロックは表の見出し行から始まり、分割と`manifest.json`に、表のID、何番目のブロックか、見出し行とそのブロックの行の元のセル範囲、前後の分割を記録します。表のすぐ上にある短いセルの文字（`売上実績（単位: 千円、税抜）`のような表題・単位・条件の注記）は最初のブロックに含め、2つ目以降のブロックでも見出し行の前にそのまま再掲します。1つのブロックだけをAIへ渡しても数値の意味がわかるようにするためで、分割と`manifest.json`（`context_range`）にそのセル範囲を記録します。行の重複・欠落・並べ替えは起きません。小さな表やほかの形式は従来どおりです。
 
@@ -66,7 +80,7 @@ Wordは見出しと意味のまとまりで分割し、既定のサイズ目安�
 
 AIへの依頼ごとに`document.md`と`source-index.json`の両方を渡す必要はありません。収まる場合は`document.md`、収まらない場合は分割を順に渡します（各分割に元ファイルと位置が書かれています）。`source-index.json`は手元に置き、回答をノードIDやExcelのセルへ戻すときだけ読み込みます。詳しくは[形式仕様](../reference/ai-package.md#giving-a-package-to-a-model)を参照してください。
 
-画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換には引き続き実験機能の環境変数が必要です。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。自動処理では`--fail-on-review`を付けると、照合が必要な項目（原本照合ページ、OCR確認、Excelの表の区切り。`report.json`の`review.required`）がある場合に、パッケージを書き出したうえで終了コード11を返します。終了コード0だけを見てAIへ渡してしまうことを防ぐためで、付けない場合は照合項目で終了コードは変わりません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
+画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換には引き続き実験機能の環境変数が必要です。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。自動処理では`--fail-on-review`を付けると、照合が必要な項目（原本照合ページ、OCR確認、Excelの表の区切り、Word変更履歴の共有確認。`report.json`の`review.required`）がある場合に、パッケージを書き出したうえで終了コード11を返します。終了コード0だけを見てAIへ渡してしまうことを防ぐためで、付けない場合は照合項目で終了コードは変わりません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
 
 ## 3. 生成されるファイル
 
@@ -80,13 +94,15 @@ AIへの依頼ごとに`document.md`と`source-index.json`の両方を渡す必�
 
 Mermaidは、接続関係が明確で矛盾しない場合だけ出力します。認識した図は、(1) Mermaid、(2) 画像／ページプレビュー等の代替表示、(3) 明示的な診断の順で、利用可能な形を残します。図形テキストがあることだけでは、接続関係や分岐まで完全に保持したことにはなりません。
 
+GUIのパッケージ設定には、行分割、目安文字数、予想分割数、最大分割サイズと超過の有無を表示します（予想は先頭の文書・OCRなし）。書き出し後は実績を表示します。「パッケージを読む」でZIP／フォルダーを検証し、確認レポートを読んでから本文を検索・選択コピーできます。出典索引はコピー本文に含めません。CLIでも`docredock package search package.zip "売上"`、`docredock package read package.zip --part part-0001`が使えます。要確認のパッケージは終了11で本文を出さず、確認後の`--allow-review`で読み取れます。1分割では本文を絞る効果が限られ、全分割を渡すと注記の反復で全文より増える場合があります。
+
 ## 4. 内容ポリシーを選ぶ
 
 - **visible**（既定）: 認識できる非表示テキスト、シート・行・列、スライド・オブジェクト、ノート、コメント、変更履歴のメタデータと、PDFで表示範囲の完全に外側にある文字や非表示レイヤーの文字を除外します。
 - **complete**: 非表示情報とメタデータを含め、警告を出します。
 - **sanitized**: メタデータ、派生・OCR情報、ヘッダー／フッター等も除外します。
 
-Word本文の変更履歴は、`visible`／`sanitized`でも閲覧用MarkdownとAI向けパッケージに表示され、削除した文字を含みます。共有したくない場合は、原本のコピーで変更を確定してから変換してください。
+Wordの変更履歴は`--revisions final|markup|reject`（GUIの「Wordの変更履歴」、APIの`Revisions`）で指定します。`final`は挿入後・現在の内容だけを出力し、削除内容・移動元・履歴注記を除外します。`markup`は削除内容も含む履歴付き表示、`reject`は変更履歴がある文書の書き出しを拒否します。省略時は`sanitized`が`final`、`visible`／`complete`が従来互換の`markup`です。`sanitized`で`markup`を選ぶ場合は`--allow-revision-sharing`またはGUIの許可チェックが必要です。許可チェックは保存されません。履歴付き出力は共有確認対象となり、`--fail-on-review`で終了11になります。原本と復元用サイドカーには履歴が残ります。
 
 XLSXの書き出しでは、`--sheets Sheet1,Sheet2`（CLI限定）で指定したシートだけを対象にできます。指定した名前は既存のシート名と（大文字小文字を区別せず）完全一致する必要があります。存在しない名前を指定するとexit code 2で失敗し、出力ファイルは作成されません。一部の名前だけ一致しない場合（部分的な不一致）も、その名前を黙って無視せず失敗します。指定したシートが非表示で`visible`/`sanitized`ポリシーにより除外される場合はエラーにはなりませんが、`XlsxSheetExcludedByPolicy`という警告（exit code 1）を出し、出力が空に見える理由を説明します。含めるには`--content-policy complete`を使用してください。
 

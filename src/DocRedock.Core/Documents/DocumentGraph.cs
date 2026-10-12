@@ -21,6 +21,7 @@ public static class DocumentContentPolicyRules
 
     public static bool Includes(DocumentNode node, DocumentContentPolicy policy)
     {
+        ArgumentNullException.ThrowIfNull(node);
         if (policy == DocumentContentPolicy.Complete) return true;
         if (node.Layer is ContentLayer.Hidden or ContentLayer.Metadata ||
             node.Kind is NodeKind.Comment or NodeKind.Revision or NodeKind.SpeakerNotes) return false;
@@ -100,7 +101,7 @@ public sealed record DocumentGraph
         styles = Styles; assets = Assets; formatExtensions = FormatExtensions; capabilities = Capabilities;
     }
 
-    private static IReadOnlyList<DocumentPartition> NormalizeNodeIds(IReadOnlyList<DocumentPartition>? partitions)
+    private static DocumentPartition[] NormalizeNodeIds(IReadOnlyList<DocumentPartition>? partitions)
     {
         partitions ??= Array.Empty<DocumentPartition>();
         var used = new HashSet<string>(StringComparer.Ordinal);

@@ -241,6 +241,7 @@ public sealed class WindowsOcrEngine : IOcrEngine
 
 public static class WindowsOcrJsonParser
 {
+    private static readonly JsonSerializerOptions ReadJsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static readonly Regex HyphenSpacing = new(@"\s*-\s*", RegexOptions.CultureInvariant);
     private static readonly Regex NumericOrLatinHyphen = new(
         @"(?<=[0-9０-９A-Za-z])\s*[-‐‑‒–—−ー]\s*(?=[0-9０-９A-Za-z])", RegexOptions.CultureInvariant);
@@ -257,7 +258,7 @@ public static class WindowsOcrJsonParser
     public static OcrResult Parse(string json)
     {
         ArgumentNullException.ThrowIfNull(json);
-        var lines = JsonSerializer.Deserialize<WindowsOcrLine[]>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+        var lines = JsonSerializer.Deserialize<WindowsOcrLine[]>(json, ReadJsonOptions) ?? [];
         var regions = lines
             .Where(line => !string.IsNullOrWhiteSpace(line.Text))
             .Select((line, index) => new OcrTextRegion(NormalizeText(line.Text), new Geometry("image-pixels", line.X, line.Y, line.Width, line.Height), null, index + 1))
@@ -276,6 +277,7 @@ public static class WindowsOcrJsonParser
         return RepeatedHorizontalSpacing.Replace(normalized, " ").Trim();
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record WindowsOcrLine(
         [property: JsonPropertyName("text")] string Text,
         [property: JsonPropertyName("x")] double X,

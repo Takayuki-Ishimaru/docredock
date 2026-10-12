@@ -13,15 +13,18 @@ import sys
 from PIL import Image, ImageDraw
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    BaseDocTemplate, Frame, Image as RLImage, KeepTogether, PageTemplate,
+    BaseDocTemplate, Frame, Image as RLImage, PageTemplate,
     Paragraph, Spacer, Table, TableStyle, PageBreak,
 )
+
+# Match the other fixture generators when run from a relocated checkout.
+ROOT = Path(os.environ["DRMD_FIXTURE_ROOT"]) if os.environ.get("DRMD_FIXTURE_ROOT") else Path(__file__).resolve().parents[4]
 
 FONT_NAME = "DocRedockFixtureFont"
 

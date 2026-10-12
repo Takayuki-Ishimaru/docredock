@@ -17,7 +17,9 @@ Underlines identifying headings or links are not exported as emphasis. When a li
 
 Readable Markdown and AI packages show Word deletions/move sources as `~~strikethrough~~` and insertions/move destinations as `<ins>additions</ins>`. Inserted/deleted rows and cells are marked too. Formatting, table structure, paragraph and section changes carry previous/current notes.
 
-**Review before sharing:** Word body revisions appear even with the default `visible` policy or `sanitized`, and may include deleted text. To exclude revisions, finalize the changes in a copy of the source before conversion. Explicitly hidden text still follows the content policy. Historical page layout is not reconstructed. Experimental round-trip editing uses the finalized-body view and restricts edits through revision markup.
+**Review before sharing:** In v0.3.3, Word body revisions appear even with the default `visible` policy or `sanitized`, and may include deleted text. To exclude revisions, finalize the changes in a copy of the source before conversion. Explicitly hidden text still follows the content policy. Historical page layout is not reconstructed. Experimental round-trip editing uses the finalized-body view and restricts edits through revision markup.
+
+For revision choices and the new `sanitized` default introduced in v0.3.4, see the [v0.3.4 release notes](RELEASE_NOTES_v0.3.4.en.md#choose-how-word-tracked-changes-are-exported).
 
 Excel conditional strikethrough evaluates supported arithmetic, logical, aggregate, text and date functions, saved cross-sheet values and defined names. Cell formulas are not recalculated. `TODAY` and `NOW` use the device clock at conversion start. Unsupported references/functions, missing saved values and other unresolved conditions retain ordinary formatting and produce a diagnostic.
 

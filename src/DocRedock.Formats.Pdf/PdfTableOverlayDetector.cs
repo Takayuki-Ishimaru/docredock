@@ -357,10 +357,10 @@ public static class PdfTableOverlayDetector
     // uses): a band is "covered" when the shape's span on that axis overlaps it by at least half
     // the band's own width; with no band covered, fall back to the band containing the shape's own
     // center (clamped to the grid).
-    private static (int Start, int End) ComputeAxisRange(double min, double max, IReadOnlyList<double> boundariesAscending)
+    private static (int Start, int End) ComputeAxisRange(double min, double max, double[] boundariesAscending)
     {
         var covered = new List<int>();
-        for (var index = 0; index < boundariesAscending.Count - 1; index++)
+        for (var index = 0; index < boundariesAscending.Length - 1; index++)
         {
             var bandStart = boundariesAscending[index]; var bandEnd = boundariesAscending[index + 1];
             var bandWidth = bandEnd - bandStart;
@@ -370,7 +370,7 @@ public static class PdfTableOverlayDetector
         }
         if (covered.Count > 0) return (covered[0], covered[^1]);
         var clamped = Math.Clamp((min + max) / 2, boundariesAscending[0], boundariesAscending[^1]);
-        for (var index = 0; index < boundariesAscending.Count - 1; index++)
+        for (var index = 0; index < boundariesAscending.Length - 1; index++)
             if (clamped >= boundariesAscending[index] && clamped <= boundariesAscending[index + 1]) return (index, index);
         return (0, 0);
     }
@@ -378,9 +378,9 @@ public static class PdfTableOverlayDetector
     // Rows are stored top-down (descending Y); ComputeAxisRange itself only ever reasons over an
     // ascending boundary list, so reverse to ascending Y first and map the resulting ascending-band
     // index back to a top-down row index (ascending band 0 = bottom-most = the LAST row).
-    private static (int Start, int End) ComputeRowRange(double minY, double maxY, IReadOnlyList<double> ysTopDown)
+    private static (int Start, int End) ComputeRowRange(double minY, double maxY, double[] ysTopDown)
     {
-        var rowCount = ysTopDown.Count - 1;
+        var rowCount = ysTopDown.Length - 1;
         var ascending = ysTopDown.Reverse().ToArray();
         var (startAscending, endAscending) = ComputeAxisRange(minY, maxY, ascending);
         return (rowCount - 1 - endAscending, rowCount - 1 - startAscending);
@@ -463,7 +463,7 @@ public static class PdfTableOverlayDetector
     // flared shaft (P10 fix, see below). Checked on whichever axis actually shows this taper
     // signature; a shape's non-arrow axis (e.g. a horizontal arrow's Y extent) never shows it,
     // since several vertices always share both the top and bottom edge there.
-    private static bool TryDetectArrow(IReadOnlyList<VisualPathPoint> vertices, out string direction, out string axis)
+    private static bool TryDetectArrow(VisualPathPoint[] vertices, out string direction, out string axis)
     {
         direction = "none"; axis = "horizontal";
         var minX = vertices.Min(vertex => vertex.X); var maxX = vertices.Max(vertex => vertex.X);
@@ -483,10 +483,10 @@ public static class PdfTableOverlayDetector
         // neither oneSidedTaper nor doubleTipTaper being satisfied, exactly like any other polygon
         // whose taper signature does not otherwise match a single-headed arrow.
         var oneSidedTaperX = atMinX == 1 && atMaxX >= 2 || atMaxX == 1 && atMinX >= 2;
-        var doubleTipTaperX = atMinX == 1 && atMaxX == 1 && atMinY >= 2 && atMaxY >= 2 && vertices.Count >= 7;
+        var doubleTipTaperX = atMinX == 1 && atMaxX == 1 && atMinY >= 2 && atMaxY >= 2 && vertices.Length >= 7;
         var horizontalTaper = oneSidedTaperX || doubleTipTaperX;
         var oneSidedTaperY = atMinY == 1 && atMaxY >= 2 || atMaxY == 1 && atMinY >= 2;
-        var doubleTipTaperY = atMinY == 1 && atMaxY == 1 && atMinX >= 2 && atMaxX >= 2 && vertices.Count >= 7;
+        var doubleTipTaperY = atMinY == 1 && atMaxY == 1 && atMinX >= 2 && atMaxX >= 2 && vertices.Length >= 7;
         var verticalTaper = oneSidedTaperY || doubleTipTaperY;
         if (horizontalTaper && (!verticalTaper || maxX - minX >= maxY - minY))
         {

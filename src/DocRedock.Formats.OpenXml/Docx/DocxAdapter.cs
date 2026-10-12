@@ -53,6 +53,8 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     public ValueTask<ProbeResult> ProbeAsync(RewindableInput input, ProbeContext context, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(context);
         try
         {
             input.Reset();
@@ -91,10 +93,14 @@ public sealed partial class DocxAdapter : IFormatProbe
         var documentBytes = await ReadEntryAsync(document, cancellationToken).ConfigureAwait(false);
         var slices = XmlSliceScanner.FindWordBodyBlocks(documentBytes, "/word/document.xml");
         var doc = SafeXml.LoadDocument(documentBytes);
+        var originalHasTrackedRevisions = doc.Descendants().Any(IsRevisionContainer);
+        var deletedRevisionContent = HasDeletedRevisionContent(doc);
+        if (options.FinalRevisionView) ApplyFinalRevisionView(doc);
         var relationships = ReadRelationships(archive, "word/_rels/document.xml.rels", cancellationToken);
         var numberingInfo = ReadNumberingInfo(archive, cancellationToken);
         var hiddenStyles = ReadHiddenStyles(archive, cancellationToken);
         if (options.ShowTrackedRevisions) hiddenStyles = hiddenStyles.WithTrackedRevisions();
+        hiddenStyles.FinalRevisionView = options.FinalRevisionView;
         var listCounters = new Dictionary<(int NumId, int Ilvl), int>();
         var nodes = new List<DocumentNode>();
         var sliceMap = new Dictionary<string, RawSliceRef>(StringComparer.Ordinal);
@@ -297,14 +303,14 @@ public sealed partial class DocxAdapter : IFormatProbe
         hiddenStyles.Decorations.AddDiagnostics(diagnostics);
         var sourceHash = await HashFileAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() || settingsDocument?.Descendants(W + "documentProtection").Any() == true;
-        var hasTrackedRevisions = doc.Descendants().Any(IsRevisionContainer);
-        if (!hasTrackedRevisions)
-            foreach (var part in archive.Entries.Where(entry => entry.FullName.StartsWith("word/header", StringComparison.Ordinal) ||
-                entry.FullName.StartsWith("word/footer", StringComparison.Ordinal) || entry.FullName is "word/footnotes.xml" or "word/endnotes.xml"))
+        var hasTrackedRevisions = originalHasTrackedRevisions;
+        foreach (var part in archive.Entries.Where(entry => entry.FullName.StartsWith("word/header", StringComparison.Ordinal) ||
+                entry.FullName.StartsWith("word/footer", StringComparison.Ordinal) || entry.FullName is "word/footnotes.xml" or "word/endnotes.xml" or "word/comments.xml"))
             {
                 if (!part.FullName.EndsWith(".xml", StringComparison.Ordinal)) continue;
-                if (SafeXml.LoadDocument(await ReadEntryAsync(part, cancellationToken).ConfigureAwait(false)).Descendants().Any(IsRevisionContainer))
-                { hasTrackedRevisions = true; break; }
+                var revisionPart = SafeXml.LoadDocument(await ReadEntryAsync(part, cancellationToken).ConfigureAwait(false));
+                hasTrackedRevisions |= revisionPart.Descendants().Any(IsRevisionContainer);
+                deletedRevisionContent |= HasDeletedRevisionContent(revisionPart);
             }
         var index = new DocxSourceIndex(sourcePath, sourceHash, sliceMap, runMaps, slices.BodyEndTagStart,
             archive.GetEntry("word/vbaProject.bin") is not null,
@@ -318,8 +324,12 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (index.HasTrackedRevisions) diagnostics.Add(new("TrackedRevisionsPresent",
             options.ShowTrackedRevisions
                 ? "DOCX contains tracked revisions; readable output marks inserted/deleted text, rows and cells, and annotates formatting and structure changes. Edits crossing revision markup are strict-rejected."
+                : options.FinalRevisionView
+                ? "DOCX contains tracked revisions; final readable output excludes deleted content and revision annotations. The source still retains the history."
                 : "DOCX contains tracked revisions; extracted body follows Word's final view (insertions shown, deletions retained as hidden content), and edits crossing revision markup are strict-rejected.",
             DiagnosticSeverity.Warning));
+        if (options.ShowTrackedRevisions && deletedRevisionContent)
+            diagnostics.Add(new("DeletedRevisionContentIncluded", "Revision markup may include deleted text or objects; review sharing permissions.", DiagnosticSeverity.Warning));
         // One document-level notice, not one per equation: OMML is structured markup that only
         // approximates as linear text, so the reader is told once that layout may have changed.
         var linearizedEquations = bodyElements.Sum(CountMathRoots);
@@ -334,8 +344,8 @@ public sealed partial class DocxAdapter : IFormatProbe
     }
 
     private static async Task AddChartsAsync(ZipArchive archive, XElement block,
-        IReadOnlyDictionary<string, string> relationships, ICollection<DocumentNode> nodes,
-        ICollection<Diagnostic> diagnostics, int order, string? parentId,
+        Dictionary<string, string> relationships, List<DocumentNode> nodes,
+        List<Diagnostic> diagnostics, int order, string? parentId,
         DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
     {
         foreach (var (chart, index) in block.Descendants(C + "chart").Select((chart, index) => (chart, index)))
@@ -389,6 +399,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         string sourcePath, DocumentGraph baselineGraph, DocumentGraph editedGraph, string outputPath,
         DiffOptions? diffOptions = null, DocxRestoreOptions? options = null, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(baselineGraph);
+        ArgumentNullException.ThrowIfNull(editedGraph);
         options ??= new();
         var diagnostics = new List<Diagnostic>();
         var diff = new DocumentGraphDiffEngine().Compare(baselineGraph, editedGraph, diffOptions);
@@ -514,8 +526,8 @@ public sealed partial class DocxAdapter : IFormatProbe
     }
 
     private static void AddParagraph(XElement paragraph, string partUri, RawSliceRef? slice, int order,
-        ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, IDictionary<string, DocxRunCharacterMap> runMaps,
-        IReadOnlyDictionary<string, string> relationships, ContentLayer layer,
+        List<DocumentNode> nodes, Dictionary<string, RawSliceRef> sliceMap, Dictionary<string, DocxRunCharacterMap> runMaps,
+        Dictionary<string, string> relationships, ContentLayer layer,
         NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters,
         DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, bool includeVisualGraph = true,
         IReadOnlyList<DocxTextBoxBinding?>? textBoxSlices = null)
@@ -764,7 +776,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     /// <summary>What one mc:Choice / mc:Fallback holds at body positions, in the order and with the
     /// content-control transparency <see cref="XmlSliceScanner"/> recorded: the sliceable blocks it
     /// owns directly, and the nested forks that stand for a body position of their own.</summary>
-    private static IReadOnlyList<XElement> BranchChildren(XElement branch) =>
+    private static XElement[] BranchChildren(XElement branch) =>
         branch.Elements().SelectMany(child => ExpandContentControls(child, null))
             .Select(item => item.Element).ToArray();
 
@@ -787,7 +799,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     private static bool AssignAlternateContentSlices(
         XElement alternate, int alternateIndex, IReadOnlyList<XmlSliceScanner.BlockSlice> group,
         IReadOnlyList<(XElement Element, DocxContentControl? Control)> selected, RawSliceRef?[] selectedSlices,
-        XElement?[] selectedOriginals, IDictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
+        XElement?[] selectedOriginals, Dictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
     {
         var slicesByPath = group.GroupBy(item => item.Branch ?? string.Empty, StringComparer.Ordinal)
             .ToDictionary(item => item.Key, item => (IReadOnlyList<XmlSliceScanner.BlockSlice>)item.OrderBy(entry => entry.Start).ToArray(), StringComparer.Ordinal);
@@ -902,9 +914,9 @@ public sealed partial class DocxAdapter : IFormatProbe
     /// block, resolving each mc:AlternateContent exactly as the projection did; a box the two walks
     /// disagree about is left unbound and stays read-only. Mirrors for the branches passed over are
     /// registered on the way through.</summary>
-    private static IReadOnlyList<DocxTextBoxBinding?> BindHostTextBoxes(
+    private static List<DocxTextBoxBinding?> BindHostTextBoxes(
         XElement? original, RawSliceRef? hostSlice, ILookup<int, XmlSliceScanner.TextBoxSlice> textBoxLedger,
-        IDictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
+        Dictionary<long, DocxAlternateMirror> mirrors, DocxHiddenStyles hiddenStyles)
     {
         if (original is null || hostSlice is null) return [];
         var recorded = textBoxLedger[(int)hostSlice.StartOffset].OrderBy(item => item.Start).ToArray();
@@ -990,7 +1002,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         return result;
     }
 
-    private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, ICollection<DocumentNode> nodes, ref int ordinal,
+    private static void AddDocumentVisualGraph(IReadOnlyList<XElement> bodyElements, List<DocumentNode> nodes, ref int ordinal,
         DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken,
         IReadOnlySet<XElement>? overlayExcludedShapes = null)
     {
@@ -1070,7 +1082,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         }
     }
 
-    private static IEnumerable<VisualGraph> SplitVisualGraphs(VisualGraph graph)
+    private static VisualGraph[] SplitVisualGraphs(VisualGraph graph)
     {
         var nodes = (graph.Nodes ?? []).Where(node => node is not null).OrderBy(node => node.Id, StringComparer.Ordinal).ToArray();
         var edges = (graph.Edges ?? []).Where(edge => edge is not null).ToArray();
@@ -1187,7 +1199,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         var shapeRecords = shapeElements.Select((shape, index) =>
         {
             var shapeId = (string?)shape.Attribute("id") ??
-                (string?)shape.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ?? index.ToString();
+                (string?)shape.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ?? index.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var nodeAnchor = anchor with { Locators = [new AnchorLocator("shape_id", shapeId)] };
             var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
             var geometry = ReadVisualGeometry(shape);
@@ -1772,7 +1784,9 @@ public sealed partial class DocxAdapter : IFormatProbe
     {
         // Resolution of an inline AlternateContent can change the element walk. Keep its
         // nested tables protected unless the byte and semantic trees are identical in shape.
-        if (slice is not null && documentBytes is not null && originalTable is not null && !originalTable.Descendants(MC + "AlternateContent").Any())
+        // The one-way final view has removed revision elements, rows and cells. Its semantic
+        // tree cannot be indexed against the original byte walk for restoration slices.
+        if (!hiddenStyles.FinalRevisionView && slice is not null && documentBytes is not null && originalTable is not null && !originalTable.Descendants(MC + "AlternateContent").Any())
         {
             var bytes = documentBytes.AsSpan(checked((int)slice.StartOffset), checked((int)(slice.EndOffset - slice.StartOffset))).ToArray();
             tableSlices = IndexSliceElements(bytes, table, slice);
@@ -2003,11 +2017,11 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     private static double EmuToTwips(double emu) => emu / DocxOverlayEmuPerTwip;
 
-    private static IReadOnlyList<double> DocxOverlayBoundaries(double origin, IReadOnlyList<double> sizes)
+    private static double[] DocxOverlayBoundaries(double origin, double[] sizes)
     {
-        var boundaries = new double[sizes.Count + 1];
+        var boundaries = new double[sizes.Length + 1];
         boundaries[0] = origin;
-        for (var i = 0; i < sizes.Count; i++) boundaries[i + 1] = boundaries[i] + sizes[i];
+        for (var i = 0; i < sizes.Length; i++) boundaries[i + 1] = boundaries[i] + sizes[i];
         return boundaries;
     }
 
@@ -2351,7 +2365,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         return true;
     }
 
-    private static bool TryGetDocxOverlayColumnContainment(DocxOverlayCandidate candidate, double x, double width, IReadOnlyList<double> columnBoundaries, out double containment)
+    private static bool TryGetDocxOverlayColumnContainment(DocxOverlayCandidate candidate, double x, double width, double[] columnBoundaries, out double containment)
     {
         var tableLeft = columnBoundaries[0]; var tableRight = columnBoundaries[^1];
         if (width > 0)
@@ -2608,11 +2622,11 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     /// <summary>Marks, per cell block, whether a paragraph survives <see cref="CellText"/>'s trimming
     /// of leading and trailing empty paragraphs (tables are never "kept" paragraphs).</summary>
-    private static bool[] KeptCellParagraphs(IReadOnlyList<XElement> blocks, DocxHiddenStyles hiddenStyles)
+    private static bool[] KeptCellParagraphs(XElement[] blocks, DocxHiddenStyles hiddenStyles)
     {
-        var kept = new bool[blocks.Count];
+        var kept = new bool[blocks.Length];
         var paragraphs = new List<int>();
-        for (var index = 0; index < blocks.Count; index++) if (blocks[index].Name == W + "p") paragraphs.Add(index);
+        for (var index = 0; index < blocks.Length; index++) if (blocks[index].Name == W + "p") paragraphs.Add(index);
         var first = 0;
         var last = paragraphs.Count - 1;
         while (first <= last && ParagraphText(blocks[paragraphs[first]], hiddenStyles).Length == 0) first++;
@@ -2644,7 +2658,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             foreach (var expanded in ExpandContentControls(child, control)) yield return expanded;
     }
 
-    private static void AddContentControlExtensions(IDictionary<string, JsonElement> extensions, DocxContentControl? control)
+    private static void AddContentControlExtensions(Dictionary<string, JsonElement> extensions, DocxContentControl? control)
     {
         if (control is null) return;
         extensions["content_control"] = JsonSerializer.SerializeToElement(true);
@@ -2774,7 +2788,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         element is not null && (string?)element.Attribute(W + "val") is not ("0" or "false" or "off");
 
     private static async Task<int> AddRelatedTextPartsAsync(ZipArchive archive, IReadOnlyDictionary<string, string> relationships, string relationshipFragment,
-        NodeKind kind, ContentLayer layer, ICollection<DocumentNode> nodes, int ordinal, DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
+        NodeKind kind, ContentLayer layer, List<DocumentNode> nodes, int ordinal, DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
     {
         foreach (var target in relationships.Values.Where(target => target.Contains(relationshipFragment, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.Ordinal))
         {
@@ -2782,6 +2796,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             if (entry is null) continue;
             var partUri = "/" + entry.FullName;
             var xml = SafeXml.LoadDocument(await ReadEntryAsync(entry, cancellationToken).ConfigureAwait(false));
+            if (hiddenStyles.FinalRevisionView) ApplyFinalRevisionView(xml);
             foreach (var paragraph in xml.Descendants(W + "p"))
             {
                 var anchor = new SourceAnchor("docx", partUri, [new("part_paragraph_ordinal", ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture))], ordinal);
@@ -2826,7 +2841,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     // Emits a machine-readable `<!-- section:landscape -->` marker (D05) reusing NodeKind.Section
     // with a section_orientation extension. Xlsx/Pptx never set that extension, so their existing
     // Section-as-heading rendering in ReadableMarkdownSerializer is unaffected.
-    private static void AddSectionOrientationMarker(ICollection<DocumentNode> nodes, string partUri, int order, string orientation)
+    private static void AddSectionOrientationMarker(List<DocumentNode> nodes, string partUri, int order, string orientation)
     {
         var anchor = new SourceAnchor("docx", partUri, [new("section_break", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
         var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
@@ -2838,9 +2853,10 @@ public sealed partial class DocxAdapter : IFormatProbe
             Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
     }
 
-    private static void AddFootnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
+    private static void AddFootnotes(byte[] bytes, List<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
+        if (hiddenStyles.FinalRevisionView) ApplyFinalRevisionView(xml);
         foreach (var footnote in xml.Descendants(W + "footnote"))
         {
             var noteId = (string?)footnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -2856,9 +2872,10 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     // D16: word/endnotes.xml mirrors word/footnotes.xml but was never read at all, so an
     // endnote's text disappeared entirely rather than merely losing its number.
-    private static void AddEndnotes(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
+    private static void AddEndnotes(byte[] bytes, List<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
+        if (hiddenStyles.FinalRevisionView) ApplyFinalRevisionView(xml);
         foreach (var endnote in xml.Descendants(W + "endnote"))
         {
             var noteId = (string?)endnote.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -2874,9 +2891,10 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     // D17: word/comments.xml was never read, so a reviewer comment's text disappeared entirely.
     // w:author is captured as a comment_author extension so readable can label who wrote it.
-    private static void AddComments(byte[] bytes, ICollection<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
+    private static void AddComments(byte[] bytes, List<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
     {
         var xml = SafeXml.LoadDocument(bytes);
+        if (hiddenStyles.FinalRevisionView) ApplyFinalRevisionView(xml);
         foreach (var comment in xml.Descendants(W + "comment"))
         {
             var commentId = (string?)comment.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -2927,7 +2945,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     // edit to its linear text can only replace the whole equation with an ordinary paragraph -
     // which restore does, reporting the lost markup as DocxMathReplaced.
     private static void AddMathParagraph(XElement math, string partUri, RawSliceRef? slice, int order,
-        ICollection<DocumentNode> nodes, IDictionary<string, RawSliceRef> sliceMap, DocxContentControl? contentControl)
+        List<DocumentNode> nodes, Dictionary<string, RawSliceRef> sliceMap, DocxContentControl? contentControl)
     {
         var anchor = new SourceAnchor("docx", partUri,
             [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
@@ -3029,7 +3047,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     /// <summary>Splits a plain-text edit around the anchor texts it still contains, so a text-only
     /// rewrite (a table cell, a paragraph that never projected rich runs) keeps the OMML and the
     /// inline controls the editor left alone.</summary>
-    private static IReadOnlyList<TextRun> SplitTextAroundAnchors(string text, IReadOnlyList<DocxInlineAnchor> anchors)
+    private static List<TextRun> SplitTextAroundAnchors(string text, IReadOnlyList<DocxInlineAnchor> anchors)
     {
         var runs = new List<TextRun>();
         var cursor = 0;
@@ -3178,7 +3196,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     private static bool IsHiddenRun(XElement run, DocxHiddenStyles hiddenStyles) =>
         !hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(run) || hiddenStyles.IsHiddenRun(run);
 
-    private static IReadOnlyList<TextRun> ExtractRichTextRuns(XElement paragraph, IReadOnlyDictionary<string, string> relationships,
+    private static List<TextRun> ExtractRichTextRuns(XElement paragraph, IReadOnlyDictionary<string, string> relationships,
         DocxHiddenStyles hiddenStyles)
     {
         var runs = new List<TextRun>();
@@ -3298,6 +3316,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         private readonly bool hasStyleVanish;
         public DocxStyleDecorations Decorations { get; init; } = DocxStyleDecorations.Empty;
         public bool ShowTrackedRevisions { get; private init; }
+        public bool FinalRevisionView { get; set; }
 
         public DocxHiddenStyles WithTrackedRevisions() =>
             new(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId) { ShowTrackedRevisions = true, Decorations = Decorations };
@@ -3408,7 +3427,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         return new(nodeId, spans);
     }
 
-    private static IReadOnlyDictionary<string, string> ReadRelationships(ZipArchive archive, string entryName, CancellationToken cancellationToken)
+    private static Dictionary<string, string> ReadRelationships(ZipArchive archive, string entryName, CancellationToken cancellationToken)
     {
         var entry = archive.GetEntry(entryName);
         if (entry is null) return new Dictionary<string, string>();
@@ -3439,7 +3458,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     private static ZipArchiveEntry RequireEntry(ZipArchive archive, string name) => archive.GetEntry(name) ?? throw new InvalidDataException($"DOCX required part '{name}' is missing.");
     private static async Task<byte[]> ReadEntryAsync(ZipArchiveEntry entry, CancellationToken cancellationToken)
     {
-        await using var stream = entry.Open();
+        await using var stream = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
         using var output = new MemoryStream();
         await stream.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
         return output.ToArray();
@@ -3525,13 +3544,13 @@ public sealed partial class DocxAdapter : IFormatProbe
     /// <summary>Preserve existing run/text boundaries where possible. This is the minimal
     /// character-offset-map policy: original character spans remain assigned to their original
     /// formatting runs; growth is assigned to the final run.</summary>
-    private static void WriteTextAcross(IReadOnlyList<XElement> textElements, string text)
+    private static void WriteTextAcross(XElement[] textElements, string text)
     {
         var originalLengths = textElements.Select(element => element.Value.Length).ToArray();
         var offset = 0;
-        for (var index = 0; index < textElements.Count; index++)
+        for (var index = 0; index < textElements.Length; index++)
         {
-            var length = index == textElements.Count - 1
+            var length = index == textElements.Length - 1
                 ? text.Length - offset
                 : Math.Min(originalLengths[index], Math.Max(0, text.Length - offset));
             var replacement = text.Substring(offset, length);
@@ -3555,7 +3574,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     /// the search missed had its own text edited - if everything around it came back untouched the
     /// difference is its new content and goes back inside the wrapper; otherwise the edit ran
     /// across the wrapper's boundary and the wrapper cannot survive it.</summary>
-    private static IReadOnlyList<DocxAnchorPlacement> PlaceInlineAnchors(DocxParagraphLayout layout, string combined)
+    private static List<DocxAnchorPlacement> PlaceInlineAnchors(DocxParagraphLayout layout, string combined)
     {
         var placements = new List<DocxAnchorPlacement>();
         var cursor = 0;
@@ -3694,7 +3713,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 templateIndex = groupEnd;
                 return;
             }
-            var specialTemplate = templateIndex < templates.Count ? templates[templateIndex] : templates.LastOrDefault();
+            var specialTemplate = templateIndex < templates.Count ? templates[templateIndex] : (templates.Count > 0 ? templates[^1] : null);
             Insert(CreateRichRun(run, specialTemplate?.Properties));
             if (templateIndex < templates.Count) templateIndex++;
         }
@@ -3969,7 +3988,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         return (true, next);
     }
 
-    private static IReadOnlyDictionary<XElement, RawSliceRef> IndexSliceElements(byte[] bytes, XElement root, RawSliceRef host)
+    private static Dictionary<XElement, RawSliceRef> IndexSliceElements(byte[] bytes, XElement root, RawSliceRef host)
     {
         var ranges = XmlSliceScanner.FindElementRanges(bytes);
         var elements = root.DescendantsAndSelf().ToArray();
@@ -3981,7 +4000,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 SafeXml.Sha256(bytes.AsSpan(item.range.Start, item.range.End - item.range.Start)), RawSliceKind.XmlElement));
     }
 
-    private static IReadOnlyList<(RawSliceRef Slice, byte[] Data)> ReplaceTableCellSlices(
+    private static List<(RawSliceRef Slice, byte[] Data)> ReplaceTableCellSlices(
         byte[] originalSlice, RawSliceRef host, NodeContent before, NodeContent content, out DocxParagraphEditResult edits)
     {
         if (before is not TableNodeContent baseline || content is not TableNodeContent edited)
@@ -4151,7 +4170,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         _ => throw new InvalidDataException($"Node '{node.Id}' does not contain editable text.")
     };
 
-    private static byte[] SpliceDocument(byte[] original, IReadOnlyList<(RawSliceRef Slice, byte[] Data)> replacements, IReadOnlyList<byte[]> additions)
+    private static byte[] SpliceDocument(byte[] original, IReadOnlyList<(RawSliceRef Slice, byte[] Data)> replacements, List<byte[]> additions)
     {
         var output = new MemoryStream(original.Length + additions.Sum(item => item.Length));
         long copied = 0;
@@ -4192,12 +4211,12 @@ public sealed partial class DocxAdapter : IFormatProbe
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var copied = output.CreateEntry(entry.FullName, CompressionLevel.Optimal);
-                    await using var target = copied.Open();
+                    await using var target = await copied.OpenAsync(cancellationToken).ConfigureAwait(false);
                     if (StringComparer.Ordinal.Equals(entry.FullName, "word/document.xml"))
                         await target.WriteAsync(patchedDocument, cancellationToken).ConfigureAwait(false);
                     else
                     {
-                        await using var origin = entry.Open();
+                        await using var origin = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
                         await origin.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
                     }
                 }

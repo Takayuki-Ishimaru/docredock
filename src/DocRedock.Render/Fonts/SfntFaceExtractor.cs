@@ -25,6 +25,7 @@ public static class SfntFaceExtractor
 
     public static int GetFaceCount(byte[] data)
     {
+        ArgumentNullException.ThrowIfNull(data);
         ValidateRange(data, 0, 12, "font header");
         if (ReadUInt32(data, 0) != TtcfTag) return 1;
         var count = CheckedInt(ReadUInt32(data, 8), "TTC face count");
@@ -117,6 +118,7 @@ public static class SfntFaceExtractor
 
     public static uint ComputeChecksum(byte[] data, int offset, int length)
     {
+        ArgumentNullException.ThrowIfNull(data);
         ValidateRange(data, offset, length, "checksum range");
         uint sum = 0;
         var paddedLength = Align4(length);

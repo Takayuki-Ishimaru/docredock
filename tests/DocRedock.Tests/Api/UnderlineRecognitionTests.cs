@@ -237,7 +237,7 @@ public sealed class UnderlineRecognitionTests : IDisposable
         AssertNoMarkers(markdown);
     }
 
-    private static readonly string WordNamespaces =
+    private const string WordNamespaces =
         "xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"";
 
     private string Document(string name, string body) => Write(name, new Dictionary<string, string>

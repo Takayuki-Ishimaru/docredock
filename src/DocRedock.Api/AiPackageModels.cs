@@ -89,4 +89,23 @@ public sealed record AiPackageExportResult(
     IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> Diagnostics,
     IReadOnlyList<AiPackagePart> Parts,
     ExportSummary Summary,
-    ExportReview Review);
+    ExportReview Review)
+{
+    public AiPackageSizeSummary? Size { get; init; }
+}
+
+public sealed record AiPackageSizeSummary(int PartCount, int DocumentCharacters, int TotalPartCharacters,
+    int MaximumPartCharacters, int ExceedingParts, int TargetCharacters)
+{
+    public static AiPackageSizeSummary Build(string document, IReadOnlyList<AiPackagePart> parts, int target)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(parts);
+        return new(parts.Count, document.Length, parts.Sum(part => part.Markdown.Length),
+            parts.Count == 0 ? 0 : parts.Max(part => part.Markdown.Length), parts.Count(part => part.ExceedsTarget), target);
+    }
+    public string DescribeJapanese(bool estimated = false) =>
+        $"{(estimated ? "予想" : "実績")}: {PartCount}分割／最大 {MaximumPartCharacters:N0}文字／目安 {TargetCharacters:N0}文字／目安超過 {ExceedingParts}分割。" +
+        $"全文 {DocumentCharacters:N0}文字、分割本文の合計 {TotalPartCharacters:N0}文字。" +
+        (PartCount <= 1 ? "1分割では必要な本文だけに絞る効果が限られます。Excelの行分割を検討してください。" : "必要な分割だけをAIへ渡してください。全分割の合計は注記の反復で全文より増える場合があります。");
+}

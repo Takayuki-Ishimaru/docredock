@@ -10,10 +10,18 @@ public static class PdfPageProjection
 {
     /// <summary>The "strike_ranges" extension of a line: its struck-through characters as [start, end)
     /// offsets into its text; null when nothing is struck.</summary>
-    public static JsonElement? StrikeRanges(PdfTextRegion region) => Ranges(region.Struck);
+    public static JsonElement? StrikeRanges(PdfTextRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        return Ranges(region.Struck);
+    }
 
     /// <summary>The "underline_ranges" extension of a line: its underlined characters, in the same form.</summary>
-    public static JsonElement? UnderlineRanges(PdfTextRegion region) => Ranges(region.Underlined);
+    public static JsonElement? UnderlineRanges(PdfTextRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        return Ranges(region.Underlined);
+    }
 
     private static JsonElement? Ranges(IReadOnlyList<TextRange>? ranges) => ranges is { Count: > 0 }
         ? JsonSerializer.SerializeToElement(ranges.Select(range => new[] { range.Start, range.End }).ToArray())

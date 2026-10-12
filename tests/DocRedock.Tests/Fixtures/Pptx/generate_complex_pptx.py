@@ -18,9 +18,9 @@ import zipfile
 from lxml import etree
 
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
@@ -975,7 +975,6 @@ def inject_smartart(pptx_path, slide_part, nodes=SMARTART_NODES):
     to slide_part (e.g. 'ppt/slides/slide13.xml')."""
     with zipfile.ZipFile(pptx_path) as zin:
         slide_xml = zin.read(slide_part).decode("utf-8")
-        names = set(zin.namelist())
     existing_ids = [int(x) for x in etree.fromstring(slide_xml.encode("utf-8")).xpath(
         "//*[local-name()='cNvPr']/@id")]
     shape_id = max(existing_ids, default=1) + 1

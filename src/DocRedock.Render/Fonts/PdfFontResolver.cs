@@ -5,6 +5,7 @@ public sealed class PdfFontResolver
     public const string FontPathEnvironmentVariable = "DOCREDOCK_PDF_FONT_PATH";
     public const string FontFaceIndexEnvironmentVariable = "DOCREDOCK_PDF_FONT_FACE_INDEX";
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public ResolvedPdfFont Resolve(PdfFontRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -51,7 +52,7 @@ public sealed class PdfFontResolver
         throw failures.ToException(systemSearch: false);
     }
 
-    private static IReadOnlyList<Candidate> InspectFile(
+    private static List<Candidate> InspectFile(
         string path,
         int? requestedFaceIndex,
         IReadOnlySet<uint> requiredCodePoints,

@@ -85,7 +85,7 @@ public static class MarkdownInlineParser
         return ParseProtected(ProtectEscapes(value), 0);
     }
 
-    private static IReadOnlyList<MarkdownInline> ParseProtected(string protectedValue, int depth)
+    private static List<MarkdownInline> ParseProtected(string protectedValue, int depth)
     {
         var nodes = new List<MarkdownInline>();
         // Parse before decoding entities and escape placeholders: decoded literal delimiters

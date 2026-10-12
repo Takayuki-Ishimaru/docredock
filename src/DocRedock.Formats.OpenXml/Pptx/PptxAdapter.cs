@@ -86,7 +86,9 @@ public sealed record PptxSlideRecord(string SlideId, string PartUri, IReadOnlyLi
 public sealed record PptxExtractionResult(DocumentGraph Graph, IReadOnlyList<PptxSlideRecord> Slides, IReadOnlyDictionary<string, string> PartSha256, IReadOnlyList<string> Warnings);
 public sealed record PptxShapeTextEdit(string SlideId, string ShapeId, string Text);
 public sealed record PptxPatchPlan(IReadOnlyList<PptxShapeTextEdit> Edits, IReadOnlySet<string> DirtyParts);
+#pragma warning disable CA1819 // Existing public API exposes owned binary buffers without cloning.
 public sealed record PptxRestoreResult(byte[] Bytes, bool IsByteIdentical, PptxPatchPlan Plan, IReadOnlyList<string> Warnings);
+#pragma warning restore CA1819
 
 /// <summary>BCL-only PPTX extractor and existing-shape text patcher.</summary>
 public sealed partial class PptxAdapter
@@ -117,7 +119,7 @@ public sealed partial class PptxAdapter
             var (tableOverlaysByTable, tableOverlayHostByShapeId, shapeGridTables, gridMemberHostByShapeId, gridInsertBeforeShapeId,
                 tocLeaderShapeIds, visualGraphs, visualLabelShapeIds, visualConnectorShapeIds, visualNodeShapeIds, _) = drawings;
             visualDiagnostics.AddRange(visualGraphs.SelectMany(graph => graph.Diagnostics ?? []));
-            var visual = visualGraphs.FirstOrDefault();
+            var visual = visualGraphs.Count > 0 ? visualGraphs[0] : null;
             foreach (var shape in slide.Shapes)
             {
                 // P-ShapeGrid: insert the synthesized grid Table node right before its header's
@@ -266,8 +268,10 @@ public sealed partial class PptxAdapter
         return new(graph, slides, package.ToDictionary(x => x.Key, x => Hash(x.Value), StringComparer.Ordinal), warnings);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public PptxPatchPlan CreatePatchPlan(IEnumerable<PptxShapeTextEdit> edits)
     {
+        ArgumentNullException.ThrowIfNull(edits);
         var list = edits.ToArray();
         var dirty = list.Select(x => SlidePartFromId(x.SlideId)).ToHashSet(StringComparer.Ordinal);
         return new(list, dirty);
@@ -275,6 +279,8 @@ public sealed partial class PptxAdapter
 
     public PptxPatchPlan CreatePatchPlan(DocumentGraph baseline, DocumentGraph edited)
     {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(edited);
         var baselineNotes = baseline.Nodes.Where(x => x.Kind == NodeKind.SpeakerNotes).ToDictionary(x => x.Id, x => (x.Content as TextNodeContent)?.Text ?? string.Empty);
         var editedNotes = edited.Nodes.Where(x => x.Kind == NodeKind.SpeakerNotes).ToDictionary(x => x.Id, x => (x.Content as TextNodeContent)?.Text ?? string.Empty);
         if (baselineNotes.Any(x => !editedNotes.TryGetValue(x.Key, out var text) || !StringComparer.Ordinal.Equals(text, x.Value)) || editedNotes.Any(x => !baselineNotes.ContainsKey(x.Key)))
@@ -288,6 +294,7 @@ public sealed partial class PptxAdapter
         return CreatePatchPlan(edits);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public PptxRestoreResult Restore(Stream original, PptxPatchPlan plan)
     {
         ArgumentNullException.ThrowIfNull(original); ArgumentNullException.ThrowIfNull(plan);
@@ -323,7 +330,7 @@ public sealed partial class PptxAdapter
         using var reader = XmlReader.Create(new MemoryStream(presentation), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "sldId")
         {
-            var id = reader.GetAttribute("id") ?? (result.Count + 1).ToString(); var rid = reader.GetAttribute("id", PresentationRelNs) ?? reader.GetAttribute("r:id") ?? "";
+            var id = reader.GetAttribute("id") ?? (result.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture); var rid = reader.GetAttribute("id", PresentationRelNs) ?? reader.GetAttribute("r:id") ?? "";
             if (!presentationRels.TryGetValue(rid, out var target) || !package.TryGetValue(target.Target, out var slideBytes)) continue;
             var slideId = "slide" + (result.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var bulletResolver = BuildBulletResolver(package, target.Target, resolverCache);
@@ -400,7 +407,7 @@ public sealed partial class PptxAdapter
     // inferTitle:false: the slide-title auto-inference heuristic (ReadShapes, below its main loop)
     // exists to recover a title among a *slide's own* shapes; run in isolation against a layout's
     // or master's own decorative shape set it would risk mislabeling one of them "title".
-    private static IReadOnlyList<PptxShapeRecord> NonPlaceholderVisibleShapes(byte[] bytes, string from, string part) =>
+    private static PptxShapeRecord[] NonPlaceholderVisibleShapes(byte[] bytes, string from, string part) =>
         ReadShapes(bytes, from, out _, PlaceholderBulletResolver.Empty, inferTitle: false)
             .Where(shape => !shape.IsPlaceholder && !shape.IsHidden && !string.IsNullOrWhiteSpace(shape.Text))
             // Renumber so a layout/master shape id (independently numbered from the slide's own
@@ -816,7 +823,7 @@ public sealed partial class PptxAdapter
     // must not surface as a spurious blank line at either edge. An empty paragraph sandwiched
     // between real ones is kept: it is a deliberate blank line inside the cell.
     // The struck-through (or underlined) ranges of a cell's paragraphs placed in JoinCellParagraphs' text.
-    private static IReadOnlyList<(int Start, int End)> JoinCellRanges(List<string> paragraphs, List<List<(int Start, int End)>> struck)
+    private static List<(int Start, int End)> JoinCellRanges(List<string> paragraphs, List<List<(int Start, int End)>> struck)
     {
         var start = 0; var end = paragraphs.Count;
         while (start < end && paragraphs[start].Length == 0) start++;
@@ -1047,7 +1054,7 @@ public sealed partial class PptxAdapter
         return values.Select(value => value * scale).ToArray();
     }
 
-    private static IReadOnlyList<double> ToBoundaries(double origin, IReadOnlyList<double> sizes)
+    private static double[] ToBoundaries(double origin, IReadOnlyList<double> sizes)
     {
         var boundaries = new double[sizes.Count + 1];
         boundaries[0] = origin;
@@ -1333,7 +1340,7 @@ public sealed partial class PptxAdapter
     // EMU epsilon -- a fixed threshold cannot scale down for a genuinely tiny hand-drawn grid, nor
     // reliably separate "these two boundaries are the same seam" from "this is a real, if narrow,
     // row" for a normally-sized one.
-    private static IReadOnlyList<double> DedupeAdjacentBoundaries(IReadOnlyList<double> raw, double tolerance)
+    private static List<double> DedupeAdjacentBoundaries(List<double> raw, double tolerance)
     {
         var result = new List<double>(raw.Count);
         foreach (var value in raw)
@@ -1427,9 +1434,9 @@ public sealed partial class PptxAdapter
     private static bool IsUnambiguousOverlayShape(PptxShapeRecord shape) =>
         shape.IsTextBox || StringComparer.Ordinal.Equals(shape.ShapeType, "connector") || !IsShapeGridBoxPreset(shape.ShapePreset);
 
-    private static IReadOnlyList<ShapeGridTable> DetectShapeGridTables(
-        IReadOnlyList<PptxShapeRecord> shapes, IReadOnlySet<string> nativeTableOverlayShapeIds,
-        IReadOnlyList<HostTable> nativeHostTables, IReadOnlySet<string> wiredShapeIds)
+    private static List<ShapeGridTable> DetectShapeGridTables(
+        IReadOnlyList<PptxShapeRecord> shapes, HashSet<string> nativeTableOverlayShapeIds,
+        IReadOnlyList<HostTable> nativeHostTables, HashSet<string> wiredShapeIds)
     {
         var results = new List<ShapeGridTable>();
 
@@ -1539,7 +1546,7 @@ public sealed partial class PptxAdapter
         // G3: the dedupe tolerance scales with this grid's own row height instead of a fixed 0.5
         // EMU epsilon -- see DedupeAdjacentBoundaries for why a fixed threshold cannot work here.
         var rowBoundaryDedupeTolerance = Math.Max(heightMedian * 0.1, 0.5);
-        IReadOnlyList<double> rowBoundaries;
+        List<double> rowBoundaries;
         if (primaryLabel is not null)
         {
             // G3: chain each row boundary through the MIDPOINT between adjacent members --
@@ -1648,7 +1655,9 @@ public sealed partial class PptxAdapter
         // ら\n結合、Y→X順") when more than one member lands on the same cell.
         var rowCount = rowBoundaries.Count - 1;
         var columnCount = columnBoundaries.Length - 1;
+#pragma warning disable CA1814 // Dense rectangular grid: every row has the same number of columns.
         var cellText = new string?[rowCount, columnCount];
+#pragma warning restore CA1814
         void PlaceMember(PptxShapeRecord shape)
         {
             var text = shape.Text.Trim();
@@ -1704,7 +1713,7 @@ public sealed partial class PptxAdapter
     // height past the previous SURVIVING cluster's centre, it and everything after it reads as
     // unrelated content far down the slide rather than the next row of this grid, so it -- and any
     // cluster beyond it -- is dropped, "以降は切り捨てる").
-    private static IReadOnlyList<double>? DeriveRowBoundariesFromOverlayBands(IReadOnlyList<PptxShapeRecord> overlayCandidates, double headerTop, double headerBottom)
+    private static List<double>? DeriveRowBoundariesFromOverlayBands(IReadOnlyList<PptxShapeRecord> overlayCandidates, double headerTop, double headerBottom)
     {
         var withGeometry = overlayCandidates.Where(shape => shape.Geometry is not null).ToArray();
         if (withGeometry.Length == 0) return null;
@@ -1782,7 +1791,7 @@ public sealed partial class PptxAdapter
         return leaders.Length >= 3 ? leaders.Select(s => s.ShapeId).ToHashSet(StringComparer.Ordinal) : [];
     }
 
-    private static IReadOnlyList<VisualGraph> BuildVisualGraphs(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,
+    private static List<VisualGraph> BuildVisualGraphs(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,
         TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
         var graph = BuildVisualGraph(slide, out edgeLabelShapeIds, inferenceTimeout, cancellationToken);
@@ -2560,11 +2569,11 @@ public sealed partial class PptxAdapter
 
     private sealed record AssignedEdgeLabel(string Text, string ShapeId);
 
-    private static IReadOnlyDictionary<string, AssignedEdgeLabel> AssignEdgeLabels(
+    private static Dictionary<string, AssignedEdgeLabel> AssignEdgeLabels(
         IReadOnlyList<PptxShapeRecord> connectors,
-        IReadOnlyDictionary<string, (string Start, string End, VisualEdgeResolution Resolution, VisualConnectionEvidence Evidence)> projectedConnectors,
+        Dictionary<string, (string Start, string End, VisualEdgeResolution Resolution, VisualConnectionEvidence Evidence)> projectedConnectors,
         IReadOnlyList<PptxShapeRecord> candidates,
-        IReadOnlySet<string> reservedEndpointShapeIds,
+        HashSet<string> reservedEndpointShapeIds,
         out IReadOnlySet<string> unresolvedConnectorIds)
     {
         var choices = new List<EdgeLabelCandidate>();
@@ -2633,7 +2642,7 @@ public sealed partial class PptxAdapter
         "ellipse" => VisualNodeKind.Terminator,
         _ => VisualNodeKind.Generic,
     };
-    private static string InferDirection(IReadOnlyList<VisualNode> nodes, IReadOnlyDictionary<string, PptxShapeRecord> byShapeId)
+    private static string InferDirection(IReadOnlyList<VisualNode> nodes, Dictionary<string, PptxShapeRecord> byShapeId)
     {
         var geometries = nodes.Select(node => byShapeId.TryGetValue(node.SourceNodeId ?? "", out var shape) ? shape.Geometry : null).Where(geometry => geometry is not null).Cast<Geometry>().ToArray();
         if (geometries.Length < 2) return "LR";
@@ -2832,7 +2841,7 @@ public sealed partial class PptxAdapter
     }
 
     // ---------------------------------------------------------------------------- P07: SmartArt --
-    private static IReadOnlyList<string>? ResolveDiagramTexts(Dictionary<string, byte[]> package, string slidePart, string relationshipId)
+    private static List<string>? ResolveDiagramTexts(Dictionary<string, byte[]> package, string slidePart, string relationshipId)
     {
         var slash = slidePart.LastIndexOf('/');
         if (slash < 0) return null;
@@ -2841,7 +2850,7 @@ public sealed partial class PptxAdapter
             ? ParseDiagramTexts(bytes) : null;
     }
 
-    private static IReadOnlyList<string> ParseDiagramTexts(byte[] bytes)
+    private static List<string> ParseDiagramTexts(byte[] bytes)
     {
         var result = new List<string>();
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
@@ -2985,7 +2994,7 @@ public sealed partial class PptxAdapter
     private static Dictionary<string, byte[]> Open(byte[] bytes)
     {
         using var stream = new MemoryStream(bytes, false); using var zip = new ZipArchive(stream, ZipArchiveMode.Read); var result = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-        foreach (var entry in zip.Entries) { if (entry.FullName.Contains("..", StringComparison.Ordinal) || entry.FullName.StartsWith("/", StringComparison.Ordinal)) throw new InvalidDataException("Unsafe ZIP entry path."); using var input = entry.Open(); using var output = new MemoryStream(); input.CopyTo(output); result[entry.FullName] = output.ToArray(); }
+        foreach (var entry in zip.Entries) { if (entry.FullName.Contains("..", StringComparison.Ordinal) || entry.FullName.StartsWith('/')) throw new InvalidDataException("Unsafe ZIP entry path."); using var input = entry.Open(); using var output = new MemoryStream(); input.CopyTo(output); result[entry.FullName] = output.ToArray(); }
         return result;
     }
     private static byte[] WritePackage(Dictionary<string, byte[]> parts)
@@ -2995,7 +3004,7 @@ public sealed partial class PptxAdapter
     }
     private static Dictionary<string, Relationship> ReadRelationships(Dictionary<string, byte[]> package, string path)
     {
-        var result = new Dictionary<string, Relationship>(StringComparer.Ordinal); if (!package.TryGetValue(path, out var bytes)) return result; using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml); while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Relationship") { var id = reader.GetAttribute("Id"); var target = reader.GetAttribute("Target"); var type = reader.GetAttribute("Type") ?? ""; if (id is null || target is null) continue; var basePath = path[..path.LastIndexOf("/_rels/", StringComparison.Ordinal)]; var resolved = target.StartsWith("/", StringComparison.Ordinal) ? NormalizePartPath(target) : NormalizePartPath(basePath + "/" + target); result[id] = new(id, resolved, type); }
+        var result = new Dictionary<string, Relationship>(StringComparer.Ordinal); if (!package.TryGetValue(path, out var bytes)) return result; using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml); while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Relationship") { var id = reader.GetAttribute("Id"); var target = reader.GetAttribute("Target"); var type = reader.GetAttribute("Type") ?? ""; if (id is null || target is null) continue; var basePath = path[..path.LastIndexOf("/_rels/", StringComparison.Ordinal)]; var resolved = target.StartsWith('/') ? NormalizePartPath(target) : NormalizePartPath(basePath + "/" + target); result[id] = new(id, resolved, type); }
         return result;
     }
 

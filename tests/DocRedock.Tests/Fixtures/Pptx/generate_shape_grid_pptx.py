@@ -52,8 +52,8 @@ from generate_schedule_pptx import (  # noqa: E402
     add_titled_slide,
     add_bar_shape, add_diamond_marker, add_today_line, add_label_textbox,
     normalize_zip_timestamps,
-    _local, _prstGeom_prst, _xfrm_of, _off_ext_rot, print_shape_facts,
-    rotated_aabb, overlap_len, assign_axis, table_bounds, emu,
+    _local, _prstGeom_prst, _xfrm_of, print_shape_facts,
+    rotated_aabb, assign_axis, table_bounds, emu,
     find_tailEnd, is_textbox, stcxn_endcxn,
 )
 

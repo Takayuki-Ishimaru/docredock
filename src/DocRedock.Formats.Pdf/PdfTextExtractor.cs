@@ -227,8 +227,8 @@ public static partial class PdfTextExtractor
         int pageCount;
         try
         {
-            pageCount = Math.Max(1, Regex.Matches(structure, PageMarkerPattern, RegexOptions.Compiled, options.EffectiveRegexTimeout).Count);
-            var objectCount = Regex.Matches(structure, ObjectPattern, RegexOptions.Compiled, options.EffectiveRegexTimeout).Count;
+            pageCount = Math.Max(1, Regex.Count(structure, PageMarkerPattern, RegexOptions.Compiled, options.EffectiveRegexTimeout));
+            var objectCount = Regex.Count(structure, ObjectPattern, RegexOptions.Compiled, options.EffectiveRegexTimeout);
             if (objectCount > options.MaxObjects) throw new PdfExtractionException($"PDF object count exceeds the {options.MaxObjects}-object limit.");
         }
         catch (RegexMatchTimeoutException exception)
@@ -340,7 +340,7 @@ public static partial class PdfTextExtractor
                 : [];
             // A page whose only text is hidden is still a page with text: it is not "native text
             // unavailable", and its hidden text must reach the complete content policy.
-            if (!imageOnly && regions.Count == 0 && !vector && hiddenRegions.Count == 0) continue;
+            if (!imageOnly && regions.Count == 0 && !vector && hiddenRegions.Length == 0) continue;
             var vectorPlaceholder = false;
             if (vector && regions.Count == 0)
             {
@@ -507,7 +507,7 @@ public static partial class PdfTextExtractor
                 embeddedImages.Count, embeddedBounds.Length == 0 ? null : embeddedBounds,
                 attributes?.MediaBox, attributes?.CropBox, attributes?.Rotation ?? 0,
                 imageOnly || unparsedForms.Count == 0 ? null : unparsedForms,
-                hiddenRegions.Count == 0 ? null : hiddenRegions,
+                hiddenRegions.Length == 0 ? null : hiddenRegions,
                 uncertainText.Length == 0 ? null : uncertainText));
         }
         if (pages.Count == 0)
@@ -551,7 +551,7 @@ public static partial class PdfTextExtractor
     /// <summary>States how many drawn forms were left unanalyzed and why, e.g. "PDF page 2: 1 Form
     /// XObject draw(s) could not be analyzed (nested deeper than 8 levels); any text or drawing
     /// inside is missing from the extracted content. Compare with page 2 of the original."</summary>
-    private static string DescribeUnparsedForms(int pageNumber, IReadOnlyList<PdfUnparsedFormXObject> forms)
+    private static string DescribeUnparsedForms(int pageNumber, List<PdfUnparsedFormXObject> forms)
     {
         var reasons = forms.Select(form => form.Reason).Distinct().Order().Select(reason => reason switch
         {
@@ -580,7 +580,7 @@ public static partial class PdfTextExtractor
 
     /// <summary>What to take out of a graph for its text decorations: each decoration's path, and the
     /// node or edge built from it (by the source ledger, or an edge drawn along the path's own points).</summary>
-    private static IReadOnlyList<string> DecorationIds(VisualGraph graph, IReadOnlyList<PdfTextDecorations.Decoration> decorations)
+    private static string[] DecorationIds(VisualGraph graph, IReadOnlyList<PdfTextDecorations.Decoration> decorations)
     {
         var pathIds = decorations.SelectMany(decoration => decoration.PathIds).ToHashSet(StringComparer.Ordinal);
         var ids = new HashSet<string>(pathIds, StringComparer.Ordinal);
@@ -599,7 +599,7 @@ public static partial class PdfTextExtractor
 
     /// <summary>Hidden fragments merged into readable lines, each reason on its own, so that the
     /// complete content policy reads them like the page's other text.</summary>
-    private static IReadOnlyList<PdfHiddenTextRegion> HiddenLines(IReadOnlyList<(PdfTextRegion Region, PdfHiddenTextReason Reason)> fragments) =>
+    private static PdfHiddenTextRegion[] HiddenLines(IReadOnlyList<(PdfTextRegion Region, PdfHiddenTextReason Reason)> fragments) =>
         fragments.GroupBy(fragment => fragment.Reason).OrderBy(group => group.Key).SelectMany(group =>
             SortReadingOrder(group.Select((fragment, index) => fragment.Region with { ReadingOrder = index, SourceIds = [index] }).ToArray(), null, out _)
                 .Select(line => new PdfHiddenTextRegion(line, group.Key))).ToArray();
@@ -621,7 +621,7 @@ public static partial class PdfTextExtractor
     /// <summary>Merges parsed fragments into readable flow lines without letting a reconstructed
     /// table swallow unrelated native text, then reconciles every parsed fragment against the two
     /// places it may legitimately live: a table cell, or a surviving flow region.</summary>
-    private static IReadOnlyList<PdfTextRegion> BuildFlowRegions(IReadOnlyList<PdfTextRegion> regions,
+    private static PdfTextRegion[] BuildFlowRegions(IReadOnlyList<PdfTextRegion> regions,
         IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount, BoxLayout? boxes = null)
     {
         var tableSourceIds = PdfTextAccounting.TableSourceIds(tables);
@@ -662,7 +662,7 @@ public static partial class PdfTextExtractor
             diagnostics.Add($"VisualDiagnosticsCompacted: PDF page {pageNumber}: {omitted} repeated diagnostics omitted from readable output.");
     }
 
-    private static VisualGraph BuildVisualGraph(int pageNumber, string content, IReadOnlyList<PdfTextRegion> regions,
+    private static VisualGraph BuildVisualGraph(int pageNumber, string content, List<PdfTextRegion> regions,
         List<string> diagnostics, TimeSpan? inferenceTimeout, Geometry? pageBounds, CancellationToken cancellationToken,
         out IReadOnlyDictionary<int, string> visualLabelNodeIds)
     {
@@ -710,7 +710,7 @@ public static partial class PdfTextExtractor
         var strokeState = new Stack<(IReadOnlyList<double>? Dash, double LineWidth)>();
         List<double>? collectingArray = null;
         IReadOnlyList<double>? closedArray = null;
-        var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString())]);
+        var anchor = new SourceAnchor("pdf", $"pdf:page:{pageNumber}", [new AnchorLocator("visual_path", pageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))]);
         using var visualInferenceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (inferenceTimeout is { } visualInferenceTimeout)
         {
@@ -1332,7 +1332,7 @@ public static partial class PdfTextExtractor
                             endpoint.AtStart
                                 ? new VisualVector(shaft.Path[0].X - shaft.Path[^1].X, shaft.Path[0].Y - shaft.Path[^1].Y)
                                 : new VisualVector(shaft.Path[^1].X - shaft.Path[0].X, shaft.Path[^1].Y - shaft.Path[0].Y)))
-                    .OrderBy(item => Distance(item.points.First(), endpoint.Point)).FirstOrDefault();
+                    .OrderBy(item => Distance(item.points[0], endpoint.Point)).FirstOrDefault();
                 if (decoration.edge is null) continue;
                 var source = endpoint.AtStart ? shaft.TargetId : shaft.SourceId;
                 var target = endpoint.AtStart ? shaft.SourceId : shaft.TargetId;
@@ -1669,7 +1669,9 @@ public static partial class PdfTextExtractor
             // ever exist inside a component, so a line's crossing count - and therefore whether it
             // is an active lattice member - is the same number either way: a page carrying a single
             // grid yields one component and an unchanged outcome.
+#pragma warning disable CA1814 // Dense rectangular grid: every row has the same number of columns.
             var crossing = new bool[horizontalLines.Length, verticalLines.Length];
+#pragma warning restore CA1814
             var horizontalCrossings = new int[horizontalLines.Length];
             var verticalCrossings = new int[verticalLines.Length];
             var componentOf = new int[horizontalLines.Length + verticalLines.Length];
@@ -2395,14 +2397,14 @@ public static partial class PdfTextExtractor
             if (payload < value.Length && value[payload] == '\r') payload++;
             if (payload < value.Length && value[payload] == '\n') payload++;
             var end = value.IndexOf("endstream", payload, StringComparison.Ordinal);
-            if (end < 0) { output.Append("\n"); break; }
+            if (end < 0) { output.Append('\n'); break; }
             output.Append("\nendstream");
             cursor = end + "endstream".Length;
         }
         return output.ToString();
     }
 
-    private static IReadOnlyDictionary<int, int> ReadContentObjectPages(string structure, TimeSpan timeout)
+    private static Dictionary<int, int> ReadContentObjectPages(string structure, TimeSpan timeout)
     {
         var result = new Dictionary<int, int>();
         var pageNumber = 0;
@@ -2420,7 +2422,7 @@ public static partial class PdfTextExtractor
         return result;
     }
 
-    private static IReadOnlySet<int> ReadContentObjectIds(string structure, TimeSpan timeout)
+    private static HashSet<int> ReadContentObjectIds(string structure, TimeSpan timeout)
     {
         var ids = new HashSet<int>();
         foreach (Match match in Regex.Matches(structure, @"/Contents\s+(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
@@ -2793,7 +2795,7 @@ public static partial class PdfTextExtractor
     /// itself counted; an unresolved name survives only when <paramref name="treatUnresolvedAsImage"/>
     /// says the document has image objects at all, so an unfollowable resource dictionary degrades
     /// to over-reporting a placeholder rather than to silently dropping the image.</summary>
-    private static IReadOnlyList<Geometry?> ResolveEmbeddedImages(string content,
+    private static List<Geometry?> ResolveEmbeddedImages(string content,
         PdfResourceScope? resources, bool treatUnresolvedAsImage,
         IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget budget)
     {
@@ -2844,7 +2846,7 @@ public static partial class PdfTextExtractor
     /// "Do" inside a literal string is not an operator. <paramref name="initial"/> is the CTM the
     /// stream starts under: identity for a page, and the invoking CTM composed with the form's
     /// <c>/Matrix</c> for a Form XObject, so a nested draw reports page-space coordinates.</summary>
-    private static IReadOnlyList<PdfImageInvocation> ScanImageInvocations(string content, PdfMatrix initial)
+    private static List<PdfImageInvocation> ScanImageInvocations(string content, PdfMatrix initial)
     {
         var result = new List<PdfImageInvocation>();
         var stack = new Stack<PdfMatrix>();
@@ -2991,7 +2993,7 @@ public static partial class PdfTextExtractor
     /// <c>/Pages</c> ancestors declare, which is how most producers write multi-page files - so
     /// reading them off the page dictionary alone silently loses every image on such a page. Pages
     /// are numbered exactly as <see cref="ReadContentObjectPages"/> numbers them so the maps agree.</summary>
-    private static IReadOnlyDictionary<int, PdfPageAttributes> ReadPageAttributes(
+    private static Dictionary<int, PdfPageAttributes> ReadPageAttributes(
         (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById) index, TimeSpan timeout,
         PdfFontCatalog fonts)
     {
@@ -3072,7 +3074,7 @@ public static partial class PdfTextExtractor
     /// <summary>Catalogs every Form XObject with its own resources, <c>/Matrix</c> and decoded
     /// content stream. The streams are read in one extra pass restricted to the form objects, and
     /// only when the document has forms at all, so an ordinary file pays nothing for this.</summary>
-    private static IReadOnlyDictionary<int, PdfFormXObject> ReadFormXObjects(
+    private static Dictionary<int, PdfFormXObject> ReadFormXObjects(
         (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById) index,
         byte[] raw, string latin, PdfExtractionOptions options, PdfFontCatalog fonts)
     {
@@ -3552,7 +3554,7 @@ public static partial class PdfTextExtractor
     /// <see cref="MergeAdjacentIntoLines"/>) emits a whole column before the next one instead of
     /// interleaving side-by-side columns baseline by baseline. <paramref name="columnCount"/>
     /// reports how many side-by-side columns were detected (1 when the page is single-column).</summary>
-    private static IReadOnlyList<PdfTextRegion> SortReadingOrder(IEnumerable<PdfTextRegion> regions,
+    private static PdfTextRegion[] SortReadingOrder(IEnumerable<PdfTextRegion> regions,
         IReadOnlySet<int>? tableSourceIds, out int columnCount, BoxLayout? boxes = null)
     {
         // A superscript or subscript sorts away from the line it belongs to unless it is put on its baseline.
@@ -3748,12 +3750,12 @@ public static partial class PdfTextExtractor
     /// returns to plain top-to-bottom order. Table-owned fragments are excluded from detection
     /// entirely and keep the position the geometric sort gave them; only the surrounding non-table
     /// fragments move.</summary>
-    private static PdfTextRegion[] ApplyColumnLayout(IReadOnlyList<PdfTextRegion> geometric,
+    private static PdfTextRegion[] ApplyColumnLayout(PdfTextRegion[] geometric,
         IReadOnlySet<int>? tableSourceIds, out int columnCount, IReadOnlySet<int>? isolated = null)
     {
         columnCount = 1;
-        var isTableOwned = new bool[geometric.Count];
-        for (var index = 0; index < geometric.Count; index++)
+        var isTableOwned = new bool[geometric.Length];
+        for (var index = 0; index < geometric.Length; index++)
             isTableOwned[index] = PdfTextAccounting.IsTableOwned(geometric[index], tableSourceIds);
         var flowRegions = geometric.Where((_, index) => !isTableOwned[index]).ToArray();
         if (flowRegions.Length == 0) return [.. geometric];
@@ -3911,9 +3913,9 @@ public static partial class PdfTextExtractor
         // geometry as evidence for the numeric/text seam while preserving column reading order.
         var flowLineStarts = MergeAdjacentIntoLines(reorderedFlow, tableSourceIds, isolated, geometric)
             .ToDictionary(line => line.SourceTextIds[0]);
-        var result = new List<PdfTextRegion>(geometric.Count);
+        var result = new List<PdfTextRegion>(geometric.Length);
         var flowCursor = 0;
-        for (var index = 0; index < geometric.Count; index++)
+        for (var index = 0; index < geometric.Length; index++)
         {
             if (isTableOwned[index]) result.Add(geometric[index]);
             else if (flowLineStarts.TryGetValue(reorderedFlow[flowCursor++].SourceTextIds[0], out var line))
@@ -3940,7 +3942,7 @@ public static partial class PdfTextExtractor
     /// <summary>The bytes a literal <c>( )</c> or hexadecimal <c>&lt; &gt;</c> string operand holds.</summary>
     private static byte[] StringBytes(string value)
     {
-        if (value.StartsWith("<", StringComparison.Ordinal))
+        if (value.StartsWith('<'))
         {
             var hex = Regex.Replace(value[1..^1], @"\s+", string.Empty, RegexOptions.CultureInvariant);
             if (hex.Length % 2 != 0) hex += "0";
@@ -3979,7 +3981,7 @@ public static partial class PdfTextExtractor
     /// <summary>Decodes the streams of the objects in <paramref name="objectIds"/>. Everything else
     /// is skipped before it is copied or inflated.</summary>
     private static IEnumerable<PdfObjectStream> ReadObjectStreams(byte[] bytes, string latin, PdfExtractionOptions options,
-        IReadOnlySet<int> objectIds, IReadOnlyDictionary<int, string>? lengthObjects = null)
+        HashSet<int> objectIds, IReadOnlyDictionary<int, string>? lengthObjects = null)
     {
         var marker = Encoding.ASCII.GetBytes("stream");
         var endMarker = Encoding.ASCII.GetBytes("endstream");
@@ -4228,7 +4230,7 @@ public static partial class PdfTextExtractor
             return new PdfToUnicodeMap(entries);
         }
 
-        private static void ParsePairs(string body, IDictionary<string, string> entries, TimeSpan timeout)
+        private static void ParsePairs(string body, Dictionary<string, string> entries, TimeSpan timeout)
         {
             var tokens = Regex.Matches(body, @"<(?<hex>[0-9A-Fa-f\s]+)>", RegexOptions.None, timeout).Select(match => NormalizeHex(match.Groups["hex"].Value)).ToArray();
             for (var index = 0; index + 1 < tokens.Length; index += 2) entries[tokens[index]] = DecodeDestination(tokens[index + 1]);
@@ -4240,7 +4242,7 @@ public static partial class PdfTextExtractor
         /// 0xFFFFFFFF, never stop.</summary>
         private const uint MaxRangeCodes = 65_536;
 
-        private static void ParseRanges(string body, IDictionary<string, string> entries, TimeSpan timeout)
+        private static void ParseRanges(string body, Dictionary<string, string> entries, TimeSpan timeout)
         {
             var lines = body.Split('\n');
             foreach (var line in lines)
@@ -4255,7 +4257,7 @@ public static partial class PdfTextExtractor
                     var start = Convert.ToUInt32(sourceStart, 16); var end = Convert.ToUInt32(sourceEnd, 16); var destinationToken = range.Groups["dest"].Value.Trim();
                     if (end < start) continue;
                     var count = (uint)Math.Min((ulong)end - start + 1, MaxRangeCodes);
-                    if (destinationToken.StartsWith("[", StringComparison.Ordinal))
+                    if (destinationToken.StartsWith('['))
                     {
                         var destinations = Regex.Matches(destinationToken, @"<(?<hex>[0-9A-Fa-f\s]+)>", RegexOptions.None, timeout)
                             .Select(match => NormalizeHex(match.Groups["hex"].Value)).ToArray();

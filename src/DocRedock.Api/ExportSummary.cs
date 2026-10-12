@@ -146,6 +146,7 @@ public static class ExportSummaryText
     /// and tables were obtained. It never says that no review is needed.</summary>
     public static string EvaluationJapanese(ExportSummary summary)
     {
+        ArgumentNullException.ThrowIfNull(summary);
         var detected = summary.ReviewItemsDetected || summary.HiddenContentIncluded ? "あり（上記）" : "なし";
         return $"検出された要確認事項: {detected}／読み順: {ReadingOrderJapanese(summary.ReadingOrder)}／" +
             $"表構造: {TableStructureJapanese(summary.TableStructure, summary.TableBoundaryReviewItems)}";
@@ -156,20 +157,28 @@ public static class ExportSummaryBuilder
 {
     /// <summary>Summary of an export without a readable projection, or with only its table count
     /// known. Reading order and table structure are then reported as not evaluated.</summary>
-    public static ExportSummary Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, int? renderedTables = null) =>
-        Create(graph, diagnostics, projection: null) with { RenderedTables = renderedTables };
+    public static ExportSummary Build(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, int? renderedTables = null)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(diagnostics);
+        return Create(graph, diagnostics, projection: null) with { RenderedTables = renderedTables };
+    }
 
     /// <summary>Summary of a readable export. <paramref name="projection"/> is the report of the
     /// serializer that wrote the Markdown: what it reconstructed from layout and which worksheet
     /// table boundaries need comparison.</summary>
     public static ExportSummary BuildReadable(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, ReadableProjectionReport projection)
     {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(diagnostics);
         ArgumentNullException.ThrowIfNull(projection);
         return Create(graph, diagnostics, projection);
     }
 
     private static ExportSummary Create(DocumentGraph graph, IReadOnlyList<Diagnostic> diagnostics, ReadableProjectionReport? projection)
     {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(diagnostics);
         var graphs = graph.Nodes.Select(ReadVisualGraph).OfType<VisualGraph>().ToArray();
         var edges = graphs.SelectMany(item => item.Edges ?? []).Where(edge => edge is not null).ToArray();
         // A PDF page (or a slide) can yield several diagram nodes. Count each partition once, the

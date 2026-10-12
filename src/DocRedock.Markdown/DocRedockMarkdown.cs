@@ -110,6 +110,7 @@ public sealed class DocRedockMarkdownSerializer
 {
     private static readonly string[] NodeCollectionNames = ["Nodes", "Children"];
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public MarkdownProjection Serialize(object graph, MarkdownSerializationOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(graph);
@@ -315,6 +316,7 @@ public sealed class DocRedockMarkdownSerializer
     private sealed record GraphNodeView(string Id, string Kind, string? Text, int Order, ProjectionEvidence Evidence, string Layer);
 
     /// <summary>Type-safe entry point for the canonical Core DocumentGraph.</summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public MarkdownProjection Serialize(DocumentGraph graph, MarkdownSerializationOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(graph);
@@ -534,7 +536,7 @@ public sealed class DocRedockMarkdownSerializer
                 output.Append("![").Append(EscapeLinkText(image.AltText ?? "image")).Append("](").Append(resolveImageReference(image.Reference)).AppendLine(")");
                 break;
             case NodeKind.Link when node.Content is ReferenceNodeContent link:
-                output.Append("[").Append(EscapeLinkText(link.AltText ?? link.Reference)).Append("](").Append(link.Reference).AppendLine(")");
+                output.Append('[').Append(EscapeLinkText(link.AltText ?? link.Reference)).Append("](").Append(link.Reference).AppendLine(")");
                 break;
             case NodeKind.Cell:
                 var address = node.Source?.Locators.FirstOrDefault(locator => locator.Kind == "cell_address")?.Value ?? node.Id;
@@ -652,7 +654,7 @@ public sealed class DocRedockMarkdownSerializer
         node.Extensions is not null && node.Extensions.TryGetValue(name, out var value) &&
         value.ValueKind is System.Text.Json.JsonValueKind.True or System.Text.Json.JsonValueKind.False && value.GetBoolean();
 
-    private static bool IsInlineLinkProjection(DocumentNode node, IReadOnlyDictionary<string, DocumentNode> nodesById)
+    private static bool IsInlineLinkProjection(DocumentNode node, Dictionary<string, DocumentNode> nodesById)
     {
         if (node.Kind != NodeKind.Link || node.Content is not ReferenceNodeContent link ||
             node.ParentId is null || !nodesById.TryGetValue(node.ParentId, out var parent) ||
@@ -703,7 +705,7 @@ public sealed class DocRedockMarkdownSerializer
         }
     }
 
-    private static IReadOnlyList<IReadOnlyList<SpreadsheetCell>> SplitSheetSections(IReadOnlyList<SpreadsheetCell> cells)
+    private static IReadOnlyList<SpreadsheetCell>[] SplitSheetSections(IReadOnlyList<SpreadsheetCell> cells)
     {
         const int maximumRowGapWithinSection = 4;
         const int maximumColumnDistanceFromSection = 2;
@@ -936,7 +938,7 @@ public sealed class DocRedockMarkdownSerializer
         .Replace("<", "&lt;", StringComparison.Ordinal)
         .Replace(">", "&gt;", StringComparison.Ordinal);
     private static ProjectionRole RoleFor(DocumentNode node) => node.Kind switch { NodeKind.Heading => ProjectionRole.HeadingLabel, NodeKind.Image => ProjectionRole.ImageReference, NodeKind.Table or NodeKind.Cell => ProjectionRole.TableCell, _ when EvidenceFor(node) == ProjectionEvidence.Ocr => ProjectionRole.OcrText, _ => ProjectionRole.PrimaryText };
-    private static ProjectionEvidence EvidenceFor(DocumentNode node) => Enum.TryParse<ProjectionEvidence>(node.Provenance?.FirstOrDefault()?.Evidence.ToString(), true, out var evidence) ? evidence : ProjectionEvidence.Native;
+    private static ProjectionEvidence EvidenceFor(DocumentNode node) => Enum.TryParse<ProjectionEvidence>((node.Provenance is { Count: > 0 } provenance ? provenance[0]?.Evidence.ToString() : null), true, out var evidence) ? evidence : ProjectionEvidence.Native;
 
     private static string? NodeText(DocumentNode node)
     {
@@ -953,8 +955,11 @@ public sealed class DocRedockMarkdownSerializer
         };
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record CoreGraphContract(string DocumentId, string Format, IReadOnlyList<CorePartitionContract> Partitions);
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record CorePartitionContract(string Id, int Order, IReadOnlyList<CoreNodeContract> Nodes);
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record CoreNodeContract(string Id, string Kind, string? Text, int Order, string Evidence, string Layer);
 
     private sealed class ReflectionGraphView
@@ -1026,6 +1031,7 @@ public sealed class DocRedockMarkdownParser
     private static readonly Regex FrontMatter = new("^---\\r?\\n(?<body>.*?)\\r?\\n---\\r?\\n", RegexOptions.Singleline | RegexOptions.Compiled);
     private static readonly Regex Marker = new("<!--drmd:(?<kind>block|delete|new|sheet-table|partition-begin|partition-end|document-end)(?:\\s+(?<attrs>.*?))?-->", RegexOptions.Compiled);
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public TypedMarkdownDocument Parse(string markdown, MarkdownParseOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(markdown);
@@ -1179,6 +1185,8 @@ public sealed class DocRedockMarkdownParser
     /// <summary>Checks baseline inventory and reports missing markers without treating them as deletions.</summary>
     public static IReadOnlyList<MarkdownDiagnostic> FindMissingNodes(TypedMarkdownDocument document, IEnumerable<string> baselineNodeIds)
     {
+        ArgumentNullException.ThrowIfNull(document);
+        ArgumentNullException.ThrowIfNull(baselineNodeIds);
         var present = document.Blocks.Where(x => x.NodeId is not null && !x.IsNew && !x.IsExplicitDelete)
             .Select(x => x.NodeId!).ToHashSet(StringComparer.Ordinal);
         var deleted = document.Blocks.Where(x => x.IsExplicitDelete).Select(x => x.NodeId!).ToHashSet(StringComparer.Ordinal);
@@ -1187,9 +1195,12 @@ public sealed class DocRedockMarkdownParser
             .ToArray();
     }
 
-    public static IReadOnlyDictionary<string, TypedMarkdownBlock> MapEditsToNodes(TypedMarkdownDocument document) =>
-        document.Blocks.Where(x => x.NodeId is not null && !x.IsExplicitDelete)
+    public static IReadOnlyDictionary<string, TypedMarkdownBlock> MapEditsToNodes(TypedMarkdownDocument document)
+    {
+        ArgumentNullException.ThrowIfNull(document);
+        return document.Blocks.Where(x => x.NodeId is not null && !x.IsExplicitDelete)
             .GroupBy(x => x.NodeId!, StringComparer.Ordinal).ToDictionary(x => x.Key, x => x.Last(), StringComparer.Ordinal);
+    }
 
     private static void ValidateBaselineCount(IReadOnlyDictionary<string, string> attrs, int actual, string partitionId, List<MarkdownDiagnostic> diagnostics)
     {

@@ -254,7 +254,7 @@ internal static class PdfTextDecorations
     /// of a link) is not under the line. A gap is known only where the fonts give the characters' places; when
     /// any text a stretch lies under has none, the line is taken for an underline.</summary>
     private static bool RunsOverColumns(IReadOnlyList<PdfTextRegion> fragments, IEnumerable<int> window, double y,
-        IReadOnlyList<(double Left, double Right)> stretches, IReadOnlyDictionary<PdfTextRegion, double> limits)
+        IReadOnlyList<(double Left, double Right)> stretches, Dictionary<PdfTextRegion, double> limits)
     {
         foreach (var (left, right) in stretches)
         {
@@ -294,6 +294,7 @@ internal static class PdfTextDecorations
         public bool[]?[] Characters { get; } = new bool[]?[count];
 
         /// <summary>The marked ranges of the text of fragment <paramref name="index"/>; null when none.</summary>
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "Whole-fragment ranges and sparse ranges retain their original array or List without copying.")]
         public IReadOnlyList<TextRange>? Of(int index, string text) =>
             Whole[index] ? [new TextRange(0, text.Length)] : Characters[index] is { } marked ? Ranges(text, marked) : null;
     }
@@ -305,7 +306,7 @@ internal static class PdfTextDecorations
     /// <summary>A placed fragment's marked characters as ranges: the whole text when every character
     /// but white space is marked, as a line over a whole show marks it; null when no character but
     /// white space is.</summary>
-    private static IReadOnlyList<TextRange>? Ranges(string text, bool[] marked)
+    private static List<TextRange>? Ranges(string text, bool[] marked)
     {
         var ranges = new List<TextRange>();
         for (var index = 0; index < text.Length;)
@@ -327,7 +328,7 @@ internal static class PdfTextDecorations
     /// an underline of its own that is not emphasis (LibreOffice, Word and Chrome all underline links),
     /// so the part of a line that lies within a link's area, up to <see cref="LinkSlack"/> beyond its
     /// edges, is left out; the rest of the line stays.</summary>
-    private static IReadOnlyList<(double Left, double Right)> Uncovered(double left, double right, double y,
+    private static List<(double Left, double Right)> Uncovered(double left, double right, double y,
         IReadOnlyList<Geometry> links, double maxLinkHeight)
     {
         var stretches = new List<(double Left, double Right)> { (left, right) };

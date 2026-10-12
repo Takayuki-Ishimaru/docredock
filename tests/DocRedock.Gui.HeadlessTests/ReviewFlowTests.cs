@@ -107,7 +107,7 @@ public sealed class ReviewFlowTests
         try
         {
             var item = Item(root, 1, WritePng(root), regions: [new ReviewRegion(.25, .5, .4, .2)]);
-            SetField(window, "_latestReviewItems", (IReadOnlyList<GuiReviewItem>)[item]);
+            SetField(window, "_latestReviewItems", (GuiReviewItem[])[item]);
             SetField(window, "_latestOcrReviewItems", 2);
             var warnings = new[]
             {
@@ -168,7 +168,7 @@ public sealed class ReviewFlowTests
                 [new ReviewElement(ReviewElementKind.UncertainText, "n#0:C1", new ReviewRegion(.1, .1, .3, .05))], null, true, HasTables: false);
             var item = new GuiReviewItem("quartz.pdf", Path.Combine(root, "quartz.md"), page, ExportReviewText.Location(page),
                 ExportReviewText.DescribeJapanese(page), null, "text\n");
-            SetField(window, "_latestReviewItems", (IReadOnlyList<GuiReviewItem>)[item]);
+            SetField(window, "_latestReviewItems", (GuiReviewItem[])[item]);
             SetField(window, "_latestOcrReviewItems", 0);
             Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, new[]
             {
