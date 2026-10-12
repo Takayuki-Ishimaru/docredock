@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.4 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.5 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 ## 1. Get DocRedock
 
@@ -35,7 +35,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.4. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.5. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -50,7 +50,18 @@ Use **Read package** (「パッケージを読む」) in the GUI to open an exis
 docredock package search input.ai-package.zip "sales" --json
 docredock package read input.ai-package.zip --part part-0002
 docredock package read input.ai-package.zip --part part-0002 --json --with-sources
+docredock package review input.ai-package.zip --json --require-hidden-review
 ```
+
+`package review package.zip` verifies the whole package and displays only `review.md`. With `--json`, it returns conversion review, revision-sharing review, hidden-content flags, stop reasons, affected part IDs and the review text. Since some review items have no individual part mapping, affected IDs conservatively cover the entire package when review is required. Inspection normally exits 0; `--fail-on-review` returns the review information and exits 11 when required.
+
+Add `--require-hidden-review` to `package search/read` to require recipient review of included hidden content. It blocks body output with exit 11 until acknowledged with `--allow-review`. The GUI offers the checkbox 「非表示内容を含むパッケージも共有範囲の確認後に読む」 for the same policy. Older `complete` packages without an inclusion flag also require review under this option. The Python example accepts the same option, automatically verifies the whole package and exits 3 before body output; omit the option after completing review.
+
+When final cell deletion leaves an unresolved Word table grid, surviving text is retained in row order with `DocxFinalTableGridUnresolved` and required source review; column/header relationships are not guessed.
+
+This fallback also retains text from figures over the table as notes with unresolved cell placement. Equivalent deleted column ranges are recognized across merged and adjacent cells. CLI review and single-part reading verify the whole package without retaining other parts' Markdown.
+
+The Python reader's `--require-hidden-review` also enforces stored conversion/sharing review. JSON `review.required`/`effective_required` show the effective state, `reported_required` preserves the original review state, and `stop_reasons` lists the reasons. JSON without this option keeps its previous shape.
 
 Both CLI operations verify the whole package before returning content. When review is required, they return 11 without printing the body. After checking `review.md` and the relevant content, use `--allow-review` to acknowledge review for one invocation. Keep source cells retrieved with `--json --with-sources` locally and send an AI only the body it needs. Search normalizes supported decoration, escapes, case and full-width/half-width forms for text matching.
 

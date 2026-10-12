@@ -1164,12 +1164,28 @@ def _part_json(part):
             "locations": [dict(location) for location in part["locations"]], "table_block": part["table_block"]}
 
 
-def _document_json(manifest, verified, review=None):
+def _review_json(manifest, review, hidden_required):
+    """The review object for --json. hidden_required None keeps the shape callers have always seen:
+    what report.json says. True or False is the hidden-content policy --require-hidden-review acts
+    on, so required agrees with the exit code, beside the report's own state and the reasons."""
+    document = dict(review, file=manifest["review"])
+    if hidden_required is None:
+        return document
+    reported = review["required"]
+    document["reported_required"] = reported
+    document["effective_required"] = bool(reported or hidden_required)
+    document["required"] = document["effective_required"]
+    document["stop_reasons"] = (["package_review"] if reported else []) \
+        + (["hidden_content"] if hidden_required else [])
+    return document
+
+
+def _document_json(manifest, verified, review=None, hidden_required=None):
     document = {"schema_version": manifest["schema_version"], "generator_version": manifest["generator_version"],
                 "source": dict(manifest["source"]), "content_policy": manifest["content_policy"],
                 "verified": verified}
     if review is not None:
-        document["review"] = dict(review, file=manifest["review"])
+        document["review"] = _review_json(manifest, review, hidden_required)
     return document
 
 
@@ -1203,7 +1219,7 @@ def _run(package, args):
     paths = [part["path"]] if part else []
     if args.search is not None:
         paths += [item["path"] for item in manifest["parts"]]
-    if args.verify or args.json or args.fail_on_review:
+    if args.verify or args.json or args.fail_on_review or args.require_hidden_review:
         paths.append(manifest["report"])
     if manifest["source_index"] and (args.verify or (args.json and part)):
         paths.append(manifest["source_index"])
@@ -1226,11 +1242,17 @@ def _run(package, args):
         index, review = _check_contents(package, manifest, contents)
         if part is None and args.search is None and not args.json:
             _say("files ok")
-    elif args.json or args.fail_on_review:
+    elif args.json or args.fail_on_review or args.require_hidden_review:
         review = read_review(package, manifest, contents.get(manifest["report"]))
-    if args.fail_on_review and review["required"]:
+    # None without --require-hidden-review, so the JSON keeps the report's own state alone; with it,
+    # whether the hidden-content policy stops this package, which the JSON must agree with.
+    hidden_required = None
+    if args.require_hidden_review:
+        hidden_required = (review["hidden_content_included"] is True or
+                           (review["hidden_content_included"] is None and manifest["content_policy"] == "complete"))
+    if ((args.fail_on_review or args.require_hidden_review) and review["required"]) or hidden_required:
         if args.json:
-            _print_json(_document_json(manifest, args.verify, review))
+            _print_json(_document_json(manifest, args.verify, review, hidden_required))
         print("review required: read %s before giving this package to a model" % manifest["review"], file=sys.stderr)
         return 3
     if part is not None:
@@ -1243,14 +1265,14 @@ def _run(package, args):
         if index is None:
             index_name = manifest["source_index"]
             index = load_source_index(package, manifest, contents.get(index_name) if index_name else None)
-        document = _document_json(manifest, args.verify, review)
+        document = _document_json(manifest, args.verify, review, hidden_required)
         document["part"] = dict(_part_json(part), sources=index[part["id"]], markdown=_decode(data, part["path"]))
         _print_json(document)
         return 0
     if args.search is not None:
         matches = search_parts(package, manifest, args.search, contents)
         if args.json:
-            document = _document_json(manifest, args.verify, review)
+            document = _document_json(manifest, args.verify, review, hidden_required)
             document["search"] = {"text": args.search, "parts": [
                 dict(_part_json(item), lines=[{"number": number, "text": line} for number, line in lines])
                 for item, lines in matches]}
@@ -1266,7 +1288,7 @@ def _run(package, args):
                 _say("  ... %d more matching lines" % (len(lines) - 3))
         return 0
     if args.json:
-        document = _document_json(manifest, args.verify, review)
+        document = _document_json(manifest, args.verify, review, hidden_required)
         document["parts"] = [_part_json(item) for item in manifest["parts"]]
         _print_json(document)
     elif not args.verify:
@@ -1294,10 +1316,14 @@ def main(argv=None):
                             "escapes and underline, strikethrough and bold marks) with their matching lines")
     parser.add_argument("--fail-on-review", action="store_true",
                         help="exit 3 instead of printing when report.json says the conversion needs review")
+    parser.add_argument("--require-hidden-review", action="store_true",
+                        help="verify the package and exit 3 before body output for stored review items or included hidden content (also for older complete packages without the flag)")
     parser.add_argument("--json", action="store_true",
                         help="print one JSON object: source, verification, review state, and the part "
                              "(Markdown, locations, table block, source-index entries), every part or the matches")
     args = parser.parse_args(argv)
+    if args.require_hidden_review:
+        args.verify = True
     if args.search is not None and not args.search.strip():
         parser.error("--search needs text to look for")
     # Names and labels come from documents: a console that cannot show a character gets an escape

@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.Headless;
+using Avalonia.LogicalTree;
 using DocRedock.Api;
 using DocRedock.Gui;
 using Xunit;
@@ -68,9 +69,16 @@ public sealed class PackageBrowserTests
             var result = await service.ExportAiPackageAsync(new(new(Fixture("spec.docx"), "unused.md"), Path.Combine(root, "package")));
             window.Show(); await window.LoadPackageAsync(result.OutputPath);
             Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown.Replace("\\", ""));
+            Assert.Contains("確認が必要", window.CurrentStatus);
             SaveFrame(window, "package-review-gate.png");
             window.Search("SECRET"); Assert.Empty(window.CurrentMarkdown.Replace("\\", ""));
             window.ConfirmReview(); Assert.True(window.CanRead); Assert.Contains("DELETED_REVIEW_SECRET", window.CurrentMarkdown.Replace("\\", ""));
+            Assert.Contains("確認済み", window.CurrentStatus); Assert.DoesNotContain("確認前", window.CurrentStatus);
+            SaveFrame(window, "package-review-confirmed.png");
+            window.Search("SECRET"); Assert.Contains("確認済み", window.CurrentStatus);
+            window.ClearReviewConfirmation(); Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown);
+            Assert.Contains("確認が必要", window.CurrentStatus);
+            window.ConfirmReview();
             File.AppendAllText(Path.Combine(result.OutputPath, result.Parts[0].Path), "TAMPERED");
             await Assert.ThrowsAsync<AiPackageVerificationException>(() => window.LoadPackageAsync(result.OutputPath));
             Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown.Replace("\\", "")); Assert.Empty(window.CurrentSources);
@@ -94,8 +102,91 @@ public sealed class PackageBrowserTests
             try { await older; } catch (OperationCanceledException) { }
             Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown); Assert.Empty(window.CurrentSources);
             window.ConfirmReview(); Assert.True(window.CanRead);
+            window.Search("SECRET"); Assert.Equal("SECRET", window.CurrentQuery);
             await window.LoadPackageAsync(revision.OutputPath);
             Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown);
+            Assert.Empty(window.CurrentQuery); Assert.Contains("確認が必要", window.CurrentStatus);
+        }
+        finally { window.Close(); Directory.Delete(root, true); }
+    }
+
+    [AvaloniaFact]
+    public async Task Hidden_content_review_can_be_required_and_is_reset_when_policy_or_package_changes()
+    {
+        var root = Directory.CreateTempSubdirectory("docredock-browser-hidden-").FullName;
+        var service = new DocumentService(null, null, discoverPdfRasterizer: false);
+        var window = new PackageBrowserWindow();
+        try
+        {
+            var complete = await service.ExportAiPackageAsync(new(new(Fixture("sales.xlsx"), "unused.md", ContentPolicy: "complete"), Path.Combine(root, "complete.zip"), AiPackageForm.Zip));
+            window.Show(); await window.LoadPackageAsync(complete.OutputPath);
+            Assert.True(window.CanRead);
+            window.RequireHiddenReview = true;
+            Assert.False(window.CanRead); Assert.Empty(window.CurrentMarkdown); Assert.Empty(window.CurrentSources);
+            Assert.Contains("確認が必要", window.CurrentStatus);
+            window.ConfirmReview(); Assert.True(window.CanRead); Assert.Contains("確認済み", window.CurrentStatus);
+            SaveFrame(window, "package-hidden-confirmed.png");
+            window.Search("INTERNAL_ONLY"); Assert.NotEmpty(window.CurrentMarkdown);
+            await window.LoadPackageAsync(complete.OutputPath);
+            Assert.True(window.RequireHiddenReview); Assert.False(window.CanRead); Assert.Empty(window.CurrentQuery);
+            window.RequireHiddenReview = false; Assert.True(window.CanRead);
+            window.RequireHiddenReview = true; Assert.False(window.CanRead);
+        }
+        finally { window.Close(); Directory.Delete(root, true); }
+    }
+
+    [AvaloniaFact]
+    public async Task Search_filter_survives_review_confirmation_and_policy_changes()
+    {
+        var root = Directory.CreateTempSubdirectory("docredock-browser-filter-").FullName;
+        var service = new DocumentService(null, null, discoverPdfRasterizer: false);
+        var window = new PackageBrowserWindow();
+        try
+        {
+            var result = await service.ExportAiPackageAsync(new(new(Fixture("sales.xlsx"), "unused.md", ContentPolicy: "complete"),
+                Path.Combine(root, "package"), TargetCharacters: 1500, TableRowBlocks: true));
+            window.Show(); await window.LoadPackageAsync(result.OutputPath);
+            window.RequireHiddenReview = true;
+            window.Search("ＳＴＯＲＥ＿０２５０");
+            Assert.False(window.CanRead); Assert.Empty(window.VisiblePartIds);
+            window.ConfirmReview();
+            Assert.Single(window.VisiblePartIds);
+            Assert.Contains("STORE_0250", window.CurrentMarkdown.Replace("\\", ""));
+            Assert.Equal("ＳＴＯＲＥ＿０２５０", window.CurrentQuery);
+            Assert.Contains("1分割が一致", window.CurrentStatus);
+            window.ClearReviewConfirmation();
+            Assert.Empty(window.VisiblePartIds); Assert.Empty(window.CurrentMarkdown);
+            window.ConfirmReview(); Assert.Single(window.VisiblePartIds);
+            window.RequireHiddenReview = false;
+            Assert.Single(window.VisiblePartIds);
+            Assert.Contains("1分割が一致", window.CurrentStatus);
+        }
+        finally { window.Close(); Directory.Delete(root, true); }
+    }
+
+    [AvaloniaFact]
+    public async Task Clearing_search_and_showing_all_parts_clear_the_query_and_match_status()
+    {
+        var root = Directory.CreateTempSubdirectory("docredock-browser-clear-search-").FullName;
+        var service = new DocumentService(null, null, discoverPdfRasterizer: false);
+        var window = new PackageBrowserWindow();
+        try
+        {
+            var result = await service.ExportAiPackageAsync(new(new(Fixture("sales.xlsx"), "unused.md"),
+                Path.Combine(root, "package"), TargetCharacters: 1500, TableRowBlocks: true));
+            window.Show(); await window.LoadPackageAsync(result.OutputPath);
+            window.Search("no-such-value");
+            Assert.Empty(window.VisiblePartIds); Assert.Contains("0分割が一致", window.CurrentStatus);
+            window.Search("");
+            Assert.Equal(result.Parts.Count, window.VisiblePartIds.Count);
+            Assert.DoesNotContain("分割が一致", window.CurrentStatus);
+            window.Search("ＳＴＯＲＥ＿０２５０"); Assert.Single(window.VisiblePartIds);
+            var showAll = window.GetLogicalDescendants().OfType<Button>()
+                .Single(button => Equals(button.Content, "すべての分割"));
+            showAll.RaiseEvent(new Avalonia.Interactivity.RoutedEventArgs(Button.ClickEvent));
+            Assert.Empty(window.CurrentQuery);
+            Assert.Equal(result.Parts.Count, window.VisiblePartIds.Count);
+            Assert.DoesNotContain("分割が一致", window.CurrentStatus);
         }
         finally { window.Close(); Directory.Delete(root, true); }
     }

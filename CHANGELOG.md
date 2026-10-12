@@ -4,6 +4,19 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.5]
+
+- Preserved surviving Word table cells in final revision view when cell deletion leaves an unresolved grid; retained text uses row-order fallback with a dedicated diagnostic and required conversion review.
+- Added verified `package review` output, including JSON stop reasons and conservative affected-part IDs.
+- Added optional hidden-content review to CLI/GUI package readers and the Python example.
+- Updated GUI package status after review confirmation and cleared the search query when opening another package.
+- Kept table-overlay text in unresolved final-table fallback and normalized deleted column ranges across merged and adjacent cells.
+- Aligned Python hidden-review JSON with the effective reader gate and exposed stored state and stop reasons.
+- Reduced CLI review/single-part memory use by retaining only selected content and streaming verification of other files, including ZIP CRC checks.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.5.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.5.md)
+
 ## [0.3.4]
 
 - Added GUI and CLI AI-package search and reading with whole-package verification, review confirmation and selected Markdown separated from source-cell details.

@@ -88,24 +88,67 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private async Task<int> PackageAsync(Arguments args, CancellationToken token)
     {
-        if (args.Positionals.Count is < 2 or > 3 || args.Positionals[0] is not ("search" or "read"))
-            return Invalid("Use package search <directory|zip> <text> or package read <directory|zip> --part <id>.");
+        if (args.Positionals.Count is < 2 or > 3 || args.Positionals[0] is not ("search" or "read" or "review"))
+            return Invalid("Use package search <directory|zip> <text>, package read <directory|zip> --part <id>, or package review <directory|zip> [--json].");
         var action = args.Positionals[0];
+        if (action == "review" && (args.Positionals.Count != 2 || args.Option("part") is not null || args.Option("query") is not null || args.HasFlag("with-sources")))
+            return Invalid("package review takes only a package path and review options.");
         var selection = args.Positionals.Count == 3 ? args.Positionals[2] : args.Option(action == "read" ? "part" : "query");
-        if (string.IsNullOrWhiteSpace(selection)) return Invalid(action == "read" ? "--part is required." : "Search text is required.");
+        if (action != "review" && string.IsNullOrWhiteSpace(selection)) return Invalid(action == "read" ? "--part is required." : "Search text is required.");
         if (args.HasFlag("with-sources") && !args.HasFlag("json")) return Invalid("--with-sources requires --json; plain output contains only Markdown.");
         if (args.HasFlag("allow-review") && args.HasFlag("fail-on-review")) return Invalid("--allow-review and --fail-on-review conflict.");
-        var package = await AiPackageManifestReader.ReadVerifiedPackageAsync(args.Positionals[1], token);
-        if (package.Review.Required && !args.HasFlag("allow-review"))
+        AiPackageManifest manifest;
+        AiPackageReview review;
+        string? reviewMarkdown = null;
+        AiPackageVerifiedPart? selectedPart = null;
+        AiPackageVerifiedPackage? package = null;
+        if (action == "read")
         {
-            await error.WriteLineAsync("Review required: read review.md and confirm conversion and sharing permissions before reading (use --allow-review after review).");
+            try { selectedPart = await AiPackageManifestReader.ReadVerifiedPartAsync(args.Positionals[1], selection!, token); }
+            catch (KeyNotFoundException) { return Invalid($"Unknown part '{selection}'."); }
+            manifest = selectedPart.Manifest; review = selectedPart.Review;
+        }
+        else if (action == "review")
+        {
+            var verified = await AiPackageManifestReader.ReadVerifiedReviewAsync(args.Positionals[1], token);
+            manifest = verified.Manifest; review = verified.Review; reviewMarkdown = verified.ReviewMarkdown;
+        }
+        else
+        {
+            package = await AiPackageManifestReader.ReadVerifiedPackageAsync(args.Positionals[1], token);
+            manifest = package.Manifest; review = package.Review;
+        }
+        var requireHiddenReview = args.HasFlag("require-hidden-review");
+        var reasons = review.StopReasons(requireHiddenReview, manifest.ContentPolicy);
+        if (action == "review")
+        {
+            if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
+            {
+                verified = true, review_required = reasons.Count > 0,
+                conversion_review = new { required = review.ConversionReviewRequired },
+                revision_sharing = new { required = review.RevisionSharingRequired, details = review.SharingReview },
+                hidden_content = new { included = review.HiddenContentIncluded, require_review = requireHiddenReview,
+                    required = review.HiddenReviewRequired(requireHiddenReview, manifest.ContentPolicy) },
+                stop_reasons = reasons,
+                // Reports do not identify every revision/hidden/OCR item by part; list the full
+                // package conservatively, without suggesting unaffected parts are safe to share.
+                affected_parts = reasons.Count > 0 ? manifest.Parts.Select(part => part.Id).ToArray() : [],
+                affected_parts_scope = reasons.Count > 0 ? "package" : "none",
+                review_markdown = reviewMarkdown,
+            }, PackageJson));
+            else await output.WriteAsync(reviewMarkdown);
+            return args.HasFlag("fail-on-review") && reasons.Count > 0 ? (int)ExitCode.ReviewRequired : 0;
+        }
+        if (reasons.Count > 0 && !args.HasFlag("allow-review"))
+        {
+            await error.WriteLineAsync("Review required (" + string.Join(", ", reasons) + "): use package review <directory|zip> [--json] and confirm conversion and sharing permissions before reading (use --allow-review after review).");
             return (int)ExitCode.ReviewRequired;
         }
         var jsonOptions = PackageJson;
         if (action == "search")
         {
-            var matches = AiPackageSearch.Find(package, selection, token);
-            if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new { review_required = package.Review.Required, matches }, jsonOptions));
+            var matches = AiPackageSearch.Find(package!, selection!, token);
+            if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new { review_required = reasons.Count > 0, matches }, jsonOptions));
             else foreach (var match in matches)
             {
                 await output.WriteLineAsync(PackageSearchDisplay(match.PartId) + " — " + string.Join("; ", match.Locations.Select(location => PackageSearchDisplay(location.Label))));
@@ -114,11 +157,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             if (matches.Count == 0) await error.WriteLineAsync("No matching part.");
             return 0;
         }
-        var part = package.Parts.FirstOrDefault(part => part.Part.Id == selection);
-        if (part is null) return Invalid($"Unknown part '{selection}'.");
+        var part = selectedPart!;
         if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
         {
-            part_id = part.Part.Id, markdown = part.Markdown, review_required = package.Review.Required,
+            part_id = part.Part.Id, markdown = part.Markdown, review_required = reasons.Count > 0,
             sources = args.HasFlag("with-sources") ? part.Sources : null,
             locations = args.HasFlag("with-sources") ? part.Part.Locations : null,
         }, jsonOptions));
@@ -197,7 +239,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
             "doctor" => "doctor [--json] [--strict]",
-            "package" => "package search <directory|zip> <text> [--json] | package read <directory|zip> --part part-0001 [--with-sources --json] [--allow-review] (always verifies; review blocks body by default)",
+            "package" => "package review <directory|zip> [--json --fail-on-review --require-hidden-review] | package search <directory|zip> <text> [--json] | package read <directory|zip> --part part-0001 [--with-sources --json] [--allow-review --require-hidden-review] (always verifies; review blocks body by default)",
             "licenses" => "licenses [--json] [--verify] (packages and bundled source data; verification requires the source repository)",
             "inspect" => "inspect <source-or-file.md>",
             "diff" => "diff <file.md> [--json]",
@@ -848,8 +890,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           docredock --version
           docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
                       readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--revisions final|markup|reject] [--allow-revision-sharing] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
-          docredock package search <directory|zip> <text> [--json] [--allow-review]
-          docredock package read <directory|zip> --part part-0001 [--json] [--with-sources] [--allow-review]
+          docredock package review <directory|zip> [--json] [--fail-on-review] [--require-hidden-review]
+          docredock package search <directory|zip> <text> [--json] [--allow-review] [--require-hidden-review]
+          docredock package read <directory|zip> --part part-0001 [--json] [--with-sources] [--allow-review] [--require-hidden-review]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
@@ -913,7 +956,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private sealed class Arguments
     {
         private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

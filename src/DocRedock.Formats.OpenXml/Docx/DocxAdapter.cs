@@ -301,6 +301,10 @@ public sealed partial class DocxAdapter : IFormatProbe
             AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
 
         hiddenStyles.Decorations.AddDiagnostics(diagnostics);
+        foreach (var node in nodes.Where(node => node.Extensions?.ContainsKey(ReviewExtensionKeys.FinalTableGridUnresolved) == true))
+            diagnostics.Add(new("DocxFinalTableGridUnresolved",
+                "The final table grid could not be resolved. Surviving cell text is retained in row order without inferred column relationships; compare it with the source.",
+                DiagnosticSeverity.Warning, node.Id, PartUri: node.Source?.PartUri));
         var sourceHash = await HashFileAsync(sourcePath, cancellationToken).ConfigureAwait(false);
         var hasDocumentProtection = doc.Descendants(W + "documentProtection").Any() || settingsDocument?.Descendants(W + "documentProtection").Any() == true;
         var hasTrackedRevisions = originalHasTrackedRevisions;
@@ -1850,13 +1854,19 @@ public sealed partial class DocxAdapter : IFormatProbe
         }
         // Rejecting tracked cells/rows can leave shorter rows in the current grid.
         // Preserve their text and column positions when the readable grid is rectangularized.
-        if (table.Descendants().Any(IsRevisionContainer) && grid.Count > 0)
+        if (!hiddenStyles.FinalRevisionView && table.Descendants().Any(IsRevisionContainer) && grid.Count > 0)
         {
             var width = grid.Max(row => row.Sum(cell => cell.ColSpan));
             foreach (var row in grid)
                 for (var column = row.Sum(cell => cell.ColSpan); column < width; column++) row.Add(new TableCell(""));
         }
         var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (hiddenStyles.FinalRevisionView && ((string?)table.Attribute(FinalTableGridMarker) == "true" ||
+            !TableGrid.TryCreate(new TableNodeContent(grid), out _, out _)))
+        {
+            extensions[ReviewExtensionKeys.FinalTableGridUnresolved] = JsonSerializer.SerializeToElement(true);
+            extensions[ReviewExtensionKeys.SourceReviewRequired] = JsonSerializer.SerializeToElement(true);
+        }
         AddContentControlExtensions(extensions, contentControl);
         if (nested is not null)
         {
