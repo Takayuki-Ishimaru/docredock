@@ -35,6 +35,8 @@ public enum ReviewElementKind
     /// widths, or text in a worksheet, slide or Word document that a drawn line crosses in part). Counted with
     /// unanalyzed content, like <see cref="UncertainText"/>.</summary>
     StrikethroughUnplaced,
+    /// <summary>Surviving table text is present in row order, but its column relationships could not be resolved.</summary>
+    TableStructureUncertain,
 }
 
 /// <summary>A rectangle on the review image, normalized to 0..1 with the origin at the top left.</summary>
@@ -228,6 +230,11 @@ public static class ExportReviewBuilder
     /// <see cref="ReadableMarkdownSerializer.RequiresSourceReview"/> can never disagree.</summary>
     internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping)
     {
+        if (ExtensionBool(node, ReviewExtensionKeys.FinalTableGridUnresolved))
+        {
+            yield return new ReviewElement(ReviewElementKind.TableStructureUncertain, node.Id);
+            yield break;
+        }
         if (node.Extensions?.TryGetValue(PdfDocumentGraphProjection.UncertainTextExtension, out var doubts) == true &&
             doubts.ValueKind == JsonValueKind.Array && doubts.GetArrayLength() > 0)
         {

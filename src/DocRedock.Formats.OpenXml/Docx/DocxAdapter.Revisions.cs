@@ -12,6 +12,32 @@ public sealed partial class DocxAdapter
 
     private static void ApplyFinalRevisionView(XDocument document)
     {
+        // Equal surviving row widths alone do not prove equal columns: different rows can
+        // delete different columns. Retain that uncertainty through the semantic clones,
+        // without changing the original ZIP bytes or assigning surviving cells new headers.
+        foreach (var table in document.Descendants(W + "tbl"))
+        {
+            var deletionPatterns = table.Elements(W + "tr").Where(row => !IsDeletedRevision(row)).Select(row =>
+            {
+                long column = ParseDocxGridBefore(row.Element(W + "trPr"));
+                var deleted = new List<(long Start, long End)>();
+                foreach (var cell in row.Elements(W + "tc"))
+                {
+                    var span = ParsePositiveInt((string?)cell.Element(W + "tcPr")?.Element(W + "gridSpan")?.Attribute(W + "val")) ?? 1;
+                    if (IsDeletedRevision(cell))
+                    {
+                        // A merged deleted cell and adjacent single-column deleted cells
+                        // describe the same removed columns, regardless of segmentation.
+                        if (deleted.Count > 0 && deleted[^1].End == column)
+                            deleted[^1] = (deleted[^1].Start, column + span);
+                        else deleted.Add((column, column + span));
+                    }
+                    column += span;
+                }
+                return string.Join(",", deleted.Select(range => range.Start + ":" + range.End));
+            }).Distinct(StringComparer.Ordinal).Take(2).Count();
+            if (deletionPatterns > 1) table.SetAttributeValue(FinalTableGridMarker, "true");
+        }
         foreach (var deleted in document.Descendants().Where(element => DeletedStructure(element) ||
                      element.Name == W + "del" || element.Name == W + "moveFrom" || element.Name == W + "delText").ToArray())
             deleted.Remove();
@@ -20,6 +46,8 @@ public sealed partial class DocxAdapter
         foreach (var inserted in document.Descendants().Where(element => element.Name == W + "ins" ||
                      element.Name == W + "moveTo").ToArray()) inserted.ReplaceWith(inserted.Nodes().ToArray());
     }
+
+    private static readonly XName FinalTableGridMarker = XNamespace.Get("urn:docredock:projection") + "unresolved-final-table-grid";
 
     private static readonly HashSet<string> PropertyRevisionNames = new(StringComparer.Ordinal)
     {

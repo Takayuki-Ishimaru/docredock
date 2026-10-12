@@ -13,4 +13,8 @@ public static class ReviewExtensionKeys
     /// <summary>Marks a node that stands for source content the export could not fully analyze: it needs the same
     /// comparison with the source as an unresolved figure does (<c>ReadableMarkdownSerializer.RequiresSourceReview</c>).</summary>
     public const string SourceReviewRequired = "source_review_required";
+
+    /// <summary>A final DOCX table has no reliable rectangular grid; its surviving cell text is
+    /// rendered in row order without assigning it to inferred columns.</summary>
+    public const string FinalTableGridUnresolved = "final_table_grid_unresolved";
 }

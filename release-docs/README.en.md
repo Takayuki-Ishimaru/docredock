@@ -6,14 +6,21 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.5 Public Beta
+
+- [v0.3.5 release notes](RELEASE_NOTES_v0.3.5.en.md)
+- Preserve surviving Word table and overlay text after cell deletion; require source comparison when columns are uncertain
+- Add verified review-report retrieval and optional hidden-content review
+- Improve GUI review status, package switching and CLI single-part reading
+
+## Published releases
+
 ### v0.3.4 Public Beta
 
 - [v0.3.4 release notes](RELEASE_NOTES_v0.3.4.en.md)
 - Search and read AI packages in the GUI/CLI after verification and review
 - Show part-size estimates and actual results
 - Choose Word revision output; add sharing review in report schema 1.2
-
-## Published releases
 
 ### v0.3.3 Public Beta
 

@@ -20,11 +20,13 @@ public sealed class PackageBrowserWindow : Window
     private readonly TextBox sources = new() { IsReadOnly = true, AcceptsReturn = true, MaxHeight = 150 };
     private readonly TextBox review = new() { IsReadOnly = true, AcceptsReturn = true, MaxHeight = 160, TextWrapping = Avalonia.Media.TextWrapping.Wrap };
     private readonly CheckBox consent = new() { Content = new TextBlock { Text = "確認レポートを読み、共有範囲と原本照合の必要事項を確認しました", TextWrapping = Avalonia.Media.TextWrapping.Wrap }, IsVisible = false };
+    private readonly CheckBox hiddenReview = new() { Content = "非表示内容を含むパッケージも共有範囲の確認後に読む" };
     private readonly ListBox parts = new() { MinWidth = 180 };
     private readonly Button copy = new() { Content = "この分割本文だけをコピー", IsEnabled = false };
     private AiPackageVerifiedPackage? package;
     private CancellationTokenSource? loading;
     private readonly string? initialPath;
+    private string packageName = "";
 
     public PackageBrowserWindow(string? path = null)
     {
@@ -40,6 +42,7 @@ public sealed class PackageBrowserWindow : Window
         top.Children.Add(new TextBlock { Text = "全文はパッケージ内のdocument.mdです。必要な分割本文だけをAIへ渡し、出典索引はここで確認してください。検証は意味・著者の真正性・共有権限を保証しません。", TextWrapping = Avalonia.Media.TextWrapping.Wrap });
         top.Children.Add(new Expander { Header = "検証済みの確認レポート（review.md）", Content = review });
         top.Children.Add(consent);
+        top.Children.Add(hiddenReview);
         var searchRow = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto"), ColumnSpacing = 8 };
         searchRow.Children.Add(query); Grid.SetColumn(search, 1); searchRow.Children.Add(search); Grid.SetColumn(all, 2); searchRow.Children.Add(all);
         top.Children.Add(searchRow);
@@ -66,9 +69,10 @@ public sealed class PackageBrowserWindow : Window
             if (folders.Count > 0 && folders[0] is { } folder) await LoadFromUiAsync(folder.Path.LocalPath);
         };
         search.Click += (_, _) => Search(query.Text ?? "");
-        all.Click += (_, _) => ShowParts(package?.Parts.Select(part => part.Part.Id) ?? []);
+        all.Click += (_, _) => Search("");
         parts.SelectionChanged += (_, _) => ShowSelection();
-        consent.IsCheckedChanged += (_, _) => ShowParts(package?.Parts.Select(part => part.Part.Id) ?? []);
+        consent.IsCheckedChanged += (_, _) => RefreshReviewState();
+        hiddenReview.IsCheckedChanged += (_, _) => { consent.IsChecked = false; RefreshReviewState(); };
         copy.Click += async (_, _) =>
         {
             if (!CanRead || markdown.Text is not { Length: > 0 } text) return;
@@ -78,11 +82,31 @@ public sealed class PackageBrowserWindow : Window
         Closed += (_, _) => loading?.Cancel();
     }
 
-    internal bool CanRead => package is not null && (!package.Review.Required || consent.IsChecked == true);
+    private bool ReviewRequired => package is not null && package.Review.StopReasons(hiddenReview.IsChecked == true, package.Manifest.ContentPolicy).Count > 0;
+    internal bool CanRead => package is not null && (!ReviewRequired || consent.IsChecked == true);
     internal string CurrentMarkdown => markdown.Text ?? "";
     internal string CurrentSources => sources.Text ?? "";
+    internal string CurrentStatus => status.Text ?? "";
+    internal string CurrentQuery => query.Text ?? "";
+    internal bool RequireHiddenReview { get => hiddenReview.IsChecked == true; set => hiddenReview.IsChecked = value; }
     internal IReadOnlyList<string> VisiblePartIds => parts.Items.Cast<string>().ToArray();
     internal void ConfirmReview() => consent.IsChecked = true;
+    internal void ClearReviewConfirmation() => consent.IsChecked = false;
+
+    private void RefreshReviewState()
+    {
+        if (package is null) return;
+        consent.IsVisible = ReviewRequired;
+        Search(query.Text ?? "");
+    }
+
+    private void UpdateStatus(string? searchResult = null)
+    {
+        if (package is null) return;
+        status.Text = packageName + " — 検証完了" + (ReviewRequired
+            ? CanRead ? "・確認済み。本文を表示できます。" : "・確認が必要です。確認前は本文を表示しません。"
+            : "。本文を表示できます。") + (searchResult is null ? "" : " " + searchResult);
+    }
 
     private async Task LoadFromUiAsync(string path)
     {
@@ -97,7 +121,7 @@ public sealed class PackageBrowserWindow : Window
         // Publish the new owner before awaiting cancellation callbacks, so a newer load can cancel it.
         var previous = loading;
         var cancellation = new CancellationTokenSource(); loading = cancellation;
-        package = null; consent.IsChecked = false; consent.IsVisible = false; review.Text = ""; ShowParts([]);
+        package = null; consent.IsChecked = false; consent.IsVisible = false; review.Text = ""; query.Text = ""; ShowParts([]);
         status.Text = "全ファイル・出典索引・確認レポートを検証しています…";
         try
         {
@@ -106,10 +130,9 @@ public sealed class PackageBrowserWindow : Window
             var verified = await Task.Run(() => AiPackageManifestReader.ReadVerifiedPackageAsync(path, cancellation.Token), cancellation.Token);
             cancellation.Token.ThrowIfCancellationRequested();
             package = verified;
+            packageName = Path.GetFileName(path);
             review.Text = verified.ReviewMarkdown;
-            consent.IsVisible = verified.Review.Required;
-            status.Text = Path.GetFileName(path) + (verified.Review.Required ? " — 検証完了・確認が必要です。確認前は本文を表示しません。" : " — 検証完了");
-            ShowParts(verified.Parts.Select(part => part.Part.Id));
+            RefreshReviewState();
         }
         catch (Exception exception)
         {
@@ -122,11 +145,17 @@ public sealed class PackageBrowserWindow : Window
 
     internal void Search(string text)
     {
-        if (!CanRead) { ShowParts([]); return; }
-        if (string.IsNullOrWhiteSpace(text)) { ShowParts(package!.Parts.Select(part => part.Part.Id)); return; }
+        query.Text = text;
+        if (!CanRead) { ShowParts([]); UpdateStatus(); return; }
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            ShowParts(package!.Parts.Select(part => part.Part.Id));
+            UpdateStatus();
+            return;
+        }
         var matches = AiPackageSearch.Find(package!, text);
         ShowParts(matches.Select(match => match.PartId));
-        status.Text = $"検証済み本文の検索: {matches.Count}分割が一致しました。";
+        UpdateStatus($"検証済み本文の検索: {matches.Count}分割が一致しました。");
     }
 
     private void ShowParts(IEnumerable<string> ids)

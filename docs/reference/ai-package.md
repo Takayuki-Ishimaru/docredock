@@ -62,7 +62,22 @@ By default a worksheet stays one part even above the target, so a table is never
 docredock package search input.ai-package.zip "売上" --json
 docredock package read input.ai-package.zip --part part-0002 > part.md
 docredock package read input.ai-package.zip --part part-0002 --json --with-sources
+docredock package review input.ai-package.zip --json --require-hidden-review
 ```
+
+`package review <directory|zip>` runs the same whole-package verification and emits the checked `review.md`, even while body access is gated. `--json` returns `verified`, `review_required`, `conversion_review`, `revision_sharing` (including available revision policy details), `hidden_content`, `stop_reasons`, `affected_parts`, `affected_parts_scope`, and `review_markdown`. Stop reasons are `conversion_review`, `revision_sharing`, and optionally `hidden_content`. Reports do not map every sharing/OCR item to individual parts: affected IDs conservatively cover the whole package (`affected_parts_scope: package`) when required, or are empty (`none`) otherwise. Inspection normally exits 0; `--fail-on-review` emits this metadata and exits 11 when required. Malformed or changed packages emit no review or body, even with `--allow-review`.
+
+`--require-hidden-review` on package search/read/review adds a recipient policy: `hidden_content_included: true` requires acknowledgement before body access. An absent/null flag on older `complete` packages is conservatively gated too. This option does not change the stored report's `review.required`; it changes the reader's effective gate. `--allow-review` acknowledges all effective reasons for one invocation. The Python example accepts the same option, automatically enables `--verify`, and exits 3 before body output; omit the option after reviewing. API callers use `Review.StopReasons(requireHiddenReview, manifest.ContentPolicy)` for this policy.
+
+The GUI's optional hidden-content-review checkbox applies the same recipient policy. Confirmation updates the status; loading another package clears the search query as well as old content and review confirmation.
+
+Final DOCX tables whose surviving grid cannot be resolved retain their cell text in row order instead of dropping it or guessing column relationships. `DocxFinalTableGridUnresolved` and `review.pages[].elements[].kind: table_structure_uncertain` identify the source-review item, and `review.required` is true. Rectangular control tables and uniform whole-column deletion keep normal table rendering without this extra review.
+
+Final-table fallback also retains text from absorbed overlay figures as separate notes with unresolved cell placement. Uniform deleted column ranges are compared independently of how merged/adjacent cells represent them, so equivalent deletions do not add unnecessary review.
+
+CLI `package review` uses `ReadVerifiedReviewAsync`, which retains the checked report/review and validates the source index without loading part Markdown. CLI `package read` uses `ReadVerifiedPartAsync`, retaining only its selected Markdown. Every other listed file is verified with a bounded streaming buffer, including the same ZIP opening, size and CRC rules; whole-package verification remains mandatory. Returned text is still exactly the bytes checked. Source-index/manifest metadata and selected text still need memory. Full-text search and the GUI retain their verified full-text snapshot.
+
+With the Python example's `--require-hidden-review`, stored package review is also enforced. JSON `review.required` and `review.effective_required` include the hidden-content policy; `review.reported_required` preserves the original report-aware state. `review.stop_reasons` contains `package_review` and/or `hidden_content`. Without the option, the previous JSON shape and `--fail-on-review` behavior are retained.
 
 These commands always verify every file, the source index and the report before emitting any selected content. They stop with exit 11 and no stdout when either conversion or revision-sharing review is required. Read `review.md` and perform the relevant checks, then use `--allow-review` to acknowledge that review for one invocation. A malformed or changed package produces no body; verification errors exit 7, unreadable paths exit 2, and unsupported schemas exit 4. Plain `read` output contains only the selected Markdown; source-index data is included only with `--json --with-sources`. Search ignores case, full-width forms, Markdown escapes and supported inline decoration. It is text matching, not semantic retrieval.
 

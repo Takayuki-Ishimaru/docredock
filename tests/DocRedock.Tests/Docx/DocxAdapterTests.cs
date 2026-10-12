@@ -2643,6 +2643,41 @@ public sealed class DocxAdapterTests
         Assert.Contains("レビュー", markdown); // still present, folded into the cell instead.
     }
 
+    [Theory]
+    [InlineData("visible", false)]
+    [InlineData("complete", false)]
+    [InlineData("sanitized", false)]
+    [InlineData("visible", true)]
+    public async Task Final_cell_deletion_preserves_overlay_text_once_without_assigning_an_uncertain_cell(string policy, bool cellAnchored)
+    {
+        var shape = cellAnchored
+            ? OverlayInline("1101", "rightArrow", 571_500, 190_500, "OVERLAY_RETAIN")
+            : OverlayAnchor("1101", "rightArrow", 571_500, 190_500, "column", 1_301_750, "paragraph", 215_900,
+                text: "OVERLAY_RETAIN", cNvPrId: "1101");
+        var preceding = cellAnchored ? "" : $"<w:p>{shape}</w:p>";
+        var deleted = "<w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>SECRET_CELL</w:t></w:r></w:p></w:tc>";
+        var table = OverlayTable(["2000", "1000", "1000"],
+        [
+            (null, [OverlayCell("<w:r><w:t>STEP</w:t></w:r>"), OverlayCell("<w:r><w:t>A</w:t></w:r>"), OverlayCell("<w:r><w:t>B</w:t></w:r>")]),
+            ("500", [deleted, OverlayCell("<w:r><w:t>KEPT_A</w:t></w:r>" + (cellAnchored ? shape : "")), OverlayCell("<w:r><w:t>KEPT_B</w:t></w:r>")]),
+        ]);
+        var source = await WriteOverlayDocxAsync("overlay-final-delete-" + Guid.NewGuid().ToString("N") + ".docx", preceding + table);
+        try
+        {
+            var original = await File.ReadAllBytesAsync(source);
+            var result = await new DocumentService(null, null, discoverPdfRasterizer: false).ExportAiPackageAsync(
+                new(new(source, "unused.md", Revisions: "final", ContentPolicy: policy, EnableOcr: false),
+                    Path.Combine(Path.GetDirectoryName(source)!, "final-" + Guid.NewGuid().ToString("N"))));
+            var snapshot = await AiPackageManifestReader.ReadVerifiedPackageAsync(result.OutputPath);
+            var text = Assert.Single(snapshot.Parts).Markdown.Replace("\\", "");
+            Assert.Equal(1, text.Split("OVERLAY_RETAIN", StringSplitOptions.None).Length - 1);
+            Assert.Contains("Figure text (cell unresolved)", text);
+            Assert.Contains("KEPT_A", text); Assert.Contains("KEPT_B", text); Assert.DoesNotContain("SECRET_CELL", text);
+            Assert.True(result.Review.Required); Assert.Equal(original, await File.ReadAllBytesAsync(source));
+        }
+        finally { File.Delete(source); }
+    }
+
     [Fact]
     public async Task PrecedingParagraph_page_relativeFrom_is_not_an_overlay()
     {
