@@ -24,7 +24,9 @@ public sealed record GuiExportResult(
     OcrReviewSummary? OcrReview = null,
     string? AiPackagePath = null,
     ExportSummary? Summary = null,
-    IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview>? TableBoundaries = null)
+    IReadOnlyList<DocRedock.Markdown.ReadableTableBoundaryReview>? TableBoundaries = null,
+    AiPackageSizeSummary? PackageSize = null,
+    RevisionSharingReview? SharingReview = null)
 {
     public string PackagePath => SidecarPath;
 }
@@ -72,6 +74,7 @@ public sealed class GuiWorkflowService
 
     private static string SupportedSourceDescription => "DOCX, XLSX, PPTX, and PDF";
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public async Task<GuiExportResult> ExportAsync(
         string sourcePath,
         string outputDirectory,
@@ -91,7 +94,10 @@ public sealed class GuiWorkflowService
         DocRedock.Markdown.OcrReviewMode ocrReview = DocRedock.Markdown.OcrReviewMode.LowConfidence,
         bool aiPackage = false,
         bool zipAiPackage = false,
-        bool tableRowBlocks = false)
+        bool tableRowBlocks = false,
+        int targetCharacters = 12000,
+        string? revisions = null,
+        bool allowRevisionSharing = false)
     {
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
@@ -125,8 +131,9 @@ public sealed class GuiWorkflowService
             var exported = await aiService.ExportAiPackageAsync(new AiPackageExportOptions(
                 new ReadableDocumentExportOptions(sourcePath, "document.md", enableOcr, NormalizeLanguages(ocrLanguages),
                     contentPolicy, showFormulas, includeSvgPreviews, includeDiagrams,
-                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview),
-                aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory, TableRowBlocks: tableRowBlocks), cancellationToken).ConfigureAwait(false);
+                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
+                    Revisions: revisions, AllowRevisionSharing: allowRevisionSharing),
+                aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters, tableRowBlocks), cancellationToken).ConfigureAwait(false);
             var aiMarkdown = zipAiPackage ? aiOutput : Path.Combine(aiOutput, "document.md");
             var reviewItems = BuildReviewItems(sourcePath, aiMarkdown, null, exported.Graph, exported.Review,
                 new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
@@ -135,7 +142,7 @@ public sealed class GuiWorkflowService
             {
                 // Review images can be displayed directly from the ZIP; no temporary extraction
                 // directory needs to outlive this workflow or leak into output references.
-                using var zip = System.IO.Compression.ZipFile.OpenRead(aiOutput);
+                using var zip = await System.IO.Compression.ZipFile.OpenReadAsync(aiOutput, cancellationToken).ConfigureAwait(false);
                 reviewItems = reviewItems.Select(item =>
                 {
                     var reference = item.Page.ReviewImageReference;
@@ -151,9 +158,10 @@ public sealed class GuiWorkflowService
             return new GuiExportResult(aiMarkdown, string.Empty, exported.Graph.Format.ToString().ToLowerInvariant(),
                 "AI package (one-way)", exported.Diagnostics, IsReadable: true, InferenceMode: inferenceMode,
                 VisualSummary: SummarizeVisualGraph(exported.Summary),
-                ExportSummary: $"AIパッケージ: {aiOutput}（{exported.Parts.Count}分割）\n{exported.Summary}",
+                ExportSummary: $"AIパッケージ: {aiOutput}\n{exported.Size?.DescribeJapanese()}\n{exported.Summary}",
                 ReviewItems: reviewItems, OcrReview: exported.Review.Ocr, AiPackagePath: aiOutput,
-                Summary: exported.Summary, TableBoundaries: exported.Review.TableBoundaries);
+                Summary: exported.Summary, TableBoundaries: exported.Review.TableBoundaries,
+                PackageSize: exported.Size, SharingReview: exported.Review.SharingReview);
         }
         if (useUniqueName) baseName = NextAvailableBaseName(outputDirectory, baseName, readable);
         var markdownPath = Path.Combine(outputDirectory, baseName + ".md");
@@ -175,7 +183,8 @@ public sealed class GuiWorkflowService
                     IncludeSvgPreviews: includeSvgPreviews,
                     IncludeDiagrams: includeDiagrams,
                     EmbedImages: embedReadableImages,
-                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview), cancellationToken).ConfigureAwait(false);
+                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
+                    Revisions: revisions, AllowRevisionSharing: allowRevisionSharing), cancellationToken).ConfigureAwait(false);
                 // Built once so the two GUI summary lines (this one and ExportSummary below) can
                 // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
                 var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
@@ -195,7 +204,7 @@ public sealed class GuiWorkflowService
                     ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
                         new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
                             ContentPolicy: contentPolicy, OcrReview: ocrReview)),
-                    OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries);
+                    OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries, SharingReview: review.SharingReview);
             }
             catch
             {
@@ -252,6 +261,7 @@ public sealed class GuiWorkflowService
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public async Task<GuiRestoreResult> RestoreAsync(
         string markdownPath,
         string sidecarPath,
@@ -336,6 +346,11 @@ public sealed class GuiWorkflowService
     public static OcrCapabilityDecision DescribeOcrCapability(
         CapabilityStatus rasterizer, CapabilityStatus engine, CapabilityStatus native, CapabilityStatus jpn, CapabilityStatus eng)
     {
+        ArgumentNullException.ThrowIfNull(rasterizer);
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(native);
+        ArgumentNullException.ThrowIfNull(jpn);
+        ArgumentNullException.ThrowIfNull(eng);
         var enabled = engine.Status == "ready" || native.Status is "ready" or "partial";
         if (!enabled)
         {
@@ -383,7 +398,7 @@ public sealed class GuiWorkflowService
             DiagnosticSeverity.Warning)).ToArray();
     }
 
-    private static IReadOnlyList<GuiReviewItem> BuildReviewItems(string sourcePath, string markdownPath, string? sidecarDirectory,
+    private static GuiReviewItem[] BuildReviewItems(string sourcePath, string markdownPath, string? sidecarDirectory,
         DocumentGraph graph, ExportReview review, DocRedock.Markdown.ReadableMarkdownOptions options) =>
         review.Pages.Select(page =>
         {
@@ -422,6 +437,8 @@ public sealed class GuiWorkflowService
 
     public static string SafeFileName(string untrustedName, string fallbackBaseName)
     {
+        ArgumentNullException.ThrowIfNull(untrustedName);
+        ArgumentNullException.ThrowIfNull(fallbackBaseName);
         var fileName = Path.GetFileName(untrustedName.Replace('\\', '/'));
         var extension = Path.GetExtension(fileName);
         var baseName = SafeBaseName(Path.GetFileNameWithoutExtension(fileName), fallbackBaseName);
@@ -443,7 +460,7 @@ public sealed class GuiWorkflowService
         return ReservedWindowsBaseNames.Contains(result) ? "_" + result : result;
     }
 
-    private static IReadOnlyList<string> NormalizeLanguages(IReadOnlyList<string>? languages)
+    private static string[] NormalizeLanguages(IReadOnlyList<string>? languages)
     {
         var normalized = (languages is null || languages.Count == 0 ? ["jpn", "eng"] : languages)
             .SelectMany(value => value.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))

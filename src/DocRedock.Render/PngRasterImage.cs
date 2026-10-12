@@ -6,7 +6,9 @@ namespace DocRedock.Render;
 /// <summary>A decoded 8-bit RGB raster and the PNG bytes it came from (or was encoded to). Alpha is
 /// composited onto white during decoding, so <see cref="RgbBytes"/> is always three bytes per
 /// pixel in row-major order.</summary>
+#pragma warning disable CA1819 // Existing public API exposes owned binary buffers without cloning.
 public sealed record PngRasterImage(byte[] PngBytes, int Width, int Height, byte[] RgbBytes)
+#pragma warning restore CA1819
 {
     private static readonly byte[] Signature = [137, 80, 78, 71, 13, 10, 26, 10];
     private const int MaxPixels = 20_000_000;

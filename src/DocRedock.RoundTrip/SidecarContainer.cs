@@ -245,13 +245,13 @@ public static class SidecarContainer
         {
             ct.ThrowIfCancellationRequested();
             var relative = RoundTripPackage.ValidateEntry(entry, seen);
-            if (relative.EndsWith("/", StringComparison.Ordinal)) continue;
+            if (relative.EndsWith('/')) continue;
             expanded = checked(expanded + entry.Length);
             if (expanded > ExpandedSizeLimit) throw new InvalidDataException("Package exceeds the expanded-size limit.");
             var destination = Path.GetFullPath(Path.Combine(outputDirectory, relative.Replace('/', Path.DirectorySeparatorChar)));
             if (!RoundTripPackage.IsWithin(outputDirectory, destination)) throw new InvalidDataException("Package entry escapes the output directory.");
             Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            await using var source = entry.Open();
+            await using var source = await entry.OpenAsync(ct).ConfigureAwait(false);
             await using var target = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
             await source.CopyToAsync(target, ct).ConfigureAwait(false);

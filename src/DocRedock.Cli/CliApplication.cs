@@ -23,6 +23,9 @@ public enum ExitCode
 
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
 {
+    private static readonly JsonSerializerOptions PackageJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true };
+    private static readonly JsonSerializerOptions ReportJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
     private DocumentService Service { get; } = documentService ?? new DocumentService(OcrEngineFactory.CreateDefault(),
         PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
             string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)));
@@ -33,6 +36,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(args);
         if (args.Length == 0 || args[0] is "help" or "--help" or "-h") { WriteHelp(); return 0; }
         // Command help is intentionally dispatched before experimental gates and
         // input validation so every command documents itself in every environment.
@@ -46,6 +50,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return args[0].ToLowerInvariant() switch
             {
                 "export" => await ExportAsync(parsed, cancellationToken),
+                "package" => await PackageAsync(parsed, cancellationToken),
                 "restore" => await RestoreAsync(parsed, cancellationToken),
                 "render" => await RenderAsync(parsed, cancellationToken),
                 "inspect" => await InspectAsync(parsed, cancellationToken),
@@ -63,6 +68,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             };
         }
         catch (OperationCanceledException) { await error.WriteLineAsync("Operation cancelled."); return (int)ExitCode.InvalidInput; }
+        catch (AiPackageVerificationException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.ValidationFailed; }
         catch (WorkspaceIntegrityException ex) { await error.WriteLineAsync($"Workspace verification failed: {ex.Message}"); return (int)ExitCode.WorkspaceInvalid; }
         catch (UnauthorizedAccessException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.SecurityPolicyViolation; }
         catch (NotSupportedException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.Unsupported; }
@@ -80,6 +86,65 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         }
     }
 
+    private async Task<int> PackageAsync(Arguments args, CancellationToken token)
+    {
+        if (args.Positionals.Count is < 2 or > 3 || args.Positionals[0] is not ("search" or "read"))
+            return Invalid("Use package search <directory|zip> <text> or package read <directory|zip> --part <id>.");
+        var action = args.Positionals[0];
+        var selection = args.Positionals.Count == 3 ? args.Positionals[2] : args.Option(action == "read" ? "part" : "query");
+        if (string.IsNullOrWhiteSpace(selection)) return Invalid(action == "read" ? "--part is required." : "Search text is required.");
+        if (args.HasFlag("with-sources") && !args.HasFlag("json")) return Invalid("--with-sources requires --json; plain output contains only Markdown.");
+        if (args.HasFlag("allow-review") && args.HasFlag("fail-on-review")) return Invalid("--allow-review and --fail-on-review conflict.");
+        var package = await AiPackageManifestReader.ReadVerifiedPackageAsync(args.Positionals[1], token);
+        if (package.Review.Required && !args.HasFlag("allow-review"))
+        {
+            await error.WriteLineAsync("Review required: read review.md and confirm conversion and sharing permissions before reading (use --allow-review after review).");
+            return (int)ExitCode.ReviewRequired;
+        }
+        var jsonOptions = PackageJson;
+        if (action == "search")
+        {
+            var matches = AiPackageSearch.Find(package, selection, token);
+            if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new { review_required = package.Review.Required, matches }, jsonOptions));
+            else foreach (var match in matches)
+            {
+                await output.WriteLineAsync(PackageSearchDisplay(match.PartId) + " — " + string.Join("; ", match.Locations.Select(location => PackageSearchDisplay(location.Label))));
+                foreach (var line in match.Lines) await output.WriteLineAsync($"  {line.Number}: {PackageSearchDisplay(line.Text)}");
+            }
+            if (matches.Count == 0) await error.WriteLineAsync("No matching part.");
+            return 0;
+        }
+        var part = package.Parts.FirstOrDefault(part => part.Part.Id == selection);
+        if (part is null) return Invalid($"Unknown part '{selection}'.");
+        if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
+        {
+            part_id = part.Part.Id, markdown = part.Markdown, review_required = package.Review.Required,
+            sources = args.HasFlag("with-sources") ? part.Sources : null,
+            locations = args.HasFlag("with-sources") ? part.Part.Locations : null,
+        }, jsonOptions));
+        else await output.WriteAsync(part.Markdown);
+        return 0;
+    }
+
+    // Search results are terminal annotations; keep controls visible without executing them.
+    private static string PackageSearchDisplay(string text)
+    {
+        var shown = new StringBuilder(text.Length);
+        for (var index = 0; index < text.Length; index++)
+        {
+            var character = text[index];
+            if (char.IsHighSurrogate(character) && index + 1 < text.Length && char.IsLowSurrogate(text[index + 1]))
+                shown.Append(character).Append(text[++index]);
+            else if (character is <= '\u001f' or (>= '\u007f' and <= '\u009f') or '\u061c' or
+                     '\u200e' or '\u200f' or '\u2028' or '\u2029' or (>= '\u202a' and <= '\u202e') or
+                     (>= '\u2066' and <= '\u2069') || char.IsSurrogate(character))
+                shown.Append(character < 0x100 ? "\\x" : "\\u")
+                    .Append(((int)character).ToString(character < 0x100 ? "x2" : "x4", System.Globalization.CultureInfo.InvariantCulture));
+            else shown.Append(character);
+        }
+        return shown.ToString();
+    }
+
     private async Task<int> DoctorAsync(Arguments args)
     {
         if (args.Positionals.Count != 0) return Invalid("doctor does not accept an input file.");
@@ -94,7 +159,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var report = new CapabilityReport("1", Version, capabilities, strict, verdict.ExitCode, summary);
         if (args.HasFlag("json"))
         {
-            await output.WriteLineAsync(JsonSerializer.Serialize(report, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            await output.WriteLineAsync(JsonSerializer.Serialize(report, ReportJson));
             return verdict.ExitCode;
         }
         await output.WriteLineAsync($"DocRedock {Version}"); await output.WriteLineAsync("Readable export");
@@ -127,11 +192,12 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--fail-on-review] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--fail-on-review] [--revisions final|markup|reject] [--allow-revision-sharing] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
             "doctor" => "doctor [--json] [--strict]",
+            "package" => "package search <directory|zip> <text> [--json] | package read <directory|zip> --part part-0001 [--with-sources --json] [--allow-review] (always verifies; review blocks body by default)",
             "licenses" => "licenses [--json] [--verify] (packages and bundled source data; verification requires the source repository)",
             "inspect" => "inspect <source-or-file.md>",
             "diff" => "diff <file.md> [--json]",
@@ -178,6 +244,10 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var contentPolicy = (args.Option("content-policy") ?? "visible").ToLowerInvariant();
         if (contentPolicy is not ("visible" or "complete" or "sanitized"))
             return Invalid("--content-policy must be visible, complete, or sanitized.");
+        var revisions = args.Option("revisions")?.ToLowerInvariant();
+        if (revisions is not (null or "final" or "markup" or "reject")) return Invalid("--revisions must be final, markup, or reject.");
+        if (profile != "readable" && (revisions is not null || args.HasFlag("allow-revision-sharing")))
+            return Invalid("Revision policies apply to readable exports; roundtrip/audit retain the original source.");
         var languages = (args.Option("ocr-lang") ?? "jpn+eng").Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (languages.Length == 0) return Invalid("--ocr-lang must contain at least one language identifier.");
         var pdfFallbackImages = args.Option("pdf-fallback-images") ?? "auto";
@@ -211,7 +281,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 EmbedImages: embedImages,
                 InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off",
                 OcrReview: ocrReview switch { "all" => DocRedock.Markdown.OcrReviewMode.All,
-                    "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence });
+                    "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
+                Revisions: revisions, AllowRevisionSharing: args.HasFlag("allow-revision-sharing"));
             if (aiPackage is not null)
             {
                 // Replacing a package directory must not remove an input anywhere below it.
@@ -412,7 +483,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var result = await Service.PreflightAsync(ResolveWorkspace(markdown, parsed.RoundTripStore), markdown,
             args.HasFlag("allow-render-fallback"), token);
         if (args.HasFlag("json"))
-            await output.WriteLineAsync(JsonSerializer.Serialize(result, new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
+            await output.WriteLineAsync(JsonSerializer.Serialize(result, ReportJson));
         else
         {
             await output.WriteLineAsync($"Edits: {(result.ProjectionChanged ? "detected (not corruption)" : "none")}");
@@ -496,7 +567,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (format == DocumentFormatKind.Unknown) return 4;
         if (format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx)
         {
-            using var archive = ZipFile.OpenRead(path);
+            using var archive = await ZipFile.OpenReadAsync(path, token).ConfigureAwait(false);
             await output.WriteLineAsync($"Macro enabled: {archive.Entries.Any(entry => entry.FullName.EndsWith("/vbaProject.bin", StringComparison.OrdinalIgnoreCase)).ToString().ToLowerInvariant()}");
             await output.WriteLineAsync($"External relationships: {CountExternalRelationships(archive)}");
             await output.WriteLineAsync($"Embedded media: {archive.Entries.Count(entry => entry.FullName.Contains("/media/", StringComparison.OrdinalIgnoreCase))}");
@@ -675,7 +746,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         {
             if (root is null) return LicenseFailure("License verification requires the source repository and package lock files.");
             var violations = VerifyLockedPackages(root, packages); foreach (var item in violations) await error.WriteLineAsync(item);
-            if (violations.Count > 0) return 9;
+            if (violations.Length > 0) return 9;
             if (!args.HasFlag("json")) await output.WriteLineAsync("License verification: passed");
         }
         return 0;
@@ -731,7 +802,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         return count;
     }
     private static string FindRepositoryRoot() { for (var current = new DirectoryInfo(Directory.GetCurrentDirectory()); current is not null; current = current.Parent) if (File.Exists(Path.Combine(current.FullName, "DocRedock.sln"))) return current.FullName; throw new FileNotFoundException("DRMD repository root was not found."); }
-    private static IReadOnlyList<string> VerifyLockedPackages(string root, IReadOnlyList<JsonElement> entries)
+    private static string[] VerifyLockedPackages(string root, IReadOnlyList<JsonElement> entries)
     {
         var allowed = entries.Select(item => (item.GetProperty("id").GetString()!.ToLowerInvariant(), item.GetProperty("version").GetString()!)).ToHashSet(); var violations = new List<string>();
         foreach (var path in Directory.EnumerateFiles(root, "packages.lock.json", SearchOption.AllDirectories).Where(path => !path.Split(Path.DirectorySeparatorChar).Any(part => part is "bin" or "obj")))
@@ -741,7 +812,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private void WriteMarkdownDiagnostics(TypedMarkdownDocument document) { foreach (var item in document.Diagnostics) { var writer = item.Severity == MarkdownDiagnosticSeverity.Error ? error : output; writer.WriteLine($"{item.Severity.ToString().ToUpperInvariant()} {item.Code}: {item.Message}"); } }
     private int Invalid(string message) { error.WriteLine(message); return 2; }
     private int Unsupported(string message) { error.WriteLine(message); return 4; }
-    private static IReadOnlyList<string> AiPackageProtectedInputs(string source)
+    private static string[] AiPackageProtectedInputs(string source)
     {
         var protectedPaths = new HashSet<string>(OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
             ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -776,7 +847,9 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         DocRedock {Version} Public Beta
           docredock --version
           docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
-                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
+                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--revisions final|markup|reject] [--allow-revision-sharing] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
+          docredock package search <directory|zip> <text> [--json] [--allow-review]
+          docredock package read <directory|zip> --part part-0001 [--json] [--with-sources] [--allow-review]
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
           docredock inspect <source-or-file.md>
@@ -839,8 +912,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public static Arguments Parse(string[] values)

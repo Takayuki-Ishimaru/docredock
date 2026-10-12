@@ -169,6 +169,29 @@ public sealed class TesseractOcrTests
     }
 
     [Fact]
+    public async Task Windows_json_parser_reuses_options_safely_across_parallel_case_insensitive_reads()
+    {
+        const string json = """[{"TEXT":"合 計：1 2,800 円","X":12.5,"Y":23,"WIDTH":80,"HEIGHT":16}]""";
+        var results = await Task.WhenAll(Enumerable.Range(0, 64).Select(_ => Task.Run(() => WindowsOcrJsonParser.Parse(json)))).ConfigureAwait(true);
+        foreach (var result in results)
+        {
+            Assert.Equal("合計：12,800円", result.Text);
+            var region = Assert.Single(result.Regions);
+            Assert.Equal(12.5, region.BoundingBox!.X);
+            Assert.Equal(80, region.BoundingBox.Width);
+            Assert.Null(region.Confidence);
+        }
+    }
+
+    [Fact]
+    public void Windows_json_parser_invalid_input_does_not_poison_later_reads()
+    {
+        Assert.Throws<System.Text.Json.JsonException>(() => WindowsOcrJsonParser.Parse("{"));
+        Assert.Empty(WindowsOcrJsonParser.Parse("[]").Regions);
+        Assert.Equal("valid", WindowsOcrJsonParser.Parse("""[{"text":"valid","x":0,"y":0,"width":1,"height":1}]""").Text);
+    }
+
+    [Fact]
     public async Task Windows_ocr_is_unavailable_off_windows_without_modifying_image_stream()
     {
         if (OperatingSystem.IsWindows()) return;

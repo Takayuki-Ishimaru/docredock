@@ -193,7 +193,7 @@ public sealed class MarkdownRenderer
         return new RenderWriteOutcome(coverage, pdf, pdf?.Font);
     }
 
-    private static IReadOnlyList<RenderOmission> FindOmissions(MarkdownDocument document, RenderFormat format)
+    private static List<RenderOmission> FindOmissions(MarkdownDocument document, RenderFormat format)
     {
         var xlsxHasTables = document.Blocks.OfType<MarkdownTable>().Any();
         var omissions = new List<RenderOmission>();
@@ -346,7 +346,7 @@ public sealed class MarkdownRenderer
         foreach (var entry in archive.Entries)
         {
             var normalized = entry.FullName.Replace('\\', '/');
-            if (Path.IsPathRooted(entry.FullName) || (normalized.Length >= 2 && normalized[1] == ':') || normalized.StartsWith("/", StringComparison.Ordinal) ||
+            if (Path.IsPathRooted(entry.FullName) || (normalized.Length >= 2 && normalized[1] == ':') || normalized.StartsWith('/') ||
                 normalized.Split('/').Any(segment => segment is ".." or "."))
                 throw new UnauthorizedAccessException("Template contains an unsafe package path.");
             if (entry.Length > 268_435_456 || entry.Length > 0 && (entry.CompressedLength == 0 || (double)entry.Length / entry.CompressedLength > 100))
@@ -507,6 +507,8 @@ public sealed class MarkdownRenderer
         return element;
     }
 
+    private static readonly string[] WordTableBorderNames = ["top", "left", "bottom", "right", "insideH", "insideV"];
+
     private static XElement WordTable(XNamespace w, MarkdownTable table)
     {
         var rows = new[] { table.Headers }.Concat(table.Rows).ToArray();
@@ -515,7 +517,7 @@ public sealed class MarkdownRenderer
             new XElement(w + "tblPr",
                 new XElement(w + "tblW", new XAttribute(w + "w", "0"), new XAttribute(w + "type", "auto")),
                 new XElement(w + "tblBorders",
-                    new[] { "top", "left", "bottom", "right", "insideH", "insideV" }
+                    WordTableBorderNames
                         .Select(name => new XElement(w + name, new XAttribute(w + "val", "single"), new XAttribute(w + "sz", "4"), new XAttribute(w + "color", "B7C9E2"))))),
             new XElement(w + "tblGrid", Enumerable.Range(0, width).Select(_ => new XElement(w + "gridCol", new XAttribute(w + "w", (9000 / width).ToString(System.Globalization.CultureInfo.InvariantCulture))))),
             rows.Select((row, rowIndex) => new XElement(w + "tr",
@@ -699,11 +701,11 @@ public sealed class MarkdownRenderer
         for (var index = 0; index < diagrams.Length; index++) Add(archive, $"xl/media/docredock-mermaid-{index + 1}.png", diagrams[index].Image.PngBytes);
     }
 
-    private static IReadOnlyList<XlsxDiagramPlacement> XlsxDiagramPlacements(IReadOnlyList<MarkdownDiagram> diagrams, int firstRow)
+    private static List<XlsxDiagramPlacement> XlsxDiagramPlacements(MarkdownDiagram[] diagrams, int firstRow)
     {
         const long emuPerPixel = 9525;
-        var result = new List<XlsxDiagramPlacement>(diagrams.Count);
-        for (var index = 0; index < diagrams.Count; index++)
+        var result = new List<XlsxDiagramPlacement>(diagrams.Length);
+        for (var index = 0; index < diagrams.Length; index++)
         {
             var (width, height) = FitEmu(diagrams[index].Image.Width, diagrams[index].Image.Height, 900 * emuPerPixel, 500 * emuPerPixel);
             var heightPixels = (double)height / emuPerPixel;
@@ -777,7 +779,7 @@ public sealed class MarkdownRenderer
     /// TrueType font.  That keeps generated PDFs portable and, importantly, keeps
     /// the text available to PDF extractors through the generated ToUnicode map.
     /// </summary>
-    private sealed class PdfBuilder
+    private static class PdfBuilder
     {
         private const int PageWidth = 612;
         private const int PageHeight = 792;
@@ -791,7 +793,7 @@ public sealed class MarkdownRenderer
         public static PdfWriteResult Write(
             string path,
             IReadOnlyList<string> lines,
-            IReadOnlyList<MarkdownDiagram> diagrams,
+            MarkdownDiagram[] diagrams,
             string? fontPath,
             int? fontFaceIndex)
         {
@@ -806,7 +808,7 @@ public sealed class MarkdownRenderer
             var resolved = new PdfFontResolver().Resolve(new PdfFontRequest(requiredCodePoints, fontPath, fontFaceIndex));
             var font = TrueTypeFont.Load(resolved.StandaloneSfntBytes);
             var allVisualLines = WrapLines(lines, font).ToArray();
-            var lineLimit = diagrams.Count == 0 ? MaxLines : Math.Min(MaxLines, 18);
+            var lineLimit = diagrams.Length == 0 ? MaxLines : Math.Min(MaxLines, 18);
             var visualLines = allVisualLines.Take(lineLimit).ToArray();
             var encoding = font.BuildEncoding(visualLines.SelectMany(line => line.CodePoints));
             var placements = PlaceDiagrams(diagrams, visualLines.Length);
@@ -838,10 +840,10 @@ public sealed class MarkdownRenderer
         private static PdfWriteResult WriteAscii(
             string path,
             IReadOnlyList<string> lines,
-            IReadOnlyList<MarkdownDiagram> diagrams)
+            MarkdownDiagram[] diagrams)
         {
             var allVisualLines = WrapAsciiLines(lines).ToArray();
-            var lineLimit = diagrams.Count == 0 ? MaxLines : Math.Min(MaxLines, 18);
+            var lineLimit = diagrams.Length == 0 ? MaxLines : Math.Min(MaxLines, 18);
             var visualLines = allVisualLines.Take(lineLimit).ToArray();
             var placements = PlaceDiagrams(diagrams, visualLines.Length);
             var content = BuildAsciiContent(visualLines, placements);
@@ -888,7 +890,7 @@ public sealed class MarkdownRenderer
             .Replace("(", "\\(", StringComparison.Ordinal)
             .Replace(")", "\\)", StringComparison.Ordinal);
 
-        private static void AddImages(ICollection<byte[]> objects, IReadOnlyList<PdfDiagramPlacement> placements)
+        private static void AddImages(List<byte[]> objects, IReadOnlyList<PdfDiagramPlacement> placements)
         {
             foreach (var placement in placements)
             {
@@ -898,7 +900,7 @@ public sealed class MarkdownRenderer
             }
         }
 
-        private static void WriteObjects(string path, IReadOnlyList<byte[]> objects)
+        private static void WriteObjects(string path, List<byte[]> objects)
         {
             using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
             output.Write(Encoding.ASCII.GetBytes("%PDF-1.4\n%\xFF\xFF\xFF\xFF\n"));
@@ -917,15 +919,15 @@ public sealed class MarkdownRenderer
             output.Write(Encoding.ASCII.GetBytes($"trailer\n<< /Size {objects.Count + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"));
         }
 
-        private static IReadOnlyList<PdfDiagramPlacement> PlaceDiagrams(IReadOnlyList<MarkdownDiagram> diagrams, int textLineCount)
+        private static List<PdfDiagramPlacement> PlaceDiagrams(MarkdownDiagram[] diagrams, int textLineCount)
         {
-            if (diagrams.Count == 0) return [];
+            if (diagrams.Length == 0) return [];
             var top = Top - textLineCount * LineHeight - 18d;
             const double bottom = 54;
             var available = Math.Max(1, top - bottom);
-            var slotHeight = available / diagrams.Count;
-            var result = new List<PdfDiagramPlacement>(diagrams.Count);
-            for (var index = 0; index < diagrams.Count; index++)
+            var slotHeight = available / diagrams.Length;
+            var result = new List<PdfDiagramPlacement>(diagrams.Length);
+            for (var index = 0; index < diagrams.Length; index++)
             {
                 var diagram = diagrams[index];
                 var scale = Math.Min((double)MaxLineWidth / diagram.Image.Width, Math.Max(1, slotHeight - 8) / diagram.Image.Height);

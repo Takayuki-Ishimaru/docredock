@@ -5,6 +5,22 @@ namespace DocRedock.Formats.OpenXml.Docx;
 
 public sealed partial class DocxAdapter
 {
+    // One-way final projection only. The source ZIP and round-trip defaults are unchanged.
+    private static bool HasDeletedRevisionContent(XDocument document) => document.Descendants().Any(element =>
+        IsDeletedRevision(element) && (element.Name == W + "t" || element.Name == W + "delText" ||
+            element.Name == W + "drawing" || element.Name == W + "pict"));
+
+    private static void ApplyFinalRevisionView(XDocument document)
+    {
+        foreach (var deleted in document.Descendants().Where(element => DeletedStructure(element) ||
+                     element.Name == W + "del" || element.Name == W + "moveFrom" || element.Name == W + "delText").ToArray())
+            deleted.Remove();
+        foreach (var previous in document.Descendants().Where(element => element.Name.Namespace == W &&
+                     PropertyRevisionNames.Contains(element.Name.LocalName)).ToArray()) previous.Remove();
+        foreach (var inserted in document.Descendants().Where(element => element.Name == W + "ins" ||
+                     element.Name == W + "moveTo").ToArray()) inserted.ReplaceWith(inserted.Nodes().ToArray());
+    }
+
     private static readonly HashSet<string> PropertyRevisionNames = new(StringComparer.Ordinal)
     {
         "rPrChange", "pPrChange", "tblPrChange", "tblPrExChange", "trPrChange", "tcPrChange", "tblGridChange", "sectPrChange",
@@ -32,7 +48,7 @@ public sealed partial class DocxAdapter
         return result.Count == 0 ? null : result;
     }
 
-    private static void AddRevisionExtensions(IDictionary<string, JsonElement> extensions, XElement block, DocxHiddenStyles styles)
+    private static void AddRevisionExtensions(Dictionary<string, JsonElement> extensions, XElement block, DocxHiddenStyles styles)
     {
         if (!styles.ShowTrackedRevisions) return;
         var changes = new List<object>();

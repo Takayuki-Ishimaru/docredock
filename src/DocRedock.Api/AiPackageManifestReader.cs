@@ -77,6 +77,10 @@ public sealed record AiPackageVerifiedPart(
     IReadOnlyList<AiPackageSourceGroup> Sources,
     AiPackageReview Review);
 
+/// <summary>A verified in-memory snapshot. Later reads and searches use the checked bytes.</summary>
+public sealed record AiPackageVerifiedPackage(AiPackageManifest Manifest,
+    IReadOnlyList<AiPackageVerifiedPart> Parts, AiPackageReview Review, string ReviewMarkdown);
+
 /// <summary>A package file is missing, changed, refused or not listed in the manifest.
 /// <see cref="Problems"/> holds the lines <see cref="AiPackageManifestReader.VerifyFilesAsync"/> returns.</summary>
 public sealed class AiPackageVerificationException(IReadOnlyList<string> problems)
@@ -180,6 +184,33 @@ public static class AiPackageManifestReader
         return new AiPackageVerifiedPart(manifest, part, Utf8(contents[part.Path], part.Path), sources[part.Id], review);
     }
 
+    public static async Task<AiPackageVerifiedPackage> ReadVerifiedPackageAsync(string packagePath,
+        CancellationToken cancellationToken = default)
+    {
+        using var files = new PackageFiles(packagePath);
+        var manifest = await ReadManifestAsync(files, cancellationToken).ConfigureAwait(false);
+        var listed = manifest.Files.ToDictionary(file => file.Path, file => file.Bytes, StringComparer.Ordinal);
+        var contents = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var path in manifest.Parts.Select(part => part.Path).Append(manifest.Report).Append(manifest.Review)
+                     .Concat(manifest.SourceIndex is { } index ? [index] : []).Distinct(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (files.Size(path) == listed[path]) contents[path] = await files.ReadAsync(path, cancellationToken).ConfigureAwait(false);
+            }
+            catch (FileNotFoundException) { }
+            catch (InvalidDataException refused) when (IsRefused(refused)) { }
+        }
+        var problems = await VerifyAsync(files, manifest, contents, cancellationToken).ConfigureAwait(false);
+        if (problems.Count > 0) throw new AiPackageVerificationException(problems);
+        var sources = SourceIndex(manifest, manifest.SourceIndex is { } name ? contents[name] : null);
+        var review = Review(manifest, contents[manifest.Report]);
+        return new(manifest, manifest.Parts.Select(part => new AiPackageVerifiedPart(manifest, part,
+            Utf8(contents[part.Path], part.Path), sources[part.Id], review)).ToArray(), review,
+            Utf8(contents[manifest.Review], manifest.Review));
+    }
+
     /// <summary>Node identities and cell addresses of every part, keyed by part id. Schema 2.x reads
     /// the source index; schema 1.x groups the inline node identities by location. The index must
     /// agree with the manifest: its schema is 1.x, it lists each manifest part exactly once, a part's
@@ -197,7 +228,7 @@ public static class AiPackageManifestReader
         return SourceIndex(manifest, bytes);
     }
 
-    private static IReadOnlyDictionary<string, IReadOnlyList<AiPackageSourceGroup>> SourceIndex(AiPackageManifest manifest, byte[]? bytes)
+    private static Dictionary<string, IReadOnlyList<AiPackageSourceGroup>> SourceIndex(AiPackageManifest manifest, byte[]? bytes)
     {
         // Node id -> the first part that listed it and where that part put it.
         var places = new Dictionary<string, (string Part, string SourceId, string? Cell)>(StringComparer.Ordinal);
@@ -244,9 +275,9 @@ public static class AiPackageManifestReader
                 IReadOnlyList<string?>? cells = null;
                 if (Fields.Optional(group, "cell_addresses") is { } raw)
                 {
-                    if (raw.ValueKind != JsonValueKind.Array || raw.GetArrayLength() != nodeIds.Count ||
+                    if (raw.ValueKind != JsonValueKind.Array || raw.GetArrayLength() != nodeIds.Length ||
                         raw.EnumerateArray().Any(cell => cell.ValueKind is not (JsonValueKind.String or JsonValueKind.Null)))
-                        throw fields.Invalid($"{groupWhere}.cell_addresses must hold one address or null for each of its {nodeIds.Count} node_ids");
+                        throw fields.Invalid($"{groupWhere}.cell_addresses must hold one address or null for each of its {nodeIds.Length} node_ids");
                     cells = raw.EnumerateArray().Select(cell => cell.ValueKind == JsonValueKind.String ? cell.GetString() : null).ToArray();
                 }
                 groups.Add(new AiPackageSourceGroup(fields.Text(group, groupWhere, "source_id"), nodeIds, cells));
@@ -303,7 +334,7 @@ public static class AiPackageManifestReader
     // contents holds bytes the caller already read; they are checked instead of reading the file again,
     // so the caller uses exactly the bytes that were verified.
     private static async Task<List<string>> VerifyAsync(PackageFiles files, AiPackageManifest manifest,
-        IReadOnlyDictionary<string, byte[]> contents, CancellationToken cancellationToken)
+        Dictionary<string, byte[]> contents, CancellationToken cancellationToken)
     {
         var problems = new List<string>();
         foreach (var file in manifest.Files)
@@ -387,8 +418,26 @@ public static class AiPackageManifestReader
         var required = fields.Required(review, "review", "required");
         if (required.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             throw fields.Invalid($"review.required must be true or false, got {Fields.Kind(required)}");
+        var sharingRequired = false;
+        if (Fields.Optional(root, "sharing_review") is { } rawSharing)
+        {
+            var sharing = fields.Object(rawSharing, "sharing_review");
+            foreach (var key in new[] { "required", "revisions_present", "revisions_included", "deleted_text_included" })
+            {
+                var flag = fields.Required(sharing, "sharing_review", key);
+                if (flag.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+                    throw fields.Invalid($"sharing_review.{key} must be true or false, got {Fields.Kind(flag)}");
+            }
+            var policy = fields.Text(sharing, "sharing_review", "revisions_policy");
+            if (policy is not ("final" or "markup" or "reject"))
+                throw fields.Invalid($"sharing_review.revisions_policy must be final, markup or reject, got {JsonSerializer.Serialize(policy)}");
+            sharingRequired = sharing.GetProperty("required").GetBoolean();
+        }
+        else if (Fields.Optional(root, "diagnostics") is { ValueKind: JsonValueKind.Array } diagnostics)
+            sharingRequired = diagnostics.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.Object &&
+                item.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String && code.GetString() == "TrackedRevisionsPresent");
         var summary = Fields.Optional(root, "summary") is { } value ? fields.Object(value, "summary") : (JsonElement?)null;
-        return new AiPackageReview(required.ValueKind == JsonValueKind.True,
+        return new AiPackageReview(required.ValueKind == JsonValueKind.True || sharingRequired,
             summary is { } flags ? fields.OptionalFlag(flags, "summary", "review_items_detected") : null,
             summary is { } other ? fields.OptionalFlag(other, "summary", "hidden_content_included") : null);
     }
@@ -457,8 +506,8 @@ public static class AiPackageManifestReader
             fields.Object(part, where);
             var nodeIds = fields.Strings(part, where, "node_ids");
             var sources = fields.Array(part, where, "sources").ToArray();
-            if (sources.Length != nodeIds.Count)
-                throw fields.Invalid($"{where} lists {nodeIds.Count} node_ids but {sources.Length} sources; schema 1.x pairs them one to one");
+            if (sources.Length != nodeIds.Length)
+                throw fields.Invalid($"{where} lists {nodeIds.Length} node_ids but {sources.Length} sources; schema 1.x pairs them one to one");
             var partLocations = new List<AiPackageManifestLocation>();
             var nodeLocations = new List<string>();
             var cellAddresses = new List<string?>();
@@ -480,7 +529,7 @@ public static class AiPackageManifestReader
                 if (!partLocations.Contains(shared)) partLocations.Add(shared);
                 nodeLocations.Add(shared.Id);
             }
-            parts.Add(new AiPackageManifestPart(fields.Text(part, where, "id"), fields.Path(part, where, "path"), nodeIds.Count, partLocations,
+            parts.Add(new AiPackageManifestPart(fields.Text(part, where, "id"), fields.Path(part, where, "path"), nodeIds.Length, partLocations,
                 fields.Flag(part, where, "exceeds_target"), NodeIds: nodeIds)
             { LegacyNodeLocations = nodeLocations, LegacyCellAddresses = cellAddresses });
         }
@@ -510,7 +559,7 @@ public static class AiPackageManifestReader
             var sourceIds = fields.Strings(part, where, "source_ids");
             var partLocations = sourceIds.Select(sourceId => byId.TryGetValue(sourceId, out var location) ? location
                 : throw fields.Invalid($"part {id} names an unknown location '{sourceId}'")).ToArray();
-            if (sourceIds.Distinct(StringComparer.Ordinal).Count() != sourceIds.Count)
+            if (sourceIds.Distinct(StringComparer.Ordinal).Count() != sourceIds.Length)
                 throw fields.Invalid($"part {id} names a location twice in source_ids");
             parts.Add(new AiPackageManifestPart(id, fields.Path(part, where, "path"), fields.Count(part, where, "node_count"), partLocations,
                 fields.Flag(part, where, "exceeds_target"), fields.OptionalCount(part, where, "estimated_tokens"), TableBlock(fields, part, where)));
@@ -740,16 +789,16 @@ public static class AiPackageManifestReader
             { } value => throw Invalid($"{Name(where, key)} must be true or false, got {Kind(value)}"),
         };
 
-        public IEnumerable<JsonElement> Array(JsonElement element, string where, string key)
+        public JsonElement.ArrayEnumerator Array(JsonElement element, string where, string key)
         {
             var value = Required(element, where, key);
             return value.ValueKind == JsonValueKind.Array ? value.EnumerateArray()
                 : throw Invalid($"{Name(where, key)} must be an array, got {Kind(value)}");
         }
 
-        public IReadOnlyList<string> Strings(JsonElement element, string where, string key) => AsStrings(Array(element, where, key), where, key);
+        public string[] Strings(JsonElement element, string where, string key) => AsStrings(Array(element, where, key), where, key);
 
-        public IReadOnlyList<string>? OptionalStrings(JsonElement element, string where, string key) => Optional(element, key) switch
+        public string[]? OptionalStrings(JsonElement element, string where, string key) => Optional(element, key) switch
         {
             null => null,
             { ValueKind: JsonValueKind.Array } value => AsStrings(value.EnumerateArray(), where, key),
@@ -878,7 +927,7 @@ public static class AiPackageManifestReader
             var total = 0;
             try
             {
-                await using var input = item.Entry.Open();
+                await using var input = await item.Entry.OpenAsync(token).ConfigureAwait(false);
                 while (total < bytes.Length)
                 {
                     var read = await input.ReadAsync(bytes.AsMemory(total, Math.Min(bytes.Length - total, 81920)), token).ConfigureAwait(false);
@@ -1242,19 +1291,31 @@ public static class AiPackageManifestReader
         }
 
         [SupportedOSPlatform("macos")]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+            Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
         [DllImport("libc", EntryPoint = "stat$INODE64")]
-        private static extern int MacStatX64(string path, byte[] statBuffer);
+        private static extern int MacStatX64([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
         [SupportedOSPlatform("macos")]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+            Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
         [DllImport("libc", EntryPoint = "stat")]
-        private static extern int MacStatArm64(string path, byte[] statBuffer);
+        private static extern int MacStatArm64([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
         [SupportedOSPlatform("linux")]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+            Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
         [DllImport("libc", EntryPoint = "stat")]
-        private static extern int LinuxStat(string path, byte[] statBuffer);
+        private static extern int LinuxStat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
         [SupportedOSPlatform("linux")]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+        [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+            Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
         [DllImport("libc", EntryPoint = "__xstat")]
-        private static extern int LinuxXStat(int version, string path, byte[] statBuffer);
+        private static extern int LinuxXStat(int version, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
     }
 }

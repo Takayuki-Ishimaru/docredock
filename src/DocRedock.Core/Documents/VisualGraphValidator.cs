@@ -160,8 +160,8 @@ public static class VisualGraphValidator
     }
 
     private static VisualSourceAccounting ValidateSourceItems(IReadOnlyList<VisualSourceItem>? items,
-        IReadOnlySet<string> nodeIds, IReadOnlySet<string> edgeIds, IReadOnlySet<string> resolvedEdgeIds, IReadOnlySet<string> pathIds,
-        IReadOnlySet<string> diagnosticCodes, List<VisualGraphValidationIssue> errors)
+        HashSet<string> nodeIds, HashSet<string> edgeIds, IReadOnlySet<string> resolvedEdgeIds, HashSet<string> pathIds,
+        HashSet<string> diagnosticCodes, List<VisualGraphValidationIssue> errors)
     {
         if (items is null) return VisualSourceAccounting.Legacy;
         var ids = new HashSet<string>(StringComparer.Ordinal);

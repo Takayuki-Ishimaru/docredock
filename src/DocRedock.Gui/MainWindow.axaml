@@ -32,12 +32,13 @@
           <StackPanel Orientation="Horizontal" Spacing="2">
             <RadioButton x:Name="ExportModeRadio" Classes="segment" GroupName="WorkflowMode" IsChecked="True"
                          Content="書き出す" IsCheckedChanged="OnModeChanged" />
+            <Button x:Name="ReadPackageButton" Classes="flat compact" Click="OnReadPackage" AutomationProperties.Name="AIパッケージを検索して読む">パッケージを読む</Button>
             <RadioButton x:Name="RestoreModeRadio" Classes="segment" GroupName="WorkflowMode"
                          Content="復元する（実験）" IsCheckedChanged="OnModeChanged" />
           </StackPanel>
         </Border>
 
-        <Border Grid.Column="2" Classes="local-pill" VerticalAlignment="Center">
+        <Border x:Name="LocalProcessingPill" Grid.Column="2" Classes="local-pill" VerticalAlignment="Center">
           <StackPanel Orientation="Horizontal" Spacing="7">
             <PathIcon Data="{StaticResource IconShield}" Width="15" Height="15" />
             <TextBlock Text="ローカル処理" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" />
@@ -246,6 +247,30 @@
               </RadioButton>
             </StackPanel>
 
+            <StackPanel x:Name="AiPackageOptionsPanel" Spacing="8" IsVisible="False">
+              <TextBlock Text="分割を確認" Classes="section-label" />
+              <CheckBox x:Name="TableRowBlocksCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
+                        AutomationProperties.Name="大きなExcelの表を行ブロックに分割"
+                        ToolTip.Tip="目安を超えるExcelの表を行の区切りで分割します。各分割には見出し行と元のセル範囲を付けます。">
+                <TextBlock Text="大きなExcelの表を行ブロックに分割（見出し行を各分割に再掲）" TextWrapping="Wrap" />
+              </CheckBox>
+              <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                <TextBlock Text="目安（文字数）" Classes="muted caption" VerticalAlignment="Center" />
+                <NumericUpDown x:Name="PackageTargetCharacters" Grid.Column="1" Minimum="128" Maximum="1000000" Value="12000" Increment="500" ValueChanged="OnPackageTargetChanged" AutomationProperties.Name="分割の目安文字数" />
+                <Button Grid.Column="2" Classes="secondary compact" Click="OnPreviewPackage">分割を確認</Button>
+              </Grid>
+              <TextBlock x:Name="PackagePreviewText" Text="文書を選択して分割を確認してください。" Classes="muted caption" TextWrapping="Wrap" AutomationProperties.Name="分割効果の予想" />
+              <TextBlock Text="AIへは必要な分割本文だけを渡します。全文は全体を読むため、出典索引はアプリで出典を確認するためのものです。目安はトークン数ではなく文字数です。表・図などは目安を超えることがあり、予想はOCRなしです。" Classes="muted caption" TextWrapping="Wrap" />
+              <Grid ColumnDefinitions="Auto,*" ColumnSpacing="8">
+                <TextBlock Text="保存形式" Classes="muted caption" VerticalAlignment="Center" />
+                <ComboBox x:Name="AiPackageFormComboBox" Grid.Column="1" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
+                          AutomationProperties.Name="AIパッケージの保存形式">
+                  <ComboBoxItem Content="フォルダー（推奨）" Tag="dir" />
+                  <ComboBoxItem Content="ZIP" Tag="zip" />
+                </ComboBox>
+              </Grid>
+            </StackPanel>
+
             <Border Classes="workspace-card">
               <StackPanel Spacing="8">
                 <TextBlock Text="出力先" Classes="section-label" />
@@ -276,21 +301,6 @@
                   <TextBox x:Name="OcrLanguagesTextBox" Grid.Column="1" Text="jpn+eng" IsEnabled="False" PlaceholderText="例: jpn+eng" MaxLength="80" />
                 </Grid>
                 <StackPanel x:Name="ReadableOptionsPanel" Spacing="8">
-                  <StackPanel x:Name="AiPackageOptionsPanel" Spacing="6" IsVisible="False">
-                    <TextBlock Text="パッケージの保存形式" Classes="muted caption" />
-                    <ComboBox x:Name="AiPackageFormComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
-                              AutomationProperties.Name="AIパッケージの保存形式">
-                      <ComboBoxItem Content="フォルダー（推奨）" Tag="dir" />
-                      <ComboBoxItem Content="ZIP" Tag="zip" />
-                    </ComboBox>
-                    <TextBlock Text="分割は約12,000文字が目安です。表・図やページ・シートを一体で保つため、目安を超えることがあります。"
-                               Classes="muted caption" TextWrapping="Wrap" />
-                    <CheckBox x:Name="TableRowBlocksCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
-                              AutomationProperties.Name="大きなExcelの表を行ブロックに分割"
-                              ToolTip.Tip="目安を超えるExcelの表を行の区切りで分割します。各分割には見出し行と元のセル範囲を付けます。">
-                      <TextBlock Text="大きなExcelの表を行ブロックに分割（見出し行を各分割に再掲）" TextWrapping="Wrap" />
-                    </CheckBox>
-                  </StackPanel>
                   <TextBlock Text="接続推定" Classes="muted caption" />
                   <ComboBox x:Name="VisualInferenceModeComboBox" SelectedIndex="1" SelectionChanged="OnSettingsChanged"
                             AutomationProperties.Name="視覚接続の推定モード">
@@ -310,6 +320,17 @@
                   </ComboBox>
                   <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
                              Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+                  <TextBlock Text="Wordの変更履歴" Classes="muted caption" />
+                  <ComboBox x:Name="RevisionsComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged" AutomationProperties.Name="Wordの変更履歴の出力方法">
+                    <ComboBoxItem Content="共有範囲に合わせる（プライバシー優先は最終版）" Tag="auto" />
+                    <ComboBoxItem Content="最終版のみ（削除内容・履歴を除外）" Tag="final" />
+                    <ComboBoxItem Content="履歴付き（挿入・削除・変更を含む）" Tag="markup" />
+                    <ComboBoxItem Content="変更履歴がある文書を拒否" Tag="reject" />
+                  </ComboBox>
+                  <CheckBox x:Name="RevisionSharingConsent" IsChecked="False" IsCheckedChanged="OnSettingsChanged">
+                    <TextBlock Text="プライバシー優先でも履歴付き出力を許可する（削除内容・著者・日時の共有可否を確認）" TextWrapping="Wrap" />
+                  </CheckBox>
+                  <TextBlock Text="履歴を含む出力は、変換品質と別に共有前の確認が必要です。" Classes="muted caption" TextWrapping="Wrap" />
                   <TextBlock Text="OCR照合情報の詳細" Classes="muted caption" />
                   <ComboBox x:Name="OcrReviewModeComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged"
                             AutomationProperties.Name="OCR照合情報の詳細">

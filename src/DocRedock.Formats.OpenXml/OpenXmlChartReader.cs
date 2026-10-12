@@ -41,10 +41,14 @@ public static class OpenXmlChartReader
         var categoryElement = DirectChild(series, "cat") ?? DirectChild(series, "xVal");
         var valueElement = DirectChild(series, "val") ?? DirectChild(series, "yVal");
         var name = TextFrom(nameElement);
-        if (string.IsNullOrWhiteSpace(name)) name = ResolveFormula(nameElement, referenceResolver).FirstOrDefault() ?? string.Empty;
-        var categories = PointValues(categoryElement);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            var resolvedName = ResolveFormula(nameElement, referenceResolver);
+            name = resolvedName.Count > 0 ? resolvedName[0] ?? string.Empty : string.Empty;
+        }
+        IReadOnlyList<string> categories = PointValues(categoryElement);
         if (categories.Count == 0) categories = ResolveFormula(categoryElement, referenceResolver);
-        var values = PointValues(valueElement);
+        IReadOnlyList<string> values = PointValues(valueElement);
         if (values.Count == 0) values = ResolveFormula(valueElement, referenceResolver);
         return new OpenXmlChartSeries(string.IsNullOrWhiteSpace(name) ? null : name, categories, values);
     }
@@ -57,7 +61,7 @@ public static class OpenXmlChartReader
         return formula is null ? [] : referenceResolver(formula);
     }
 
-    private static IReadOnlyList<string> PointValues(XmlElement? element)
+    private static string[] PointValues(XmlElement? element)
     {
         if (element is null) return [];
         var points = element.SelectNodes(".//*[local-name()='pt']")?.OfType<XmlElement>().ToArray() ?? [];
@@ -94,7 +98,7 @@ public static class OpenXmlChartReader
 
     private static string TextFrom(XmlNode? node) => string.Concat(TextValues(node)).Trim();
 
-    private static IReadOnlyList<string> TextValues(XmlNode? node) =>
+    private static string[] TextValues(XmlNode? node) =>
         node?.SelectNodes(".//*[local-name()='t' or local-name()='v']")?.OfType<XmlElement>()
             .Select(element => element.InnerText.Trim()).Where(value => value.Length > 0).ToArray() ?? [];
 

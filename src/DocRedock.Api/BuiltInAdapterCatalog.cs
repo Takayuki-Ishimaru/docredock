@@ -175,7 +175,7 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
         if (!File.Exists(input.Path)) throw new FileNotFoundException("Adapter input was not found.", input.Path);
     }
 
-    private static IReadOnlySet<string> Capabilities(DocumentFormatKind format) => format switch
+    private static HashSet<string> Capabilities(DocumentFormatKind format) => format switch
     {
         DocumentFormatKind.Docx => new HashSet<string>(StringComparer.Ordinal) { "extract.text", "extract.images", "restore.byte_identical", "restore.text_in_place", "restore.insert_node", "restore.delete_node", "preserve.raw_xml_slice", "preserve.unknown_parts" },
         DocumentFormatKind.Xlsx => new HashSet<string>(StringComparer.Ordinal) { "extract.text", "extract.images", "restore.byte_identical", "restore.cell_value", "preserve.unknown_parts" },

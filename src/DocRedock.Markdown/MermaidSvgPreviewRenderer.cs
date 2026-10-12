@@ -321,7 +321,7 @@ internal static class MermaidSvgPreviewRenderer
         return output.ToString().TrimEnd();
     }
 
-    private static void AppendText(StringBuilder output, double x, double centerY, IReadOnlyList<string> lines, double fontSize, bool bold, string color)
+    private static void AppendText(StringBuilder output, double x, double centerY, List<string> lines, double fontSize, bool bold, string color)
     {
         if (lines.Count == 0) return;
         var lineHeight = fontSize * 1.35;
@@ -335,7 +335,7 @@ internal static class MermaidSvgPreviewRenderer
         output.AppendLine("  </text>");
     }
 
-    private static IReadOnlyList<string> WrapLabel(string value, int maxCharacters)
+    private static List<string> WrapLabel(string value, int maxCharacters)
     {
         var result = new List<string>();
         foreach (var rawLine in Regex.Split(value, "<br\\s*/?>|\\n", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
@@ -354,7 +354,7 @@ internal static class MermaidSvgPreviewRenderer
     }
 
     private static double DisplayLength(string value) => value.Sum(character => character <= 0x7f ? 0.6 : 1.0);
-    private static string ShapeKind(string shape) => shape.StartsWith("{", StringComparison.Ordinal) ? "diamond" :
+    private static string ShapeKind(string shape) => shape.StartsWith('{') ? "diamond" :
         shape.StartsWith("[/", StringComparison.Ordinal) ? "parallelogram" :
         shape.StartsWith("[(", StringComparison.Ordinal) ? "cylinder" :
         shape.StartsWith("([", StringComparison.Ordinal) ? "round" : "rect";

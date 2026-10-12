@@ -28,7 +28,7 @@ public partial class ReviewWindow : Window
     private const double ZoomStep = 1.25;
     private readonly IReadOnlyList<GuiReviewItem> _items;
     private Bitmap? _bitmap;
-    private IReadOnlyList<Rect> _focusTargets = [];
+    private List<Rect> _focusTargets = [];
     private readonly List<(Shape Shape, double ScreenThickness)> _highlightShapes = [];
     private int _focusIndex = -1;
     private double _zoom = 1;

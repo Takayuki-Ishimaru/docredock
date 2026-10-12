@@ -17,6 +17,7 @@ public sealed record GraphEditResult(
 /// <summary>Maps a DRMD projection back to the canonical graph without using text heuristics for identity.</summary>
 public sealed class MarkdownGraphEditor
 {
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public GraphEditResult Apply(DocumentGraph baseline, string markdown)
     {
         ArgumentNullException.ThrowIfNull(baseline);
@@ -327,7 +328,7 @@ public sealed class MarkdownGraphEditor
     // that distinction would already be destroyed by the time the wrapper
     // decision runs. A normal table cell instead goes through DecodeTableCell
     // right after this returns.
-    private static IReadOnlyList<string> ParseTableRow(string line)
+    private static List<string> ParseTableRow(string line)
     {
         var normalized = line.Trim();
         if (normalized.StartsWith('|')) normalized = normalized[1..];
@@ -636,7 +637,7 @@ public sealed class MarkdownGraphEditor
         DocumentFormatKind format,
         DocumentNode node,
         TypedMarkdownBlock block,
-        ICollection<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics)
     {
         var keys = new[] { "editability", "operations", "constraints" };
         if (!keys.Any(block.Attributes.ContainsKey)) return; // DRMD Markdown 1.0 legacy projection.
@@ -651,7 +652,7 @@ public sealed class MarkdownGraphEditor
             diagnostics.Add(new Diagnostic("BlockPolicyMismatch", $"Block '{node.Id}' editing policy attributes do not match the baseline capabilities.", DiagnosticSeverity.Error, node.Id, node.Source?.PartUri));
     }
 
-    private static void ValidateSemanticAttributes(DocumentNode node, TypedMarkdownBlock block, ICollection<Diagnostic> diagnostics)
+    private static void ValidateSemanticAttributes(DocumentNode node, TypedMarkdownBlock block, List<Diagnostic> diagnostics)
     {
         var expectedRich = node.Content is RichTextNodeContent;
         var actualRich = block.Attributes.TryGetValue("rich-text", out var richMode) && StringComparer.Ordinal.Equals(richMode, "inline-v1");
@@ -661,11 +662,11 @@ public sealed class MarkdownGraphEditor
             diagnostics.Add(new Diagnostic("BlockSemanticMismatch", $"Block '{node.Id}' rich-text or presentation role metadata does not match the baseline node.", DiagnosticSeverity.Error, node.Id, node.Source?.PartUri));
     }
 
-    private static IReadOnlyDictionary<string, SheetGrid> ReadSheetGrids(
+    private static Dictionary<string, SheetGrid> ReadSheetGrids(
         DocumentGraph baseline,
         TypedMarkdownDocument parsed,
         DocumentContentPolicy contentPolicy,
-        ICollection<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics)
     {
         var result = new Dictionary<string, SheetGrid>(StringComparer.Ordinal);
         if (baseline.Format != DocumentFormatKind.Xlsx) return result;
@@ -741,11 +742,11 @@ public sealed class MarkdownGraphEditor
         return result;
     }
 
-    private static IReadOnlyDictionary<string, string>? ParseSheetGrid(
+    private static Dictionary<string, string>? ParseSheetGrid(
         string text,
-        IReadOnlySet<string> baselineAddresses,
+        HashSet<string> baselineAddresses,
         IReadOnlyDictionary<string, string> attributes,
-        ICollection<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics)
     {
         var coordinates = baselineAddresses.Select(address =>
         {
@@ -824,23 +825,23 @@ public sealed class MarkdownGraphEditor
             expected.Select((column, index) => StringComparer.OrdinalIgnoreCase.Equals(headerCells[index + 1], ColumnName(column))).All(matches => matches);
     }
 
-    private static IReadOnlyDictionary<string, string>? ParseMetadataAddressedGrid(
-        IReadOnlyList<string> lines,
-        IReadOnlyList<int> columns,
-        IReadOnlyList<int> rows,
-        IReadOnlySet<string> baselineAddresses,
-        ICollection<Diagnostic> diagnostics)
+    private static Dictionary<string, string>? ParseMetadataAddressedGrid(
+        string[] lines,
+        int[] columns,
+        int[] rows,
+        HashSet<string> baselineAddresses,
+        List<Diagnostic> diagnostics)
     {
-        var expectedLineCount = rows.Count + 1;
-        if (lines.Count != expectedLineCount)
+        var expectedLineCount = rows.Length + 1;
+        if (lines.Length != expectedLineCount)
         {
             diagnostics.Add(new Diagnostic("SpreadsheetGridShapeMismatch",
-                $"Sheet table must keep its {columns.Count}-column and {rows.Count}-row layout.", DiagnosticSeverity.Error));
+                $"Sheet table must keep its {columns.Length}-column and {rows.Length}-row layout.", DiagnosticSeverity.Error));
             return null;
         }
 
         var separator = ParseTableRow(lines[1]);
-        if (separator.Count != columns.Count ||
+        if (separator.Count != columns.Length ||
             !separator.All(cell => cell.Length >= 3 && cell.All(character => character is '-' or ':' or ' ')))
         {
             diagnostics.Add(new Diagnostic("SpreadsheetGridShapeMismatch",
@@ -849,17 +850,17 @@ public sealed class MarkdownGraphEditor
         }
 
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        for (var rowOffset = 0; rowOffset < rows.Count; rowOffset++)
+        for (var rowOffset = 0; rowOffset < rows.Length; rowOffset++)
         {
             var cells = ParseTableRow(lines[rowOffset == 0 ? 0 : rowOffset + 1]);
-            if (cells.Count != columns.Count)
+            if (cells.Count != columns.Length)
             {
                 diagnostics.Add(new Diagnostic("SpreadsheetGridShapeMismatch",
                     "Sheet table column count was changed.", DiagnosticSeverity.Error));
                 return null;
             }
 
-            for (var columnOffset = 0; columnOffset < columns.Count; columnOffset++)
+            for (var columnOffset = 0; columnOffset < columns.Length; columnOffset++)
             {
                 var address = ColumnName(columns[columnOffset]) + rows[rowOffset];
                 var value = DecodeSpreadsheetCell(cells[columnOffset]);

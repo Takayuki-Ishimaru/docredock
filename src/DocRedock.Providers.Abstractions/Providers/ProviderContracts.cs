@@ -69,11 +69,13 @@ public sealed class ProviderAllowlist
 
     public ProviderAllowlist(IEnumerable<AllowedProvider> entries)
     {
+        ArgumentNullException.ThrowIfNull(entries);
         this.entries = entries.ToDictionary(entry => entry.ProviderId, StringComparer.Ordinal);
     }
 
     public bool IsAllowed(ProviderDescriptor descriptor, out string reason)
     {
+        ArgumentNullException.ThrowIfNull(descriptor);
         if (descriptor.IsBuiltIn) { reason = string.Empty; return true; }
         if (!entries.TryGetValue(descriptor.ProviderId, out var entry)) { reason = "Provider is not explicitly allowlisted."; return false; }
         if (entry.InterfaceVersion != descriptor.InterfaceVersion) { reason = "Provider interface version does not match allowlist."; return false; }

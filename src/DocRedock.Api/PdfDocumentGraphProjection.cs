@@ -61,7 +61,7 @@ internal static class PdfDocumentGraphProjection
                 return new DocumentNode(
                 $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", NodeKind.Paragraph, null, region.ReadingOrder,
                 ContentLayer.Body, new TextNodeContent(region.Text),
-                new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString())]),
+                new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                 Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
                 Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)], Extensions: extensions);
             }).ToList();
@@ -95,7 +95,7 @@ internal static class PdfDocumentGraphProjection
                     $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_embedded_images", NodeKind.Annotation, null, nodes.Count,
                     ContentLayer.Body,
                     new TextNodeContent($"[PDF page {page.PageNumber}: {page.EmbeddedImageCount} embedded image(s) not extracted; run with --ocr on and a configured rasterizer to recover image text]"),
-                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("embedded_images", page.PageNumber.ToString())]),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("embedded_images", page.PageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                     Geometry: bounds, Editability: NodeEditability.RenderOnly,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
                     Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -115,7 +115,7 @@ internal static class PdfDocumentGraphProjection
                     $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_unparsed_forms", NodeKind.Annotation, null, nodes.Count,
                     ContentLayer.Body,
                     new TextNodeContent($"[PDF page {page.PageNumber}: {unparsed.Count} drawing component(s) (Form XObject) could not be analyzed; their text and graphics are missing here - compare with the source page]"),
-                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("unparsed_form_xobjects", page.PageNumber.ToString())]),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("unparsed_form_xobjects", page.PageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                     Geometry: bounds, Editability: NodeEditability.RenderOnly,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
                     Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -137,7 +137,7 @@ internal static class PdfDocumentGraphProjection
                     $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_uncertain_text", NodeKind.Annotation, null, nodes.Count,
                     ContentLayer.Body,
                     new TextNodeContent(UncertainTextMarker(page.PageNumber, uncertain)),
-                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("uncertain_text", page.PageNumber.ToString())]),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("uncertain_text", page.PageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                     Geometry: bounds, Editability: NodeEditability.RenderOnly,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: bounds)],
                     Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -173,7 +173,7 @@ internal static class PdfDocumentGraphProjection
             }
             if (visualGraph is not null)
             {
-                var visualAnchor = new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("visual_graph", page.PageNumber.ToString())]);
+                var visualAnchor = new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("visual_graph", page.PageNumber.ToString(System.Globalization.CultureInfo.InvariantCulture))]);
                 nodes.Add(new DocumentNode($"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_visual", NodeKind.Diagram, null, nodes.Count,
                     ContentLayer.Derived, new TextNodeContent("PDF visual graph"), visualAnchor, Editability: NodeEditability.RenderOnly,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber)],

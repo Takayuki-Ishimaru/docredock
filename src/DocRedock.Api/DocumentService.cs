@@ -46,7 +46,9 @@ public sealed record ReadableDocumentExportOptions(
     bool EmbedImages = false,
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
     bool IncludePdfFallbackImages = true,
-    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence);
+    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence,
+    string? Revisions = null,
+    bool AllowRevisionSharing = false);
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
@@ -125,7 +127,7 @@ public sealed partial class DocumentService
         if (IsOfficeFormat(format)) PreflightOfficePackage(source);
         DocumentGraph graph;
         IReadOnlyList<PdfPageText> pdfPages = [];
-        IReadOnlyList<RawSliceRef> slices = Array.Empty<RawSliceRef>();
+        RawSliceRef[] slices = Array.Empty<RawSliceRef>();
         var macro = false;
         switch (format)
         {
@@ -224,7 +226,7 @@ public sealed partial class DocumentService
                     DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx => "part-payload-identical",
                     _ => "unsupported",
                 },
-                OriginalSliceIndexed = slices.Count > 0,
+                OriginalSliceIndexed = slices.Length > 0,
             }
         }, cancellationToken).ConfigureAwait(false);
         try
@@ -264,6 +266,7 @@ public sealed partial class DocumentService
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        _ = RevisionSharingReview.Policy(options.Revisions, options.ContentPolicy);
         using var inferenceScope = VisualInferenceContext.Push(options.InferenceMode);
         var markdownPath = Path.GetFullPath(options.MarkdownPath);
         if (File.Exists(markdownPath)) throw new IOException("Output already exists; refusing to overwrite it.");
@@ -373,9 +376,17 @@ public sealed partial class DocumentService
         {
             case DocumentFormatKind.Docx:
                 {
-                    var extraction = await docx.ExtractAsync(source, new DocxExportOptions(ShowTrackedRevisions: true), cancellationToken).ConfigureAwait(false);
+                    var revisionPolicy = RevisionSharingReview.Policy(options.Revisions, options.ContentPolicy);
+                    var extraction = await docx.ExtractAsync(source, new DocxExportOptions(
+                        ShowTrackedRevisions: revisionPolicy == "markup", FinalRevisionView: revisionPolicy == "final"), cancellationToken).ConfigureAwait(false);
+                    if (extraction.SourceIndex.HasTrackedRevisions && revisionPolicy == "reject")
+                        throw new InvalidDataException("Tracked revisions are present; --revisions reject refused the export.");
+                    if (extraction.SourceIndex.HasTrackedRevisions && revisionPolicy == "markup" &&
+                        DocumentContentPolicyRules.Parse(options.ContentPolicy) == DocumentContentPolicy.Sanitized && !options.AllowRevisionSharing)
+                        throw new InvalidDataException("Sanitized revision markup includes revision history. Use --revisions final or explicitly allow sharing with --allow-revision-sharing.");
                     graph = extraction.Graph;
                     diagnostics.AddRange(extraction.Diagnostics);
+                    diagnostics.Add(new Diagnostic("RevisionPolicy", revisionPolicy, DiagnosticSeverity.Information));
                     break;
                 }
             case DocumentFormatKind.Xlsx:
@@ -424,7 +435,10 @@ public sealed partial class DocumentService
                 options.EnableOcr, options.IncludePdfFallbackImages).ConfigureAwait(false);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
-        if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 })
+        // Complete output normally keeps unreferenced Office media as metadata. A final DOCX
+        // view must also exclude media referenced only by deleted content, before OCR/attachment.
+        if (format == DocumentFormatKind.Xlsx && options.Sheets is { Count: > 0 } ||
+            format == DocumentFormatKind.Docx && RevisionSharingReview.Policy(options.Revisions, options.ContentPolicy) == "final")
         {
             var selectedImageReferences = ReadableScopeNodes(graph, options.Sheets)
                 .Where(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent)
@@ -446,7 +460,7 @@ public sealed partial class DocumentService
 
     private static DocumentGraph RebindReadableImageReferences(
         DocumentGraph graph,
-        IReadOnlyDictionary<string, string> references,
+        Dictionary<string, string> references,
         bool omitUnresolvedImages = false)
     {
         return graph with
@@ -493,7 +507,7 @@ public sealed partial class DocumentService
         _ => false,
     };
 
-    private static IReadOnlyList<DocumentNode> ReadableScopeNodes(DocumentGraph graph, IReadOnlyList<string>? includedSheets)
+    private static DocumentNode[] ReadableScopeNodes(DocumentGraph graph, IReadOnlyList<string>? includedSheets)
         => ReadableScopeGraph(graph, includedSheets).Nodes.ToArray();
 
     private static DocumentGraph ReadableScopeGraph(DocumentGraph graph, IReadOnlyList<string>? includedSheets)
@@ -576,7 +590,7 @@ public sealed partial class DocumentService
             warning.EndsWith($" (worksheet: {sheet})", StringComparison.OrdinalIgnoreCase)));
     }
 
-    private static void AddContentPolicyDiagnostics(ICollection<Diagnostic> diagnostics,
+    private static void AddContentPolicyDiagnostics(List<Diagnostic> diagnostics,
         IReadOnlyList<DocumentNode> scopedNodes, string contentPolicy)
     {
         var policy = DocumentContentPolicyRules.Parse(contentPolicy);
@@ -622,7 +636,7 @@ public sealed partial class DocumentService
          bool.TryParse(value.ToString(), out var parsed) && parsed);
 
     private static void AddFormulaDiagnostics(
-        ICollection<Diagnostic> diagnostics,
+        List<Diagnostic> diagnostics,
         IReadOnlyList<XlsxFormulaDiagnostic> formulaDiagnostics)
     {
         foreach (var group in formulaDiagnostics.GroupBy(item => item.Safety).OrderBy(group => group.Key))
@@ -636,6 +650,7 @@ public sealed partial class DocumentService
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public async Task<DocumentDiffResult> DiffAsync(string workspacePath, string? markdownPath = null, CancellationToken cancellationToken = default)
     {
         await using var lease = await SidecarContainer.OpenAsync(workspacePath, cancellationToken).ConfigureAwait(false);
@@ -773,6 +788,7 @@ public sealed partial class DocumentService
 
     public async Task<DocumentExportResult> RebaseAsync(DocumentRebaseOptions options, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(options);
         // Rebase is explicit: it creates a fresh workspace/baseline and never rewrites an existing one.
         return await ExportAsync(new DocumentExportOptions(options.SourcePath, options.WorkspacePath, options.MarkdownPath, DocumentId: options.DocumentId), cancellationToken).ConfigureAwait(false);
     }
@@ -841,7 +857,7 @@ public sealed partial class DocumentService
         IReadOnlyList<WorkspaceAsset> assets,
         bool enabled,
         IReadOnlyList<string> languages,
-        ICollection<Diagnostic> diagnostics,
+        List<Diagnostic> diagnostics,
         CancellationToken cancellationToken)
     {
         var records = new List<OcrAssetRecord>();
@@ -1061,7 +1077,7 @@ public sealed partial class DocumentService
     /// <summary>Plans a crop for every page that carries an embedded-image placeholder. A textless
     /// page has no placeholder and gets no plan: its whole partition is the image, so the page
     /// raster is the right asset for it.</summary>
-    private static IReadOnlyDictionary<int, PdfPageCropPlan> BuildPdfCropPlans(
+    private static Dictionary<int, PdfPageCropPlan> BuildPdfCropPlans(
         DocumentGraph graph, IReadOnlyList<PdfPageText> pdfPages, string rasterizerProviderId)
     {
         var plans = new Dictionary<int, PdfPageCropPlan>();
@@ -1086,7 +1102,7 @@ public sealed partial class DocumentService
     /// could not. It is all-or-nothing on purpose: cropping only some of a page's images would drop
     /// the rest with nothing left behind, so any obstacle sends the whole page back to the
     /// whole-page raster, where OCR still sees every image.</summary>
-    private static IReadOnlyList<PdfCroppedImage>? CropPdfEmbeddedImages(
+    private static List<PdfCroppedImage>? CropPdfEmbeddedImages(
         RasterizedPdfPage page, byte[] bytes, PdfPageCropPlan? plan, ICollection<Diagnostic> diagnostics)
     {
         if (plan is null) return null;
@@ -1246,7 +1262,7 @@ public sealed partial class DocumentService
         DocumentGraph graph,
         IReadOnlyList<WorkspaceAsset> assets,
         IReadOnlyList<OcrAssetRecord> ocrResults,
-        ICollection<Diagnostic> diagnostics)
+        List<Diagnostic> diagnostics)
     {
         var descriptors = assets.ToDictionary(
             asset => asset.Id,
@@ -1434,7 +1450,7 @@ public sealed partial class DocumentService
         marker.GetBoolean();
 
     private static int FindPdfPagePartitionIndex(
-        IReadOnlyList<DocumentPartition> partitions,
+        List<DocumentPartition> partitions,
         WorkspaceAsset asset)
     {
         var pageUri = asset.SourcePartUri;
@@ -1454,7 +1470,7 @@ public sealed partial class DocumentService
     }
 
     private static int FindPartitionBySourcePartUri(
-        IReadOnlyList<DocumentPartition> partitions,
+        List<DocumentPartition> partitions,
         string? sourcePartUri)
     {
         if (string.IsNullOrWhiteSpace(sourcePartUri)) return -1;
@@ -1612,7 +1628,7 @@ public sealed partial class DocumentService
         var index = 0;
         foreach (var entry in archive.Entries.Where(IsOfficeMediaEntry).OrderBy(entry => entry.FullName, StringComparer.Ordinal))
         {
-            await using var content = entry.Open();
+            await using var content = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
             using var output = new MemoryStream(checked((int)entry.Length));
             await content.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
             var bytes = output.ToArray();
@@ -1675,7 +1691,7 @@ public sealed partial class DocumentService
     private static bool IsOfficeMediaEntry(ZipArchiveEntry entry) =>
         entry.FullName.Contains("/media/", StringComparison.OrdinalIgnoreCase);
 
-    private static IReadOnlyList<Diagnostic> InspectOfficePackage(string sourcePath, out bool hasMacro)
+    private static List<Diagnostic> InspectOfficePackage(string sourcePath, out bool hasMacro)
     {
         using var archive = ZipFile.OpenRead(sourcePath);
         hasMacro = archive.Entries.Any(entry => entry.FullName.EndsWith("/vbaProject.bin", StringComparison.OrdinalIgnoreCase));
@@ -1761,19 +1777,21 @@ public sealed partial class DocumentService
         using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
         foreach (var entry in archive.Entries.OrderBy(entry => entry.FullName, StringComparer.Ordinal))
         {
-            await using (var content = entry.Open())
+            await using (var content = await entry.OpenAsync(cancellationToken).ConfigureAwait(false))
                 entries.Add(new OfficePackageEntry(entry.FullName, entry.Length, entry.CompressedLength,
                     Convert.ToHexString(await SHA256.HashDataAsync(content, cancellationToken).ConfigureAwait(false)).ToLowerInvariant()));
             if (!entry.FullName.EndsWith(".rels", StringComparison.OrdinalIgnoreCase)) continue;
-            await using var relationshipContent = entry.Open();
+            await using var relationshipContent = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
             using var reader = XmlReader.Create(relationshipContent, new XmlReaderSettings
             {
+                Async = true,
                 DtdProcessing = DtdProcessing.Prohibit,
                 XmlResolver = null,
                 MaxCharactersInDocument = 16_777_216,
             });
-            while (reader.Read())
+            while (await reader.ReadAsync().ConfigureAwait(false))
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "Relationship") continue;
                 var id = reader.GetAttribute("Id");
                 var type = reader.GetAttribute("Type");
@@ -1807,7 +1825,7 @@ public sealed partial class DocumentService
         return AdapterWarningDiagnostics.Normalize(result);
     }
 
-    private static void AddImageDisplayDiagnostics(ICollection<Diagnostic> diagnostics, DocumentGraph graph)
+    private static void AddImageDisplayDiagnostics(List<Diagnostic> diagnostics, DocumentGraph graph)
     {
         foreach (var node in graph.Nodes.Where(node => node.Kind == NodeKind.Image))
         {

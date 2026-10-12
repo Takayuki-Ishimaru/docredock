@@ -795,12 +795,12 @@ public sealed partial class ReadableMarkdownSerializer
         return TopThenLeft(left).Concat(TopThenLeft(right));
     }
 
-    private static bool LooksLikeColumn(IReadOnlyList<DocumentNode> nodes, double columnGap)
+    private static bool LooksLikeColumn(DocumentNode[] nodes, double columnGap)
     {
         var centersX = nodes.Select(node => node.Geometry!.X + node.Geometry.Width / 2).ToArray();
         var centersY = nodes.Select(node => node.Geometry!.Y + node.Geometry.Height / 2).ToArray();
-        var medianWidth = nodes.Select(node => node.Geometry!.Width).Order().ElementAt(nodes.Count / 2);
-        var medianHeight = nodes.Select(node => node.Geometry!.Height).Order().ElementAt(nodes.Count / 2);
+        var medianWidth = nodes.Select(node => node.Geometry!.Width).Order().ElementAt(nodes.Length / 2);
+        var medianHeight = nodes.Select(node => node.Geometry!.Height).Order().ElementAt(nodes.Length / 2);
         return centersX.Max() - centersX.Min() <= Math.Max(medianWidth, columnGap * 0.6) &&
                centersY.Max() - centersY.Min() >= Math.Max(1, medianHeight * 0.5);
     }
@@ -1594,7 +1594,7 @@ public sealed partial class ReadableMarkdownSerializer
     // the header and each data row line were written and which cells they came from. The headers name
     // the columns, so callers give them without underline (ShownWithoutUnderline), as the labels of a
     // label/value list.
-    private void WriteSheetTable(StringBuilder output, IReadOnlyList<string> headers, IReadOnlyList<SheetRow> headerRows,
+    private void WriteSheetTable(StringBuilder output, string[] headers, IReadOnlyList<SheetRow> headerRows,
         IReadOnlyList<SheetRow> dataRows)
     {
         if (sheetRecorder is null)
@@ -1610,7 +1610,7 @@ public sealed partial class ReadableMarkdownSerializer
         foreach (var row in dataRows)
         {
             var lineStart = output.Length;
-            WriteTableRow(output, Enumerable.Range(0, headers.Count).Select(index => index < row.Cells.Count ? row.Cells[index].Shown : string.Empty).ToArray());
+            WriteTableRow(output, Enumerable.Range(0, headers.Length).Select(index => index < row.Cells.Count ? row.Cells[index].Shown : string.Empty).ToArray());
             lines.Add(new(lineStart, output.Length, row.Number, NodeIdsOf([row]).OfType<string>().Distinct(StringComparer.Ordinal).ToArray()));
         }
         output.AppendLine();
@@ -1703,7 +1703,7 @@ public sealed partial class ReadableMarkdownSerializer
     /// This preserves blank values inside a table while keeping side-by-side tables
     /// independent.
     /// </summary>
-    private static IReadOnlyList<SheetRegion> BuildRegions(IReadOnlyList<SheetRow> rows, out IReadOnlyList<SheetGap> uncertainGaps)
+    private static SheetRegion[] BuildRegions(IReadOnlyList<SheetRow> rows, out IReadOnlyList<SheetGap> uncertainGaps)
     {
         var regions = new List<MutableRegion>();
         var gaps = SheetRegionBoundaries(rows);
@@ -1813,7 +1813,7 @@ public sealed partial class ReadableMarkdownSerializer
             .Select(row => row.Number).ToHashSet();
     }
 
-    private static IReadOnlyList<SheetGap> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
+    private static List<SheetGap> SheetRegionBoundaries(IReadOnlyList<SheetRow> rows)
     {
         // Column blocks are separated by at least one column that no cell (and no merge) covers.
         // Two or more empty columns always separate regions. A single empty column can separate
@@ -1964,7 +1964,7 @@ public sealed partial class ReadableMarkdownSerializer
     /// The number of cells on a side is never evidence by itself: a numeric ID column is part of
     /// its table, not a sign that a neighbouring block is independent.
     /// </summary>
-    private static SheetGap DecideSingleColumnGap(IReadOnlyList<SheetRow> rows, IReadOnlySet<int> titleRows,
+    private static SheetGap DecideSingleColumnGap(IReadOnlyList<SheetRow> rows, HashSet<int> titleRows,
         int leftStart, int leftEnd, int rightStart, int rightEnd)
     {
         var sides = rows.Where(row => !titleRows.Contains(row.Number)).Select(row => (row.Number,
@@ -2015,7 +2015,7 @@ public sealed partial class ReadableMarkdownSerializer
     // similar placeholder is neutral: it neither starts the values nor counts as a label. Columns
     // headed 備考/Notes are annotations and are left out.
     private static bool HoldsValuesOf(IReadOnlyList<(int Number, ReadableCell[] Cells)> side,
-        IReadOnlyList<(int Number, ReadableCell[] Cells)> other, IReadOnlyList<int> otherRows)
+        IReadOnlyList<(int Number, ReadableCell[] Cells)> other, int[] otherRows)
     {
         var rows = side.Where(row => row.Cells.Length > 0).ToArray();
         var annotations = rows.SelectMany(row => row.Cells).GroupBy(cell => cell.Column)
@@ -2038,7 +2038,7 @@ public sealed partial class ReadableMarkdownSerializer
             }
             data.Add((number, cells));
         }
-        if (data.Count == 0 || otherRows.Count == 0 || data[0].Number < otherRows[0] || data[^1].Number > otherRows[^1]) return false;
+        if (data.Count == 0 || otherRows.Length == 0 || data[0].Number < otherRows[0] || data[^1].Number > otherRows[^1]) return false;
         // Only the other side's rows beside this block count: a table stacked above or below in the
         // same columns, or a list lower on the sheet, says nothing about it.
         var beside = RowsBeside(other, headers.Count > 0 ? headers[0].Number : data[0].Number, data[^1].Number);
@@ -2163,7 +2163,7 @@ public sealed partial class ReadableMarkdownSerializer
     private static string CellRange(int startColumn, int startRow, int endColumn, int endRow) =>
         $"{ColumnLetters(startColumn)}{startRow}:{ColumnLetters(endColumn)}{endRow}";
 
-    private static IEnumerable<RowFragment> SplitRow(SheetRow row, IReadOnlyList<int> boundaries, IReadOnlySet<int> judged)
+    private static IEnumerable<RowFragment> SplitRow(SheetRow row, int[] boundaries, IReadOnlySet<int> judged)
     {
         // Preserve compact rows as one logical table row. This keeps a four-column
         // header aligned with its following data row even when the source uses wide
@@ -2172,7 +2172,7 @@ public sealed partial class ReadableMarkdownSerializer
         // must never split into an orphaned label fragment and an orphaned marker fragment.
         var crossesJudgedGap = Enumerable.Range(1, Math.Max(0, row.Cells.Count - 1)).Any(index =>
             judged.Any(boundary => row.Cells[index - 1].MaxColumn < boundary && row.Cells[index].Column >= boundary));
-        if (boundaries.Count == 0 || row.Cells.Any(cell => cell.IsOverlay) ||
+        if (boundaries.Length == 0 || row.Cells.Any(cell => cell.IsOverlay) ||
             row.Cells.Count == 1 && row.Cells[0].MaxColumn > row.Cells[0].Column ||
             !crossesJudgedGap && row.Cells.Count <= 4 && !Enumerable.Range(1, row.Cells.Count - 1)
                 .Any(index => row.Cells[index].Column - row.Cells[index - 1].MaxColumn <= 2))
@@ -2680,7 +2680,7 @@ public sealed partial class ReadableMarkdownSerializer
         output.Append("> 線種の注記: 表中の ").Append(string.Join("、", legend))
             .AppendLine("で描かれた図形です（原本の線種を記号で区別しています）。");
         foreach (var overlay in styled.Take(maxListed))
-            output.Append("> - ").Append(LineStyleName(overlay.LineStyle)).Append("の").Append(OverlayKindName(overlay))
+            output.Append("> - ").Append(LineStyleName(overlay.LineStyle)).Append('の').Append(OverlayKindName(overlay))
                 .Append(": ").AppendLine(EscapeLiteral(location(overlay)));
         if (styled.Count > maxListed)
             output.Append("> - ほか ").Append((styled.Count - maxListed).ToString(CultureInfo.InvariantCulture)).AppendLine(" 件");
@@ -2813,7 +2813,7 @@ public sealed partial class ReadableMarkdownSerializer
                 _ => needsReview,
             };
             output.AppendLine("OCR照合情報：信頼度はエンジンの推定値であり、正解率ではありません。識別子・品番・数値は原画像と照合してください。")
-                .AppendLine($"全{allRegions.Length}件、低信頼・信頼度不明{needsReview.Length}件、詳細表示{shown.Length}件。")
+                .AppendLine(CultureInfo.InvariantCulture, $"全{allRegions.Length}件、低信頼・信頼度不明{needsReview.Length}件、詳細表示{shown.Length}件。")
                 .AppendLine();
             if (shown.Length > 0)
                 output.AppendLine("| 行 | 認識文字 | 信頼度 | 原画像の位置 |")
@@ -2872,7 +2872,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (!string.IsNullOrWhiteSpace(title))
         {
             output.Append("**").Append(EscapedInlineText(title)).Append("**");
-            if (type is { Length: > 0 }) output.Append("（").Append(type).Append("）");
+            if (type is { Length: > 0 }) output.Append('（').Append(type).Append('）');
             output.AppendLine().AppendLine();
         }
         if (node.Extensions is null || !node.Extensions.TryGetValue("chart_series", out var seriesElement) || seriesElement.ValueKind != JsonValueKind.Array) return;
@@ -2925,9 +2925,9 @@ public sealed partial class ReadableMarkdownSerializer
         var total = hasValidTotal ? numeric.Sum(item => item.Value) : 0;
         output.Append("- ").Append(EscapedInlineText(name)).Append(": 最大 ")
             .Append(EscapedInlineText(ChartCategory(categories, maximum.Index))).Append(' ').Append(EscapedInlineText(maximum.Display));
-        if (hasValidTotal) output.Append("（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
+        if (hasValidTotal) output.Append("（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append('）');
         output.Append("、最小 ").Append(EscapedInlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(EscapedInlineText(minimum.Display));
-        if (hasValidTotal) output.Append("（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append("）");
+        if (hasValidTotal) output.Append("（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append('）');
         output.AppendLine("。");
     }
 
@@ -2979,6 +2979,7 @@ public sealed partial class ReadableMarkdownSerializer
     /// needed, including raw-path-only fallback that graph accounting considers resolved.</summary>
     public static bool RequiresSourceReview(DocumentNode node)
     {
+        ArgumentNullException.ThrowIfNull(node);
         if (node.Extensions?.TryGetValue(SourceReviewRequiredExtension, out var required) == true &&
             required.ValueKind == JsonValueKind.True)
             return true;
@@ -3119,7 +3120,7 @@ public sealed partial class ReadableMarkdownSerializer
             var source = labels.TryGetValue(edge.SourceId!, out var sourceLabel) ? sourceLabel : edge.SourceId!;
             var target = labels.TryGetValue(edge.TargetId!, out var targetLabel) ? targetLabel : edge.TargetId!;
             output.Append("- ").Append(EscapedInlineText(source)).Append(edge.IsUndirected ? " — " : " → ").Append(EscapedInlineText(target));
-            if (!string.IsNullOrWhiteSpace(edge.Label)) output.Append("（").Append(EscapedInlineText(edge.Label!)).Append("）");
+            if (!string.IsNullOrWhiteSpace(edge.Label)) output.Append('（').Append(EscapedInlineText(edge.Label!)).Append('）');
             output.AppendLine();
         }
         output.AppendLine();
@@ -3816,7 +3817,7 @@ public sealed partial class ReadableMarkdownSerializer
     private readonly record struct MarkedSpan(int Start, int End);
 
     // [start, end) pairs from an extension such as "strike_ranges"; anything malformed reads as none.
-    private static IReadOnlyList<MarkedSpan>? RangesOf(JsonElement element)
+    private static List<MarkedSpan>? RangesOf(JsonElement element)
     {
         if (element.ValueKind != JsonValueKind.Array) return null;
         var ranges = new List<MarkedSpan>();
@@ -3830,7 +3831,7 @@ public sealed partial class ReadableMarkdownSerializer
         return ranges.Count == 0 ? null : ranges;
     }
 
-    private static IReadOnlyList<MarkedSpan>? ExtensionRanges(DocumentNode node, string key) =>
+    private static List<MarkedSpan>? ExtensionRanges(DocumentNode node, string key) =>
         node.Extensions is not null && node.Extensions.TryGetValue(key, out var element) ? RangesOf(element) : null;
 
     // Word, PowerPoint and PDF table cells are plain text; the table names their struck-through text in
@@ -4011,6 +4012,8 @@ public sealed partial class ReadableMarkdownSerializer
         /// underlined.</summary>
         public string ShownWithoutUnderline => MarkedText(Text, Struck);
     }
+    // Rows can retain arrays or Lists; converting every List to an array would add an allocation.
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "Both arrays and Lists are supplied by existing row builders; preserve their buffers without copying.")]
     private sealed record SheetRow(int Number, IReadOnlyList<ReadableCell> Cells);
     private sealed record RowFragment(SheetRow Row, IReadOnlyList<ReadableCell> Cells)
     {

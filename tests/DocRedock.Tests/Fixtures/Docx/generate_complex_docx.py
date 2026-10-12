@@ -29,7 +29,7 @@ from lxml import etree
 import docx
 from docx.enum.section import WD_ORIENT, WD_SECTION
 from docx.enum.style import WD_STYLE_TYPE
-from docx.enum.text import WD_BREAK, WD_COLOR_INDEX
+from docx.enum.text import WD_COLOR_INDEX
 from docx.opc.constants import CONTENT_TYPE as CT
 from docx.opc.constants import RELATIONSHIP_TYPE as RT
 from docx.opc.packuri import PackURI
@@ -380,7 +380,7 @@ class NoteBook:
     def _build_notes_part(*, root_tag, entry_tag, ref_tag, style_id, entries) -> bytes:
         short = root_tag.split(":")[1][:-1]  # "footnotes" -> "footnote", "endnotes" -> "endnote"
         parts = [
-            f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
             f'<{root_tag} xmlns:w="{W}">',
             f'<w:{short} w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:separator/></w:r></w:p></w:{short}>',
             f'<w:{short} w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr><w:r><w:continuationSeparator/></w:r></w:p></w:{short}>',

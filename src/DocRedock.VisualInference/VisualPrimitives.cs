@@ -28,7 +28,11 @@ public sealed record VisualRect(double X, double Y, double Width, double Height)
         var dx = Math.Max(X - p.X, Math.Max(0, p.X - Right)); var dy = Math.Max(Y - p.Y, Math.Max(0, p.Y - Bottom)); return Math.Sqrt(dx * dx + dy * dy);
     }
     public double DistanceTo(VisualPoint p) => BoundaryDistanceTo(p);
-    public bool Intersects(VisualRect other) => X <= other.Right && Right >= other.X && Y <= other.Bottom && Bottom >= other.Y;
+    public bool Intersects(VisualRect other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        return X <= other.Right && Right >= other.X && Y <= other.Bottom && Bottom >= other.Y;
+    }
 }
 public sealed record VisualCanvas(string Id, string PartUri, string? PartitionId, double Width, double Height, string CoordinateSpace, SourceAnchor? SourceAnchor = null)
 {
@@ -64,6 +68,7 @@ public static class GeometryMath
     public static double Distance(VisualPoint a, VisualPoint b) => (a - b).Length;
     public static double BoundaryDistanceTo(VisualPoint point, VisualRect rect, VisualBoundaryKind kind)
     {
+        ArgumentNullException.ThrowIfNull(rect);
         if (kind is VisualBoundaryKind.Ellipse or VisualBoundaryKind.Diamond)
         {
             var center = rect.Center;
@@ -81,6 +86,7 @@ public static class GeometryMath
     public static double AngleDegrees(VisualVector a, VisualVector b) { var d = a.Length * b.Length; return d <= 1e-12 ? 180 : Math.Acos(Math.Clamp(VisualVector.Dot(a, b) / d, -1, 1)) * 180 / Math.PI; }
     public static bool RayIntersectsRect(VisualPoint origin, VisualVector direction, VisualRect rect, out double distance)
     {
+        ArgumentNullException.ThrowIfNull(rect);
         distance = double.PositiveInfinity;
         direction = direction.Normalize();
         if (direction.Length == 0) return false;
@@ -111,6 +117,7 @@ public static class GeometryMath
     /// <summary>Shortest distance between segment [start,end] and rect; 0 when the segment intersects or touches the rectangle.</summary>
     public static double DistanceToSegmentRect(VisualPoint start, VisualPoint end, VisualRect rect)
     {
+        ArgumentNullException.ThrowIfNull(rect);
         if (rect.Contains(start) || rect.Contains(end)) return 0;
         var direction = end - start;
         if (direction.Length > 1e-12 && RayIntersectsRect(start, direction, rect, out var hit) && hit <= direction.Length + 1e-9) return 0;
