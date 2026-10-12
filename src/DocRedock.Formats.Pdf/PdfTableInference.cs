@@ -73,7 +73,8 @@ public static class PdfTableInference
             {
                 var ids = component.SelectMany(line => line.PathIds).ToHashSet(StringComparer.Ordinal);
                 var componentGraph = graph with { Paths = (graph.Paths ?? []).Where(path => ids.Contains(path.Id)).ToArray() };
-                var table = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1).FirstOrDefault();
+                var componentTables = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1);
+                var table = componentTables.Count > 0 ? componentTables[0] : null;
                 if (table is not null) tables.Add(table with { Id = $"pdf-p{pageNumber}-table-{tables.Count + 1}" });
             }
             return tables;
@@ -194,6 +195,7 @@ public static class PdfTableInference
     /// confidence; a false tag must never elevate a table's confidence.</summary>
     public static bool HasNativeTableMarkedContent(string content)
     {
+        ArgumentNullException.ThrowIfNull(content);
         for (var index = 0; index < content.Length; index++)
         {
             if (content[index] == '%') { while (index < content.Length && content[index] is not '\r' and not '\n') index++; continue; }
@@ -434,7 +436,7 @@ public static class PdfTableInference
     }
     private static bool Intersects(Geometry left, Geometry right) => left.X <= right.X + right.Width && left.X + left.Width >= right.X &&
         left.Y <= right.Y + right.Height && left.Y + left.Height >= right.Y;
-    private static IReadOnlyList<IReadOnlyList<AxisLine>> SeparateGridComponents(IReadOnlyList<AxisLine> lines)
+    private static List<IReadOnlyList<AxisLine>> SeparateGridComponents(IReadOnlyList<AxisLine> lines)
     {
         var pending = new HashSet<int>(Enumerable.Range(0, lines.Count));
         var result = new List<IReadOnlyList<AxisLine>>();
@@ -462,7 +464,7 @@ public static class PdfTableInference
     /// <summary>Replaces each run of collinear short strokes with regular gaps - a dashed rule drawn
     /// one dash at a time (see <see cref="PdfDashRuns"/>) - by one line over the whole run that keeps
     /// every dash's path id, where its first dash was; every other line keeps its place.</summary>
-    private static AxisLine[] MergeDashedRuns(AxisLine[] lines, IReadOnlySet<string> dashPathIds)
+    private static AxisLine[] MergeDashedRuns(AxisLine[] lines, HashSet<string> dashPathIds)
     {
         var strokes = lines.Select(line => new PdfDashRuns.Stroke(line.Horizontal, line.Fixed, line.Minimum, line.Maximum,
             dashPathIds.Contains(line.PathId))).ToArray();
@@ -502,7 +504,7 @@ public static class PdfTableInference
 
         public IReadOnlyList<string> PathIds => MergedPathIds ?? [PathId];
 
-        public static IEnumerable<AxisLine> CreateAll(VisualPath path)
+        public static AxisLine[] CreateAll(VisualPath path)
         {
             if (path.Points is not { Count: >= 2 } points) return [];
             // A filled area has no structural border. Thin filled rules may still

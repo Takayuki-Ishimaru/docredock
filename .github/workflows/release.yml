@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.3.3
+        default: v0.3.4
 
 permissions:
   contents: read
@@ -508,7 +508,10 @@ jobs:
           path = Path("release-body.md")
           base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['RELEASE_TAG']}"
           body = path.read_text(encoding="utf-8")
-          forbidden = ("quality score", "quality-score", "品質スコア", "内部指標", "内部メモ",
+          forbidden = ("quality score", "quality-score", "evaluation score", "benchmark score",
+                       "internal score", "internal metric", "internal memo", "development metric",
+                       "品質スコア", "内部評価", "内部スコア", "内部点数", "内部指標", "開発指標",
+                       "内部メモ", "検証メモ", "テスト件数", "合格率", "test count", "pass rate",
                        "pdf-semantics-evidence", "conversion-qa-evidence", "release-evidence",
                        "95/100", "90%", "124", "focused tests")
           if any(marker in body.lower() for marker in forbidden):

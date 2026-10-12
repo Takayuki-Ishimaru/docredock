@@ -89,9 +89,6 @@ internal static partial class XlsxConditionalFormula
     {
     }
 
-    private sealed class CancelledException : OperationCanceledException
-    {
-    }
 
     private static readonly string[] ErrorLiterals =
     [
@@ -216,7 +213,8 @@ internal static partial class XlsxConditionalFormula
                 }
 
                 string raw = s.Substring(start, i - start);
-                string normalized = "'" + sb.ToString().Replace("'", "''", StringComparison.Ordinal) + "'!" + s.Substring(bodyStart, i - bodyStart);
+                var prefix = "'" + sb.ToString().Replace("'", "''", StringComparison.Ordinal) + "'!";
+                string normalized = string.Concat(prefix, s.AsSpan(bodyStart, i - bodyStart));
                 Add(Tok.Name, normalized == raw ? raw : normalized, 0, start);
                 continue;
             }
@@ -421,7 +419,6 @@ internal static partial class XlsxConditionalFormula
         private static readonly FormulaValue Div0 = new(FormulaValueKind.Error, "#DIV/0!");
         private static readonly FormulaValue ValueErr = new(FormulaValueKind.Error, "#VALUE!");
         private static readonly FormulaValue NumErr = new(FormulaValueKind.Error, "#NUM!");
-        private static readonly FormulaValue NaErr = new(FormulaValueKind.Error, "#N/A");
 
         private readonly string _src;
         private readonly Func<string, IReadOnlyList<FormulaValue>?> _resolve;
@@ -483,7 +480,7 @@ internal static partial class XlsxConditionalFormula
 
         internal bool AtEnd => Pos >= Tokens.Count;
 
-        private static Node Literal(FormulaValue v) => new LiteralNode(v);
+        private static LiteralNode Literal(FormulaValue v) => new LiteralNode(v);
 
         internal Node? ParseExpression()
         {

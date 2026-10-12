@@ -10,6 +10,7 @@ public sealed class DiagramClusterer
     public IReadOnlyList<VisualExtractionDiagnostic> Diagnostics { get; private set; } = [];
     public IReadOnlyList<DiagramCluster> Cluster(VisualPrimitiveDocument document, DiagramClusterOptions? options = null)
     {
+        ArgumentNullException.ThrowIfNull(document);
         options ??= new(); var result = new List<DiagramCluster>();
         Diagnostics = [];
         var pairChecks = 0;
@@ -120,8 +121,10 @@ public sealed record SoftConnectionOptions(
 public sealed record SoftConnectionResult(IReadOnlyList<ConnectionPairCandidate> Resolved, IReadOnlyList<ConnectionPairCandidate> Unresolved, IReadOnlyList<ConnectionCandidate> Candidates, double GraphMargin = 0, IReadOnlyList<VisualExtractionDiagnostic>? Diagnostics = null);
 public sealed class SoftConnectionEngine
 {
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public SoftConnectionResult Infer(VisualPrimitiveDocument document, IReadOnlyList<DiagramCluster>? clusters = null, SoftConnectionOptions? options = null, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(document);
         options ??= new();
         cancellationToken.ThrowIfCancellationRequested();
         var clusterer = new DiagramClusterer();
@@ -289,7 +292,7 @@ public sealed class SoftConnectionEngine
         IReadOnlySet<string> intermediateNodeIds) =>
         intermediateNodeIds.Any(nodeId => nodeId != sourceId && nodeId != targetId);
 
-    private static IReadOnlySet<string> FindIntermediateNodeIds(VisualConnectorPrimitive connector,
+    private static HashSet<string> FindIntermediateNodeIds(VisualConnectorPrimitive connector,
         NodeSpatialIndex spatialIndex, AdaptiveScale scale)
     {
         var result = new HashSet<string>(StringComparer.Ordinal);
@@ -324,7 +327,7 @@ public sealed class SoftConnectionEngine
         var matches = nodes.Where(n => n.Id == alias || (n.Aliases ?? []).Any(a => a.Value == alias)).OrderBy(n => n.Id, StringComparer.Ordinal).ToArray();
         return matches.Length == 1 ? matches[0] : null; // alias collisions are deliberately unresolved, never thrown.
     }
-    private static IReadOnlyList<ConnectionCandidate> Generate(VisualConnectorPrimitive connector, bool start,
+    private static ConnectionCandidate[] Generate(VisualConnectorPrimitive connector, bool start,
         IReadOnlyList<VisualNodePrimitive> nodes, NodeSpatialIndex spatialIndex, string clusterId,
         AdaptiveScale adaptive, SoftConnectionOptions options)
     {
@@ -449,7 +452,7 @@ public sealed class SoftConnectionEngine
             }
         }
 
-        public IReadOnlyList<VisualNodePrimitive> QueryEndpoint(VisualPoint endpoint, VisualVector tangent,
+        public VisualNodePrimitive[] QueryEndpoint(VisualPoint endpoint, VisualVector tangent,
             double radius, double rayExtension)
         {
             var direction = tangent.Normalize();
@@ -461,7 +464,7 @@ public sealed class SoftConnectionEngine
                 Math.Max(endpoint.X, rayEnd.X) + padding, Math.Max(endpoint.Y, rayEnd.Y) + padding);
         }
 
-        public IReadOnlyList<VisualNodePrimitive> QuerySegment(VisualPoint start, VisualPoint end, double padding)
+        public VisualNodePrimitive[] QuerySegment(VisualPoint start, VisualPoint end, double padding)
         {
             // With no nodes there is nothing a segment can query. Apart from avoiding wasted
             // work, this matters when a document has only connectors: their coordinates may be
@@ -473,7 +476,7 @@ public sealed class SoftConnectionEngine
                 Math.Max(start.X, end.X) + padding, Math.Max(start.Y, end.Y) + padding);
         }
 
-        private IReadOnlyList<VisualNodePrimitive> QueryBounds(double minX, double minY, double maxX, double maxY)
+        private VisualNodePrimitive[] QueryBounds(double minX, double minY, double maxX, double maxY)
         {
             var stamp = ++_queryStamp;
             if (stamp == 0)

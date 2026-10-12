@@ -109,7 +109,7 @@ public static class PdfVisualOutputCompactor
 
     // Only diagnostics for consumed objects are resolved. Legacy graphs without
     // object IDs retain the bounded count-based connector reconciliation.
-    private static IReadOnlyList<VisualDiagnostic>? ReconcileConsumedDiagnostics(
+    private static List<VisualDiagnostic>? ReconcileConsumedDiagnostics(
         IReadOnlyList<VisualDiagnostic>? diagnostics, HashSet<string> consumedIds, int removedUnresolvedEdges)
     {
         if (diagnostics is null) return null;

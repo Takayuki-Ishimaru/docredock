@@ -39,6 +39,7 @@ public sealed class SourceInfo
     [JsonPropertyName("size")] public long Size { get; init; }
     [JsonPropertyName("macro_enabled")] public bool MacroEnabled { get; init; }
     [JsonPropertyName("encrypted")] public bool Encrypted { get; init; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1720", Justification = "Signed describes a document digital signature and preserves the existing public API.")]
     [JsonPropertyName("signed")] public bool Signed { get; init; }
 }
 
@@ -125,14 +126,14 @@ internal static class JsonCanonicalizer
         DefaultIgnoreCondition = JsonIgnoreCondition.Never,
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) },
     };
+    private static readonly JsonSerializerOptions CompactOptions = new(Options) { WriteIndented = false };
 
     internal static string Serialize<T>(T value) => JsonSerializer.Serialize(value, Options) + "\n";
 
     internal static string Canonicalize(string json)
     {
         using var document = JsonDocument.Parse(json);
-        var compact = new JsonSerializerOptions(Options) { WriteIndented = false };
-        return JsonSerializer.Serialize(document.RootElement, compact) + "\n";
+        return JsonSerializer.Serialize(document.RootElement, CompactOptions) + "\n";
     }
 }
 

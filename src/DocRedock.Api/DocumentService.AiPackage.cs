@@ -11,6 +11,26 @@ namespace DocRedock.Api;
 
 public sealed partial class DocumentService
 {
+    /// <summary>Estimates the same part boundaries without writing an output. OCR is disabled;
+    /// its later text may change the sizes. The source and selected options determine the estimate.</summary>
+    public async Task<AiPackageSizeSummary> PreviewAiPackageAsync(ReadableDocumentExportOptions options,
+        AiPackagePartOptions? partOptions = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        _ = RevisionSharingReview.Policy(options.Revisions, options.ContentPolicy);
+        partOptions ??= new();
+        if (partOptions.TargetCharacters is < 128 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(partOptions));
+        using var inferenceScope = VisualInferenceContext.Push(options.InferenceMode);
+        var previewOptions = options with { EnableOcr = false };
+        var (extracted, _, _) = await ExtractReadableGraphAsync(Path.GetFullPath(options.SourcePath), previewOptions, cancellationToken).ConfigureAwait(false);
+        var graph = AiPackageGraph(extracted, previewOptions);
+        var markdownOptions = new ReadableMarkdownOptions(options.ShowFormulas, options.IncludeSvgPreviews,
+            options.IncludeDiagrams, options.Sheets, options.Title, options.ContentPolicy, options.OcrReview);
+        var markdown = new ReadableMarkdownSerializer(markdownOptions).Serialize(graph);
+        var parts = AiPackageContentBuilder.Build(AiMapImageReferences(graph, "../assets/"), markdownOptions,
+            Path.GetFileName(options.SourcePath), partOptions, cancellationToken);
+        return AiPackageSizeSummary.Build(markdown, parts, partOptions.TargetCharacters);
+    }
     private static readonly JsonSerializerOptions AiJson = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
@@ -19,6 +39,11 @@ public sealed partial class DocumentService
         // instead of \uXXXX escapes; HTML-sensitive and control characters are still escaped.
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All),
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.SnakeCaseLower) }
+    };
+    private static readonly JsonSerializerOptions SourceIndexJson = new(AiJson)
+    {
+        WriteIndented = false,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     /// <summary>Produces a local, one-way AI input package. Existing destinations are never
@@ -81,10 +106,11 @@ public sealed partial class DocumentService
             var report = new
             {
                 // 1.1 adds the reading-order/table-structure basis, table boundary review items and
-                // review.table_boundaries; every 1.0 field is unchanged.
-                schema_version = "1.1",
+                // review.table_boundaries; 1.2 adds sharing_review and includes it in review.required.
+                schema_version = "1.2",
                 summary,
                 review,
+                sharing_review = review.SharingReview,
                 diagnostics = exported.Diagnostics.GroupBy(d => (d.Code, d.Severity))
                     .OrderBy(g => g.Key.Code, StringComparer.Ordinal).ThenBy(g => g.Key.Severity)
                     .Select(g => new { code = g.Key.Code, severity = g.Key.Severity, count = g.Count() }).ToArray()
@@ -118,8 +144,8 @@ public sealed partial class DocumentService
             }).ToArray();
             var sourceIndex = new { schema_version = "1.0", parts = indexParts };
             await File.WriteAllTextAsync(Path.Combine(package, "source-index.json"),
-                JsonSerializer.Serialize(sourceIndex, new JsonSerializerOptions(AiJson)
-                { WriteIndented = false, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull }) + "\n",
+                JsonSerializer.Serialize(sourceIndex, SourceIndexJson)
+                    + "\n",
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var files = new List<object>();
             foreach (var file in Directory.EnumerateFiles(package, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
@@ -164,14 +190,15 @@ public sealed partial class DocumentService
                         var entry = zip.CreateEntry(Path.GetRelativePath(package, file).Replace('\\', '/'), CompressionLevel.Optimal);
                         entry.LastWriteTime = new DateTimeOffset(2000, 1, 1, 0, 0, 0, TimeSpan.Zero);
                         await using var input = File.OpenRead(file);
-                        await using var output = entry.Open();
+                        await using var output = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
                         await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
                     }
                 }
                 cancellationToken.ThrowIfCancellationRequested();
                 File.Move(zipPath, target);
             }
-            return new AiPackageExportResult(target, options.Form, graph, exported.Diagnostics, parts, summary, review);
+            return new AiPackageExportResult(target, options.Form, graph, exported.Diagnostics, parts, summary, review)
+                { Size = AiPackageSizeSummary.Build(documentMarkdown, parts, options.TargetCharacters) };
         }
         finally { TryDeleteDirectory(staging); }
     }
@@ -227,6 +254,13 @@ public sealed partial class DocumentService
         text.Append("- OCR確認 / OCR review items: ").Append(summary.OcrReviewItems).Append('\n');
         text.Append("- 表の区切りの確認 / Table boundaries to compare: ").Append(summary.TableBoundaryReviewItems).Append('\n');
         text.Append("- 非表示内容を含む / Hidden content included: ").Append(summary.HiddenContentIncluded ? "yes" : "no").Append('\n');
+        if (review.SharingReview is { } sharing)
+        {
+            text.Append("- 変更履歴 / Revision policy: ").Append(sharing.RevisionsPolicy).Append('\n');
+            text.Append("- 履歴を含む / Revisions included: ").Append(sharing.RevisionsIncluded ? "yes" : "no").Append('\n');
+            text.Append("- 削除内容を含む可能性 / Deleted content may be included: ").Append(sharing.DeletedTextIncluded ? "yes" : "no").Append('\n');
+            if (sharing.Required) text.Append("変更履歴を含みます。削除内容・著者・日時の共有可否を確認してからAIへ渡してください。 / Review revision history before sharing.\n");
+        }
         // What was evaluated: "nothing detected" never means reading order and tables were verified.
         text.Append("- 読み順 / Reading order: ").Append(ExportSummaryText.ReadingOrderJapanese(summary.ReadingOrder))
             .Append(" / ").Append(ExportSummaryText.ReadingOrderEnglish(summary.ReadingOrder)).Append('\n');

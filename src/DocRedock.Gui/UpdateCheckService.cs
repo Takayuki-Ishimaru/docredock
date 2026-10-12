@@ -214,6 +214,7 @@ public sealed class UpdateCheckService
 
     public static string FormatVersion(Version version)
     {
+        ArgumentNullException.ThrowIfNull(version);
         var componentCount = version.Revision > 0 ? 4 : version.Build > 0 ? 3 : 2;
         return version.ToString(componentCount);
     }

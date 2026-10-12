@@ -589,6 +589,7 @@ public sealed class RoundTripWorkspace
             IReadOnlyList<string> warnings)
             => (Operation, Success, FidelityLevel, PackagePreservationLevel, Summary, Warnings) =
                 (operation, success, fidelityLevel, packagePreservationLevel, summary, warnings);
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
         [System.Text.Json.Serialization.JsonPropertyName("schema_version")] public string SchemaVersion => "1.0";
         [System.Text.Json.Serialization.JsonPropertyName("operation")] public string Operation { get; }
         [System.Text.Json.Serialization.JsonPropertyName("success")] public bool Success { get; }
@@ -596,6 +597,7 @@ public sealed class RoundTripWorkspace
         [System.Text.Json.Serialization.JsonPropertyName("package_preservation_level")] public string PackagePreservationLevel { get; }
         [System.Text.Json.Serialization.JsonPropertyName("summary")] public string Summary { get; }
         [System.Text.Json.Serialization.JsonPropertyName("warnings")] public IReadOnlyList<string> Warnings { get; }
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
         [System.Text.Json.Serialization.JsonPropertyName("diagnostics")] public IReadOnlyList<object> Diagnostics => [];
 
         public string ToMarkdown()

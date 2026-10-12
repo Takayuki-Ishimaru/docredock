@@ -7,6 +7,7 @@ public enum PdfFontSource
     System
 }
 
+[System.Diagnostics.CodeAnalysis.SuppressMessage("Naming", "CA1711", Justification = "Permission is the font embedding rights domain term and part of the existing public API.")]
 public enum FontEmbeddingPermission
 {
     Installable,
@@ -22,6 +23,7 @@ public sealed record PdfFontRequest(
     string? ExplicitPath = null,
     int? ExplicitFaceIndex = null);
 
+#pragma warning disable CA1819 // Existing public API exposes owned binary buffers without cloning.
 public sealed record ResolvedPdfFont(
     string SourcePath,
     int FaceIndex,
@@ -30,6 +32,7 @@ public sealed record ResolvedPdfFont(
     PdfFontSource Source,
     FontEmbeddingPermission EmbeddingPermission,
     byte[] StandaloneSfntBytes);
+#pragma warning restore CA1819
 
 public sealed record OpenTypeFontInfo(
     string FamilyName,

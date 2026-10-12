@@ -108,7 +108,7 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
                 catch (IOException exception) when (OperatingSystem.IsWindows() && attempt < 39 &&
                     ((exception.HResult & 0xffff) is 32 or 33 or 145))
                 {
-                    await Task.Delay(50).ConfigureAwait(false);
+                    await Task.Delay(50, CancellationToken.None).ConfigureAwait(false);
                 }
             }
         }
@@ -117,6 +117,9 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
     protected virtual void ConfigureArguments(ProcessStartInfo start, string pdfPath, string output,
         IReadOnlyList<int> pages, PdfRasterizationOptions options)
     {
+        ArgumentNullException.ThrowIfNull(start);
+        ArgumentNullException.ThrowIfNull(pages);
+        ArgumentNullException.ThrowIfNull(options);
         var maxDimension = MaximumDimension(options);
         foreach (var argument in new[]
         {
@@ -129,8 +132,11 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
 
     protected virtual string OutputPath(string output, int page) => output + ".png";
 
-    protected static int MaximumDimension(PdfRasterizationOptions options) =>
-        Math.Max(1, (int)Math.Min(4096, Math.Floor(Math.Sqrt(Math.Min(options.MaxPixelsPerPage, options.MaxTotalPixels)))));
+    protected static int MaximumDimension(PdfRasterizationOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return Math.Max(1, (int)Math.Min(4096, Math.Floor(Math.Sqrt(Math.Min(options.MaxPixelsPerPage, options.MaxTotalPixels)))));
+    }
 
     private static (int Width, int Height) ReadPngDimensions(ReadOnlySpan<byte> header)
     {
@@ -162,7 +168,7 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
         catch (OperationCanceledException)
         {
             Stop(process);
-            try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false); }
             catch (TimeoutException) { }
             if (cancellationToken.IsCancellationRequested) throw;
             throw new TimeoutException("PDF rasterization timed out; reduce the document size or check the configured provider.");

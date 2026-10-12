@@ -150,7 +150,8 @@ public sealed class MainWindowFilePickerTests
             Assert.Single(markdownFiles);
             Assert.True(Get<Control>(window, "ResultPanel").IsVisible);
             Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
-            Assert.Equal("保存は完了しました・原本との照合が必要です", Get<TextBlock>(window, "ResultTitleText").Text);
+            Assert.Equal("保存は完了しました・変更履歴の共有確認が必要です", Get<TextBlock>(window, "ResultTitleText").Text);
+            Assert.Contains("変更履歴を含みます", Get<TextBlock>(window, "ResultReviewText").Text);
             Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
         }
         finally

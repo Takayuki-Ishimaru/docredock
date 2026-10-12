@@ -17,6 +17,7 @@ public sealed record GraphChunkOptions(int TargetCharacters = 4_000, bool Includ
 /// <summary>Creates stable, node-complete chunks without splitting tables, shapes, or paragraphs.</summary>
 public sealed class GraphChunker
 {
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public IReadOnlyList<GraphChunk> Chunk(DocumentGraph graph, GraphChunkOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(graph);

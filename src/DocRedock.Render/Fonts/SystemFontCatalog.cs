@@ -13,7 +13,7 @@ public static class SystemFontCatalog
 
     public static IReadOnlyList<SystemFontFile> GetInstalledFontFiles() => CachedFiles.Value;
 
-    private static IReadOnlyList<SystemFontFile> Discover()
+    private static SystemFontFile[] Discover()
     {
         var files = new List<SystemFontFile>();
         if (OperatingSystem.IsLinux())
@@ -101,7 +101,7 @@ public static class SystemFontCatalog
         }
     }
 
-    private static void AddDirectory(ICollection<SystemFontFile> output, string root)
+    private static void AddDirectory(List<SystemFontFile> output, string root)
     {
         if (!Directory.Exists(root)) return;
         var pending = new Stack<string>();

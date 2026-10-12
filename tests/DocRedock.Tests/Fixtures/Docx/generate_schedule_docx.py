@@ -570,7 +570,6 @@ def verify_anchor(anchor_el, tbl1, tbl2, page_num):
     extent = anchor_el.find(qn2("wp:extent"))
     cx, cy = int(extent.get("cx")), int(extent.get("cy"))
     layout_in_cell = anchor_el.get("layoutInCell")
-    wsp = anchor_el.find(f'.//{qn2("wps:wsp")}')
     prst_el = anchor_el.find(f'.//{qn2("a:prstGeom")}')
     prst = prst_el.get("prst") if prst_el is not None else "?"
     xfrm = anchor_el.find(f'.//{qn2("a:xfrm")}')

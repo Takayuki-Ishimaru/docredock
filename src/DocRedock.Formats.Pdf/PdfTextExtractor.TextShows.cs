@@ -110,7 +110,7 @@ public static partial class PdfTextExtractor
     /// fact clipped, never drop text that can be seen.</summary>
     private const double MaxGlyphAdvanceEm = 1.25;
 
-    private static IReadOnlyDictionary<int, PdfTextShow> ScanTextShows(PdfExpandedContent expanded, Geometry? pageBox,
+    private static Dictionary<int, PdfTextShow> ScanTextShows(PdfExpandedContent expanded, Geometry? pageBox,
         IReadOnlyDictionary<string, PdfFontBinding> fonts)
     {
         var content = expanded.Content;

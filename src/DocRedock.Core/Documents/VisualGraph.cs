@@ -38,7 +38,7 @@ public static class VisualLineStyles
     /// dashes, no longer than about the line width, read as dots.</summary>
     public static string? FromDashArray(IReadOnlyList<double>? dashArray, double lineWidth)
     {
-        if (dashArray is not { Count: > 0 } || dashArray.Any(value => !double.IsFinite(value) || value < 0) ||
+        if (dashArray is null || dashArray.Count == 0 || dashArray.Any(value => !double.IsFinite(value) || value < 0) ||
             dashArray.All(value => value <= 0)) return null;
         // An odd-length array repeats, so its elements alternate between dashes and gaps.
         var pattern = dashArray.Count % 2 == 1 ? dashArray.Concat(dashArray).ToArray() : dashArray.ToArray();
@@ -86,6 +86,7 @@ public sealed record VisualDiagnostic(string Code, string Message, string? Sourc
     /// <summary>Recognizes stable adapter warnings formatted as <c>VisualCode: message</c>.</summary>
     public static bool TryParseWarning(string warning, out string code, out string message)
     {
+        ArgumentNullException.ThrowIfNull(warning);
         code = string.Empty; message = warning;
         var separator = warning.IndexOf(':');
         if (separator <= "Visual".Length || !warning.StartsWith("Visual", StringComparison.Ordinal)) return false;

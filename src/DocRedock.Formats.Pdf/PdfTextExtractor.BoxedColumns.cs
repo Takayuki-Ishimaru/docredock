@@ -396,7 +396,7 @@ public static partial class PdfTextExtractor
     /// which no column has two lines is left as it is: the order of single lines does not change, and
     /// neither do the lines. So are the blocks that white space divides a frame into when they are rows
     /// of labels and values (see <see cref="LooksLikeRows"/>). Null when no group is arranged.</summary>
-    private static BoxArrangement? ArrangeBoxedColumns(IReadOnlyList<PdfTextRegion> geometric,
+    private static BoxArrangement? ArrangeBoxedColumns(PdfTextRegion[] geometric,
         IReadOnlySet<int>? tableSourceIds, BoxLayout layout)
     {
         var cells = layout.Cells;
@@ -404,7 +404,7 @@ public static partial class PdfTextExtractor
         // node and not a column of text, and the text of a grid or a drawing is left to read as it always was.
         var members = new Dictionary<int, List<int>>();
         var nodes = new HashSet<int>();
-        for (var index = 0; index < geometric.Count; index++)
+        for (var index = 0; index < geometric.Length; index++)
         {
             if (!CanBeBoxed(geometric[index], tableSourceIds)) continue;
             var (x, y) = BoxAnchor(geometric[index]);
@@ -505,7 +505,7 @@ public static partial class PdfTextExtractor
     /// <summary>Cuts one box's text into blocks at the channels of white space no line crosses, when
     /// they are wide, text lies on both sides of them and each block is a block of text (see
     /// <see cref="ChannelEm"/>); one column, unchanged, when the box has no such channel.</summary>
-    private static List<BoxColumn> SplitByChannels(BoxColumn column, IReadOnlyList<PdfTextRegion> geometric)
+    private static List<BoxColumn> SplitByChannels(BoxColumn column, PdfTextRegion[] geometric)
     {
         var fragments = column.Indices.Select(index => geometric[index]).ToArray();
         if (fragments.Length < 4 || fragments.Any(fragment => !fragment.MeasuredWidth) || IsFixedPitch(fragments)) return [column];
@@ -796,10 +796,10 @@ public static partial class PdfTextExtractor
     /// <summary>The characters of the shows of a line, each with the edges it is drawn between: its glyph's
     /// where the font's widths are placed, and otherwise an equal share of the show's width (a ligature
     /// that was given its text from outside, for one).</summary>
-    private static List<DrawnCharacter> DrawnCharactersOf(IReadOnlyList<PdfTextRegion> parts)
+    private static List<DrawnCharacter> DrawnCharactersOf(PdfTextRegion[] parts)
     {
         var characters = new List<DrawnCharacter>();
-        for (var part = 0; part < parts.Count; part++)
+        for (var part = 0; part < parts.Length; part++)
         {
             var fragment = parts[part];
             var share = fragment.BoundingBox.Width / Math.Max(1, fragment.Text.Length);

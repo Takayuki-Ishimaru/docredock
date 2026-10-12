@@ -72,7 +72,7 @@ public sealed partial class XlsxAdapter
     /// rotated or stacked is not placed.</summary>
     private sealed record CellTextStyle(double FontSize, string Horizontal, string Vertical, bool Wrap, int Indent, bool Rotated);
 
-    private static IReadOnlyList<CellTextStyle> ReadCellTextStyles(Dictionary<string, byte[]> package)
+    private static CellTextStyle[] ReadCellTextStyles(Dictionary<string, byte[]> package)
     {
         if (!package.TryGetValue("xl/styles.xml", out var bytes)) return [];
         var document = new XmlDocument();

@@ -333,7 +333,9 @@ public sealed record XlsxPatchPlan(
     IReadOnlyList<XlsxCellEdit> Edits,
     XlsxDirtyPartGraph DirtyPartGraph,
     IReadOnlyList<XlsxFormulaDiagnostic> FormulaDiagnostics);
+#pragma warning disable CA1819 // Existing public API exposes owned binary buffers without cloning.
 public sealed record XlsxRestoreResult(byte[] Bytes, bool IsByteIdentical, XlsxPatchPlan Plan, IReadOnlyList<string> Warnings);
+#pragma warning restore CA1819
 
 /// <summary>BCL-only XLSX extractor and minimal cell patcher. Formulas are classified, never evaluated.</summary>
 public sealed partial class XlsxAdapter
@@ -520,6 +522,7 @@ public sealed partial class XlsxAdapter
         return new(graph, worksheets, shared, formulaDiagnostics, hashes, warnings);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public XlsxPatchPlan CreatePatchPlan(DocumentGraph baseline, DocumentGraph edited, XlsxPatchOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(baseline);
@@ -560,6 +563,7 @@ public sealed partial class XlsxAdapter
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public XlsxPatchPlan CreatePatchPlan(IEnumerable<XlsxCellEdit> edits, XlsxPatchOptions? options = null)
     {
         options ??= new XlsxPatchOptions();
@@ -570,6 +574,7 @@ public sealed partial class XlsxAdapter
         return new(list, BuildDirtyPartGraph(list), diagnostics);
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
     public XlsxRestoreResult Restore(Stream original, XlsxPatchPlan plan)
     {
         ArgumentNullException.ThrowIfNull(original);
@@ -611,8 +616,10 @@ public sealed partial class XlsxAdapter
 
     public static XlsxFormulaDiagnostic ClassifyFormula(string cellReference, string formula)
     {
+        ArgumentNullException.ThrowIfNull(cellReference);
+        ArgumentNullException.ThrowIfNull(formula);
         var normalized = formula.TrimStart('=');
-        if (normalized.Contains('[') || normalized.Contains("]", StringComparison.Ordinal) ||
+        if (normalized.Contains('[', StringComparison.Ordinal) || normalized.Contains(']', StringComparison.Ordinal) ||
             normalized.Contains("DDE", StringComparison.OrdinalIgnoreCase) ||
             normalized.Contains("WEBSERVICE", StringComparison.OrdinalIgnoreCase) ||
             normalized.Contains("CALL(", StringComparison.OrdinalIgnoreCase))
@@ -625,6 +632,7 @@ public sealed partial class XlsxAdapter
 
     public static XlsxDirtyPartGraph BuildDirtyPartGraph(IEnumerable<XlsxCellEdit> edits)
     {
+        ArgumentNullException.ThrowIfNull(edits);
         var dirty = new HashSet<string>(StringComparer.Ordinal);
         var reasons = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         foreach (var edit in edits)
@@ -831,7 +839,7 @@ public sealed partial class XlsxAdapter
         (preset.StartsWith("star", StringComparison.Ordinal) && preset.Length > 4 && preset[4..].All(char.IsAsciiDigit));
 
     private static (IReadOnlyList<(XlsxSheetOverlay Overlay, XlsxDrawingShapeRecord Shape)> Overlays, HashSet<string> OverlayShapeIds)
-        DetectSheetOverlays(XlsxWorksheetRecord worksheet, IReadOnlySet<string>? excludedShapeIds = null)
+        DetectSheetOverlays(XlsxWorksheetRecord worksheet, HashSet<string>? excludedShapeIds = null)
     {
         var empty = (Overlays: (IReadOnlyList<(XlsxSheetOverlay, XlsxDrawingShapeRecord)>)[], OverlayShapeIds: new HashSet<string>(StringComparer.Ordinal));
         if (worksheet.DrawingShapes is not { Count: > 0 } shapes || worksheet.Metrics is not { } metrics) return empty;
@@ -1177,7 +1185,7 @@ public sealed partial class XlsxAdapter
         return (direction, axis);
     }
 
-    private static IReadOnlyDictionary<string, JsonElement> WithExtension(IReadOnlyDictionary<string, JsonElement>? source, string key, string value)
+    private static Dictionary<string, JsonElement> WithExtension(IReadOnlyDictionary<string, JsonElement>? source, string key, string value)
     {
         var result = source is null
             ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -1203,7 +1211,7 @@ public sealed partial class XlsxAdapter
         var result = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         foreach (var entry in zip.Entries)
         {
-            if (entry.FullName.Contains("..", StringComparison.Ordinal) || entry.FullName.StartsWith("/", StringComparison.Ordinal)) throw new InvalidDataException("Unsafe ZIP entry path.");
+            if (entry.FullName.Contains("..", StringComparison.Ordinal) || entry.FullName.StartsWith('/')) throw new InvalidDataException("Unsafe ZIP entry path.");
             using var input = entry.Open(); using var output = new MemoryStream(); input.CopyTo(output); result[entry.FullName] = output.ToArray();
         }
         if (!result.ContainsKey("[Content_Types].xml")) throw new InvalidDataException("Not an OOXML package.");
@@ -1312,7 +1320,7 @@ public sealed partial class XlsxAdapter
     // What is marked in a cell's value (struck through or underlined, as mark says of a run): its runs
     // where they say so, else the whole value when the cell's font marks it. Overlapping or touching
     // ranges are merged.
-    private static IReadOnlyList<TextRange>? MarkedRanges(string? value, IReadOnlyList<XlsxRun>? runs, Func<XlsxRun, bool?> mark, bool fontMarks)
+    private static List<TextRange>? MarkedRanges(string? value, IReadOnlyList<XlsxRun>? runs, Func<XlsxRun, bool?> mark, bool fontMarks)
     {
         if (string.IsNullOrEmpty(value)) return null;
         if (runs is not { Count: > 0 }) return fontMarks ? [new TextRange(0, value.Length)] : null;
@@ -1364,7 +1372,7 @@ public sealed partial class XlsxAdapter
             var id = reader.GetAttribute("Id"); var target = reader.GetAttribute("Target");
             if (id is null || target is null) continue;
             var basePath = relsPath[..relsPath.LastIndexOf("/_rels/", StringComparison.Ordinal)];
-            result[id] = target.StartsWith("/", StringComparison.Ordinal)
+            result[id] = target.StartsWith('/')
                 ? NormalizePartPath(target)
                 : NormalizePartPath(basePath + "/" + target);
         }
@@ -1382,7 +1390,7 @@ public sealed partial class XlsxAdapter
         }
         return string.Join('/', stack);
     }
-    private static IReadOnlySet<int> ReadHiddenRows(byte[] bytes)
+    private static HashSet<int> ReadHiddenRows(byte[] bytes)
     {
         var result = new HashSet<int>();
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
@@ -1394,7 +1402,7 @@ public sealed partial class XlsxAdapter
         return result;
     }
 
-    private static IReadOnlySet<int> ReadHiddenColumns(byte[] bytes)
+    private static HashSet<int> ReadHiddenColumns(byte[] bytes)
     {
         var result = new HashSet<int>();
         var examinedColumns = 0;
@@ -1674,7 +1682,7 @@ public sealed partial class XlsxAdapter
     private static int? AttributeInt(XmlElement element, string attribute) =>
         int.TryParse(element.GetAttribute(attribute), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : null;
 
-    private static string? ResolveNumberFormat(int id, IReadOnlyDictionary<int, string> custom) =>
+    private static string? ResolveNumberFormat(int id, Dictionary<int, string> custom) =>
         custom.TryGetValue(id, out var format) ? format : id switch
         {
             // ECMA-376 18.8.30 built-in formats. Ids 5-8 are locale-dependent currency formats and
@@ -2493,7 +2501,7 @@ public sealed partial class XlsxAdapter
         return new($"{ColumnName(minColumn)}{minRow}:{ColumnName(maxColumn)}{maxRow}", minRow, maxRow, minColumn, maxColumn);
     }
 
-    private static IReadOnlyList<string> ReadMergedRanges(byte[] bytes)
+    private static List<string> ReadMergedRanges(byte[] bytes)
     {
         var result = new List<string>();
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
@@ -2506,9 +2514,9 @@ public sealed partial class XlsxAdapter
         return result;
     }
 
-    private static IReadOnlyList<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells, IReadOnlyDictionary<string, (bool Hidden, IReadOnlySet<int> Rows, IReadOnlySet<int> Columns)> sheetVisibility, List<string> warnings)
+    private static List<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells, IReadOnlyDictionary<string, (bool Hidden, IReadOnlySet<int> Rows, IReadOnlySet<int> Columns)> sheetVisibility, List<string> warnings)
     {
-        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
         var result = new List<XlsxChartRecord>();
         var workbookHasPotentiallyHiddenSources = sheetVisibility.Values.Any(visibility =>
@@ -2518,7 +2526,7 @@ public sealed partial class XlsxAdapter
                      .Distinct(StringComparer.Ordinal))
         {
             if (!package.TryGetValue(drawingPart, out var bytes)) continue;
-            var drawingRelationships = ReadRelationships(package, drawingPart[..drawingPart.LastIndexOf("/", StringComparison.Ordinal)] + "/_rels/" + Path.GetFileName(drawingPart) + ".rels");
+            var drawingRelationships = ReadRelationships(package, drawingPart[..drawingPart.LastIndexOf('/')] + "/_rels/" + Path.GetFileName(drawingPart) + ".rels");
             var document = new XmlDocument { PreserveWhitespace = false };
             using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
             document.Load(reader);
@@ -2587,7 +2595,7 @@ public sealed partial class XlsxAdapter
         return (references, true);
     }
 
-    private static IReadOnlyList<string> ResolveChartReference(string formula, string sheetName, IReadOnlyList<XlsxCellRecord> cells)
+    private static List<string> ResolveChartReference(string formula, string sheetName, IReadOnlyList<XlsxCellRecord> cells)
     {
         var normalized = formula.Trim().TrimStart('=');
         if (normalized.Contains('[', StringComparison.Ordinal) || normalized.Contains(']', StringComparison.Ordinal)) return [];
@@ -2622,13 +2630,13 @@ public sealed partial class XlsxAdapter
 
     private sealed record PictureRelationship(string Target, bool IsExternal);
 
-    private static IReadOnlyList<XlsxPictureRecord> ReadPictures(
+    private static List<XlsxPictureRecord> ReadPictures(
         Dictionary<string, byte[]> package,
         string worksheetPartUri,
         string sheetName,
         List<string> warnings)
     {
-        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var fileName = Path.GetFileName(worksheetPartUri);
         var relationships = ReadRelationships(package, directory + "/_rels/" + fileName + ".rels");
         var result = new List<XlsxPictureRecord>();
@@ -2637,7 +2645,7 @@ public sealed partial class XlsxAdapter
                      .Distinct(StringComparer.Ordinal))
         {
             if (!package.TryGetValue(drawingPart, out var bytes)) continue;
-            var drawingDirectory = drawingPart[..drawingPart.LastIndexOf("/", StringComparison.Ordinal)];
+            var drawingDirectory = drawingPart[..drawingPart.LastIndexOf('/')];
             var drawingRelationships = ReadPictureRelationships(package, drawingDirectory + "/_rels/" + Path.GetFileName(drawingPart) + ".rels");
             var document = new XmlDocument { PreserveWhitespace = false };
             using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
@@ -2728,7 +2736,7 @@ public sealed partial class XlsxAdapter
             var target = reader.GetAttribute("Target");
             if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(target)) continue;
             var external = StringComparer.OrdinalIgnoreCase.Equals(reader.GetAttribute("TargetMode"), "External");
-            var resolvedTarget = external || target.StartsWith("/", StringComparison.Ordinal)
+            var resolvedTarget = external || target.StartsWith('/')
                 ? target
                 : basePath + "/" + target;
             result[id] = new PictureRelationship(resolvedTarget, external);
@@ -2752,7 +2760,7 @@ public sealed partial class XlsxAdapter
     /// <summary>Reads the Excel tables (ListObjects) a worksheet declares with tablePart elements.
     /// Only relationships the worksheet itself references are followed; a part without a readable
     /// <c>table/@ref</c> is ignored, so a damaged table never invents a boundary.</summary>
-    private static IReadOnlyList<XlsxTableRecord> ReadTables(Dictionary<string, byte[]> package, string worksheetPartUri, byte[] worksheetXml)
+    private static List<XlsxTableRecord> ReadTables(Dictionary<string, byte[]> package, string worksheetPartUri, byte[] worksheetXml)
     {
         var ids = new List<string>();
         using (var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml))
@@ -2761,7 +2769,7 @@ public sealed partial class XlsxAdapter
                     reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") is { Length: > 0 } id)
                     ids.Add(id);
         if (ids.Count == 0) return [];
-        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
         var result = new List<XlsxTableRecord>();
         foreach (var id in ids.Distinct(StringComparer.Ordinal))
@@ -2783,7 +2791,7 @@ public sealed partial class XlsxAdapter
         return result;
     }
 
-    private static List<XlsxCellRecord> ApplyTableRanges(List<XlsxCellRecord> cells, IReadOnlyList<XlsxTableRecord> tables)
+    private static List<XlsxCellRecord> ApplyTableRanges(List<XlsxCellRecord> cells, List<XlsxTableRecord> tables)
     {
         if (tables.Count == 0) return cells;
         return cells.Select(cell => tables.FirstOrDefault(table =>
@@ -2870,12 +2878,12 @@ public sealed partial class XlsxAdapter
         return false;
     }
 
-    private static IReadOnlyList<XlsxDrawingShapeRecord> ReadDrawingShapes(
+    private static List<XlsxDrawingShapeRecord> ReadDrawingShapes(
         Dictionary<string, byte[]> package,
         string worksheetPartUri,
         XlsxWorksheetMetrics metrics)
     {
-        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf("/", StringComparison.Ordinal)];
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var fileName = Path.GetFileName(worksheetPartUri);
         var relationships = ReadRelationships(package, directory + "/_rels/" + fileName + ".rels");
         var result = new List<XlsxDrawingShapeRecord>();
