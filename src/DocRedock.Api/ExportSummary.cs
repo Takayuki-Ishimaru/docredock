@@ -22,6 +22,8 @@ public enum StructureBasis
     /// <summary>Reconstructed from layout, and at least one place could not be decided from it:
     /// compare those places with the source.</summary>
     NeedsComparison,
+    /// <summary>Column relationships could not be resolved; surviving table text is retained for source comparison.</summary>
+    Unresolved,
 }
 
 /// <summary>The one finalized set of visual/export counters, computed once from the final graph
@@ -120,6 +122,7 @@ public static class ExportSummaryText
         StructureBasis.Source => "source tables",
         StructureBasis.Inferred => "inferred from layout (not compared with the source)",
         StructureBasis.NeedsComparison => $"inferred from layout; {reviewItems} boundary(ies) need source comparison",
+        StructureBasis.Unresolved => "unresolved column relationships; surviving text retained for source comparison",
         StructureBasis.NotApplicable => "no tables",
         _ => "not evaluated",
     };
@@ -138,6 +141,7 @@ public static class ExportSummaryText
         StructureBasis.Source => "原本の表",
         StructureBasis.Inferred => "配置から推定（原本とは未照合）",
         StructureBasis.NeedsComparison => $"配置から推定・{reviewItems}か所要照合",
+        StructureBasis.Unresolved => "列対応が未確定・残存文字を保持（原本照合が必要）",
         StructureBasis.NotApplicable => "表なし",
         _ => "未評価",
     };
@@ -241,6 +245,8 @@ public static class ExportSummaryBuilder
     private static StructureBasis TableStructureBasis(DocumentGraph graph, ReadableProjectionReport? projection)
     {
         if (projection is null) return StructureBasis.NotEvaluated;
+        if (graph.Nodes.Any(node => node.Extensions?.TryGetValue(ReviewExtensionKeys.FinalTableGridUnresolved, out var unresolved) == true &&
+            unresolved.ValueKind == JsonValueKind.True)) return StructureBasis.Unresolved;
         if (projection.RenderedTables == 0) return StructureBasis.NotApplicable;
         if (projection.TableBoundaryReviews.Count > 0) return StructureBasis.NeedsComparison;
         var tables = graph.Nodes.Where(node => node.Kind == NodeKind.Table).ToArray();

@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.4 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.5 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -35,7 +35,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.4では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.5では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -50,7 +50,18 @@ GUIの「パッケージを読む」から既存のフォルダー／ZIPを開�
 docredock package search input.ai-package.zip "売上" --json
 docredock package read input.ai-package.zip --part part-0002
 docredock package read input.ai-package.zip --part part-0002 --json --with-sources
+docredock package review input.ai-package.zip --json --require-hidden-review
 ```
+
+`package review package.zip`はパッケージ全体を検証してから`review.md`だけを表示します。`--json`では変換確認、変更履歴の共有確認、非表示内容、停止理由、影響する分割IDとレビュー文書を取得できます。影響範囲を分割ごとに特定できない項目があるため、要確認時の分割IDはパッケージ全体を保守的に列挙します。この操作自体は通常終了0、`--fail-on-review`を付けると要確認時はレビュー情報を返して終了11です。
+
+受信側でも非表示内容の共有確認を必須にするには、`package search/read`に`--require-hidden-review`を付けます。非表示内容を含む場合は本文を出さず終了11となり、確認後の`--allow-review`で解除できます。GUIでは「非表示内容を含むパッケージも共有範囲の確認後に読む」を選択します。古い`complete`パッケージで非表示内容のフラグがない場合も確認対象です。同梱Python readerには同名オプションがあり、全体検証を自動で有効にして本文出力前に終了3で停止します。確認後はこのオプションを外して読み取ります。
+
+最終版のセル削除で表の列対応を確定できない場合、残存文字を行順に保持し、`DocxFinalTableGridUnresolved`診断と原本照合の確認事項を付けます。列見出しとの対応を推測した表にはしません。
+
+この代替表示でも、表上の図形の文字はセルとの対応が不明な注記として保持します。結合セル1個と通常セル複数で同じ列を削除した場合は、削除範囲を同等に扱います。CLIのレビュー表示と単一分割読取は、他の分割本文をメモリに保持せず全体検証します。
+
+Python readerの`--require-hidden-review`は既存の変換・共有確認も停止対象にします。JSONの`review.required`／`effective_required`は実効状態、`reported_required`は元の確認状態、`stop_reasons`は停止理由です。このオプションを省略した場合のJSON形式は従来どおりです。
 
 どちらのCLI操作も本文を返す前にパッケージ全体を検証し、要確認の場合は本文を出さず終了コード11を返します。`review.md`と該当する内容を確認した後、1回の実行について確認済みとするには`--allow-review`を付けます。`--json --with-sources`で取得した元セル等の出典情報は手元に置き、AIには必要な本文だけを渡せます。検索は対応する装飾・エスケープ、大文字小文字、全角半角を正規化した文字列照合です。
 

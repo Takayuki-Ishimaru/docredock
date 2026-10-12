@@ -68,6 +68,36 @@ class ReaderTest(unittest.TestCase):
 
 
 class OneCallJson(ReaderTest):
+    def test_hidden_review_is_opt_in_and_verifies_before_part_or_search_output(self):
+        package = self.copy_of('schema-2.1')
+        report = json.loads((package / 'report.json').read_text(encoding='utf-8'))
+        report['summary']['hidden_content_included'] = True
+        self.relisted(package, 'report.json', json.dumps(report).encode('utf-8'))
+        for selection in (['--part', 'part-0003'], ['--search', 'Cost']):
+            with self.subTest(selection=selection):
+                code, out, err = self.run_cli(package, *selection, '--require-hidden-review')
+                self.assertEqual((3, ''), (code, out), err)
+                self.assertIn('review required', err)
+                code, out, err = self.run_cli(package, *selection, '--verify')
+                self.assertEqual(0, code, err)
+                self.assertIn('Cost', out)
+        (package / 'parts/0003.md').write_text('TAMPERED', encoding='utf-8')
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review')
+        self.assertEqual((1, ''), (code, out), err)
+
+    def test_hidden_review_blocks_legacy_complete_without_a_flag_but_not_visible(self):
+        package = self.copy_of('schema-2.1')
+        report = json.loads((package / 'report.json').read_text(encoding='utf-8'))
+        report['summary'].pop('hidden_content_included')
+        self.relisted(package, 'report.json', json.dumps(report).encode('utf-8'))
+        self.edit_manifest(package, lambda manifest: manifest.update(content_policy='complete'))
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review')
+        self.assertEqual((3, ''), (code, out), err)
+        self.edit_manifest(package, lambda manifest: manifest.update(content_policy='visible'))
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review')
+        self.assertEqual(0, code, err)
+        self.assertIn('Cost', out)
+
     def test_verify_part_json_gives_the_text_its_cells_and_the_review_state(self):
         sample = SAMPLES / 'schema-2.1'
         code, out, err = self.run_cli(sample, '--verify', '--part', 'part-0003', '--json')
@@ -361,6 +391,142 @@ class Zip64Records(ReaderTest):
         code, out, err = self.run_cli(archive, '--verify')
         self.assertEqual((2, ''), (code, out))
         self.assertIn('Zip64 end record does not end where its locator begins', err)
+
+
+class HiddenReviewJson(ReaderTest):
+    """--require-hidden-review: the JSON review state agrees with the exit code, and the reasons the
+    reader stopped are machine readable. Without the option the review object stays as report.json
+    says."""
+
+    def zipped(self, package, name='package.zip'):
+        archive = self.root / name
+        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as out:
+            for path in sorted(package.rglob('*')):
+                if path.is_file():
+                    out.write(path, path.relative_to(package).as_posix())
+        return archive
+
+    def hidden_report(self, package, value):
+        report = json.loads((package / 'report.json').read_text(encoding='utf-8'))
+        if value is None:
+            report['summary'].pop('hidden_content_included')
+        else:
+            report['summary']['hidden_content_included'] = value
+        self.relisted(package, 'report.json', json.dumps(report).encode('utf-8'))
+
+    def test_hidden_true_exit3_json_is_effective_with_one_reason_and_no_body(self):
+        package = self.copy_of('schema-2.1')
+        self.hidden_report(package, True)
+        for selection in (['--part', 'part-0003'], ['--search', 'Cost'], []):
+            with self.subTest(selection=selection):
+                code, out, err = self.run_cli(package, *selection, '--require-hidden-review', '--json')
+                self.assertEqual(3, code, err)
+                self.assertIn('review required', err)
+                document = json.loads(out)
+                self.assertIs(True, document['review']['required'])
+                self.assertIs(True, document['review']['effective_required'])
+                self.assertIs(False, document['review']['reported_required'])
+                self.assertEqual(['hidden_content'], document['review']['stop_reasons'])
+                self.assertEqual('review.md', document['review']['file'])
+                self.assertNotIn('part', document)
+                self.assertNotIn('search', document)
+                self.assertNotIn('parts', document)
+                self.assertNotIn('| Cost |', out)
+
+    def test_hidden_true_exit3_json_is_the_same_for_a_zip_package(self):
+        package = self.copy_of('schema-2.1')
+        self.hidden_report(package, True)
+        code, out, err = self.run_cli(self.zipped(package), '--part', 'part-0003', '--require-hidden-review', '--json')
+        self.assertEqual(3, code, err)
+        document = json.loads(out)
+        self.assertIs(True, document['verified'])
+        self.assertIs(True, document['review']['required'])
+        self.assertEqual(['hidden_content'], document['review']['stop_reasons'])
+        self.assertNotIn('part', document)
+
+    def test_legacy_complete_package_without_the_flag_is_blocked_as_hidden(self):
+        package = self.copy_of('schema-2.1')
+        self.hidden_report(package, None)
+        self.edit_manifest(package, lambda manifest: manifest.update(content_policy='complete'))
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review', '--json')
+        self.assertEqual(3, code, err)
+        document = json.loads(out)
+        self.assertIsNone(document['review']['hidden_content_included'])
+        self.assertIs(True, document['review']['required'])
+        self.assertEqual(['hidden_content'], document['review']['stop_reasons'])
+        self.assertNotIn('part', document)
+
+    def test_visible_or_explicit_false_hidden_leaves_the_state_false_with_no_reason(self):
+        for policy, hidden in (('visible', False), ('complete', False), ('visible', None)):
+            for selection in (['--part', 'part-0003'], ['--search', 'Cost'], []):
+                with self.subTest(policy=policy, hidden=hidden, selection=selection):
+                    package = self.copy_of('schema-2.1')
+                    self.hidden_report(package, hidden)
+                    self.edit_manifest(package, lambda manifest, policy=policy: manifest.update(content_policy=policy))
+                    code, out, err = self.run_cli(package, *selection, '--require-hidden-review', '--json')
+                    self.assertEqual((0, ''), (code, err))
+                    document = json.loads(out)
+                    review = document['review']
+                    self.assertIs(False, review['required'])
+                    self.assertIs(False, review['effective_required'])
+                    self.assertIs(False, review['reported_required'])
+                    self.assertEqual([], review['stop_reasons'])
+                    self.assertTrue(document.get('verified'))
+                    if selection[0:1] == ['--part']:
+                        self.assertIn('Cost', document['part']['markdown'])
+                    elif selection:
+                        self.assertTrue(document['search']['parts'])
+                    else:
+                        self.assertTrue(document['parts'])
+
+    def test_stored_required_and_hidden_policy_give_two_reasons(self):
+        package = self.copy_of('schema-2.1')
+        report = json.loads((package / 'report.json').read_text(encoding='utf-8'))
+        report['review']['required'] = True
+        report['summary']['hidden_content_included'] = True
+        self.relisted(package, 'report.json', json.dumps(report).encode('utf-8'))
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--fail-on-review',
+                                      '--require-hidden-review', '--json')
+        self.assertEqual(3, code, err)
+        review = json.loads(out)['review']
+        self.assertIs(True, review['required'])
+        self.assertIs(True, review['reported_required'])
+        self.assertIs(True, review['effective_required'])
+        self.assertEqual(['package_review', 'hidden_content'], review['stop_reasons'])
+        # Stored required alone (no hidden content) reports only the package reason.
+        self.hidden_report(package, False)
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review', '--json')
+        self.assertEqual(3, code, err)
+        document = json.loads(out)
+        review = document['review']
+        self.assertIs(True, review['required'])
+        self.assertEqual(['package_review'], review['stop_reasons'])
+        self.assertNotIn('part', document)
+
+    def test_a_changed_unselected_part_is_refused_before_the_hidden_gate(self):
+        package = self.copy_of('schema-2.1')
+        self.hidden_report(package, True)
+        part = package / 'parts/0005.md'
+        part.write_bytes(part.read_bytes() + b'\nchanged\n')
+        code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review', '--json')
+        self.assertEqual(1, code, err)
+        self.assertNotIn('Cost', out)
+        document = json.loads(out)
+        self.assertIs(False, document['verified'])
+        self.assertTrue(document['problems'][0].startswith('parts/0005.md:'), document)
+        self.assertNotIn('part', document)
+        self.assertNotIn('review', document)
+
+    def test_without_the_option_the_json_review_keeps_the_reported_shape(self):
+        package = self.copy_of('schema-2.1')
+        self.hidden_report(package, True)
+        for selection in (['--json'], ['--part', 'part-0003', '--json'], ['--search', 'Cost', '--json']):
+            with self.subTest(selection=selection):
+                code, out, err = self.run_cli(package, *selection)
+                self.assertEqual((0, ''), (code, err), err)
+                document = json.loads(out)
+                self.assertEqual({'required': False, 'review_items_detected': False,
+                                  'hidden_content_included': True, 'file': 'review.md'}, document['review'])
 
 
 if __name__ == '__main__':

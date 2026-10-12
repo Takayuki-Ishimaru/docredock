@@ -605,6 +605,16 @@ public sealed partial class ReadableMarkdownSerializer
                         break;
                     case NodeKind.Table when node.Content is TableNodeContent table:
                         var overlayHostRows = FoldNestedTableRows(node.Id, MarkedRows(node, table.Rows), nestedTableFolds);
+                        if (HasExtension(node, ReviewExtensionKeys.FinalTableGridUnresolved))
+                        {
+                            WriteParagraph(output, "表の列対応を確定できないため、残存セルを行順に記載します。原本で確認してください。 / Table columns could not be resolved; surviving cells follow in row order. Compare with the source.");
+                            foreach (var row in overlayHostRows)
+                                output.Append("- ").AppendLine(string.Join(" / ", row.Select(cell => TableText(cell.Text))));
+                            foreach (var label in UnresolvedTableOverlayLabels(node))
+                                output.Append("- ").AppendLine(TableText(label));
+                            output.AppendLine();
+                            break;
+                        }
                         WriteArbitraryTable(output, ApplyTableOverlays(node, overlayHostRows));
                         WriteOverlayLineStyleNotes(output, node, overlayHostRows);
                         break;
@@ -2420,6 +2430,8 @@ public sealed partial class ReadableMarkdownSerializer
                 var childRows = slot.Child.Content is TableNodeContent childTable ? MarkedRows(slot.Child, childTable.Rows) : Array.Empty<IReadOnlyList<TableCell>>();
                 var foldedChildRows = FoldNestedTableRows(slot.Child.Id, childRows, folds);
                 var nestedText = string.Join("\n", foldedChildRows.Select(nestedRow => string.Join(" / ", nestedRow.Select(cell => cell.Text))));
+                if (HasExtension(slot.Child, ReviewExtensionKeys.FinalTableGridUnresolved))
+                    nestedText = string.Join("\n", new[] { nestedText }.Concat(UnresolvedTableOverlayLabels(slot.Child)));
                 var offset = slot.ParagraphOffset is { } known ? Math.Clamp(known, 0, paragraphs.Count) : paragraphs.Count;
                 return (Offset: offset, Text: nestedText);
             }).OrderBy(item => item.Offset).ToArray();
@@ -2594,6 +2606,12 @@ public sealed partial class ReadableMarkdownSerializer
     private sealed record TableOverlay(
         string ShapeId, string Text, string Kind, string Direction, string Axis,
         int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset, string? LineStyle = null);
+
+    // Overlay owners have already been suppressed as duplicates. A final-table fallback
+    // must retain their text too, without assigning it to an unresolved cell coordinate.
+    private static IEnumerable<string> UnresolvedTableOverlayLabels(DocumentNode node) => ReadTableOverlays(node)
+        .Where(overlay => !string.IsNullOrWhiteSpace(overlay.Text))
+        .Select(overlay => "図形の文字（セル対応未確定） / Figure text (cell unresolved): " + overlay.Text);
 
     private static List<TableOverlay> ReadTableOverlays(DocumentNode node)
     {

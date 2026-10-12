@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers;
 using System.Globalization;
 using System.IO.Compression;
 using System.Runtime.InteropServices;
@@ -65,7 +66,26 @@ public sealed record AiPackageSourceGroup(string SourceId, IReadOnlyList<string>
 /// the source (review pages, OCR items, worksheet table boundaries), and the summary's
 /// <c>review_items_detected</c> and <c>hidden_content_included</c> flags (null in a report that predates
 /// them). None of them certifies the conversion.</summary>
-public sealed record AiPackageReview(bool Required, bool? ReviewItemsDetected, bool? HiddenContentIncluded);
+public sealed record AiPackageReview(bool Required, bool? ReviewItemsDetected, bool? HiddenContentIncluded)
+{
+    public bool ConversionReviewRequired { get; init; }
+    public bool RevisionSharingRequired { get; init; }
+    public RevisionSharingReview? SharingReview { get; init; }
+
+    /// <summary>Reader policy only; does not alter the package's report. Older complete packages
+    /// without an inclusion flag are conservatively treated as needing hidden-content review.</summary>
+    public bool HiddenReviewRequired(bool requireHiddenReview, string contentPolicy) => requireHiddenReview &&
+        (HiddenContentIncluded == true || HiddenContentIncluded is null && contentPolicy == "complete");
+
+    public IReadOnlyList<string> StopReasons(bool requireHiddenReview, string contentPolicy)
+    {
+        var reasons = new List<string>();
+        if (ConversionReviewRequired || Required && !RevisionSharingRequired) reasons.Add("conversion_review");
+        if (RevisionSharingRequired) reasons.Add("revision_sharing");
+        if (HiddenReviewRequired(requireHiddenReview, contentPolicy)) reasons.Add("hidden_content");
+        return reasons;
+    }
+}
 
 /// <summary>One part read by <see cref="AiPackageManifestReader.ReadVerifiedPartAsync"/>: its Markdown,
 /// exactly the bytes that were verified, its source-index groups and the package's review state,
@@ -80,6 +100,9 @@ public sealed record AiPackageVerifiedPart(
 /// <summary>A verified in-memory snapshot. Later reads and searches use the checked bytes.</summary>
 public sealed record AiPackageVerifiedPackage(AiPackageManifest Manifest,
     IReadOnlyList<AiPackageVerifiedPart> Parts, AiPackageReview Review, string ReviewMarkdown);
+
+/// <summary>Whole-package verification with only the checked review text retained.</summary>
+public sealed record AiPackageVerifiedReview(AiPackageManifest Manifest, AiPackageReview Review, string ReviewMarkdown);
 
 /// <summary>A package file is missing, changed, refused or not listed in the manifest.
 /// <see cref="Problems"/> holds the lines <see cref="AiPackageManifestReader.VerifyFilesAsync"/> returns.</summary>
@@ -182,6 +205,32 @@ public static class AiPackageManifestReader
         var sources = SourceIndex(manifest, manifest.SourceIndex is { } name ? contents[name] : null);
         var review = Review(manifest, contents[manifest.Report]);
         return new AiPackageVerifiedPart(manifest, part, Utf8(contents[part.Path], part.Path), sources[part.Id], review);
+    }
+
+    /// <summary>Verifies every file and the source index, but retains only report/review bytes.
+    /// Unselected document content is hashed with a bounded buffer and is never decoded or retained.</summary>
+    public static async Task<AiPackageVerifiedReview> ReadVerifiedReviewAsync(string packagePath,
+        CancellationToken cancellationToken = default)
+    {
+        using var files = new PackageFiles(packagePath);
+        var manifest = await ReadManifestAsync(files, cancellationToken).ConfigureAwait(false);
+        var listed = manifest.Files.ToDictionary(file => file.Path, file => file.Bytes, StringComparer.Ordinal);
+        var contents = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        foreach (var path in new[] { manifest.Report, manifest.Review }
+                     .Concat(manifest.SourceIndex is { } index ? [index] : []).Distinct(StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                if (files.Size(path) == listed[path]) contents[path] = await files.ReadAsync(path, cancellationToken).ConfigureAwait(false);
+            }
+            catch (FileNotFoundException) { }
+            catch (InvalidDataException refused) when (IsRefused(refused)) { }
+        }
+        var problems = await VerifyAsync(files, manifest, contents, cancellationToken).ConfigureAwait(false);
+        if (problems.Count > 0) throw new AiPackageVerificationException(problems);
+        _ = SourceIndex(manifest, manifest.SourceIndex is { } name ? contents[name] : null);
+        return new(manifest, Review(manifest, contents[manifest.Report]), Utf8(contents[manifest.Review], manifest.Review));
     }
 
     public static async Task<AiPackageVerifiedPackage> ReadVerifiedPackageAsync(string packagePath,
@@ -340,7 +389,14 @@ public static class AiPackageManifestReader
         foreach (var file in manifest.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!contents.TryGetValue(file.Path, out var bytes))
+            long actualBytes;
+            string actual;
+            if (contents.TryGetValue(file.Path, out var bytes))
+            {
+                actualBytes = bytes.LongLength;
+                actual = Convert.ToHexStringLower(SHA256.HashData(bytes));
+            }
+            else
                 try
                 {
                     // A different size already says the content changed; it is found without reading the file.
@@ -350,13 +406,12 @@ public static class AiPackageManifestReader
                         problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {size})");
                         continue;
                     }
-                    bytes = await files.ReadAsync(file.Path, cancellationToken).ConfigureAwait(false);
+                    (actualBytes, actual) = await files.HashAsync(file.Path, cancellationToken).ConfigureAwait(false);
                 }
                 catch (FileNotFoundException) { problems.Add($"{file.Path}: missing"); continue; }
                 catch (InvalidDataException refused) when (IsRefused(refused)) { problems.Add($"{file.Path}: refused ({refused.Message})"); continue; }
             var expected = file.Sha256.ToLowerInvariant();
-            var actual = Convert.ToHexStringLower(SHA256.HashData(bytes));
-            if (bytes.LongLength != file.Bytes) problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {bytes.LongLength})");
+            if (actualBytes != file.Bytes) problems.Add($"{file.Path}: size mismatch (expected {file.Bytes} bytes, got {actualBytes})");
             else if (actual != expected) problems.Add($"{file.Path}: sha256 mismatch (expected {expected}, got {actual})");
         }
         // Anything else in the package is not covered by the manifest, whatever refers to it. A link
@@ -419,6 +474,7 @@ public static class AiPackageManifestReader
         if (required.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
             throw fields.Invalid($"review.required must be true or false, got {Fields.Kind(required)}");
         var sharingRequired = false;
+        RevisionSharingReview? sharingReview = null;
         if (Fields.Optional(root, "sharing_review") is { } rawSharing)
         {
             var sharing = fields.Object(rawSharing, "sharing_review");
@@ -432,14 +488,21 @@ public static class AiPackageManifestReader
             if (policy is not ("final" or "markup" or "reject"))
                 throw fields.Invalid($"sharing_review.revisions_policy must be final, markup or reject, got {JsonSerializer.Serialize(policy)}");
             sharingRequired = sharing.GetProperty("required").GetBoolean();
+            sharingReview = new(sharingRequired, sharing.GetProperty("revisions_present").GetBoolean(),
+                sharing.GetProperty("revisions_included").GetBoolean(), sharing.GetProperty("deleted_text_included").GetBoolean(), policy);
         }
         else if (Fields.Optional(root, "diagnostics") is { ValueKind: JsonValueKind.Array } diagnostics)
             sharingRequired = diagnostics.EnumerateArray().Any(item => item.ValueKind == JsonValueKind.Object &&
                 item.TryGetProperty("code", out var code) && code.ValueKind == JsonValueKind.String && code.GetString() == "TrackedRevisionsPresent");
         var summary = Fields.Optional(root, "summary") is { } value ? fields.Object(value, "summary") : (JsonElement?)null;
+        var itemsDetected = summary is { } flags ? fields.OptionalFlag(flags, "summary", "review_items_detected") : null;
         return new AiPackageReview(required.ValueKind == JsonValueKind.True || sharingRequired,
-            summary is { } flags ? fields.OptionalFlag(flags, "summary", "review_items_detected") : null,
-            summary is { } other ? fields.OptionalFlag(other, "summary", "hidden_content_included") : null);
+            itemsDetected, summary is { } other ? fields.OptionalFlag(other, "summary", "hidden_content_included") : null)
+        {
+            ConversionReviewRequired = itemsDetected == true || required.GetBoolean() && (itemsDetected != false || !sharingRequired),
+            RevisionSharingRequired = sharingRequired,
+            SharingReview = sharingReview,
+        };
     }
 
     private static AiPackageManifest Parse(JsonElement root)
@@ -947,6 +1010,52 @@ public static class AiPackageManifestReader
             return bytes;
         }
 
+        // The same open, size and ZIP CRC rules as ReadAsync, with no payload-sized allocation.
+        public async Task<(long Bytes, string Sha256)> HashAsync(string relativePath, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested();
+            var path = zip is null ? Resolve(relativePath) : null;
+            var item = zip is null ? null : Entry(relativePath);
+            if (item is not null) OpenChecks(relativePath, item);
+            var length = item?.Size ?? new FileInfo(path!).Length;
+            if (length > MaxFileBytes) throw TooLarge(relativePath);
+            if (item is null && length == 0) return (0, Convert.ToHexStringLower(SHA256.HashData([])));
+            var buffer = ArrayPool<byte>.Shared.Rent(81920);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            long total = 0;
+            var crc = 0xFFFFFFFFu;
+            try
+            {
+                try
+                {
+                    await using var input = item is null ? File.OpenRead(path!) : await item.Entry.OpenAsync(token).ConfigureAwait(false);
+                    while (item is null || total < length)
+                    {
+                        var count = item is null ? buffer.Length : (int)Math.Min(buffer.Length, length - total);
+                        var read = await input.ReadAsync(buffer.AsMemory(0, count), token).ConfigureAwait(false);
+                        if (read == 0) break;
+                        total += read;
+                        if (total > MaxFileBytes) throw TooLarge(relativePath);
+                        hash.AppendData(buffer.AsSpan(0, read));
+                        if (item is not null) crc = UpdateCrc32(crc, buffer.AsSpan(0, read));
+                    }
+                }
+                catch (InvalidDataException exception) when (item is not null && !IsRefused(exception))
+                {
+                    throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: {exception.Message}", exception);
+                }
+                if (item is not null)
+                {
+                    if (~crc != item.Crc)
+                        throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: Bad CRC-32 for file {Python.Repr(item.OriginalName)}");
+                    if (total != length)
+                        throw Refused($"cannot read {Python.Repr(relativePath)} from the ZIP: it ends before its size in the ZIP");
+                }
+                return (total, Convert.ToHexStringLower(hash.GetHashAndReset()));
+            }
+            finally { ArrayPool<byte>.Shared.Return(buffer, clearArray: true); }
+        }
+
         private static InvalidDataException TooLarge(string relativePath) =>
             Refused($"cannot read {Python.Repr(relativePath)}: it is larger than {MaxFileBytes} bytes");
 
@@ -975,15 +1084,16 @@ public static class AiPackageManifestReader
                 throw Unreadable($"Overlapped entries: {Python.Repr(item.OriginalName)} (possible zip bomb)");
         }
 
-        private static uint Crc32(ReadOnlySpan<byte> bytes)
+        private static uint Crc32(ReadOnlySpan<byte> bytes) => ~UpdateCrc32(0xFFFFFFFFu, bytes);
+
+        private static uint UpdateCrc32(uint crc, ReadOnlySpan<byte> bytes)
         {
-            var crc = 0xFFFFFFFFu;
             foreach (var value in bytes)
             {
                 crc ^= value;
                 for (var bit = 0; bit < 8; bit++) crc = (crc >> 1) ^ (0xEDB88320u & (uint)-(int)(crc & 1));
             }
-            return ~crc;
+            return crc;
         }
 
         /// <summary>A manifest.json one folder down: the package's parent was given, or the package

@@ -6,6 +6,69 @@ namespace DocRedock.Tests.Docx;
 public sealed partial class DocxReadabilityTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Uniform_column_deletion_is_identical_for_merged_and_adjacent_deleted_cells(bool reverseRows)
+    {
+        static string Cell(string text, string properties = "") => $"<w:tc><w:tcPr>{properties}</w:tcPr>{P(text)}</w:tc>";
+        var merged = Cell("SECRET_MERGED", "<w:cellDel/><w:gridSpan w:val=\"2\"/>");
+        var singles = Cell("SECRET_LEFT", "<w:cellDel/>") + Cell("SECRET_MIDDLE", "<w:cellDel/>");
+        var row1 = (reverseRows ? singles : merged) + Cell("HEADER_RIGHT");
+        var row2 = (reverseRows ? merged : singles) + Cell("KEPT_RIGHT");
+        var source = Document("<w:tbl><w:tblGrid><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/><w:gridCol w:w=\"1000\"/></w:tblGrid>" +
+            "<w:tr>" + row1 + "</w:tr><w:tr>" + row2 + "</w:tr></w:tbl>");
+        try
+        {
+            var result = await new DocumentService(null, null, discoverPdfRasterizer: false).ExportAiPackageAsync(
+                new(new(source, "unused.md", Revisions: "final", EnableOcr: false), Path.Combine(Path.GetDirectoryName(source)!, "final")));
+            var text = string.Join("\n", result.Parts.Select(part => part.Markdown)).Replace("\\", "");
+            Assert.Contains("| HEADER_RIGHT |", text); Assert.Contains("| KEPT_RIGHT |", text); Assert.DoesNotContain("SECRET", text);
+            Assert.False(result.Review.Required); Assert.Equal(StructureBasis.Source, result.Summary.TableStructure);
+            Assert.DoesNotContain(result.Diagnostics, diagnostic => diagnostic.Code == "DocxFinalTableGridUnresolved");
+        }
+        finally { Cleanup(source); }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Final_table_fallback_preserves_spanned_and_nested_cells_without_guessing_columns(bool spanned, bool nested)
+    {
+        static string Cell(string text, string properties = "") => $"<w:tc><w:tcPr>{properties}</w:tcPr>{P(text)}</w:tc>";
+        var kept = nested ? "<w:tc><w:p/><w:tbl><w:tr>" + Cell("NESTED_KEPT") + "</w:tr></w:tbl>" + P("KEPT") + "</w:tc>" : Cell("KEPT");
+        var source = Document("<w:tbl><w:tr>" + Cell("HEADER_LEFT", spanned ? "<w:gridSpan w:val=\"2\"/>" : "") +
+            Cell("HEADER_RIGHT") + "</w:tr><w:tr>" + Cell("SECRET", "<w:cellDel/>" + (spanned ? "<w:gridSpan w:val=\"2\"/>" : "")) + kept + "</w:tr></w:tbl>");
+        try
+        {
+            var result = await new DocumentService(null, null, discoverPdfRasterizer: false).ExportAiPackageAsync(
+                new(new(source, "unused.md", Revisions: "final", EnableOcr: false), Path.Combine(Path.GetDirectoryName(source)!, "final")));
+            var text = string.Join("\n", result.Parts.Select(part => part.Markdown)).Replace("\\", "");
+            Assert.Contains("KEPT", text); Assert.DoesNotContain("SECRET", text);
+            if (nested) Assert.Contains("NESTED_KEPT", text);
+            Assert.True(result.Review.Required); Assert.Equal(StructureBasis.Unresolved, result.Summary.TableStructure);
+        }
+        finally { Cleanup(source); }
+    }
+
+    [Fact]
+    public async Task Equal_row_widths_after_deleting_different_columns_still_require_review()
+    {
+        static string Cell(string text, bool deleted) => $"<w:tc><w:tcPr>{(deleted ? "<w:cellDel/>" : "")}</w:tcPr>{P(text)}</w:tc>";
+        var source = Document("<w:tbl><w:tr>" + Cell("SECRET_HEADER", true) + Cell("HEADER_RIGHT", false) +
+            "</w:tr><w:tr>" + Cell("VALUE_LEFT", false) + Cell("SECRET_VALUE", true) + "</w:tr></w:tbl>");
+        try
+        {
+            var result = await new DocumentService(null, null, discoverPdfRasterizer: false).ExportAiPackageAsync(
+                new(new(source, "unused.md", Revisions: "final", EnableOcr: false), Path.Combine(Path.GetDirectoryName(source)!, "final")));
+            var text = string.Join("\n", result.Parts.Select(part => part.Markdown)).Replace("\\", "");
+            Assert.Contains("HEADER_RIGHT", text); Assert.Contains("VALUE_LEFT", text); Assert.DoesNotContain("SECRET", text);
+            Assert.DoesNotContain("| HEADER_RIGHT |", text); Assert.True(result.Review.Required);
+        }
+        finally { Cleanup(source); }
+    }
+
+    [Theory]
     [InlineData("visible")]
     [InlineData("complete")]
     [InlineData("sanitized")]

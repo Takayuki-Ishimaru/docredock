@@ -9,6 +9,9 @@ using DocRedock.Markdown;
 
 namespace DocRedock.Tests.Xlsx;
 
+[CollectionDefinition("Excel merge scale timing", DisableParallelization = true)]
+public sealed class ExcelMergeScaleTimingCollection { }
+
 /// <summary>
 /// What a sheet costs must follow what is in it, not what its parts multiply to. A sheet drawn in thousands of merged cells
 /// (Japanese "Excel graph paper"), a banner or a value merged across the whole width in every one of thousands of rows, a long
@@ -16,6 +19,7 @@ namespace DocRedock.Tests.Xlsx;
 /// here under a time limit, so that a regression fails by name instead of keeping the suite waiting. Where the time of the
 /// right answer and of the wrong one are too close to tell apart on any machine, the bytes allocated are counted instead.
 /// </summary>
+[Collection("Excel merge scale timing")]
 public sealed class ExcelMergeScaleTests : IDisposable
 {
     // The conversions take a few seconds at most; the quadratic ones they stand for take close to a minute.
