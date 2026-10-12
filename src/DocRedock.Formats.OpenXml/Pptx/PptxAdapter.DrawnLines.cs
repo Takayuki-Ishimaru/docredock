@@ -56,9 +56,9 @@ public sealed partial class PptxAdapter
 
         public IReadOnlyDictionary<PptxShapeRecord, DrawnTextDecoration> Shapes { get; init; } =
             new Dictionary<PptxShapeRecord, DrawnTextDecoration>(ReferenceEqualityComparer.Instance);
-        public IReadOnlyDictionary<PptxShapeRecord, Dictionary<(int Row, int Cell), DrawnTextDecoration>> Cells { get; init; } =
+        public Dictionary<PptxShapeRecord, Dictionary<(int Row, int Cell), DrawnTextDecoration>> Cells { get; init; } =
             new Dictionary<PptxShapeRecord, Dictionary<(int Row, int Cell), DrawnTextDecoration>>(ReferenceEqualityComparer.Instance);
-        public IReadOnlySet<PptxShapeRecord> Consumed { get; init; } = new HashSet<PptxShapeRecord>(ReferenceEqualityComparer.Instance);
+        public HashSet<PptxShapeRecord> Consumed { get; init; } = new HashSet<PptxShapeRecord>(ReferenceEqualityComparer.Instance);
         /// <summary>The lines that were taken as formatting, by the shape whose text each of them lies over.</summary>
         public IReadOnlyDictionary<PptxShapeRecord, IReadOnlyList<PptxShapeRecord>> LinesOver { get; init; } =
             new Dictionary<PptxShapeRecord, IReadOnlyList<PptxShapeRecord>>(ReferenceEqualityComparer.Instance);
@@ -159,7 +159,7 @@ public sealed partial class PptxAdapter
 
     /// <summary>The slide's shapes, by element, in the order <see cref="ReadShapes"/> found them (its own shapes come first in
     /// <see cref="PptxSlideRecord.Shapes"/>), or null when the two do not line up.</summary>
-    private static List<XElement>? DrawnShapeElements(XDocument slide, IReadOnlyList<PptxShapeRecord> own)
+    private static List<XElement>? DrawnShapeElements(XDocument slide, List<PptxShapeRecord> own)
     {
         var elements = new List<XElement>();
         void Collect(XElement parent)
@@ -514,7 +514,7 @@ public sealed partial class PptxAdapter
     /// has an arrowhead, is no decoration. A line in <paramref name="excluded"/> is left as it is, though it still counts as a
     /// line the others may not end on.</summary>
     private static DrawnLineDecorations FindDrawnLineDecorations(Dictionary<string, byte[]> package, PptxSlideRecord slide, DrawnPartCache cache,
-        IReadOnlySet<PptxShapeRecord> excluded)
+        HashSet<PptxShapeRecord> excluded)
     {
         var own = slide.Shapes.Where(shape => shape.InheritedFrom is null).ToList();
         if (!own.Any(MaybeDrawnLine) || !own.Any(shape => !shape.IsHidden && !shape.IsHiddenByGroup && (shape.IsTable || !string.IsNullOrWhiteSpace(shape.Text)))) return DrawnLineDecorations.None;
@@ -739,7 +739,7 @@ public sealed partial class PptxAdapter
             tocLeaderShapeIds, visualGraphs, visualLabelShapeIds, visualConnectorShapeIds, visualNodeShapeIds, visualMemberShapeIds);
     }
 
-    private static IEnumerable<DrawnUnit> DrawnShapeUnits(Dictionary<string, byte[]> package, PptxSlideRecord slide, DrawnPartCache cache, PptxShapeRecord shape,
+    private static List<DrawnUnit> DrawnShapeUnits(Dictionary<string, byte[]> package, PptxSlideRecord slide, DrawnPartCache cache, PptxShapeRecord shape,
         XElement element)
     {
         if (element.Name.LocalName != "sp" || element.Element(DrawnP + "txBody") is not { } body) return [];
@@ -772,7 +772,7 @@ public sealed partial class PptxAdapter
         return LayoutDrawnFrame(shape, null, frame with { HeldFrom = skipped, Painted = IsDrawnTextPainted(element, inheritance) });
     }
 
-    private static IEnumerable<DrawnUnit> DrawnTableUnits(Dictionary<string, byte[]> package, PptxSlideRecord slide, DrawnPartCache cache, PptxShapeRecord table,
+    private static List<DrawnUnit> DrawnTableUnits(Dictionary<string, byte[]> package, PptxSlideRecord slide, DrawnPartCache cache, PptxShapeRecord table,
         XElement element)
     {
         if (element.Name.LocalName != "graphicFrame" || table.Geometry is null || table.TableRows is not { Count: > 0 } records ||

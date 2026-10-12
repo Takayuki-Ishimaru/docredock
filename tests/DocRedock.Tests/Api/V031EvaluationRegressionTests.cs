@@ -168,7 +168,7 @@ public sealed class V031EvaluationRegressionTests : IDisposable
     {
         var result = await service.ExportAiPackageAsync(new(new(Fixture("independent_one_column.xlsx"), "unused.md"), Path.Combine(root, "package")));
         using var report = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(result.OutputPath, "report.json")));
-        Assert.Equal("1.1", report.RootElement.GetProperty("schema_version").GetString());
+        Assert.Equal("1.2", report.RootElement.GetProperty("schema_version").GetString());
         var summary = report.RootElement.GetProperty("summary");
         Assert.Equal(1, summary.GetProperty("table_boundary_review_items").GetInt32());
         Assert.Equal("inferred", summary.GetProperty("reading_order").GetString());

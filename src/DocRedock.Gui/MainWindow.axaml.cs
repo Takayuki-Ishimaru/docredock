@@ -48,7 +48,7 @@ public partial class MainWindow : Window
     private string? _latestMarkdownPath;
     // What the latest successful export still needs a person to check. Kept apart from the
     // diagnostics so the result panel can say "saved" and "please compare" separately.
-    private IReadOnlyList<GuiReviewItem> _latestReviewItems = [];
+    private GuiReviewItem[] _latestReviewItems = [];
     private int _latestOcrReviewItems;
     // Worksheet table boundaries the layout could not decide, and one line per result saying what
     // was detected and how reading order and tables were obtained (never "no review needed").
@@ -64,6 +64,9 @@ public partial class MainWindow : Window
     private DateTimeOffset? _lastUpdateCheckAt;
     private Uri? _updateReleaseUri;
     private bool _componentsInitialized;
+    private CancellationTokenSource? _previewCancellation;
+    private string? _latestAiPackagePath;
+    private IReadOnlyList<RevisionSharingReview> _latestSharingReviews = [];
 
     // Test-only seam: when set, file/folder-picker calls use this instead of StorageProvider's
     // native OS dialog, which cannot run under a headless test host (e.g. CI, Xvfb without a
@@ -100,6 +103,7 @@ public partial class MainWindow : Window
         _capabilityReporter = capabilityReporter ?? new CapabilityReporter();
         _pdfRasterizerCapability = pdfRasterizerCapability ?? DescribeRasterizer;
         InitializeComponent();
+        Closed += (_, _) => _previewCancellation?.Cancel();
         _componentsInitialized = true;
         CurrentVersionText.Text = $"v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}";
         LoadSettings();
@@ -229,6 +233,7 @@ public partial class MainWindow : Window
     {
         if (!_componentsInitialized) return;
         var narrow = e.NewSize.Width < 880;
+        LocalProcessingPill.IsVisible = !narrow;
         ExportWorkspace.ColumnDefinitions = new ColumnDefinitions(narrow ? "*" : "1.15*,*");
         RestoreWorkspace.ColumnDefinitions = new ColumnDefinitions(narrow ? "*" : "1.15*,*");
         ExportWorkspace.ColumnSpacing = narrow ? 0 : 16;
@@ -277,6 +282,7 @@ public partial class MainWindow : Window
         RoundTripWarningText.IsVisible = !readable;
         AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
         EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+        SchedulePackagePreview();
         SaveSettings();
         UpdateButtons();
     }
@@ -285,6 +291,7 @@ public partial class MainWindow : Window
     {
         if (!_componentsInitialized) return;
         UpdateInferenceModeWarning();
+        SchedulePackagePreview();
         SaveSettings();
     }
 
@@ -292,6 +299,7 @@ public partial class MainWindow : Window
     {
         if (!_componentsInitialized) return;
         UpdateContentPolicyWarning();
+        SchedulePackagePreview();
         SaveSettings();
     }
 
@@ -312,6 +320,47 @@ public partial class MainWindow : Window
     private void UpdateInferenceModeWarning() =>
         BalancedInferenceWarning.IsVisible = SelectedInferenceMode() == VisualInferenceMode.Balanced;
 
+    private string? SelectedRevisions() => (RevisionsComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() is "auto" or null
+        ? null : (RevisionsComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString();
+
+    private void OnReadPackage(object? sender, RoutedEventArgs e) => new PackageBrowserWindow(_latestAiPackagePath).Show(this);
+    private void OnPackageTargetChanged(object? sender, NumericUpDownValueChangedEventArgs e)
+    {
+        if (!_componentsInitialized) return;
+        SchedulePackagePreview();
+        SaveSettings();
+    }
+    private void OnPreviewPackage(object? sender, RoutedEventArgs e) => SchedulePackagePreview();
+    private async void SchedulePackagePreview()
+    {
+        if (!_componentsInitialized) return;
+        _previewCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        _previewCancellation = cancellation;
+        try
+        {
+            if (AiPackageExportRadio.IsChecked != true || _sourceFiles.Count == 0)
+            { PackagePreviewText.Text = "文書を選択して分割を確認してください。"; return; }
+            var source = LocalPath(_sourceFiles[0]);
+            if (source is null) return;
+            var options = new ReadableDocumentExportOptions(source, "unused.md", ContentPolicy: SelectedContentPolicy(),
+                ShowFormulas: ShowFormulasCheckBox.IsChecked == true, IncludeSvgPreviews: IncludeSvgCheckBox.IsChecked == true,
+                IncludeDiagrams: IncludeDiagramsCheckBox.IsChecked == true, InferenceMode: SelectedInferenceMode(),
+                Revisions: SelectedRevisions(), AllowRevisionSharing: RevisionSharingConsent.IsChecked == true);
+            var partOptions = new AiPackagePartOptions((int)(PackageTargetCharacters.Value ?? 12000), TableRowBlocksCheckBox.IsChecked == true);
+            PackagePreviewText.Text = "分割の予想を計算しています…";
+            await Task.Delay(300, cancellation.Token);
+            var estimate = await Task.Run(() => new DocumentService(null, null, discoverPdfRasterizer: false)
+                .PreviewAiPackageAsync(options, partOptions, cancellation.Token), cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            PackagePreviewText.Text = (_sourceFiles.Count > 1 ? "先頭の文書のみ: " : "") + estimate.DescribeJapanese(estimated: true);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) when (IsExpected(exception) || exception is ArgumentException)
+        { if (!cancellation.IsCancellationRequested) PackagePreviewText.Text = "予想を取得できません: " + exception.Message; }
+        finally { if (_previewCancellation == cancellation) _previewCancellation = null; cancellation.Dispose(); }
+    }
+
     private async void OnExport(object? sender, RoutedEventArgs e)
     {
         if (_sourceFiles.Count == 0 || _exportBusy || _restoreBusy) return;
@@ -325,6 +374,7 @@ public partial class MainWindow : Window
         }
 
         var readable = RoundTripExportRadio.IsChecked != true;
+        _previewCancellation?.Cancel();
         ClearLatestReview();
         SetExportBusy(true, readable ? "読みやすいMarkdownを作成しています…" : "MarkdownとDocRedockサイドカーを作成しています…");
         _exportCancellation = new CancellationTokenSource();
@@ -355,12 +405,17 @@ public partial class MainWindow : Window
                         2 => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
                     aiPackage: AiPackageExportRadio.IsChecked == true,
                     zipAiPackage: AiPackageFormComboBox.SelectedIndex == 1,
-                    tableRowBlocks: TableRowBlocksCheckBox.IsChecked == true));
+                    tableRowBlocks: TableRowBlocksCheckBox.IsChecked == true,
+                    targetCharacters: (int)(PackageTargetCharacters.Value ?? 12000),
+                    revisions: SelectedRevisions(), allowRevisionSharing: RevisionSharingConsent.IsChecked == true));
             }
 
             _latestOutputDirectory = _exportDirectory;
             _latestMarkdownPath = results[^1].MarkdownPath;
-            var openLabel = results[^1].AiPackagePath?.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) == true ? "パッケージを開く" : "Markdownを開く";
+            _latestAiPackagePath = results[^1].AiPackagePath;
+            _latestSharingReviews = results.Select(result => result.SharingReview).OfType<RevisionSharingReview>().ToArray();
+            if (results[^1].PackageSize is { } size) PackagePreviewText.Text = size.DescribeJapanese();
+            var openLabel = results[^1].AiPackagePath is not null ? "パッケージを読む" : "Markdownを開く";
             OpenMarkdownButton.Content = openLabel;
             Avalonia.Automation.AutomationProperties.SetName(OpenMarkdownButton, openLabel);
             _latestReviewItems = results.SelectMany(result => result.ReviewItems ?? []).ToArray();
@@ -628,6 +683,7 @@ public partial class MainWindow : Window
 
     private void UpdateExportSelection()
     {
+        SchedulePackagePreview();
         ExportFilePanel.IsVisible = _sourceFiles.Count > 0;
         ExportFileTypeText.Text = _sourceFiles.Count switch
         {
@@ -753,6 +809,8 @@ public partial class MainWindow : Window
         _latestOcrReviewItems = 0;
         _latestTableBoundaries = [];
         _latestEvaluation = [];
+        _latestSharingReviews = [];
+        _latestAiPackagePath = null;
         // A review window always describes the latest export; a new run closes the previous one.
         _reviewWindow?.Close();
         _reviewWindow = null;
@@ -783,6 +841,12 @@ public partial class MainWindow : Window
         ResultCountsText.IsVisible = counts.Length > 0;
         ResultReviewText.IsVisible = warning;
         ResultReviewText.Text = warning ? ReviewSummaryText(review, diagnostics) : "";
+        if (success && _latestSharingReviews.Any(sharing => sharing.Required))
+        {
+            ResultReviewText.Text += "変更履歴を含みます。削除内容・著者・日時の共有可否を確認してください。";
+            ResultReviewText.IsVisible = true;
+            ResultTitleText.Text = "保存は完了しました・変更履歴の共有確認が必要です";
+        }
         ResultOcrText.IsVisible = ocrReviewItems > 0;
         ResultOcrText.Text = ocrReviewItems > 0 ? ExportReviewText.OcrJapanese(new OcrReviewSummary(0, 0, ocrReviewItems)) : "";
         var tables = TableBoundaryText(tableBoundaries);
@@ -805,7 +869,7 @@ public partial class MainWindow : Window
         DiagnosticsTextBox.IsVisible = formattedDiagnostics.Length > 0;
         DiagnosticsExpander.IsVisible = formattedDiagnostics.Length > 0;
         DiagnosticsExpander.IsExpanded = !success;
-        OpenReviewButton.IsVisible = review.Count > 0;
+        OpenReviewButton.IsVisible = review.Length > 0;
         OpenOutputFolderButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestOutputDirectory);
         OpenMarkdownButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestMarkdownPath);
         CancelOperationButton.IsVisible = false;
@@ -813,12 +877,12 @@ public partial class MainWindow : Window
 
     // "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件／OCR確認 3件": pages, images, and
     // elements a person acts on, never the number of diagnostic records.
-    private static string ReviewCountsText(IReadOnlyList<GuiReviewItem> review, int ocrReviewItems, int tableBoundaries = 0)
+    private static string ReviewCountsText(GuiReviewItem[] review, int ocrReviewItems, int tableBoundaries = 0)
     {
         var parts = new List<string>();
-        if (review.Count > 0)
+        if (review.Length > 0)
         {
-            parts.Add($"要確認 {review.Count}ページ");
+            parts.Add($"要確認 {review.Length}ページ");
             parts.Add($"照合画像 {review.Count(item => item.Page.ReviewImageReference is not null)}ページ添付");
             var unanalyzed = review.Sum(item => item.Page.CountOf(ReviewElementKind.UnanalyzedContent));
             var uncertain = review.Sum(item => item.Page.CountOf(ReviewElementKind.UncertainText) + item.Page.CountOf(ReviewElementKind.StrikethroughUnplaced));
@@ -876,15 +940,15 @@ public partial class MainWindow : Window
         System.Text.RegularExpressions.Regex.Match(message, @"\((\d+)\)\.?$") is { Success: true } match &&
         int.TryParse(match.Groups[1].Value, out var count) ? count : 1;
 
-    private static string ReviewSummaryText(IReadOnlyList<GuiReviewItem> review, IReadOnlyList<Diagnostic> diagnostics)
+    private static string ReviewSummaryText(GuiReviewItem[] review, IReadOnlyList<Diagnostic> diagnostics)
     {
         const int maxPages = 3;
         var multipleSources = review.Select(item => item.MarkdownPath).Distinct(StringComparer.Ordinal).Count() > 1;
         var lines = review.Take(maxPages).Select(item => (multipleSources ? item.SourceName + " " : string.Empty) + item.Description).ToList();
-        if (review.Count > maxPages) lines.Add($"ほか{review.Count - maxPages}ページ（「該当ページを確認」で一覧できます）");
+        if (review.Length > maxPages) lines.Add($"ほか{review.Length - maxPages}ページ（「該当ページを確認」で一覧できます）");
         // Warnings that the page review does not already explain (hidden content, formulas, ...)
         // are named once per kind and place.
-        var explained = review.Count > 0;
+        var explained = review.Length > 0;
         var others = diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information &&
                 !(explained && IsVisualReviewCode(diagnostic.Code)))
             .Select(diagnostic => (Location: DiagnosticLocation(diagnostic), DiagnosticGuidance(diagnostic.Code, diagnostic.Message, diagnostic.PartUri).Summary))
@@ -1005,6 +1069,7 @@ public partial class MainWindow : Window
 
     private void OnOpenMarkdown(object? sender, RoutedEventArgs e)
     {
+        if (_latestAiPackagePath is not null) { OnReadPackage(sender, e); return; }
         if (string.IsNullOrWhiteSpace(_latestMarkdownPath) || !File.Exists(_latestMarkdownPath)) return;
         try { Process.Start(new ProcessStartInfo { FileName = _latestMarkdownPath, UseShellExecute = true }); }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
@@ -1016,7 +1081,7 @@ public partial class MainWindow : Window
 
     private void OnOpenReview(object? sender, RoutedEventArgs e)
     {
-        if (_latestReviewItems.Count == 0) return;
+        if (_latestReviewItems.Length == 0) return;
         if (_reviewWindow is not null)
         {
             _reviewWindow.Activate();
@@ -1185,7 +1250,7 @@ public partial class MainWindow : Window
 
     private static void SetDragState(Control zone, DragEventArgs e)
     {
-        var hasFiles = e.DataTransfer.TryGetFiles()?.Any() == true;
+        var hasFiles = e.DataTransfer.TryGetFiles() is { Length: > 0 };
         e.DragEffects = hasFiles ? DragDropEffects.Copy : DragDropEffects.None;
         zone.Classes.Set("drag-over", hasFiles);
     }
@@ -1268,6 +1333,8 @@ public partial class MainWindow : Window
             if (settings.AiPackage == true) AiPackageExportRadio.IsChecked = true;
             AiPackageFormComboBox.SelectedIndex = settings.ZipAiPackage == true ? 1 : 0;
             TableRowBlocksCheckBox.IsChecked = settings.TableRowBlocks == true;
+            PackageTargetCharacters.Value = settings.TargetCharacters is >= 128 and <= 1000000 ? settings.TargetCharacters : 12000;
+            RevisionsComboBox.SelectedIndex = settings.Revisions switch { "final" => 1, "markup" => 2, "reject" => 3, _ => 0 };
             if (settings.OcrEnabled is not null) OcrToggle.IsChecked = settings.OcrEnabled;
             if (!string.IsNullOrWhiteSpace(settings.OcrLanguages)) OcrLanguagesTextBox.Text = settings.OcrLanguages;
             if (settings.PdfFallback is not null) PdfFallbackToggle.IsChecked = settings.PdfFallback;
@@ -1305,7 +1372,7 @@ public partial class MainWindow : Window
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
                 (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
                 (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence",
-                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked)));
+                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked, (int)(PackageTargetCharacters.Value ?? 12000), SelectedRevisions())));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1335,7 +1402,7 @@ public partial class MainWindow : Window
         string? OcrReview = null,
         bool? AiPackage = null,
         bool? ZipAiPackage = null,
-        bool? TableRowBlocks = null);
+        bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null);
 
     private static void ShowError(TextBlock control, string message)
     {

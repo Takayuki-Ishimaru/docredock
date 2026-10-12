@@ -93,6 +93,7 @@ internal readonly record struct FileIdentity(ulong Device, ulong Index)
     }
 
     [SupportedOSPlatform("windows")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle hFile, out BY_HANDLE_FILE_INFORMATION lpFileInformation);
 
@@ -125,12 +126,18 @@ internal readonly record struct FileIdentity(ulong Device, ulong Index)
     // there is already the 64-bit layout. `path` marshals as a null-terminated UTF-8 string on
     // this platform, which matches what libc's `stat` expects.
     [SupportedOSPlatform("macos")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+        Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
     [DllImport("libc", EntryPoint = "stat$INODE64")]
-    private static extern int MacStatX64(string path, byte[] statBuffer);
+    private static extern int MacStatX64([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
     [SupportedOSPlatform("macos")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+        Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
     [DllImport("libc", EntryPoint = "stat")]
-    private static extern int MacStatArm64(string path, byte[] statBuffer);
+    private static extern int MacStatArm64([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
     // ----------------------------------------------------------------------------------------
     // Linux (glibc and musl), x86_64 and aarch64: st_dev is a uint64 at offset 0, st_ino is a
@@ -163,10 +170,16 @@ internal readonly record struct FileIdentity(ulong Device, ulong Index)
     }
 
     [SupportedOSPlatform("linux")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+        Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
     [DllImport("libc", EntryPoint = "stat")]
-    private static extern int LinuxStat(string path, byte[] statBuffer);
+    private static extern int LinuxStat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 
     [SupportedOSPlatform("linux")]
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101",
+        Justification = "libc stat requires UTF-8; LPUTF8Str avoids ANSI best-fit conversion.")]
     [DllImport("libc", EntryPoint = "__xstat")]
-    private static extern int LinuxXStat(int version, string path, byte[] statBuffer);
+    private static extern int LinuxXStat(int version, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] statBuffer);
 }

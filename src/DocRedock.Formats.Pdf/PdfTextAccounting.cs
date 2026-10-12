@@ -18,7 +18,7 @@ public static class PdfTextAccounting
     public static bool IsTableOwned(PdfTextRegion region, IReadOnlySet<int>? tableSourceIds)
     {
         ArgumentNullException.ThrowIfNull(region);
-        if (tableSourceIds is not { Count: > 0 }) return false;
+        if (tableSourceIds is null || tableSourceIds.Count == 0) return false;
         var ids = region.SourceTextIds;
         return ids.Count > 0 && ids.All(tableSourceIds.Contains);
     }

@@ -9,18 +9,23 @@ namespace DocRedock.Api;
 /// codes, object IDs, and confidences are deliberately absent; they stay in the detailed report.</summary>
 public static class ExportReviewText
 {
-    public static string Location(ReviewPage page) => page.Format switch
+    public static string Location(ReviewPage page)
     {
-        DocumentFormatKind.Pdf => $"{page.Number}ページ目",
-        DocumentFormatKind.Pptx => $"スライド{page.Number}",
-        DocumentFormatKind.Xlsx => $"シート「{SheetName(page.PartitionId)}」",
-        _ => "本文",
-    };
+        ArgumentNullException.ThrowIfNull(page);
+        return page.Format switch
+        {
+            DocumentFormatKind.Pdf => $"{page.Number}ページ目",
+            DocumentFormatKind.Pptx => $"スライド{page.Number}",
+            DocumentFormatKind.Xlsx => $"シート「{SheetName(page.PartitionId)}」",
+            _ => "本文",
+        };
+    }
 
     /// <summary>One to three short Japanese sentences for a page, e.g. 「1ページ目：表の上の斜めの線1件を
     /// 表の記号に変換できませんでした。表の文字は書き出されています。照合画像で線の意味を確認してください。」</summary>
     public static string DescribeJapanese(ReviewPage page)
     {
+        ArgumentNullException.ThrowIfNull(page);
         var parts = new List<string>();
         foreach (var kind in Enum.GetValues<ReviewElementKind>())
         {
@@ -60,6 +65,7 @@ public static class ExportReviewText
     /// <summary>The counts a person acts on: pages, attached review images, elements, and OCR items.</summary>
     public static string CountsJapanese(ExportReview review)
     {
+        ArgumentNullException.ThrowIfNull(review);
         var parts = new List<string>();
         if (review.Pages.Count > 0)
         {
@@ -77,22 +83,32 @@ public static class ExportReviewText
     }
 
     /// <summary>「シート「Data」：C列の空白の左右（A1:B3／D1:D3）を別の表として出力しました。…」</summary>
-    public static string TableBoundaryJapanese(ReadableTableBoundaryReview boundary) =>
-        $"シート「{boundary.SheetName}」：{GapColumn(boundary)}列の空白の左右（{boundary.LeftRange}／{boundary.RightRange}）を別の表として出力しました。" +
+    public static string TableBoundaryJapanese(ReadableTableBoundaryReview boundary)
+    {
+        ArgumentNullException.ThrowIfNull(boundary);
+        return $"シート「{boundary.SheetName}」：{GapColumn(boundary)}列の空白の左右（{boundary.LeftRange}／{boundary.RightRange}）を別の表として出力しました。" +
         "同じ行の内容が対応しているかを配置から判断できなかったため、原本で確認してください。";
+    }
 
-    public static string TableBoundaryEnglish(ReadableTableBoundaryReview boundary) =>
-        $"sheet '{boundary.SheetName}': cells on either side of blank column {GapColumn(boundary)} ({boundary.LeftRange}, {boundary.RightRange}) " +
+    public static string TableBoundaryEnglish(ReadableTableBoundaryReview boundary)
+    {
+        ArgumentNullException.ThrowIfNull(boundary);
+        return $"sheet '{boundary.SheetName}': cells on either side of blank column {GapColumn(boundary)} ({boundary.LeftRange}, {boundary.RightRange}) " +
         "were output as separate tables; compare with the source whether their rows belong together";
+    }
 
     private static string GapColumn(ReadableTableBoundaryReview boundary) =>
         new(boundary.GapRange.TakeWhile(char.IsLetter).ToArray());
 
-    public static string OcrJapanese(OcrReviewSummary ocr) =>
-        $"OCR：信頼度80%未満または不明の認識結果{ocr.ReviewItems}件を原画像と照合してください（Markdownの「OCR照合情報」に行番号付きで記載）。推測による自動修正はしていません。";
+    public static string OcrJapanese(OcrReviewSummary ocr)
+    {
+        ArgumentNullException.ThrowIfNull(ocr);
+        return $"OCR：信頼度80%未満または不明の認識結果{ocr.ReviewItems}件を原画像と照合してください（Markdownの「OCR照合情報」に行番号付きで記載）。推測による自動修正はしていません。";
+    }
 
     public static string DescribeEnglish(ReviewPage page)
     {
+        ArgumentNullException.ThrowIfNull(page);
         var parts = new List<string>();
         foreach (var kind in Enum.GetValues<ReviewElementKind>())
         {

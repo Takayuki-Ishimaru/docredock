@@ -718,3 +718,50 @@ class TestPlainZipAndSpecialFiles(PackageFixture):
                 ('overlapping entries', overlap, prefix + "Overlapped entries: 'parts/0001.md' (possible zip bomb))")]:
             with self.subTest(case=name):
                 self.assert_problems(self.patched(change), [line])
+
+
+class SharingReviewGate(PackageFixture):
+    def set_report(self, target, sharing=None, legacy=False, conversion=False):
+        report = {'schema_version': '1.2', 'review': {'required': conversion}}
+        if sharing is not None:
+            report['sharing_review'] = sharing
+        if legacy:
+            report['diagnostics'] = [{'code': 'TrackedRevisionsPresent', 'severity': 'warning', 'count': 1}]
+        self.relist(target, 'report.json', json.dumps(report).encode())
+
+    def sharing(self, required=False):
+        return dict(required=required, revisions_present=True, revisions_included=required,
+                    deleted_text_included=required, revisions_policy='markup' if required else 'final')
+
+    def test_conversion_sharing_and_legacy_gates_block_part_and_search_before_body(self):
+        for sharing, legacy, conversion in [(self.sharing(True), False, False), (None, True, False),
+                                             (self.sharing(False), False, True)]:
+            for mode in [('--part', 'part-0001'), ('--search', 'one')]:
+                target = self.build()
+                self.set_report(target, sharing, legacy, conversion)
+                for path in [target, self.zipped(target)]:
+                    code, out, err = self.run_cli(path, '--verify', '--fail-on-review', *mode)
+                    self.assertEqual((3, ''), (code, out), err)
+                    self.assertIn('review required', err)
+
+    def test_final_report_overrides_conservative_legacy_diagnostic(self):
+        target = self.build()
+        self.set_report(target, self.sharing(False), legacy=True)
+        code, out, err = self.run_cli(target, '--verify', '--fail-on-review', '--part', 'part-0001')
+        self.assertEqual((0, '# one\n', ''), (code, out, err))
+
+    def test_all_sharing_fields_have_required_boolean_types(self):
+        for key in ['required', 'revisions_present', 'revisions_included', 'deleted_text_included']:
+            for bad in ['false', 0, None, 'MISSING']:
+                with self.subTest(field=key, value=bad):
+                    target = self.build(); sharing = self.sharing()
+                    if bad == 'MISSING': del sharing[key]
+                    else: sharing[key] = bad
+                    self.set_report(target, sharing)
+                    self.assert_refused(target, '--verify', '--fail-on-review', '--part', 'part-0001', says='sharing_review.' + key)
+
+    def test_revision_policy_and_object_are_schema_checked(self):
+        for sharing in ['false', [], {**self.sharing(), 'revisions_policy': 'unknown'},
+                        {**self.sharing(), 'revisions_policy': 0}]:
+            target = self.build(); self.set_report(target, sharing)
+            self.assert_refused(target, '--verify', '--part', 'part-0001', says='sharing_review')

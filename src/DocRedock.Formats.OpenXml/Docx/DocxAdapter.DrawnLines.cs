@@ -49,7 +49,7 @@ public sealed partial class DocxAdapter
     {
         public static readonly DocxDrawnLines None = new();
 
-        public IReadOnlyDictionary<XElement, DocxDrawnDecoration> Paragraphs { get; init; } = new Dictionary<XElement, DocxDrawnDecoration>();
+        public Dictionary<XElement, DocxDrawnDecoration> Paragraphs { get; init; } = new Dictionary<XElement, DocxDrawnDecoration>();
         public IReadOnlySet<XElement> Consumed { get; init; } = new HashSet<XElement>();
     }
 
@@ -175,11 +175,11 @@ public sealed partial class DocxAdapter
     private sealed record DocxDrawnSpace(double Width, string? TableStyle, bool InCell);
 
     // The section that holds each top-level block: the first section break at or after it, else the document's own.
-    private static XElement?[] DrawnSections(XDocument document, IReadOnlyList<XElement> bodyElements)
+    private static XElement?[] DrawnSections(XDocument document, XElement[] bodyElements)
     {
-        var sections = new XElement?[bodyElements.Count];
+        var sections = new XElement?[bodyElements.Length];
         var next = document.Root?.Element(W + "body")?.Element(W + "sectPr");
-        for (var index = bodyElements.Count - 1; index >= 0; index--)
+        for (var index = bodyElements.Length - 1; index >= 0; index--)
         {
             if (bodyElements[index].Name == W + "p" && bodyElements[index].Element(W + "pPr")?.Element(W + "sectPr") is { } own) next = own;
             sections[index] = next;
@@ -442,7 +442,7 @@ public sealed partial class DocxAdapter
     /// it is anchored in it, lies in the strike or underline zone of its line, and spans it; a line over only part of the text
     /// strikes nothing and is reported for review (strike) or ignored (underline), and a line over no text, or over text whose
     /// place is not known, is left as it is. A line that connects shapes, or has an arrowhead, is no decoration.</summary>
-    private static DocxDrawnLines FindDocxDrawnLines(XDocument document, IReadOnlyList<XElement> bodyElements, XDocument? styleDocument,
+    private static DocxDrawnLines FindDocxDrawnLines(XDocument document, XElement[] bodyElements, XDocument? styleDocument,
         DocxHiddenStyles hiddenStyles, bool adjustLineHeightInTable)
     {
         // Quick exit: most documents have no line shape at all.
@@ -453,7 +453,7 @@ public sealed partial class DocxAdapter
         var consumed = new HashSet<XElement>();
         var decorations = new Dictionary<XElement, DocxDrawnDecoration>();
 
-        for (var index = 0; index < bodyElements.Count; index++)
+        for (var index = 0; index < bodyElements.Length; index++)
         {
             // The shapes of this block, by the paragraph they are anchored in.
             var byParagraph = new Dictionary<XElement, List<XElement>>();
@@ -507,7 +507,7 @@ public sealed partial class DocxAdapter
     // ------------------------------------------------------------------------------------------------------ the marks
 
     // A strike over part of the text that cannot be placed: the node says so, and asks for source review.
-    private static void MarkDrawnStrikeUnplaced(IDictionary<string, JsonElement> extensions)
+    private static void MarkDrawnStrikeUnplaced(Dictionary<string, JsonElement> extensions)
     {
         extensions[ReviewExtensionKeys.StrikeUnplaced] = JsonSerializer.SerializeToElement(true);
         extensions[ReviewExtensionKeys.SourceReviewRequired] = JsonSerializer.SerializeToElement(true);

@@ -13,7 +13,7 @@ namespace DocRedock.Formats.OpenXml.Xlsx;
 /// </summary>
 internal static class XlsxMermaidProjection
 {
-    private static readonly char[] ArrowCharacters = ['←', '→', '↑', '↓', '▶', '◀'];
+    private static readonly System.Buffers.SearchValues<char> ArrowCharacters = System.Buffers.SearchValues.Create("←→↑↓▶◀");
     private static readonly Regex SectionHeadingPattern = new(@"^\d+(?:\.\d+)+\s+\S", RegexOptions.CultureInvariant);
     private static readonly Regex NumberedMessagePattern = new(@"^\d+[A-Za-z]?[.)]\s*\S", RegexOptions.CultureInvariant);
     private static readonly Regex StateLabelPattern = new(@"^(?<name>.+)\n(?<code>[A-Z][A-Z0-9_]+)$", RegexOptions.CultureInvariant);
@@ -36,11 +36,15 @@ internal static class XlsxMermaidProjection
                 ids.Contains(edge.SourceId) && ids.Contains(edge.TargetId)))
             .ToArray();
         if (components.Length <= 1) return [projection];
+        var edgesByComponent = components.Select(nodeIds => visual.Edges.Where(edge =>
+            edge.SourceId is not null && edge.TargetId is not null &&
+            nodeIds.Contains(edge.SourceId) && nodeIds.Contains(edge.TargetId)).ToArray()).ToArray();
+        var edgeIdsByComponent = edgesByComponent.Select(edges =>
+            edges.Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal)).ToArray();
         var result = new List<DocumentNode>();
-        var componentSources = components.Select(nodeIds =>
+        var componentSources = components.Select((nodeIds, index) =>
         {
-            var edgeIds = visual.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null &&
-                    nodeIds.Contains(edge.SourceId) && nodeIds.Contains(edge.TargetId))
+            var edgeIds = edgesByComponent[index]
                 .Select(edge => edge.SourceNodeId).Where(id => !string.IsNullOrWhiteSpace(id)).Cast<string>();
             return visual.Nodes.Where(node => nodeIds.Contains(node.Id))
                 .Select(node => node.SourceNodeId).Where(id => !string.IsNullOrWhiteSpace(id)).Cast<string>()
@@ -49,9 +53,7 @@ internal static class XlsxMermaidProjection
         bool OwnedBy(VisualSourceItem item, int componentIndex)
         {
             var nodeIds = components[componentIndex];
-            var edgeIds = visual.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null &&
-                    nodeIds.Contains(edge.SourceId) && nodeIds.Contains(edge.TargetId))
-                .Select(edge => edge.Id).ToHashSet(StringComparer.Ordinal);
+            var edgeIds = edgeIdsByComponent[componentIndex];
             return item.ProjectedNodeId is not null && nodeIds.Contains(item.ProjectedNodeId) ||
                    item.ProjectedEdgeId is not null && edgeIds.Contains(item.ProjectedEdgeId) ||
                    item.SourceAnchor?.Locators.Any(locator => locator.Kind == "shape_id" &&
@@ -62,8 +64,7 @@ internal static class XlsxMermaidProjection
             .Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
         foreach (var (nodeIds, index) in components.Select((ids, index) => (ids, index)))
         {
-            var componentEdges = visual.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null &&
-                nodeIds.Contains(edge.SourceId) && nodeIds.Contains(edge.TargetId)).ToArray();
+            var componentEdges = edgesByComponent[index];
             var componentItems = (visual.SourceItems ?? []).Where(item => OwnedBy(item, index) ||
                 index == 0 && unownedSourceItemIds.Contains(item.Id)).ToArray();
             var componentPathIds = componentItems.Where(item => item.FallbackPathId is not null)
@@ -99,7 +100,7 @@ internal static class XlsxMermaidProjection
         return result;
     }
 
-    private static IReadOnlyList<HashSet<string>> ConnectedComponents(VisualGraph graph)
+    private static HashSet<string>[] ConnectedComponents(VisualGraph graph)
     {
         var parent = graph.Nodes.ToDictionary(node => node.Id, node => node.Id, StringComparer.Ordinal);
         string Find(string id) { while (parent[id] != id) { parent[id] = parent[parent[id]]; id = parent[id]; } return id; }
@@ -434,7 +435,7 @@ internal static class XlsxMermaidProjection
             output.Append("    ").AppendLine(item.Text);
     }
 
-    private static IReadOnlyList<SequenceFragment> ReadSequenceFragments(
+    private static List<SequenceFragment> ReadSequenceFragments(
         IReadOnlyList<Region> regions,
         IReadOnlyList<XlsxDrawingShapeRecord> shapes,
         XlsxWorksheetMetrics? metrics)
@@ -511,7 +512,7 @@ internal static class XlsxMermaidProjection
         .Select((actor, index) => (Distance: Math.Abs(actor.CenterColumn - column), Index: index))
         .OrderBy(item => item.Distance).ThenBy(item => item.Index).First().Index;
 
-    private static IReadOnlyDictionary<XlsxCellRecord, DrawingArrow> MatchSequenceArrows(
+    private static Dictionary<XlsxCellRecord, DrawingArrow> MatchSequenceArrows(
         IReadOnlyList<XlsxCellRecord> messages,
         IReadOnlyList<XlsxDrawingShapeRecord> shapes,
         XlsxWorksheetMetrics? metrics)
@@ -539,7 +540,7 @@ internal static class XlsxMermaidProjection
         shapes.Any(shape => StringComparer.OrdinalIgnoreCase.Equals(shape.Geometry, "foldedCorner") &&
                             Math.Abs(shape.Row - cell.RowIndex) <= 3 && Math.Abs(shape.Column - cell.ColumnIndex) <= 4);
 
-    private static IReadOnlyList<DrawingArrow> ReadDrawingArrows(IReadOnlyList<XlsxDrawingShapeRecord> shapes, XlsxWorksheetMetrics? metrics)
+    private static List<DrawingArrow> ReadDrawingArrows(IReadOnlyList<XlsxDrawingShapeRecord> shapes, XlsxWorksheetMetrics? metrics)
     {
         var result = new List<DrawingArrow>();
         foreach (var shape in shapes)
@@ -1001,7 +1002,7 @@ internal static class XlsxMermaidProjection
         IReadOnlyList<XlsxDrawingShapeRecord> shapes,
         IReadOnlyList<FlowNode> nodes,
         IReadOnlyList<VisualEdge> edges,
-        IReadOnlyDictionary<string, string> edgeSourceIds,
+        Dictionary<string, string> edgeSourceIds,
         List<VisualDiagnostic> diagnostics,
         IReadOnlyList<(string Id, string Value, SourceAnchor Anchor)> labels)
     {
@@ -1100,7 +1101,7 @@ internal static class XlsxMermaidProjection
 
     }
 
-    private static IReadOnlyList<InterfaceEdge> ReadInterfaceEdges(
+    private static List<InterfaceEdge> ReadInterfaceEdges(
         IReadOnlyList<XlsxCellRecord> cells,
         IReadOnlyList<FlowNode> nodes)
     {
@@ -1153,11 +1154,11 @@ internal static class XlsxMermaidProjection
         var labelTokens = EndpointTokens(nodeLabel);
         var overlap = endpointTokens.Intersect(labelTokens, StringComparer.OrdinalIgnoreCase).Count();
         if (overlap == 0) return 0;
-        return 40 + overlap * 10 - Math.Abs(endpointTokens.Count - labelTokens.Count);
+        return 40 + overlap * 10 - Math.Abs(endpointTokens.Length - labelTokens.Length);
     }
 
     private static string NormalizeEndpoint(string value) => Regex.Replace(value.ToLowerInvariant(), "[^a-z0-9一-龠ぁ-んァ-ヶ]", string.Empty);
-    private static IReadOnlyList<string> EndpointTokens(string value) => Regex
+    private static string[] EndpointTokens(string value) => Regex
         .Split(value.ToLowerInvariant().Replace("<<", " ", StringComparison.Ordinal).Replace(">>", " ", StringComparison.Ordinal),
             @"[^a-z0-9一-龠ぁ-んァ-ヶ]+")
         .Where(token => token.Length > 1 && token is not "service" and not "system" and not "システム")
@@ -1313,7 +1314,7 @@ internal static class XlsxMermaidProjection
 
     private sealed record DirectionalCandidate(FlowNode Node, double Score);
 
-    private static IReadOnlyList<Region> ReadRegions(XlsxWorksheetRecord worksheet, IReadOnlyList<XlsxCellRecord> cells)
+    private static List<Region> ReadRegions(XlsxWorksheetRecord worksheet, IReadOnlyList<XlsxCellRecord> cells)
     {
         var byCoordinate = cells.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex));
         var merged = new List<Region>();
@@ -1343,7 +1344,7 @@ internal static class XlsxMermaidProjection
         return minColumn > 0 && maxColumn >= minColumn && maxRow >= minRow;
     }
 
-    private static bool IsArrow(string value) => value.IndexOfAny(ArrowCharacters) >= 0 &&
+    private static bool IsArrow(string value) => value.AsSpan().IndexOfAny(ArrowCharacters) >= 0 &&
         Regex.Replace(value, "[←→↑↓▶◀─━—\\-<>\\s]", string.Empty).Length <= 8;
     private static bool IsHorizontalArrow(string value) => value.Contains('▶') || value.Contains('◀') ||
         value.Contains('←') || value.Contains('→') || value.Contains("->", StringComparison.Ordinal) || value.Contains("<-", StringComparison.Ordinal);
@@ -1378,7 +1379,7 @@ internal static class XlsxMermaidProjection
         var arrowCount = worksheet.Cells.Count(cell => IsGridConnector(cell.Value ?? string.Empty));
         return arrowCount >= 2 && (worksheet.MergedRanges?.Count ?? 0) >= 4;
     }
-    private static bool IsGridConnector(string value) => value.IndexOfAny(ArrowCharacters) >= 0 &&
+    private static bool IsGridConnector(string value) => value.AsSpan().IndexOfAny(ArrowCharacters) >= 0 &&
         Regex.Replace(value, "[←→↑↓▶◀─━—\\-<>\\s]", string.Empty).Length <= 2;
     private static Direction ArrowDirection(string value) => value.Contains('←') || value.Contains('◀') ? Direction.Left :
         value.Contains('→') || value.Contains('▶') ? Direction.Right : value.Contains('↑') ? Direction.Up : Direction.Down;

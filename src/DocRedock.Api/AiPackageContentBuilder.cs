@@ -21,8 +21,13 @@ public static class AiPackageContentBuilder
         ReadableMarkdownOptions options,
         string sourceFileName,
         int targetCharacters = 12000,
-        CancellationToken cancellationToken = default) =>
-        Build(graph, options, sourceFileName, new AiPackagePartOptions(targetCharacters), cancellationToken);
+        CancellationToken cancellationToken = default)
+    {
+        if (targetCharacters < MinimumTargetCharacters)
+            throw new ArgumentOutOfRangeException(nameof(targetCharacters), targetCharacters,
+                $"Target characters must be at least {MinimumTargetCharacters}.");
+        return Build(graph, options, sourceFileName, new AiPackagePartOptions(targetCharacters), cancellationToken);
+    }
 
     public static IReadOnlyList<AiPackagePart> Build(
         DocumentGraph graph,
@@ -37,7 +42,7 @@ public static class AiPackageContentBuilder
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceFileName);
         var targetCharacters = partOptions.TargetCharacters;
         if (targetCharacters < MinimumTargetCharacters)
-            throw new ArgumentOutOfRangeException(nameof(targetCharacters), targetCharacters,
+            throw new ArgumentOutOfRangeException(nameof(partOptions), targetCharacters,
                 $"Target characters must be at least {MinimumTargetCharacters}.");
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -467,6 +472,7 @@ public static class AiPackageContentBuilder
     /// Ids on the opposite side of a diagram/visual-member relationship: a diagram lists its
     /// members; a member names its host through a host/shape identifier extension.
     /// </summary>
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1859", Justification = "The empty case returns the shared empty array; retaining IEnumerable avoids allocating an empty List.")]
     private static IEnumerable<string> LinkedVisualMemberIds(DocumentNode node, Dictionary<string, string> byShapeId)
     {
         if (node.Extensions is null) return [];

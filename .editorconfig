@@ -1,0 +1,24 @@
+root = true
+
+[src/**/*.cs]
+# Enforce API contracts, deterministic serialization, cancellation, and native interop.
+dotnet_diagnostic.CA1062.severity = error
+dotnet_diagnostic.CA1305.severity = error
+dotnet_diagnostic.CA2016.severity = error
+dotnet_diagnostic.CA2101.severity = error
+dotnet_diagnostic.CA2208.severity = error
+dotnet_diagnostic.CA5392.severity = error
+
+[tests/**/*.cs]
+# Test names describe scenarios with underscores.
+dotnet_diagnostic.CA1707.severity = none
+
+[tests/DocRedock.Tests/EnvironmentVariableCollection.cs]
+# xUnit collection definitions use the framework's Collection suffix.
+dotnet_code_quality.CA1711.allowed_suffixes = Collection
+
+[tests/DocRedock.Tests/Api/StrikethroughTimingTests.cs]
+dotnet_code_quality.CA1711.allowed_suffixes = Collection
+
+[tests/DocRedock.Gui.HeadlessTests/PackageBrowserTests.cs]
+dotnet_code_quality.CA1711.allowed_suffixes = Collection

@@ -108,7 +108,7 @@ public static class ReviewMarkdownPreview
         _ => null,
     };
 
-    private static Control Heading(MarkdownHeading heading)
+    private static SelectableTextBlock Heading(MarkdownHeading heading)
     {
         var text = Inline(heading.Text);
         text.FontSize = heading.Level switch { 1 => 20, 2 => 17, 3 => 15, _ => 14 };
@@ -143,7 +143,7 @@ public static class ReviewMarkdownPreview
         return Inline(trimmed);
     }
 
-    private static Control List(MarkdownList list)
+    private static StackPanel List(MarkdownList list)
     {
         var panel = new StackPanel { Spacing = 3 };
         for (var index = 0; index < list.Items.Count; index++)
@@ -163,7 +163,7 @@ public static class ReviewMarkdownPreview
         return panel;
     }
 
-    private static Control Code(MarkdownCodeBlock code)
+    private static Border Code(MarkdownCodeBlock code)
     {
         if (code.Language.Equals("mermaid", StringComparison.OrdinalIgnoreCase) && DescribeFlowchart(code.Text) is { Count: > 0 } connections)
         {
@@ -182,7 +182,7 @@ public static class ReviewMarkdownPreview
         return Card(body);
     }
 
-    private static Control Table(MarkdownTable table)
+    private static ScrollViewer Table(MarkdownTable table)
     {
         var columns = Math.Max(table.Headers.Count, table.Rows.Select(row => row.Count).DefaultIfEmpty(0).Max());
         var grid = new Grid();

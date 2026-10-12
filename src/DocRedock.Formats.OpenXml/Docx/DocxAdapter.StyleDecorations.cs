@@ -123,7 +123,7 @@ public sealed partial class DocxAdapter
             }
         }
 
-        public void AddDiagnostics(ICollection<Diagnostic> diagnostics)
+        public void AddDiagnostics(List<Diagnostic> diagnostics)
         {
             if (unresolvedStyles.Count == 0) return;
             diagnostics.Add(new("DocxStyleDecorationUnresolved",

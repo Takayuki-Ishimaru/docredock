@@ -14,7 +14,7 @@ public sealed partial class XlsxAdapter
         public bool Spend(int work) { remaining -= work; return remaining >= 0; }
     }
 
-    private static IReadOnlyList<ConditionalName> ReadConditionalNames(Dictionary<string, byte[]> package, WorkbookInfo workbook)
+    private static List<ConditionalName> ReadConditionalNames(Dictionary<string, byte[]> package, WorkbookInfo workbook)
     {
         if (!package.TryGetValue("xl/workbook.xml", out var bytes)) return [];
         var names = new List<ConditionalName>();

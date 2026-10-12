@@ -96,7 +96,7 @@ public sealed class CapabilityReporter
         [new("ocr-jpn", status, "tesseract", path, "Install the jpn traineddata package.", Tier: "optional"),
          new("ocr-eng", status, "tesseract", path, "Install the eng traineddata package.", Tier: "optional")];
 
-    private static CapabilityStatus Language(string language, ISet<string> available, string path) => available.Contains(language)
+    private static CapabilityStatus Language(string language, HashSet<string> available, string path) => available.Contains(language)
         ? new("ocr-" + language, "ready", "tesseract", path, Tier: "optional")
         : new("ocr-" + language, "unavailable", "tesseract", path, $"Install the {language} traineddata package.", Tier: "optional");
 

@@ -21,6 +21,7 @@ public sealed class VisionOcrEngine : IOcrEngine
     private readonly TimeSpan defaultTimeout;
     private readonly long maxOutputBytes;
     private const int MaxErrorMessageLength = 500;
+    private static readonly JsonSerializerOptions ReadJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     public VisionOcrEngine(
         string? helperPath = null,
@@ -113,7 +114,7 @@ public sealed class VisionOcrEngine : IOcrEngine
                 return Failure(OcrProcessingStatus.Failed, "OutputLimit", "Vision OCR output exceeded the configured limit.");
             try
             {
-                var lines = JsonSerializer.Deserialize<VisionLine[]>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? [];
+                var lines = JsonSerializer.Deserialize<VisionLine[]>(output, ReadJsonOptions) ?? [];
                 var regions = lines
                     .Where(line => !string.IsNullOrWhiteSpace(line.Text) && line.Confidence >= 0)
                     .Select((line, index) => new OcrTextRegion(line.Text, new Geometry(
@@ -133,6 +134,7 @@ public sealed class VisionOcrEngine : IOcrEngine
         }
     }
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record VisionLine(
         [property: JsonPropertyName("text")] string Text,
         [property: JsonPropertyName("confidence")] double Confidence,
@@ -242,6 +244,8 @@ public sealed class FallbackOcrEngine : IOcrEngine
 
     public FallbackOcrEngine(IOcrEngine primary, IOcrEngine fallback)
     {
+        ArgumentNullException.ThrowIfNull(primary);
+        ArgumentNullException.ThrowIfNull(fallback);
         this.primary = primary;
         this.fallback = fallback;
         Descriptor = new ProviderDescriptor(

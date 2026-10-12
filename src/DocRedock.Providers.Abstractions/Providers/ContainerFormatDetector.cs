@@ -16,12 +16,14 @@ public sealed class ContainerFormatDetector : IFormatProbe
 
     public ValueTask<ProbeResult> ProbeAsync(RewindableInput input, ProbeContext context, CancellationToken cancellationToken)
     {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(context);
         cancellationToken.ThrowIfCancellationRequested();
         var stream = input.Stream;
         var magic = ReadPrefix(stream, 5);
         if (magic.SequenceEqual("%PDF-"u8))
             return ValueTask.FromResult(CreatePdf(context));
-        if (!IsZipMagic(magic[..Math.Min(4, magic.Length)]))
+        if (!IsZipMagic(magic.AsSpan(0, Math.Min(4, magic.Length))))
             return ValueTask.FromResult(ProbeResult.Unsupported(Descriptor.ProviderId, "Input is neither PDF nor a ZIP-based OOXML package."));
 
         try
@@ -60,7 +62,7 @@ public sealed class ContainerFormatDetector : IFormatProbe
         "docredock.format.container", 1.0, 100,
         new[] { new ProbeEvidence("magic", "%PDF-") }, ExtensionMismatch(context.FileName, "pdf"), false, false, true);
 
-    private static IReadOnlyList<ProbeWarning> ExtensionMismatch(string? fileName, string detected)
+    private static ProbeWarning[] ExtensionMismatch(string? fileName, string detected)
     {
         var extension = fileName is null ? null : Path.GetExtension(fileName).TrimStart('.');
         var accepted = detected switch

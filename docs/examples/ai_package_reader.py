@@ -920,9 +920,27 @@ def read_review(package, manifest, data=None):
     field, value = _get(review, "required", name + ".review", False)
     if not isinstance(value, bool):
         raise PackageError("%s must be true or false, got %s" % (field, _kind_of(value)))
+    conversion_required = value
+    sharing = _get(report, "sharing_review", name, True)[1]
+    sharing_required = False
+    if sharing is not None:
+        where = name + ".sharing_review"
+        sharing = _object(sharing, where)
+        for key in ("required", "revisions_present", "revisions_included", "deleted_text_included"):
+            field, flag = _get(sharing, key, where, False)
+            if not isinstance(flag, bool):
+                raise PackageError("%s must be true or false, got %s" % (field, _kind_of(flag)))
+        policy = _text(sharing, "revisions_policy", where)
+        if policy not in ("final", "markup", "reject"):
+            raise PackageError("%s.revisions_policy must be final, markup or reject, got %s" % (where, json.dumps(policy)))
+        sharing_required = sharing["required"]
+    else:
+        diagnostics = report.get("diagnostics")
+        sharing_required = isinstance(diagnostics, list) and any(
+            isinstance(item, dict) and item.get("code") == "TrackedRevisionsPresent" for item in diagnostics)
     summary = _get(report, "summary", name, True)[1]
     summary = {} if summary is None else _object(summary, name + ".summary")
-    return {"required": value,
+    return {"required": conversion_required or sharing_required,
             "review_items_detected": _boolean(summary, "review_items_detected", name + ".summary"),
             "hidden_content_included": _boolean(summary, "hidden_content_included", name + ".summary")}
 

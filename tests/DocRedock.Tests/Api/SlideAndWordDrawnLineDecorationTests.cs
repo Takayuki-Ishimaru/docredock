@@ -36,7 +36,6 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests : IDisposable
     private readonly DocumentService service = new(null, null, discoverPdfRasterizer: false);
     public void Dispose() => Directory.Delete(root, true);
 
-    private const string StrikeY = "116";
     private const string UnderlineY = "126.5";
 
     private string Write(string name, IReadOnlyDictionary<string, string> parts)

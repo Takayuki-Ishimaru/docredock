@@ -2307,6 +2307,7 @@ public sealed class DocxAdapterTests
     // "2. DOCX" for the spec these assert against.
     // =============================================================================================
 
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1812", Justification = "Instantiated by System.Text.Json during deserialization.")]
     private sealed record OverlayDto(string ShapeId, string Text, string Kind, string Direction, string Axis,
         int StartRow, int EndRow, int StartColumn, int EndColumn, string? ShapePreset);
 

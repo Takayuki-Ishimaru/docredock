@@ -92,13 +92,13 @@ public static class RoundTripPackage
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var relative = ValidateEntry(entry, seen);
-                if (relative.EndsWith("/", StringComparison.Ordinal)) continue;
+                if (relative.EndsWith('/')) continue;
                 expanded = checked(expanded + entry.Length);
                 if (expanded > 1_073_741_824) throw new InvalidDataException("Package exceeds the expanded-size limit.");
                 var destination = Path.GetFullPath(Path.Combine(staging, relative.Replace('/', Path.DirectorySeparatorChar)));
                 if (!IsWithin(staging, destination)) throw new InvalidDataException("Package entry escapes the output directory.");
                 Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-                await using var source = entry.Open();
+                await using var source = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
                 await using var target = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 64 * 1024,
                     FileOptions.Asynchronous | FileOptions.SequentialScan);
                 await source.CopyToAsync(target, cancellationToken).ConfigureAwait(false);
@@ -135,14 +135,14 @@ public static class RoundTripPackage
         entry.LastWriteTime = DeterministicTimestamp;
         await using var input = new FileStream(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
             FileOptions.Asynchronous | FileOptions.SequentialScan);
-        await using var output = entry.Open();
+        await using var output = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
         await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
     }
 
     internal static string ValidateEntry(ZipArchiveEntry entry, ISet<string> seen)
     {
         var name = entry.FullName.Replace('\\', '/');
-        if (string.IsNullOrWhiteSpace(name) || name.StartsWith("/", StringComparison.Ordinal) || Path.IsPathRooted(name) ||
+        if (string.IsNullOrWhiteSpace(name) || name.StartsWith('/') || Path.IsPathRooted(name) ||
             name.Split('/').Any(segment => segment is ".." or "."))
             throw new InvalidDataException("Package contains an unsafe entry path.");
         if (!seen.Add(name)) throw new InvalidDataException("Package contains a duplicate entry path.");

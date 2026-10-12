@@ -4,6 +4,17 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.4]
+
+- Added GUI and CLI AI-package search and reading with whole-package verification, review confirmation and selected Markdown separated from source-cell details.
+- Added package part-size estimates and actual size results beside the GUI package output controls.
+- Added Word revision choices `final|markup|reject`; `sanitized` now defaults to final content, while sanitized markup requires explicit sharing consent.
+- Updated report schema to `1.2` with `sharing_review`; manifest schema remains `2.2`. Review-aware readers also flag historical packages containing tracked-change diagnostics.
+- Extended `export --fail-on-review` to revision-sharing review; package search/read return 11 without content when review is required.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.4.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.4.md)
+
 ## [0.3.3]
 
 - Preserved underline and strikethrough across Word, Excel, PowerPoint and PDF, including supported lines drawn over text and Word decorations inherited from styles.

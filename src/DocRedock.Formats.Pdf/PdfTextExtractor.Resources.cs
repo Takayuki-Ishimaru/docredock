@@ -15,7 +15,7 @@ public static partial class PdfTextExtractor
     /// its value. A key written inside a value is never offered as an entry, so the <c>/Font</c> of
     /// an ExtGState or the <c>/Type /Font</c> of an inline font is not taken for the resource
     /// dictionary's own <c>/Font</c>.</summary>
-    private static IReadOnlyList<(string Key, string Value)> ReadDictionaryEntries(string text)
+    private static List<(string Key, string Value)> ReadDictionaryEntries(string text)
     {
         var entries = new List<(string Key, string Value)>();
         var open = text.IndexOf("<<", StringComparison.Ordinal);
@@ -74,7 +74,7 @@ public static partial class PdfTextExtractor
     }
 
     /// <summary>Every object an array (or a single reference) names, in order.</summary>
-    private static IReadOnlyList<int> ReadReferences(string? value)
+    private static List<int> ReadReferences(string? value)
     {
         if (value is null) return [];
         var ids = new List<int>();
@@ -258,7 +258,7 @@ public static partial class PdfTextExtractor
 
         /// <summary>The fonts a <c>/Font</c> resource value names, or null when the value is not a
         /// dictionary the extractor can follow.</summary>
-        public IReadOnlyDictionary<string, PdfFontResource>? ReadFontDictionary(string? value)
+        public Dictionary<string, PdfFontResource>? ReadFontDictionary(string? value)
         {
             if (ResolveDictionary(value, objects) is not { } dictionary) return null;
             var fonts = new Dictionary<string, PdfFontResource>(StringComparer.Ordinal);
@@ -554,7 +554,7 @@ public static partial class PdfTextExtractor
 
     /// <summary>The <c>/Properties</c> a resource dictionary names (marked-content property lists,
     /// among them optional content groups), by name and object.</summary>
-    private static IReadOnlyDictionary<string, int>? ReadPropertyResources(string? value, IReadOnlyDictionary<int, string> objects)
+    private static Dictionary<string, int>? ReadPropertyResources(string? value, IReadOnlyDictionary<int, string> objects)
     {
         if (ResolveDictionary(value, objects) is not { } dictionary) return null;
         var properties = new Dictionary<string, int>(StringComparer.Ordinal);

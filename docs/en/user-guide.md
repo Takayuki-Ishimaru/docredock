@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.3 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.4 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 ## 1. Get DocRedock
 
@@ -35,7 +35,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.3. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.4. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -43,6 +43,20 @@ docredock export input.xlsx --ai-package zip --sheets Summary,Data --output work
 docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.ai-package.zip
 docredock export input.xlsx --ai-package dir --table-row-blocks --output workbook.ai-package
 ```
+
+Use **Read package** (「パッケージを読む」) in the GUI to open an existing folder/ZIP, inspect verification and review guidance, then search and copy the parts you need. The CLI also provides:
+
+```sh
+docredock package search input.ai-package.zip "sales" --json
+docredock package read input.ai-package.zip --part part-0002
+docredock package read input.ai-package.zip --part part-0002 --json --with-sources
+```
+
+Both CLI operations verify the whole package before returning content. When review is required, they return 11 without printing the body. After checking `review.md` and the relevant content, use `--allow-review` to acknowledge review for one invocation. Keep source cells retrieved with `--json --with-sources` locally and send an AI only the body it needs. Search normalizes supported decoration, escapes, case and full-width/half-width forms for text matching.
+
+The GUI places target characters and Excel row splitting beside the package output settings. It shows an OCR-free estimate for the first document, then actual part count, largest part, target overshoots and full/total-part character counts. Repeated headings can make all parts combined larger than the full document.
+
+Choose Word revisions in the GUI or with `--revisions final|markup|reject`. `sanitized` defaults to final content; `visible`/`complete` default to markup. Sanitized markup requires `--allow-revision-sharing` or GUI sharing confirmation. Manifest schema remains `2.2`; report schema `1.2` adds `sharing_review`. Update readers used for sharing review, including when handling historical packages.
 
 The default name is `<source>.ai-package` or `<source>.ai-package.zip`. The package contains:
 
@@ -56,7 +70,7 @@ The default name is `<source>.ai-package` or `<source>.ai-package.zip`. The pack
 | `source-index.json` | Detailed node IDs and original Excel cell addresses; load when needed |
 | `report.json` | Structured conversion summary/review and diagnostic codes/counts |
 
-Word splits at headings and between intact semantic groups, with a soft size target of 12,000 characters. Tables (including nested tables), diagram members, and list sequences remain together. Each PDF page, PowerPoint slide, or Excel sheet remains one part. Large units can exceed the target; `exceeds_target` marks them and `review.md` lists them. This is a character target, not a model token limit. The CLI uses `--chunk-chars` and the API uses `TargetCharacters`, accepting 128–1,000,000; the GUI uses the default. Each part also records `estimated_tokens`, a rough size (about four ASCII characters or one other character per token) for planning batches; real token counts differ by model.
+Word splits at headings and between intact semantic groups, with a soft size target of 12,000 characters. Tables (including nested tables), diagram members, and list sequences remain together. Each PDF page, PowerPoint slide, or Excel sheet remains one part. Large units can exceed the target; `exceeds_target` marks them and `review.md` lists them. This is a character target, not a model token limit. The CLI uses `--chunk-chars` and the API uses `TargetCharacters`, accepting 128–1,000,000; the GUI's target character control accepts the same range (12,000 by default). Each part also records `estimated_tokens`, a rough size (about four ASCII characters or one other character per token) for planning batches; real token counts differ by model.
 
 Large Excel tables can optionally be cut between rows: `--table-row-blocks` in the CLI, "大きなExcelの表を行ブロックに分割" in the GUI, or `TableRowBlocks` in the API (off by default). When a sheet exceeds the target, each table too large for one part becomes row blocks; every block starts with the table's header rows, and its part and `manifest.json` record the table ID, the block number, the original cell ranges of the header and of the block's rows, and the previous and next part. Short cell text directly above the table — its title, unit or condition notes such as `売上実績（単位: 千円、税抜）` — goes with the first block and is repeated, as written, before the header of every later block, so a block given to a model alone still says what its numbers mean; the part and `manifest.json` (`context_range`) name its cells. Rows are not repeated, dropped or reordered, and small tables and other formats are unchanged.
 
@@ -66,7 +80,7 @@ The current manifest uses schema `2.2`: schema `2.1` (v0.3.2: `table_row_blocks`
 
 You do not need to give a model both `document.md` and `source-index.json` on every request. Send `document.md` when it fits, or the parts one by one (they name their source and location); keep `source-index.json` locally and load it only to trace an answer back to node IDs or Excel cells. See the [format contract](../reference/ai-package.md#giving-a-package-to-a-model).
 
-Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-package`. Existing conversion switches, including `--no-diagrams`, `--show-formulas`, `--ocr-review`, and PDF fallback settings, still apply. CLI PDF conversion retains its experimental flag requirement. A successful export with conversion warnings returns 1; failed/cancelled conversion leaves no partial package. For automated pipelines, `--fail-on-review` returns 11 when the export needs review (source-review pages, OCR items or Excel table boundaries; `review.required` in `report.json`), after writing the package, so the package is not handed to a model on exit code 0 alone. Without it, review items do not change the exit code. Existing targets require `--force` in the CLI; the GUI selects a numbered name for repeated exports. Packages are one-way inputs and are not restoration sidecars. See the [format contract](../reference/ai-package.md) for the API and JSON details.
+Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-package`. Existing conversion switches, including `--no-diagrams`, `--show-formulas`, `--ocr-review`, and PDF fallback settings, still apply. CLI PDF conversion retains its experimental flag requirement. A successful export with conversion warnings returns 1; failed/cancelled conversion leaves no partial package. For automated pipelines, `--fail-on-review` returns 11 when the export needs review (source-review pages, OCR items, Excel table boundaries or Word revision-sharing review; `review.required` in `report.json`), after writing the package, so the package is not handed to a model on exit code 0 alone. Without it, review items do not change the exit code. Existing targets require `--force` in the CLI; the GUI selects a numbered name for repeated exports. Packages are one-way inputs and are not restoration sidecars. See the [format contract](../reference/ai-package.md) for the API and JSON details.
 
 ## 3. Generated files
 
@@ -80,13 +94,15 @@ Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-pa
 
 Mermaid is emitted only when connections are clear and consistent. Recognized visuals retain the best available form in this order: (1) Mermaid, (2) an image or page-preview fallback, and (3) an explicit diagnostic. Preserving shape text alone does not prove that connections and branches were preserved.
 
+Package settings expose row splitting, target characters, estimated part count, largest part and target overshoots (first document, OCR off); completed exports show actual sizes. 「パッケージを読む」 verifies a directory or ZIP, shows its review report, and offers search and copy of one selected part without the source index. CLI equivalents are `docredock package search package.zip "sales"` and `docredock package read package.zip --part part-0001`. Review blocks body output with exit 11; use `--allow-review` after reviewing. A single part offers limited input reduction; all parts combined may grow due to repeated context.
+
 ## 4. Choose a content policy
 
 - **visible** (default): filters recognized hidden text, hidden sheets/rows/columns, hidden slides/objects, notes, comments, and revision metadata, as well as PDF text entirely outside the visible area or on a layer that is off, out of the Markdown projection.
 - **complete**: includes hidden/metadata content and emits a warning.
 - **sanitized**: also filters metadata, derived/OCR content, and furniture such as headers and footers.
 
-Word body revisions remain visible in readable Markdown and AI packages under `visible` and `sanitized`, including deleted text. Finalize revisions in a copy of the source before conversion if they should not be shared.
+Choose Word revisions with `--revisions final|markup|reject` (GUI Word revision selector, API `Revisions`). `final` outputs insertions/current content and excludes deletions, move sources and history annotations; `markup` includes revision history and deleted content; `reject` refuses documents with tracked changes. The default is `final` for `sanitized`, and the previous `markup` behavior for `visible`/`complete`. Explicit sanitized markup requires `--allow-revision-sharing` or the GUI's session-only consent checkbox. Revision markup requires sharing review and causes export `--fail-on-review` to return 11. Original documents and restoration sidecars still retain history.
 
 XLSX exports also accept `--sheets Sheet1,Sheet2` (CLI only) to project only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
 
