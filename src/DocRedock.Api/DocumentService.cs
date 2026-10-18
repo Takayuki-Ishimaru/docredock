@@ -273,6 +273,7 @@ public sealed partial class DocumentService
         var assetDirectoryPath = Path.Combine(Path.GetDirectoryName(markdownPath)!,
             Path.GetFileNameWithoutExtension(markdownPath) + ".assets");
         var createdAssetDirectory = false;
+        string? stagedAssetDirectoryPath = null;
 
         try
         {
@@ -322,10 +323,17 @@ public sealed partial class DocumentService
                 {
                     if (File.Exists(assetDirectoryPath) || Directory.Exists(assetDirectoryPath))
                         throw new IOException("Readable Markdown asset output already exists; refusing to overwrite it.");
-                    Directory.CreateDirectory(assetDirectoryPath);
-                    createdAssetDirectory = true;
+                    // Publish a complete, exclusively owned directory. CreateDirectory alone
+                    // is idempotent and cannot establish ownership against another exporter.
+                    stagedAssetDirectoryPath = Path.Combine(Path.GetDirectoryName(assetDirectoryPath)!,
+                        $".{Path.GetFileName(assetDirectoryPath)}.{Guid.NewGuid():N}.tmp");
+                    Directory.CreateDirectory(stagedAssetDirectoryPath);
                     foreach (var asset in imageAssets)
-                        await WriteNewAsync(Path.Combine(assetDirectoryPath, Path.GetFileName(asset.FileName)), asset.Content.ToArray(), cancellationToken).ConfigureAwait(false);
+                        await WriteNewAsync(Path.Combine(stagedAssetDirectoryPath, Path.GetFileName(asset.FileName)), asset.Content.ToArray(), cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(stagedAssetDirectoryPath, assetDirectoryPath);
+                    createdAssetDirectory = true;
+                    stagedAssetDirectoryPath = null;
                     graph = RebindReadableImageReferences(graph, imageAssets.ToDictionary(
                         asset => asset.Id,
                         asset => Path.GetFileName(assetDirectoryPath).Replace('\\', '/') + "/" + Path.GetFileName(asset.FileName),
@@ -356,7 +364,9 @@ public sealed partial class DocumentService
         }
         catch
         {
-            TryDeleteFile(markdownPath);
+            // WriteNewAsync owns its temporary file and installs Markdown atomically.
+            // A failed or cancelled export must never delete another writer's Markdown.
+            if (stagedAssetDirectoryPath is not null) TryDeleteDirectory(stagedAssetDirectoryPath);
             if (createdAssetDirectory) TryDeleteDirectory(assetDirectoryPath);
             throw;
         }
@@ -1888,7 +1898,12 @@ public sealed partial class DocumentService
         var directory = Path.GetDirectoryName(outputPath) ?? throw new IOException("Output has no parent directory.");
         Directory.CreateDirectory(directory);
         var temporary = Path.Combine(directory, $".{Path.GetFileName(outputPath)}.{Guid.NewGuid():N}.tmp");
-        try { await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false); File.Move(temporary, outputPath); }
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporary, outputPath);
+        }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 }

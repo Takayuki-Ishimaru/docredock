@@ -6,10 +6,10 @@ namespace DocRedock.Tests.Api;
 
 /// <summary>Timing checks that run alone: next to the rest of the suite, running in parallel, CPU
 /// contention stretched a one-second extraction past a five-second bound.</summary>
-[CollectionDefinition("Timed PDF extraction", DisableParallelization = true)]
-public sealed class TimedPdfExtractionCollection;
+[CollectionDefinition("Timed document processing", DisableParallelization = true)]
+public sealed class TimedDocumentProcessingCollection;
 
-[Collection("Timed PDF extraction")]
+[Collection("Timed document processing")]
 public sealed class StrikethroughTimingTests
 {
     [Fact]
@@ -27,6 +27,9 @@ public sealed class StrikethroughTimingTests
         var content = commands.ToString();
         var pdf = Encoding.Latin1.GetBytes("%PDF-1.4\n1 0 obj << /Type /Page /MediaBox [0 0 1500 13100] /Contents 2 0 R >> endobj\n2 0 obj << /Length " +
             content.Length + " >> stream\n" + content + "\nendstream endobj\n%%EOF");
+        // Measure the extraction algorithm separately from first-use JIT, as the inference
+        // timing gate does. Keep the same five-second budget and the complete input.
+        _ = PdfTextExtractor.Extract(pdf);
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var result = PdfTextExtractor.Extract(pdf);
         watch.Stop();

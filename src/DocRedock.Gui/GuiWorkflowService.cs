@@ -171,48 +171,40 @@ public sealed class GuiWorkflowService
         {
             EnsureOutputDoesNotExist(markdownPath);
             var readableService = new DocumentService(OcrEngineFactory.CreateDefault(), DiscoverRasterizer());
-            try
-            {
-                var exported = await readableService.ExportReadableAsync(new ReadableDocumentExportOptions(
-                    sourcePath,
-                    markdownPath,
-                    enableOcr,
-                    NormalizeLanguages(ocrLanguages),
-                    ContentPolicy: contentPolicy,
-                    ShowFormulas: showFormulas,
-                    IncludeSvgPreviews: includeSvgPreviews,
-                    IncludeDiagrams: includeDiagrams,
-                    EmbedImages: embedReadableImages,
-                    InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
-                    Revisions: revisions, AllowRevisionSharing: allowRevisionSharing), cancellationToken).ConfigureAwait(false);
-                // Built once so the two GUI summary lines (this one and ExportSummary below) can
-                // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
-                var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
-                var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics, exported.Projection);
-                return new GuiExportResult(
-                    markdownPath,
-                    string.Empty,
-                    exported.Graph.Format.ToString().ToLowerInvariant(),
-                    "Readable Markdown (one-way)",
-                    AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
-                    IsReadable: true,
-                    InferenceMode: exported.InferenceMode,
-                    VisualSummary: SummarizeVisualGraph(summary),
-                    PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
-                        string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
-                    ExportSummary: summary.ToString(),
-                    ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
-                        new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
-                            ContentPolicy: contentPolicy, OcrReview: ocrReview)),
-                    OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries, SharingReview: review.SharingReview);
-            }
-            catch
-            {
-                TryDeleteFile(markdownPath);
-                TryDeleteDirectory(Path.Combine(Path.GetDirectoryName(markdownPath)!,
-                    Path.GetFileNameWithoutExtension(markdownPath) + ".assets"));
-                throw;
-            }
+            // The export service removes only the outputs it created on failure.
+            // A second cleanup here could delete preexisting assets it refused to overwrite.
+            var exported = await readableService.ExportReadableAsync(new ReadableDocumentExportOptions(
+                sourcePath,
+                markdownPath,
+                enableOcr,
+                NormalizeLanguages(ocrLanguages),
+                ContentPolicy: contentPolicy,
+                ShowFormulas: showFormulas,
+                IncludeSvgPreviews: includeSvgPreviews,
+                IncludeDiagrams: includeDiagrams,
+                EmbedImages: embedReadableImages,
+                InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
+                Revisions: revisions, AllowRevisionSharing: allowRevisionSharing), cancellationToken).ConfigureAwait(false);
+            // Built once so the two GUI summary lines (this one and ExportSummary below) can
+            // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
+            var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
+            var review = ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics, exported.Projection);
+            return new GuiExportResult(
+                markdownPath,
+                string.Empty,
+                exported.Graph.Format.ToString().ToLowerInvariant(),
+                "Readable Markdown (one-way)",
+                AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
+                IsReadable: true,
+                InferenceMode: exported.InferenceMode,
+                VisualSummary: SummarizeVisualGraph(summary),
+                PdfRasterizer: PdfRasterizerFactory.Describe(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
+                    string.Equals(Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER"), "1", StringComparison.Ordinal)),
+                ExportSummary: summary.ToString(),
+                ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
+                    new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
+                        ContentPolicy: contentPolicy, OcrReview: ocrReview)),
+                OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries, SharingReview: review.SharingReview);
         }
 
         EnsureOutputDoesNotExist(markdownPath);
@@ -493,7 +485,7 @@ public sealed class GuiWorkflowService
             var suffix = index == 1 ? string.Empty : $" ({index})";
             var candidate = Path.Combine(directory, baseName + suffix);
             var paths = readable
-                ? new[] { candidate + ".md" }
+                ? new[] { candidate + ".md", candidate + ".assets" }
                 : new[] { candidate + ".md", candidate + ".drmd", candidate + ".drmdpkg" };
             if (paths.All(path => !File.Exists(path) && !Directory.Exists(path))) return baseName + suffix;
         }
