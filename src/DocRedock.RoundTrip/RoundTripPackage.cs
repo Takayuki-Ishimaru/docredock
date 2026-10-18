@@ -58,7 +58,8 @@ public static class RoundTripPackage
                 }
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
-            File.Move(temporaryPath, packagePath);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporaryPath, packagePath);
             return new PackResult(packagePath, count);
         }
         finally
@@ -115,7 +116,8 @@ public static class RoundTripPackage
             if (!verification.IsValid)
                 throw new WorkspaceIntegrityException("Unpacked workspace failed integrity verification: " +
                     string.Join("; ", verification.Issues.Select(issue => $"{issue.Code}: {issue.Message}")));
-            Directory.Move(staging, outputDirectory);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(staging, outputDirectory);
             return new UnpackResult(
                 outputDirectory,
                 Path.Combine(outputDirectory, Path.GetFileName(markdownFiles[0])),

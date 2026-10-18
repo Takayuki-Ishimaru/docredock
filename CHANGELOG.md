@@ -4,6 +4,17 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.6]
+
+- Preserved existing Markdown and image assets when readable export fails, is cancelled, or competes with another export.
+- Made non-forced CLI output commits reject destinations created during conversion and protected input documents inside nested output folders, including resolved symbolic links.
+- Included existing image files and folders when the GUI selects an unused output name.
+- Protected AI-package, experimental round-trip, restoration and rendering destinations from concurrent replacement.
+- Isolated Word revision settings for each concurrent conversion.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.6.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.6.md)
+
 ## [0.3.5]
 
 - Preserved surviving Word table cells in final revision view when cell deletion leaves an unresolved grid; retained text uses row-order fallback with a dedicated diagnostic and required conversion review.

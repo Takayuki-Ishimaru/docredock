@@ -98,9 +98,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (options.FinalRevisionView) ApplyFinalRevisionView(doc);
         var relationships = ReadRelationships(archive, "word/_rels/document.xml.rels", cancellationToken);
         var numberingInfo = ReadNumberingInfo(archive, cancellationToken);
-        var hiddenStyles = ReadHiddenStyles(archive, cancellationToken);
-        if (options.ShowTrackedRevisions) hiddenStyles = hiddenStyles.WithTrackedRevisions();
-        hiddenStyles.FinalRevisionView = options.FinalRevisionView;
+        var hiddenStyles = ReadHiddenStyles(archive, cancellationToken)
+            .WithRevisionView(options.ShowTrackedRevisions, options.FinalRevisionView);
         var listCounters = new Dictionary<(int NumId, int Ilvl), int>();
         var nodes = new List<DocumentNode>();
         var sliceMap = new Dictionary<string, RawSliceRef>(StringComparer.Ordinal);
@@ -3326,10 +3325,16 @@ public sealed partial class DocxAdapter : IFormatProbe
         private readonly bool hasStyleVanish;
         public DocxStyleDecorations Decorations { get; init; } = DocxStyleDecorations.Empty;
         public bool ShowTrackedRevisions { get; private init; }
-        public bool FinalRevisionView { get; set; }
+        public bool FinalRevisionView { get; private init; }
 
-        public DocxHiddenStyles WithTrackedRevisions() =>
-            new(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId) { ShowTrackedRevisions = true, Decorations = Decorations };
+        // Revision settings belong to one extraction; Empty is shared by documents without styles.xml.
+        public DocxHiddenStyles WithRevisionView(bool showTrackedRevisions, bool finalRevisionView) =>
+            new(documentDefault, paragraphStyles, characterStyles, defaultParagraphStyleId)
+            {
+                ShowTrackedRevisions = showTrackedRevisions,
+                FinalRevisionView = finalRevisionView,
+                Decorations = Decorations
+            };
 
         public DocxHiddenStyles(bool documentDefault, IReadOnlyDictionary<string, bool?> paragraphStyles,
             IReadOnlyDictionary<string, bool?> characterStyles, string? defaultParagraphStyleId)
@@ -4231,7 +4236,8 @@ public sealed partial class DocxAdapter : IFormatProbe
                     }
                 }
             }
-            File.Move(temporary, outputPath);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporary, outputPath);
         }
         catch
         {
@@ -4249,7 +4255,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         {
             await using var input = File.OpenRead(sourcePath);
             await using (var output = File.Create(temporary)) await input.CopyToAsync(output, cancellationToken).ConfigureAwait(false);
-            File.Move(temporary, outputPath);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporary, outputPath);
         }
         catch { if (File.Exists(temporary)) File.Delete(temporary); throw; }
     }

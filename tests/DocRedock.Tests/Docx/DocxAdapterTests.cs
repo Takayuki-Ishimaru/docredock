@@ -14,6 +14,29 @@ namespace DocRedock.Tests.Docx;
 public sealed class DocxAdapterTests
 {
     [Fact]
+    public async Task Concurrent_final_and_default_extractions_keep_revision_settings_isolated()
+    {
+        var deleted = "<w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>DELETED</w:t></w:r></w:p></w:tc>";
+        var table = OverlayTable(["1000", "1000"],
+            [(null, [deleted, OverlayCell("<w:r><w:t>KEPT</w:t></w:r>")])]);
+        var source = await WriteOverlayDocxAsync("concurrent-revisions-" + Guid.NewGuid().ToString("N") + ".docx", table);
+        try
+        {
+            var adapter = new DocxAdapter();
+            await Task.WhenAll(Enumerable.Range(0, 24).Select(worker => Task.Run(async () =>
+            {
+                for (var iteration = 0; iteration < 12; iteration++)
+                {
+                    var export = await adapter.ExtractAsync(source, new(FinalRevisionView: worker % 2 == 0));
+                    var content = Assert.IsType<TableNodeContent>(Assert.Single(export.Graph.Nodes, node => node.Kind == NodeKind.Table).Content);
+                    Assert.Equal("KEPT", Assert.Single(Assert.Single(content.Rows)).Text);
+                }
+            })));
+        }
+        finally { File.Delete(source); }
+    }
+
+    [Fact]
     public async Task Extracts_main_structures_and_f0_restore_is_byte_identical()
     {
         var source = await CreateDocxAsync();
