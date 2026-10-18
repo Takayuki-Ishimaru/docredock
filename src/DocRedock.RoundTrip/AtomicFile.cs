@@ -5,10 +5,16 @@ namespace DocRedock.RoundTrip;
 /// <summary>Small, platform-neutral helpers for committing files atomically.</summary>
 public static class AtomicFile
 {
-    public static async Task WriteAsync(
+    public static Task WriteAsync(
         string path,
         ReadOnlyMemory<byte> content,
         CancellationToken cancellationToken = default)
+        => WriteCoreAsync(path, content, overwrite: true, cancellationToken);
+
+    internal static Task WriteNewAsync(string path, ReadOnlyMemory<byte> content, CancellationToken cancellationToken = default)
+        => WriteCoreAsync(path, content, overwrite: false, cancellationToken);
+
+    private static async Task WriteCoreAsync(string path, ReadOnlyMemory<byte> content, bool overwrite, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         var fullPath = Path.GetFullPath(path);
@@ -31,7 +37,9 @@ public static class AtomicFile
                 await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(temporaryPath, fullPath, overwrite: true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (overwrite) File.Move(temporaryPath, fullPath, overwrite: true);
+            else DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporaryPath, fullPath);
         }
         finally
         {
@@ -45,10 +53,16 @@ public static class AtomicFile
     public static Task WriteUtf8Async(string path, string content, CancellationToken cancellationToken = default)
         => WriteAsync(path, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(content), cancellationToken);
 
-    public static async Task CopyAsync(
+    public static Task CopyAsync(
         string sourcePath,
         string destinationPath,
         CancellationToken cancellationToken = default)
+        => CopyCoreAsync(sourcePath, destinationPath, overwrite: true, cancellationToken);
+
+    internal static Task CopyNewAsync(string sourcePath, string destinationPath, CancellationToken cancellationToken = default)
+        => CopyCoreAsync(sourcePath, destinationPath, overwrite: false, cancellationToken);
+
+    private static async Task CopyCoreAsync(string sourcePath, string destinationPath, bool overwrite, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
@@ -67,7 +81,9 @@ public static class AtomicFile
                 await target.FlushAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            File.Move(temporaryPath, fullDestination, overwrite: true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (overwrite) File.Move(temporaryPath, fullDestination, overwrite: true);
+            else DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporaryPath, fullDestination);
         }
         finally
         {

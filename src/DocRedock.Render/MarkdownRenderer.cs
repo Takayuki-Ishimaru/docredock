@@ -87,7 +87,7 @@ public sealed class MarkdownRenderer
             }
             else outcome = WriteGenerated(document, format, tempPath, options, sanitizedDocRedock);
             cancellationToken.ThrowIfCancellationRequested();
-            File.Move(tempPath, fullPath);
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(tempPath, fullPath);
         }
         finally
         {

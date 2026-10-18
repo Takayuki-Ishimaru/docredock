@@ -3,6 +3,7 @@ using DocRedock.VisualInference;
 
 namespace DocRedock.Tests.VisualInference;
 
+[Collection("Timed document processing")]
 public sealed class SoftConnectionEngineTests
 {
     [Fact]

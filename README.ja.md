@@ -16,9 +16,9 @@ DocRedockは、Word・Excel・PowerPoint・PDFの内容を、お手元のPCでAI
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.3.5 Public Betaの対応状況
+## v0.3.6 Public Betaの対応状況
 
-v0.3.5では、変更履歴によるセル削除後のWord表の文字を保持し、AI向けパッケージの確認レポート取得と非表示内容の任意確認を追加しました。GUIの確認状態表示を改善し、CLIのレポート取得・単一分割読み取りでは、全体検証を維持しながら必要な内容だけをメモリに保持します。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
+v0.3.6では、変換の失敗・キャンセル・同時実行時に既存のMarkdownや画像フォルダーが失われる問題を修正しました。CLIでは入力文書を含む出力フォルダーの置き換えを拒否し、Wordの並行変換では変更履歴の設定を変換ごとに保持します。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
 
 | 機能 | 扱い |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.5では、変更履歴によるセル削除後のWord表の文字を保持�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.5リリースノート](release-docs/RELEASE_NOTES_v0.3.5.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.6リリースノート](release-docs/RELEASE_NOTES_v0.3.6.md)へ集約します。
 
 ## 30秒で使う
 
@@ -77,7 +77,7 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.3.5はPublic Betaであり、本番向けの安定版ではありません。
+- v0.3.6はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -89,9 +89,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.3.5の対応状況](docs/ja/supported-features.md)
+- [v0.3.6の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.3.5リリースノート](release-docs/RELEASE_NOTES_v0.3.5.md)
+- [v0.3.6リリースノート](release-docs/RELEASE_NOTES_v0.3.6.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

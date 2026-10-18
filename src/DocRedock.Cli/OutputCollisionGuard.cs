@@ -34,8 +34,8 @@ internal static class OutputCollisionGuard
 
     /// <summary>
     /// Throws <see cref="OutputCollidesWithInputException"/> if any <paramref name="candidates"/>
-    /// path resolves to the same location as any <paramref name="protectedInputs"/> path, or to the
-    /// immediate parent directory of one. The parent-directory case covers a directory-shaped output
+    /// path resolves to the same location as any <paramref name="protectedInputs"/> path, or to
+    /// any directory containing one. The ancestor-directory case covers a directory-shaped output
     /// (an unpack destination, a readable ".assets" folder) landing on the directory an input already
     /// lives in: committing such an output backs up and later deletes that whole directory, destroying
     /// the input even though no individual file name literally collided.
@@ -48,10 +48,13 @@ internal static class OutputCollisionGuard
             .ToArray();
         if (inputs.Length == 0) return;
 
+        // Follow every enclosing directory, including the resolved ancestry of file
+        // and directory symlinks, because replacing an output removes its whole tree.
         var inputParents = inputs
-            .Select(Path.GetDirectoryName)
-            .Where(parent => !string.IsNullOrEmpty(parent))
-            .Select(parent => Normalize(parent!))
+            .SelectMany(AncestorDirectories)
+            .SelectMany(parent => AncestorDirectories(ResolveReal(parent)).Prepend(parent))
+            .Concat(inputs.SelectMany(input => AncestorDirectories(ResolveReal(input))))
+            .Distinct(PathComparer)
             .ToArray();
 
         foreach (var candidate in candidates)
@@ -108,7 +111,13 @@ internal static class OutputCollisionGuard
     private static string Normalize(string path)
     {
         var full = Path.GetFullPath(path);
-        return full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return Path.TrimEndingDirectorySeparator(full);
+    }
+
+    private static IEnumerable<string> AncestorDirectories(string path)
+    {
+        for (var parent = Path.GetDirectoryName(path); !string.IsNullOrEmpty(parent); parent = Path.GetDirectoryName(parent))
+            yield return Normalize(parent);
     }
 
     // Best-effort: only a path that already exists on disk can be resolved as a symlink, and a

@@ -100,15 +100,15 @@ public static class SidecarContainer
         {
             await CreateZipAsync(directoryPath, temporaryZip, ct).ConfigureAwait(false);
             await VerifyZipAsync(temporaryZip, markdownPath, ct).ConfigureAwait(false);
-            Directory.Move(directoryPath, backupDirectory);
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(directoryPath, backupDirectory);
             try
             {
-                File.Move(temporaryZip, directoryPath);
+                DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporaryZip, directoryPath);
             }
             catch
             {
                 if (!Directory.Exists(directoryPath) && !File.Exists(directoryPath) && Directory.Exists(backupDirectory))
-                    Directory.Move(backupDirectory, directoryPath);
+                    DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(backupDirectory, directoryPath);
                 throw;
             }
             TryDeleteDirectory(backupDirectory);
@@ -118,7 +118,7 @@ public static class SidecarContainer
         {
             if (File.Exists(temporaryZip)) File.Delete(temporaryZip);
             if (Directory.Exists(backupDirectory) && !File.Exists(directoryPath) && !Directory.Exists(directoryPath))
-                Directory.Move(backupDirectory, directoryPath);
+                DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(backupDirectory, directoryPath);
         }
     }
 
@@ -135,14 +135,14 @@ public static class SidecarContainer
         {
             await ExtractAsync(zipPath, staging, ct).ConfigureAwait(false);
             await VerifyDirectoryAsync(staging, markdownPath, ct).ConfigureAwait(false);
-            File.Move(zipPath, backup);
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(zipPath, backup);
             try
             {
-                Directory.Move(staging, zipPath);
+                DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(staging, zipPath);
             }
             catch
             {
-                if (!File.Exists(zipPath) && !Directory.Exists(zipPath) && File.Exists(backup)) File.Move(backup, zipPath);
+                if (!File.Exists(zipPath) && !Directory.Exists(zipPath) && File.Exists(backup)) DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(backup, zipPath);
                 throw;
             }
             TryDeleteFile(backup);
@@ -151,7 +151,7 @@ public static class SidecarContainer
         finally
         {
             if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
-            if (File.Exists(backup) && !File.Exists(zipPath) && !Directory.Exists(zipPath)) File.Move(backup, zipPath);
+            if (File.Exists(backup) && !File.Exists(zipPath) && !Directory.Exists(zipPath)) DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(backup, zipPath);
         }
     }
 
@@ -163,16 +163,20 @@ public static class SidecarContainer
         EnsureDirectory(directoryPath);
         EnsureDoesNotExist(outputZipPath);
         await VerifyDirectoryAsync(directoryPath, markdownPath, ct).ConfigureAwait(false);
+        var parent = Path.GetDirectoryName(outputZipPath) ?? throw new IOException("Sidecar output path has no parent directory.");
+        Directory.CreateDirectory(parent);
+        var temporaryZip = Path.Combine(parent, $".{Path.GetFileName(outputZipPath)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            await CreateZipAsync(directoryPath, outputZipPath, ct).ConfigureAwait(false);
-            await VerifyZipAsync(outputZipPath, markdownPath, ct).ConfigureAwait(false);
+            await CreateZipAsync(directoryPath, temporaryZip, ct).ConfigureAwait(false);
+            await VerifyZipAsync(temporaryZip, markdownPath, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporaryZip, outputZipPath);
             return outputZipPath;
         }
-        catch
+        finally
         {
-            if (File.Exists(outputZipPath)) File.Delete(outputZipPath);
-            throw;
+            if (File.Exists(temporaryZip)) File.Delete(temporaryZip);
         }
     }
 
@@ -191,7 +195,7 @@ public static class SidecarContainer
         {
             await ExtractAsync(zipPath, staging, ct).ConfigureAwait(false);
             await VerifyDirectoryAsync(staging, markdownPath, ct).ConfigureAwait(false);
-            Directory.Move(staging, outputDirectoryPath);
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(staging, outputDirectoryPath);
             return outputDirectoryPath;
         }
         catch

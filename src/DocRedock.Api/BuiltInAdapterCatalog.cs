@@ -190,7 +190,12 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
         if (File.Exists(path)) throw new IOException("Adapter output already exists.");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try { await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false); File.Move(temporary, path); }
+        try
+        {
+            await File.WriteAllBytesAsync(temporary, bytes, cancellationToken).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(temporary, path);
+        }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
     }
 }
