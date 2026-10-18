@@ -99,7 +99,7 @@ public sealed class RoundTripWorkspace
             await AtomicFile.CopyAsync(sourcePath, originalPath, cancellationToken).ConfigureAwait(false);
             if (options.MarkdownContent is not null)
             {
-                await AtomicFile.WriteAsync(markdownPath, markdownBytes, cancellationToken).ConfigureAwait(false);
+                await AtomicFile.WriteNewAsync(markdownPath, markdownBytes, cancellationToken).ConfigureAwait(false);
                 wroteMarkdown = true;
             }
             await AtomicFile.WriteUtf8Async(Path.Combine(stagingRoot, "graph", "index.json"), "{\n  \"schema_version\": \"1.1\",\n  \"parts\": []\n}\n", cancellationToken).ConfigureAwait(false);
@@ -120,7 +120,8 @@ public sealed class RoundTripWorkspace
 
             var stagingWorkspace = new RoundTripWorkspace(stagingRoot, manifest);
             await stagingWorkspace.RefreshIntegrityAsync(cancellationToken).ConfigureAwait(false);
-            Directory.Move(stagingRoot, finalRoot);
+            cancellationToken.ThrowIfCancellationRequested();
+            DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(stagingRoot, finalRoot);
             return new RoundTripWorkspace(finalRoot, manifest);
         }
         catch
@@ -209,7 +210,7 @@ public sealed class RoundTripWorkspace
         var destination = Path.GetFullPath(destinationPath);
         if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase)) throw new IOException("Restore destination must not be the immutable source.");
         if (File.Exists(destination)) throw new IOException("Restore destination already exists.");
-        await AtomicFile.CopyAsync(source, destination, cancellationToken).ConfigureAwait(false);
+        await AtomicFile.CopyNewAsync(source, destination, cancellationToken).ConfigureAwait(false);
         var report = new BasicReport("restore", true, "F0", "byte-identical", "Byte-identical original restored", Array.Empty<string>());
         await AtomicFile.WriteUtf8Async(Path.Combine(RootPath, "reports", "restore-report.json"), JsonCanonicalizer.Serialize(report), cancellationToken).ConfigureAwait(false);
         await AtomicFile.WriteUtf8Async(Path.Combine(RootPath, "reports", "restore-report.md"), report.ToMarkdown(), cancellationToken).ConfigureAwait(false);
@@ -238,7 +239,7 @@ public sealed class RoundTripWorkspace
         if (StringComparer.OrdinalIgnoreCase.Equals(OriginalSourcePath, destination))
             throw new IOException("Restore destination must not be the immutable source.");
         if (File.Exists(destination)) throw new IOException("Restore destination already exists.");
-        await AtomicFile.CopyAsync(OriginalSourcePath, destination, cancellationToken).ConfigureAwait(false);
+        await AtomicFile.CopyNewAsync(OriginalSourcePath, destination, cancellationToken).ConfigureAwait(false);
         var warnings = diff.PatchSet.Operations.Count == 0
             ? Array.Empty<string>()
             : new[] { "Derived annotations changed; the preserved source bytes were intentionally left unchanged." };

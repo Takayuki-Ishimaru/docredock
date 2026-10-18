@@ -75,7 +75,7 @@ public sealed partial class DocumentService
             if (sourceHash != await AiHashAsync(source, cancellationToken).ConfigureAwait(false))
                 throw new IOException("Source document changed during conversion; run the export again.");
             var oldAssets = Path.Combine(package, "document.assets");
-            if (Directory.Exists(oldAssets)) Directory.Move(oldAssets, Path.Combine(package, "assets"));
+            if (Directory.Exists(oldAssets)) DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(oldAssets, Path.Combine(package, "assets"));
             var graph = AiPackageGraph(exported.Graph, documentOptions);
             var markdownOptions = new ReadableMarkdownOptions(documentOptions.ShowFormulas,
                 documentOptions.IncludeSvgPreviews, documentOptions.IncludeDiagrams, documentOptions.Sheets,
@@ -177,7 +177,7 @@ public sealed partial class DocumentService
             };
             await AiWriteJsonAsync(Path.Combine(package, "manifest.json"), manifest, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
-            if (options.Form == AiPackageForm.Directory) Directory.Move(package, target);
+            if (options.Form == AiPackageForm.Directory) DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(package, target);
             else
             {
                 var zipPath = Path.Combine(staging, "package.zip");
@@ -195,7 +195,7 @@ public sealed partial class DocumentService
                     }
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                File.Move(zipPath, target);
+                DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(zipPath, target);
             }
             return new AiPackageExportResult(target, options.Form, graph, exported.Diagnostics, parts, summary, review)
                 { Size = AiPackageSizeSummary.Build(documentMarkdown, parts, options.TargetCharacters) };

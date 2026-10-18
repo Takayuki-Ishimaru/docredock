@@ -16,8 +16,8 @@ internal sealed class PhysicalStagedOutputFileSystem : IStagedOutputFileSystem
     public bool FileExists(string path) => File.Exists(path);
     public bool DirectoryExists(string path) => Directory.Exists(path);
     public void CreateDirectory(string path) => Directory.CreateDirectory(path);
-    public void MoveFile(string source, string destination) => File.Move(source, destination);
-    public void MoveDirectory(string source, string destination) => Directory.Move(source, destination);
+    public void MoveFile(string source, string destination) => DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(source, destination);
+    public void MoveDirectory(string source, string destination) => DocRedock.Core.IO.ExclusiveFileSystem.MoveDirectory(source, destination);
     public void DeleteFile(string path) => File.Delete(path);
     public void DeleteDirectory(string path, bool recursive) => Directory.Delete(path, recursive);
 }
@@ -34,6 +34,7 @@ internal sealed class StagedOutputTransaction : IDisposable
     private readonly Dictionary<string, string> stagedPaths;
     private readonly HashSet<string> requiredTargets;
     private readonly IStagedOutputFileSystem fileSystem;
+    private readonly bool force;
     private bool committed;
     private bool disposed;
 
@@ -46,6 +47,7 @@ internal sealed class StagedOutputTransaction : IDisposable
     {
         ArgumentNullException.ThrowIfNull(destinations);
         this.fileSystem = fileSystem ?? new PhysicalStagedOutputFileSystem();
+        this.force = force;
         requiredTargets = destinations.Select(Path.GetFullPath).ToHashSet(PathComparer);
         if (requiredTargets.Count == 0) throw new ArgumentException("At least one output path is required.", nameof(destinations));
         var targets = requiredTargets
@@ -104,11 +106,17 @@ internal sealed class StagedOutputTransaction : IDisposable
             throw new InvalidOperationException(
                 $"Cannot commit because staged output is missing: {string.Join(", ", missingStagedOutputs)}.");
 
+        // Another writer may have installed an output while conversion was running.
+        // Without --force, never back it up or delete it; non-overwriting moves also
+        // protect a destination created after this check.
+        if (!force && stagedPaths.Keys.Any(Exists))
+            throw new IOException("Output already exists; refusing to overwrite it. Use --force to replace the requested output.");
+
         var backups = new Dictionary<string, string>(PathComparer);
         var installed = new List<string>();
         try
         {
-            foreach (var target in stagedPaths.Keys)
+            foreach (var target in force ? stagedPaths.Keys : Enumerable.Empty<string>())
             {
                 if (!Exists(target)) continue;
                 var backup = Path.Combine(
