@@ -57,7 +57,13 @@ public sealed record AiPackageManifest(
     string? SourceIndex,
     IReadOnlyList<AiPackageManifestLocation> Locations,
     IReadOnlyList<AiPackageManifestPart> Parts,
-    IReadOnlyList<AiPackageManifestFile> Files);
+    IReadOnlyList<AiPackageManifestFile> Files)
+{
+    /// <summary>The multiplier recorded at the manifest root, or null when absent. Part estimates
+    /// are returned as stored; the reader never applies this multiplier again. A missing multiplier
+    /// does not imply that a part has an estimate or that its estimate used a multiplier of one.</summary>
+    public double? TokenEstimateMultiplier { get; init; }
+}
 
 /// <summary>Node identities (and worksheet cell addresses) of one part's source location.</summary>
 public sealed record AiPackageSourceGroup(string SourceId, IReadOnlyList<string> NodeIds, IReadOnlyList<string?>? CellAddresses);
@@ -522,12 +528,14 @@ public static class AiPackageManifestReader
         CheckParts(fields, parts);
         // 2.x keeps node identities only in the source index, so a 2.x package always has one.
         var sourceIndex = legacy ? null : fields.Path(root, "", "source_index");
+        var multiplier = fields.OptionalMultiplier(root, "", "token_estimate_multiplier");
         var manifest = new AiPackageManifest(version, fields.OptionalText(root, "", "generator_version"),
             fields.Text(source, "source", "file_name"), fields.Sha256(source, "source", "sha256"), fields.Text(source, "source", "format"),
             fields.Text(root, "", "content_policy"), fields.OptionalCount(root, "", "target_characters") ?? 0,
             fields.Flag(root, "", "table_row_blocks"),
             fields.OptionalPath(root, "", "document") ?? "document.md", fields.OptionalPath(root, "", "review") ?? "review.md",
-            fields.OptionalPath(root, "", "report") ?? "report.json", sourceIndex, locations, parts, files);
+            fields.OptionalPath(root, "", "report") ?? "report.json", sourceIndex, locations, parts, files)
+        { TokenEstimateMultiplier = multiplier };
         // A file the manifest names but does not list would pass verification unchecked.
         var listed = files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);
         var unlisted = new[] { manifest.Document, manifest.Review, manifest.Report }
@@ -843,6 +851,20 @@ public static class AiPackageManifestReader
         }
 
         public bool Flag(JsonElement element, string where, string key) => OptionalFlag(element, where, key) ?? false;
+
+        // A stored estimate is already widened by the exporter's multiplier, so a reader only reports
+        // it: the value must be a finite number in the exporter's own range, never recomputed.
+        public double? OptionalMultiplier(JsonElement element, string where, string key)
+        {
+            if (!element.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Null) return null;
+            var text = value.GetRawText();
+            if (value.ValueKind != JsonValueKind.Number || !double.TryParse(text, NumberStyles.Float,
+                    CultureInfo.InvariantCulture, out var multiplier) || !double.IsFinite(multiplier) ||
+                multiplier < AiTokenEstimate.MinimumMultiplier || multiplier > AiTokenEstimate.MaximumMultiplier)
+                throw Invalid($"{Name(where, key)} must be a finite number from {AiTokenEstimate.MinimumMultiplier:0.#} " +
+                    $"to {AiTokenEstimate.MaximumMultiplier:0.#}, got {text}");
+            return multiplier;
+        }
 
         public bool? OptionalFlag(JsonElement element, string where, string key) => Optional(element, key) switch
         {

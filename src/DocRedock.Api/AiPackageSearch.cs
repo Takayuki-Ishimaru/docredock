@@ -6,7 +6,15 @@ namespace DocRedock.Api;
 
 public sealed record AiPackageSearchLine(int Number, string Text);
 public sealed record AiPackageSearchMatch(string PartId, IReadOnlyList<AiPackageManifestLocation> Locations,
-    IReadOnlyList<AiPackageSearchLine> Lines);
+    IReadOnlyList<AiPackageSearchLine> Lines)
+{
+    /// <summary>The part's stored heuristic token estimate, including any export margin;
+    /// null when the part records no estimate.</summary>
+    public int? EstimatedTokens { get; init; }
+    /// <summary>The manifest's recorded multiplier, or null when absent. Independent of whether
+    /// the part records an estimate; never applied again by the search.</summary>
+    public double? TokenEstimateMultiplier { get; init; }
+}
 
 public static class AiPackageSearch
 {
@@ -33,7 +41,11 @@ public static class AiPackageSearch
                 if (Normalize(plain).Contains(needle, StringComparison.Ordinal) || Normalize(searchable).Contains(needle, StringComparison.Ordinal))
                     found.Add(new(index + 1, lines[index]));
             }
-            if (found.Count > 0) matches.Add(new(part.Part.Id, part.Part.Locations, found));
+            if (found.Count > 0) matches.Add(new(part.Part.Id, part.Part.Locations, found)
+            {
+                EstimatedTokens = part.Part.EstimatedTokens,
+                TokenEstimateMultiplier = package.Manifest.TokenEstimateMultiplier,
+            });
         }
         return matches;
     }
