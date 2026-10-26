@@ -290,12 +290,22 @@ class BaselineComparisonTests(unittest.TestCase):
         self.assertEqual([], comparison["file_regressions"])
 
 
+@contextlib.contextmanager
+def patched_timeout(error):
+    """Popen seam for run_cli's timeout branch (same assertions as the old run seam)."""
+    popen = mock.Mock()
+    popen.pid = 999999  # never a real pid: a stray killpg would be harmless
+    popen.communicate.side_effect = [error, (error.stdout, error.stderr)]
+    with mock.patch.object(corpus_regression.subprocess, "Popen", return_value=popen), \
+         mock.patch.object(corpus_regression.os, "killpg", create=True):
+        yield
+
 class RunCliTests(unittest.TestCase):
     def test_timeout_decodes_partial_bytes_and_preserves_diagnostics(self):
         command = ["fake-cli"]
         error = subprocess.TimeoutExpired(command, 1, output=b"WARNING Slow: partial\n\xff",
                                           stderr="途中".encode("utf-8") + b"\xe3")
-        with mock.patch.object(corpus_regression.subprocess, "run", side_effect=error):
+        with patched_timeout(error):
             result = corpus_regression.run_cli(command, 1)
         self.assertTrue(result["timed_out"])
         self.assertIsNone(result["returncode"])
@@ -309,7 +319,7 @@ class RunCliTests(unittest.TestCase):
         for stdout, stderr in [("partial", "error"), (None, None)]:
             with self.subTest(stdout=stdout):
                 error = subprocess.TimeoutExpired(["fake-cli"], 1, output=stdout, stderr=stderr)
-                with mock.patch.object(corpus_regression.subprocess, "run", side_effect=error):
+                with patched_timeout(error):
                     result = corpus_regression.run_cli(["fake-cli"], 1)
                 self.assertEqual(stdout or "", result["stdout"])
                 self.assertTrue(result["stderr"].startswith(stderr or ""))

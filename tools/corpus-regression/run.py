@@ -24,6 +24,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -344,6 +345,43 @@ def build_once(prefix: list, kind: str) -> tuple:
     return [dotnet, str(built[0])], "dotnet-built-once"
 
 
+# Descendants can retain pipes after the CLI exits. Bound the final drain too.
+PIPE_DRAIN_TIMEOUT_SEC = 2.0
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    if os.name == "posix":
+        try:
+            # start_new_session makes the group ID equal to the original child PID,
+            # even when that child has already been reaped.
+            os.killpg(proc.pid, signal.SIGKILL)
+            return
+        except ProcessLookupError:
+            return
+        except OSError:
+            pass
+    proc.kill()
+
+
+def _close_pipes(proc: subprocess.Popen) -> None:
+    for stream in (proc.stdout, proc.stderr):
+        if stream is not None:
+            stream.close()
+
+
+def _reap(proc: subprocess.Popen) -> None:
+    try:
+        proc.wait(timeout=PIPE_DRAIN_TIMEOUT_SEC)
+    except (subprocess.TimeoutExpired, OSError):
+        pass
+
+
+def _decode_partial(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def run_cli(cmd: list, timeout: int) -> dict:
     start = time.time()
     environment = os.environ.copy()
@@ -351,31 +389,54 @@ def run_cli(cmd: list, timeout: int) -> dict:
     # is meaningless without them, so force the gate on regardless of the
     # caller's ambient environment.
     environment["DOCREDOCK_ENABLE_EXPERIMENTAL"] = "1"
+    popen_kwargs: dict = dict(cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=environment)
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(REPO_ROOT), capture_output=True, text=True,
-            timeout=timeout, env=environment,
-        )
-        return {
-            "command": cmd, "returncode": proc.returncode, "stdout": proc.stdout,
-            "stderr": proc.stderr, "elapsed_sec": round(time.time() - start, 3), "timed_out": False,
-        }
-    except subprocess.TimeoutExpired as exc:
-        # TimeoutExpired retains bytes even when subprocess.run uses text=True;
-        # a timeout can also split a UTF-8 character in the captured output.
-        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
-        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr or ""
-        return {
-            "command": cmd, "returncode": None, "stdout": stdout,
-            "stderr": stderr + f"\n[corpus-regression] timed out after {timeout}s",
-            "elapsed_sec": round(time.time() - start, 3), "timed_out": True,
-        }
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except OSError as exc:
         return {
             "command": cmd, "returncode": None, "stdout": "",
             "stderr": f"[corpus-regression] failed to launch: {exc}",
             "elapsed_sec": round(time.time() - start, 3), "timed_out": False,
         }
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = _decode_partial(exc.stdout), _decode_partial(exc.stderr)
+        _terminate_process_tree(proc)
+        try:
+            drained_stdout, drained_stderr = proc.communicate(timeout=PIPE_DRAIN_TIMEOUT_SEC)
+        except (subprocess.TimeoutExpired, UnicodeDecodeError):
+            # An escaped descendant can hold pipes open; a killed writer can also
+            # leave an incomplete UTF-8 sequence. Keep the captured partial output.
+            pass
+        else:
+            stdout, stderr = _decode_partial(drained_stdout), _decode_partial(drained_stderr)
+        return {
+            "command": cmd, "returncode": None, "stdout": stdout,
+            "stderr": stderr + f"\n[corpus-regression] timed out after {timeout}s",
+            "elapsed_sec": round(time.time() - start, 3), "timed_out": True,
+        }
+    except OSError as exc:
+        _terminate_process_tree(proc)
+        return {
+            "command": cmd, "returncode": None, "stdout": "",
+            "stderr": f"[corpus-regression] failed to launch: {exc}",
+            "elapsed_sec": round(time.time() - start, 3), "timed_out": False,
+        }
+    except BaseException:
+        _terminate_process_tree(proc)
+        raise
+    finally:
+        _close_pipes(proc)
+        _reap(proc)
+    return {
+        "command": cmd, "returncode": proc.returncode, "stdout": stdout,
+        "stderr": stderr, "elapsed_sec": round(time.time() - start, 3), "timed_out": False,
+    }
 
 
 def classify_status(returncode: Optional[int], timed_out: bool) -> str:

@@ -98,16 +98,16 @@ public sealed class MermaidCliRenderer : IMermaidRenderer
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(timeoutValue);
             using var killRegistration = timeout.Token.Register(() => TryKill(process));
-            var stdoutTask = ReadLimitedAsync(process.StandardOutput, MaxDiagnosticCharacters);
-            var stderrTask = ReadLimitedAsync(process.StandardError, MaxDiagnosticCharacters);
+            var stdoutTask = ReadLimitedAsync(process.StandardOutput, MaxDiagnosticCharacters, timeout.Token);
+            var stderrTask = ReadLimitedAsync(process.StandardError, MaxDiagnosticCharacters, timeout.Token);
             try
             {
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                // Descendants may keep these pipes open even after the CLI exits.
+                await Task.WhenAll(process.WaitForExitAsync(timeout.Token), stdoutTask, stderrTask).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 TryKill(process);
-                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
                 throw new TimeoutException($"Mermaid CLI exceeded the {timeoutValue.TotalSeconds:0}-second timeout.");
             }
             catch (OperationCanceledException)
@@ -168,13 +168,13 @@ public sealed class MermaidCliRenderer : IMermaidRenderer
         return null;
     }
 
-    private static async Task<string> ReadLimitedAsync(StreamReader reader, int maxCharacters)
+    private static async Task<string> ReadLimitedAsync(StreamReader reader, int maxCharacters, CancellationToken cancellationToken)
     {
         var buffer = new char[4096];
         var result = new StringBuilder();
         while (true)
         {
-            var read = await reader.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
+            var read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
             if (read == 0) break;
             if (result.Length < maxCharacters) result.Append(buffer, 0, Math.Min(read, maxCharacters - result.Length));
         }
