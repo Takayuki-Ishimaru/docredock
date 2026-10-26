@@ -234,7 +234,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--fail-on-review] [--revisions final|markup|reject] [--allow-revision-sharing] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--token-estimate-multiplier 1] [--fail-on-review] [--revisions final|markup|reject] [--allow-revision-sharing] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -270,6 +270,15 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return Invalid("--chunk-chars requires --ai-package dir or zip.");
         if (aiPackage is null && args.HasFlag("table-row-blocks"))
             return Invalid("--table-row-blocks requires --ai-package dir or zip.");
+        var tokenEstimateMultiplier = 1d;
+        if (args.Option("token-estimate-multiplier") is { } margin)
+        {
+            if (aiPackage is null) return Invalid("--token-estimate-multiplier requires --ai-package dir or zip.");
+            if (!double.TryParse(margin, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out tokenEstimateMultiplier) ||
+                !AiTokenEstimate.IsSupportedMultiplier(tokenEstimateMultiplier))
+                return Invalid("--token-estimate-multiplier must be a number between 1 and 100.");
+        }
         var targetCharacters = 12_000;
         if (args.Option("chunk-chars") is { } size && (!int.TryParse(size, out targetCharacters) || targetCharacters is < 128 or > 1_000_000))
             return Invalid("--chunk-chars must be between 128 and 1000000.");
@@ -333,7 +342,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 var packageResult = await Service.ExportAiPackageAsync(new AiPackageExportOptions(
                     ReadableOptions(markdown), packageTransaction.PathFor(markdown),
                     aiPackage == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters,
-                    TableRowBlocks: args.HasFlag("table-row-blocks")), token);
+                    TableRowBlocks: args.HasFlag("table-row-blocks"))
+                    { TokenEstimateMultiplier = tokenEstimateMultiplier }, token);
                 token.ThrowIfCancellationRequested();
                 packageTransaction.Commit();
                 await output.WriteLineAsync($"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))");
@@ -889,7 +899,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         DocRedock {Version} Public Beta
           docredock --version
           docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
-                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--revisions final|markup|reject] [--allow-revision-sharing] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
+                      readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--token-estimate-multiplier 1] [--revisions final|markup|reject] [--allow-revision-sharing] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock package review <directory|zip> [--json] [--fail-on-review] [--require-hidden-review]
           docredock package search <directory|zip> <text> [--json] [--allow-review] [--require-hidden-review]
           docredock package read <directory|zip> --part part-0001 [--json] [--with-sources] [--allow-review] [--require-hidden-review]
@@ -955,7 +965,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
         private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);

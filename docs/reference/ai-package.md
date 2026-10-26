@@ -170,3 +170,38 @@ Report schema `1.1` adds the fields below. Two `1.0` fields also count different
 - `summary.table_boundary_review_items` and `review.table_boundaries`: worksheet blank columns at which two tables were output separately although their rows sit side by side with nothing in the layout to tell whether they belong together. Each entry has `sheet_name` and `gap_range`, `left_range` and `right_range` to compare; the Markdown carries an `<!-- inferred: … -->` note at the same place.
 
 Visual conversion counters, `review_items_detected: false` and an `inferred` basis do not certify text reading order or semantic correctness.
+
+## Safety margin for the token estimate (`--token-estimate-multiplier`)
+
+`estimated_tokens` in `manifest.json` is a heuristic that needs no tokenizer: about four ASCII
+characters per token and one token per other character. Real tokenizers differ by model, so the
+number is for comparing parts and planning batches, never a model tokenizer count and never a
+token-limit guarantee.
+
+`export --ai-package dir|zip --token-estimate-multiplier 2` widens that heuristic by a margin you
+choose: every part's `estimated_tokens` becomes the plain estimate times the multiplier, rounded up.
+The value is invariant-culture, finite, and between 1 and 100 inclusive (1 is the default, so
+estimates exported without the option are unchanged). `NaN`, `Infinity`, out-of-range and
+non-numeric values, an omitted value, and the option used without `--ai-package` are rejected with
+exit code 2 before any output is written. The margin changes only the reported estimate: part text,
+splitting, node ids, source ids, checksums, review gates and the chunk target are untouched.
+
+```
+docredock export report.docx --ai-package dir --token-estimate-multiplier 2
+```
+
+The same margin is available through the API as
+`AiPackageExportOptions.TokenEstimateMultiplier` / `AiPackagePartOptions.TokenEstimateMultiplier`,
+and `manifest.json` records it as the root `token_estimate_multiplier` for provenance. Estimates
+saturate at `int.MaxValue` (2,147,483,647) rather than overflowing.
+
+```csharp
+var options = new AiPackageExportOptions(documentOptions, "report.zip", AiPackageForm.Zip)
+{
+    TokenEstimateMultiplier = 2,
+};
+```
+
+Revision sharing is also identified by `summary.revision_sharing_required`. The existing
+`summary.review_items_detected` flag continues to describe source-comparison items; the displayed
+summary names revision sharing explicitly while package review keeps the two decisions separate.

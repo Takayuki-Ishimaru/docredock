@@ -63,8 +63,14 @@ public sealed record ExportSummary(
     /// not a warning: it never changes the export status or exit code.</summary>
     public bool OcrReviewRequired => OcrReviewItems > 0;
 
-    /// <summary>True when the export detected something to compare with the source: figures,
-    /// unanalyzed content, OCR text, or a worksheet table boundary that the layout could not decide.
+    /// <summary>True when the output includes tracked revisions that a person must decide to share
+    /// (<c>RevisionSharingReview.Build(diagnostics).Required</c>). A sharing decision, distinct from
+    /// the conversion-fidelity items above, and never a claim that the conversion is wrong.</summary>
+    public bool RevisionSharingRequired { get; init; }
+
+    /// <summary>True when the export detected source-comparison items: figures, unanalyzed content,
+    /// OCR text, or uncertain worksheet table boundaries. Revision sharing is reported separately
+    /// by <see cref="RevisionSharingRequired"/> so package consumers can distinguish the two decisions.
     /// False means none was detected, not that reading order and tables were verified;
     /// <see cref="ReadingOrder"/> and <see cref="TableStructure"/> say how those were obtained.</summary>
     public bool ReviewItemsDetected => VisualReviewPages > 0 || UnanalyzedContentPages > 0 || OcrReviewRequired || TableBoundaryReviewItems > 0;
@@ -98,6 +104,8 @@ public sealed record ExportSummary(
         if (UnanalyzedContentPages > 0) reasons.Add($"unanalyzed content {UnanalyzedContentPages} page(s)");
         if (OcrReviewRequired) reasons.Add($"OCR {OcrReviewItems} item(s)");
         if (TableBoundaryReviewItems > 0) reasons.Add($"table boundaries {TableBoundaryReviewItems}");
+        // Revision sharing is a sharing decision, so it is named separately from the fidelity items.
+        if (RevisionSharingRequired) reasons.Add("revision sharing required");
         // Sharing hidden content is a different decision from comparing with the source.
         const string hidden = "hidden content included - review before sharing";
         if (!HiddenContentIncluded) return reasons.Count == 0 ? "none" : string.Join(", ", reasons);
@@ -152,6 +160,7 @@ public static class ExportSummaryText
     {
         ArgumentNullException.ThrowIfNull(summary);
         var detected = summary.ReviewItemsDetected || summary.HiddenContentIncluded ? "あり（上記）" : "なし";
+        if (summary.RevisionSharingRequired) detected = "あり（変更履歴の共有確認が必要）";
         return $"検出された要確認事項: {detected}／読み順: {ReadingOrderJapanese(summary.ReadingOrder)}／" +
             $"表構造: {TableStructureJapanese(summary.TableStructure, summary.TableBoundaryReviewItems)}";
     }
@@ -223,7 +232,10 @@ public static class ExportSummaryBuilder
             RenderedTables: projection?.RenderedTables,
             TableBoundaryReviewItems: projection?.TableBoundaryReviews.Count ?? 0,
             ReadingOrder: ReadingOrderBasis(graph, projection),
-            TableStructure: TableStructureBasis(graph, projection));
+            TableStructure: TableStructureBasis(graph, projection))
+        {
+            RevisionSharingRequired = RevisionSharingReview.Build(diagnostics).Required,
+        };
     }
 
     // Word body order is the file's own order. Worksheet rows are read in order unless regions that

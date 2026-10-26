@@ -20,6 +20,8 @@ public sealed partial class DocumentService
         _ = RevisionSharingReview.Policy(options.Revisions, options.ContentPolicy);
         partOptions ??= new();
         if (partOptions.TargetCharacters is < 128 or > 1_000_000) throw new ArgumentOutOfRangeException(nameof(partOptions));
+        if (!AiTokenEstimate.IsSupportedMultiplier(partOptions.TokenEstimateMultiplier))
+            throw new ArgumentOutOfRangeException(nameof(partOptions), "Token estimate multiplier must be between 1 and 100.");
         using var inferenceScope = VisualInferenceContext.Push(options.InferenceMode);
         var previewOptions = options with { EnableOcr = false };
         var (extracted, _, _) = await ExtractReadableGraphAsync(Path.GetFullPath(options.SourcePath), previewOptions, cancellationToken).ConfigureAwait(false);
@@ -56,6 +58,9 @@ public sealed partial class DocumentService
         if (options.TargetCharacters < 128 || options.TargetCharacters > 1_000_000)
             throw new ArgumentOutOfRangeException(nameof(options), "Target characters must be between 128 and 1000000.");
         if (!Enum.IsDefined(options.Form)) throw new ArgumentOutOfRangeException(nameof(options));
+        if (!AiTokenEstimate.IsSupportedMultiplier(options.TokenEstimateMultiplier))
+            throw new ArgumentOutOfRangeException(nameof(options), options.TokenEstimateMultiplier,
+                "Token estimate multiplier must be between 1 and 100.");
         _ = DocumentContentPolicyRules.Parse(options.Document.ContentPolicy);
         cancellationToken.ThrowIfCancellationRequested();
         var source = Path.GetFullPath(options.Document.SourcePath);
@@ -87,7 +92,8 @@ public sealed partial class DocumentService
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var partGraph = AiMapImageReferences(graph, "../assets/");
             var parts = AiPackageContentBuilder.Build(partGraph, markdownOptions, Path.GetFileName(source),
-                new AiPackagePartOptions(options.TargetCharacters, options.TableRowBlocks), cancellationToken);
+                new AiPackagePartOptions(options.TargetCharacters, options.TableRowBlocks)
+                    { TokenEstimateMultiplier = options.TokenEstimateMultiplier }, cancellationToken);
             Directory.CreateDirectory(Path.Combine(package, "parts"));
             foreach (var part in parts)
             {
@@ -169,6 +175,7 @@ public sealed partial class DocumentService
                 },
                 target_characters = options.TargetCharacters,
                 table_row_blocks = options.TableRowBlocks,
+                token_estimate_multiplier = options.TokenEstimateMultiplier,
                 document = "document.md", review = "review.md", report = "report.json",
                 source_index = "source-index.json",
                 locations,

@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.6 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.7 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
 
 ## 1. 入手する
 
@@ -35,7 +35,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.6では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.7では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -43,6 +43,8 @@ docredock export input.xlsx --ai-package zip --sheets Summary,Data --output work
 docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.ai-package.zip
 docredock export input.xlsx --ai-package dir --table-row-blocks --output workbook.ai-package
 ```
+
+概算トークン数に余裕を持たせる場合は、CLIで`--token-estimate-multiplier 2`を追加できます。倍率は1以上100以下、既定値は1です。本文や分割方法は変わらず、実際のtokenizerの値やトークン上限を保証するものではありません。GUIには倍率の指定操作はありません。
 
 GUIの「パッケージを読む」から既存のフォルダー／ZIPを開き、検証と確認事項を確認してから、必要な分割を検索・コピーできます。CLIでも次の操作を利用できます。
 
