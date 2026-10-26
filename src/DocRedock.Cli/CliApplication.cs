@@ -161,6 +161,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
         {
             part_id = part.Part.Id, markdown = part.Markdown, review_required = reasons.Count > 0,
+            estimated_tokens = part.Part.EstimatedTokens, token_estimate_multiplier = manifest.TokenEstimateMultiplier,
             sources = args.HasFlag("with-sources") ? part.Sources : null,
             locations = args.HasFlag("with-sources") ? part.Part.Locations : null,
         }, jsonOptions));

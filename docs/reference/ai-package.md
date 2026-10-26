@@ -79,6 +79,10 @@ CLI `package review` uses `ReadVerifiedReviewAsync`, which retains the checked r
 
 With the Python example's `--require-hidden-review`, stored package review is also enforced. JSON `review.required` and `review.effective_required` include the hidden-content policy; `review.reported_required` preserves the original report-aware state. `review.stop_reasons` contains `package_review` and/or `hidden_content`. Without the option, the previous JSON shape and `--fail-on-review` behavior are retained.
 
+`package read --json` returns `estimated_tokens` and `token_estimate_multiplier` at the root, with or without `--with-sources`. `package search --json` returns both fields on each entry of `matches`, alongside its `part_id`, `locations` and matching `lines`. The estimate describes the whole part, not just the matching lines. Both commands return the stored, already adjusted estimate without applying the multiplier again. For example, a part stored with estimate 858 and multiplier 2 returns `"estimated_tokens": 858` and `"token_estimate_multiplier": 2`.
+
+Each field is explicitly `null` when the package does not record it: schema 1.0/2.0 parts have no estimates, while schema 2.1/2.2 packages may retain estimates without a recorded multiplier. A missing multiplier does not establish that the estimate used a multiplier of 1. These are heuristic estimates, not exact tokenizer counts or token-limit guarantees. Plain `read` output remains only Markdown, and plain `search` output keeps its part/location/line display.
+
 These commands always verify every file, the source index and the report before emitting any selected content. They stop with exit 11 and no stdout when either conversion or revision-sharing review is required. Read `review.md` and perform the relevant checks, then use `--allow-review` to acknowledge that review for one invocation. A malformed or changed package produces no body; verification errors exit 7, unreadable paths exit 2, and unsupported schemas exit 4. Plain `read` output contains only the selected Markdown; source-index data is included only with `--json --with-sources`. Search ignores case, full-width forms, Markdown escapes and supported inline decoration. It is text matching, not semantic retrieval.
 
 The GUI's primary 「パッケージを読む」 action opens a directory or ZIP, verifies it, displays `review.md` and blocks content pending explicit review confirmation. Search selects matching part IDs; the selected Markdown can be copied on its own. Source-index cells stay in a separate details panel. Loading another package clears all old content and review confirmation. The API's `ReadVerifiedPackageAsync` returns an in-memory snapshot whose Markdown and review text are exactly the bytes checked; callers must check `Review.Required` before giving content to a model.
@@ -192,8 +196,12 @@ docredock export report.docx --ai-package dir --token-estimate-multiplier 2
 
 The same margin is available through the API as
 `AiPackageExportOptions.TokenEstimateMultiplier` / `AiPackagePartOptions.TokenEstimateMultiplier`,
-and `manifest.json` records it as the root `token_estimate_multiplier` for provenance. Estimates
-saturate at `int.MaxValue` (2,147,483,647) rather than overflowing.
+and `manifest.json` records it as the root `token_estimate_multiplier` for provenance. The typed
+reader exposes it as nullable `AiPackageManifest.TokenEstimateMultiplier`; a missing or JSON-null
+field becomes null. A present value must be a finite JSON number from 1 to 100 inclusive; a wrong
+type or out-of-range value raises `InvalidDataException` naming the field. `AiPackageSearchMatch`
+exposes nullable `EstimatedTokens` and `TokenEstimateMultiplier` as stored, without recomputation.
+Estimates saturate at `int.MaxValue` (2,147,483,647) rather than overflowing.
 
 ```csharp
 var options = new AiPackageExportOptions(documentOptions, "report.zip", AiPackageForm.Zip)

@@ -6,14 +6,20 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.8 Public Beta
+
+- [v0.3.8 release notes](RELEASE_NOTES_v0.3.8.en.md)
+- Expose stored token estimates and multipliers in AI-package reads and searches
+- Bound OCR input reads and improve OCR/Mermaid timeout and cancellation handling
+
+## Published releases
+
 ### v0.3.7 Public Beta
 
 - [v0.3.7 release notes](RELEASE_NOTES_v0.3.7.en.md)
 - Fix PDF table markers taking diagram labels
 - Show revision-sharing review in export summaries
 - Add a heuristic token-estimate multiplier to CLI/API AI-package export
-
-## Published releases
 
 ### v0.3.6 Public Beta
 
