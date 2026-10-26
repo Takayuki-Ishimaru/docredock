@@ -1,0 +1,154 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<<
+/Producer (pypdf)
+>>
+endobj
+2 0 obj
+<<
+/Type /Pages
+/Count 1
+/Kids [ 4 0 R ]
+>>
+endobj
+3 0 obj
+<<
+/Type /Catalog
+/Pages 2 0 R
+>>
+endobj
+4 0 obj
+<<
+/Contents 9 0 R
+/MediaBox [ 0 0 720 520 ]
+/Resources <<
+/Font 6 0 R
+/ProcSet [ /PDF /Text /ImageB /ImageC /ImageI ]
+>>
+/Rotate 0
+/Trans <<
+>>
+/Type /Page
+/Parent 2 0 R
+>>
+endobj
+5 0 obj
+<<
+/Filter [ /ASCII85Decode /FlateDecode ]
+/Length 674
+>>
+stream
+Gas2H9lo#B&;KZOMESC.W*4W&5!gE,VDQDF3^%X7E<E=7B#68#qqYOf+U=NGYhsa!BY@TOKV7Rbnm(V`-4rFI,G9V_)pg#=E=T<7'&N\Tll/p_jPqtJe_j%/E<dR$F]5L;2=/qaqXMq^+!LW7Gf:=q!WPX8!]piQ(0G9a?qDsdS^$H\S)g'1Dj,*d^.Z3+q*+VgkD/,RIf.u5Q#'ZI[`rNUBUdHtd3bbcU.nBmoer"XFsU/'!6=,!rOCS]bpo;N=Ic=.0@,t.P<n_8?\WA$rMUek6S=G,3F%;d#$nu]LHYr$[(S?!pY2Tse/?.>RiJl]5[$RDA$EpFe,3CO#Kk".p,]e:aCT(e#?=e7l!110GZV`Idn!oo7Hm'?+3ItW3G4I`/T.B'.7Z$C92GOGX`B^BiAUJV.uU3jPI[DGUWJdk$SjQH:DpZ^?>C+A2oeaZSM[6YUPRp?T"^>d2?P!`.EU]HNF9iSdZLn?K:JHVQLUV0:N3._.3')ac't`]oe8uK>@l*,(b7tSa**qbbM/MuT+>;KbLs]!:f8'5HLh#X5(*rbSEDX!idO(`N'DeTj0c\09s((a;(a@K8`9]L52L@C].<$fjC=/&.,WiCU/,u2)@NVS).Qs[;G,Tla\&-%V4/7"r)G%Y=iTtU%NI#neF`_m?RLg3"6s#Xk5~>
+endstream
+endobj
+6 0 obj
+<<
+/F1 7 0 R
+/F2 8 0 R
+>>
+endobj
+7 0 obj
+<<
+/BaseFont /Helvetica
+/Encoding /WinAnsiEncoding
+/Name /F1
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+8 0 obj
+<<
+/BaseFont /Helvetica-Bold
+/Encoding /WinAnsiEncoding
+/Name /F2
+/Subtype /Type1
+/Type /Font
+>>
+endobj
+9 0 obj
+<<
+/Length 1590
+>>
+stream
+1 0 0 1 0 0 cm  BT /F1 12 Tf 14.4 TL ET
+BT /F2 18 Tf 21.6 TL ET
+BT 1 0 0 1 30 480 Tm (Release schedule) Tj T* ET
+.7 w
+n 30 440 m 30 190 l S
+n 170 440 m 170 190 l S
+n 270 440 m 270 190 l S
+n 370 440 m 370 190 l S
+n 470 440 m 470 190 l S
+n 570 440 m 570 190 l S
+n 670 440 m 670 190 l S
+n 30 440 m 670 440 l S
+n 30 390 m 670 390 l S
+n 30 340 m 670 340 l S
+n 30 290 m 670 290 l S
+n 30 240 m 670 240 l S
+n 30 190 m 670 190 l S
+BT /F1 12 Tf 14.4 TL ET
+BT 1 0 0 1 37 412 Tm (Task) Tj T* ET
+BT 1 0 0 1 177 412 Tm (Mon) Tj T* ET
+BT 1 0 0 1 277 412 Tm (Tue) Tj T* ET
+BT 1 0 0 1 377 412 Tm (Wed) Tj T* ET
+BT 1 0 0 1 477 412 Tm (Thu) Tj T* ET
+BT 1 0 0 1 577 412 Tm (Fri) Tj T* ET
+BT 1 0 0 1 37 360 Tm (Design) Tj T* ET
+BT 1 0 0 1 37 310 Tm (Build) Tj T* ET
+BT 1 0 0 1 37 260 Tm (Rollback) Tj T* ET
+BT 1 0 0 1 37 210 Tm (Release) Tj T* ET
+.788235 .894118 .92549 rg
+.160784 .356863 .443137 RG
+n 177 350 m 350 350 l 350 343 l 363 365 l 350 387 l 350 380 l 177 380 l h
+B*
+n 277 300 286 30 re B*
+n 377 265 m 390 287 l 390 280 l 563 280 l 563 250 l 390 250 l 390 243 l h
+B*
+.062745 .062745 .062745 rg
+BT /F1 11 Tf 13.2 TL ET
+BT 1 0 0 1 192 361 Tm (DESIGN_PHASE) Tj T* ET
+BT 1 0 0 1 300 311 Tm (BUILD_PHASE) Tj T* ET
+BT 1 0 0 1 405 261 Tm (ROLLBACK_PHASE) Tj T* ET
+0 0 0 RG
+0 0 0 rg
+1 w
+n 90 75 150 55 re S
+n 470 75 150 55 re S
+n 240 102.5 m 470 102.5 l S
+n 470 102.5 m 460 107.5 l 460 97.5 l h
+B*
+BT /F1 13 Tf 15.6 TL ET
+BT 1 0 0 1 120 99 Tm (START) Tj T* ET
+BT 1 0 0 1 510 99 Tm (DONE) Tj T* ET
+ 
+
+q .788235 .894118 .92549 rg .160784 .356863 .443137 RG .7 w
+n 620 200 m 635 215 l 620 230 l 605 215 l h
+B*
+Q
+
+endstream
+endobj
+xref
+0 10
+0000000000 65535 f 
+0000000015 00000 n 
+0000000054 00000 n 
+0000000113 00000 n 
+0000000162 00000 n 
+0000000351 00000 n 
+0000001116 00000 n 
+0000001157 00000 n 
+0000001264 00000 n 
+0000001376 00000 n 
+trailer
+<<
+/Size 10
+/Root 3 0 R
+/Info 1 0 R
+>>
+startxref
+3018
+%%EOF

@@ -6,14 +6,21 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.7 Public Beta
+
+- [v0.3.7 release notes](RELEASE_NOTES_v0.3.7.en.md)
+- Fix PDF table markers taking diagram labels
+- Show revision-sharing review in export summaries
+- Add a heuristic token-estimate multiplier to CLI/API AI-package export
+
+## Published releases
+
 ### v0.3.6 Public Beta
 
 - [v0.3.6 release notes](RELEASE_NOTES_v0.3.6.en.md)
 - Improve protection of existing Markdown and image folders during failed, cancelled, and concurrent exports
 - Reject replacing output folders containing input documents and improve GUI name collision handling
 - Fix interference between revision settings in concurrent Word conversions
-
-## Published releases
 
 ### v0.3.5 Public Beta
 
