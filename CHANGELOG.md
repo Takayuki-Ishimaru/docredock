@@ -4,6 +4,16 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.7]
+
+- Fixed PDF table markers taking diagram labels and made label matching independent of shape drawing order; ambiguous labels remain unresolved.
+- Made export summaries identify Word revision markup that needs review before sharing.
+- Added optional `--token-estimate-multiplier` to CLI/API AI-package export; default estimates, text and splitting remain unchanged.
+- Added `token_estimate_multiplier` to the manifest and `summary.revision_sharing_required` to the report; schema versions remain `2.2` and `1.2`.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.7.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.7.md)
+
 ## [0.3.6]
 
 - Preserved existing Markdown and image assets when readable export fails, is cancelled, or competes with another export.

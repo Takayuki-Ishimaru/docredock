@@ -681,6 +681,7 @@ public static partial class PdfTextExtractor
         var suppressedGridPathIds = new HashSet<string>(StringComparer.Ordinal);
         var inferredGridPathIds = new HashSet<string>(StringComparer.Ordinal);
         var triangleCandidates = new List<(IReadOnlyList<VisualPathPoint> Points, Geometry Geometry, string PathId)>();
+        var closedNodeCandidates = new List<(Geometry Geometry, string PathId)>();
         var unlabelledClosedCandidates = new List<(Geometry Geometry, string PathId)>();
         var provisionalUnlabelledNodeIds = new HashSet<string>(StringComparer.Ordinal);
         var provisionalTriangleNodeIds = new HashSet<string>(StringComparer.Ordinal);
@@ -891,6 +892,8 @@ public static partial class PdfTextExtractor
             foreach (var pending in pendingOpenSubpaths)
                 RetainOpenSubpath(pending.Points, pending.CurveSeen);
         }
+        if (!visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null)
+            AssignClosedNodeLabels();
         var pathBuildCompleted = !visualInferenceToken.IsCancellationRequested && pendingVisualInferenceBudget is null;
         var preInferenceNodes = new List<VisualNode>(nodes);
         var preInferenceEdges = new List<VisualEdge>(edges);
@@ -2218,10 +2221,7 @@ public static partial class PdfTextExtractor
 
         void AddClosedNode(IReadOnlyList<VisualPathPoint> subpath)
         {
-            var sortFactor = regions.Count <= 1 ? 1 : 1 + (long)Math.Ceiling(Math.Log2(regions.Count));
-            if (!TrySpendVisualInference((long)subpath.Count + nodes.Count + 1,
-                    "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback) ||
-                !TrySpendVisualInferenceProduct(regions.Count, sortFactor,
+            if (!TrySpendVisualInference((long)subpath.Count + closedNodeCandidates.Count + 1,
                     "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback))
                 return;
             var minX = subpath.Min(point => point.X); var minY = subpath.Min(point => point.Y);
@@ -2239,7 +2239,7 @@ public static partial class PdfTextExtractor
                 return;
             }
             // Canonicalize repeated paint operations for the same visual box.
-            if (nodes.Any(node => IoU(node.Geometry, geometry) >= 0.90))
+            if (closedNodeCandidates.Any(candidate => IoU(candidate.Geometry, geometry) >= 0.90))
             {
                 if (paths.Count > 0) duplicatePathIds.Add(paths[^1].Id);
                 return;
@@ -2254,31 +2254,110 @@ public static partial class PdfTextExtractor
                 triangleCandidates.Add((subpath, geometry, paths[^1].Id));
                 return;
             }
-            var labelCandidate = regions.Select((region, index) => (region, index, score: LabelScore(region.BoundingBox, geometry)))
-                .Where(item => item.score > 0 && !assignedLabelRegions.Contains(item.index))
-                .OrderByDescending(item => item.score).ThenBy(item => item.region.ReadingOrder).ToArray();
-            var ambiguousLabel = labelCandidate.Length > 1 && labelCandidate[0].score - labelCandidate[1].score < 0.15;
-            if (ambiguousLabel)
+            closedNodeCandidates.Add((geometry, paths[^1].Id));
+        }
+
+        void AssignClosedNodeLabels()
+        {
+            if (closedNodeCandidates.Count == 0) return;
+            // Compare every shape before consuming text. In particular, a table marker painted
+            // first must not take the caption contained by a later, unrelated diagram box.
+            var sortFactor = regions.Count <= 1 ? 1 : 1 + (long)Math.Ceiling(Math.Log2(regions.Count));
+            if (!TrySpendVisualInferenceProduct(regions.Count,
+                    (long)closedNodeCandidates.Count + triangleCandidates.Count + sortFactor,
+                    "vector-path", pathBuildBudgetMessage, pathBuildBudgetFallback))
+                return;
+            var owners = new int[regions.Count];
+            Array.Fill(owners, -1);
+            var bestScores = new double[regions.Count];
+            var runnerUpScores = new double[regions.Count];
+            Array.Fill(bestScores, double.NegativeInfinity);
+            Array.Fill(runnerUpScores, double.NegativeInfinity);
+            var embedded = new bool[regions.Count];
+            for (var candidateIndex = 0; candidateIndex < closedNodeCandidates.Count + triangleCandidates.Count; candidateIndex++)
             {
-                if (paths.Count > 0)
+                cancellationToken.ThrowIfCancellationRequested();
+                if (visualInferenceToken.IsCancellationRequested) return;
+                var triangle = candidateIndex >= closedNodeCandidates.Count;
+                var geometry = triangle
+                    ? triangleCandidates[candidateIndex - closedNodeCandidates.Count].Geometry
+                    : closedNodeCandidates[candidateIndex].Geometry;
+                for (var regionIndex = 0; regionIndex < regions.Count; regionIndex++)
                 {
-                    unresolvedPathIds.Add(paths[^1].Id);
-                    paths[^1] = paths[^1] with { IsFallback = true };
+                    var bounds = regions[regionIndex].BoundingBox;
+                    // Triangles may be arrowheads. Reserve their embedded captions, leaving
+                    // their external labels to the existing shaft/arrowhead classification.
+                    var contains = ContainsLabelCenter(bounds, geometry);
+                    if (triangle && !contains || embedded[regionIndex] && !contains) continue;
+                    var score = LabelScore(bounds, geometry);
+                    if (score <= 0) continue;
+                    if (contains && !embedded[regionIndex])
+                    {
+                        owners[regionIndex] = candidateIndex;
+                        bestScores[regionIndex] = score;
+                        runnerUpScores[regionIndex] = double.NegativeInfinity;
+                        embedded[regionIndex] = true;
+                    }
+                    else if (score > bestScores[regionIndex])
+                    {
+                        runnerUpScores[regionIndex] = bestScores[regionIndex];
+                        bestScores[regionIndex] = score;
+                        owners[regionIndex] = candidateIndex;
+                    }
+                    else
+                        runnerUpScores[regionIndex] = Math.Max(runnerUpScores[regionIndex], score);
                 }
-                graphDiagnostics.Add(Diag("VisualNodeLabelMissing", "Text region assignment was ambiguous; vector box retained as fallback.", 0.2) with { SourceObjectId = paths.LastOrDefault()?.Id });
-                return;
             }
-            var hasLabel = labelCandidate.Length > 0;
-            var label = hasLabel ? labelCandidate[0].region.Text : null;
-            if (hasLabel) assignedLabelRegions.Add(labelCandidate[0].index);
-            if (string.IsNullOrWhiteSpace(label))
+            var labels = Enumerable.Range(0, closedNodeCandidates.Count)
+                .Select(_ => new List<int>()).ToArray();
+            for (var regionIndex = 0; regionIndex < regions.Count; regionIndex++)
             {
-                unlabelledClosedCandidates.Add((geometry, paths[^1].Id));
-                return;
+                // Compare against the final maximum: pairwise tolerance ties are not transitive
+                // and would otherwise make a chain of near-equal scores depend on paint order.
+                if (bestScores[regionIndex] - runnerUpScores[regionIndex] <= 1e-9) owners[regionIndex] = -1;
+                if (owners[regionIndex] >= 0 && owners[regionIndex] < labels.Length)
+                    labels[owners[regionIndex]].Add(regionIndex);
             }
-            nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", label, VisualNodeKind.Generic,
-                Geometry: geometry, SourceAnchor: anchor));
-            RecordNodeLabel(labelCandidate[0].index, nodes[^1].Id);
+            for (var candidateIndex = 0; candidateIndex < closedNodeCandidates.Count; candidateIndex++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (visualInferenceToken.IsCancellationRequested) return;
+                var candidate = closedNodeCandidates[candidateIndex];
+                var labelCandidates = labels[candidateIndex]
+                    .OrderByDescending(index => bestScores[index]).ThenBy(index => regions[index].ReadingOrder).ToArray();
+                if (labelCandidates.Length > 1 &&
+                    bestScores[labelCandidates[0]] - bestScores[labelCandidates[1]] < 0.15)
+                {
+                    var pathIndex = paths.FindIndex(path => path.Id == candidate.PathId);
+                    if (pathIndex >= 0)
+                    {
+                        unresolvedPathIds.Add(candidate.PathId);
+                        paths[pathIndex] = paths[pathIndex] with { IsFallback = true };
+                    }
+                    graphDiagnostics.Add(Diag("VisualNodeLabelMissing",
+                        "Text region assignment was ambiguous; vector box retained as fallback.", 0.2)
+                        with { SourceObjectId = candidate.PathId });
+                    continue;
+                }
+                if (labelCandidates.Length == 0 || string.IsNullOrWhiteSpace(regions[labelCandidates[0]].Text))
+                {
+                    unlabelledClosedCandidates.Add(candidate);
+                    continue;
+                }
+                var labelIndex = labelCandidates[0];
+                assignedLabelRegions.Add(labelIndex);
+                nodes.Add(new VisualNode($"pdf_p{pageNumber}_n{nodes.Count + 1}", regions[labelIndex].Text,
+                    VisualNodeKind.Generic, Geometry: candidate.Geometry, SourceAnchor: anchor));
+                RecordNodeLabel(labelIndex, nodes[^1].Id);
+            }
+        }
+
+        static bool ContainsLabelCenter(Geometry label, Geometry node)
+        {
+            var centerX = label.X + label.Width / 2;
+            var centerY = label.Y + label.Height / 2;
+            return centerX >= node.X && centerX <= node.X + node.Width &&
+                   centerY >= node.Y && centerY <= node.Y + node.Height;
         }
 
         static bool IsAxisAlignedRectangle(IReadOnlyList<VisualPathPoint> points)
