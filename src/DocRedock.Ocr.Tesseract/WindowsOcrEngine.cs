@@ -59,7 +59,7 @@ public sealed class WindowsOcrEngine : IOcrEngine
         if (powershellPath is null)
             return Failure(OcrProcessingStatus.Unavailable, "ExecutableUnavailable", $"Windows PowerShell executable '{powershellExecutable}' was not found.");
 
-        var imageBytes = await ReadImageAsync(input.Image, cancellationToken).ConfigureAwait(false);
+        var imageBytes = await ReadImageAsync(input.Image, options.PixelBudget, cancellationToken).ConfigureAwait(false);
         if (options.PixelBudget is { } pixelBudget &&
             (pixelBudget <= 0 || imageBytes.LongLength > pixelBudget))
         {
@@ -104,16 +104,15 @@ public sealed class WindowsOcrEngine : IOcrEngine
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(timeoutValue);
             using var killRegistration = timeout.Token.Register(() => TryKill(process));
-            var stdoutTask = ReadLimitedAsync(process.StandardOutput, maxOutputBytes, CancellationToken.None);
-            var stderrTask = ReadLimitedAsync(process.StandardError, maxOutputBytes, CancellationToken.None);
+            var stdoutTask = ReadLimitedAsync(process.StandardOutput, maxOutputBytes, timeout.Token);
+            var stderrTask = ReadLimitedAsync(process.StandardError, maxOutputBytes, timeout.Token);
             try
             {
-                await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
+                await Task.WhenAll(process.WaitForExitAsync(timeout.Token), stdoutTask, stderrTask).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 TryKill(process);
-                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
                 return Failure(OcrProcessingStatus.Failed, "Timeout", "Windows OCR timed out.");
             }
             catch (OperationCanceledException)
@@ -163,13 +162,26 @@ public sealed class WindowsOcrEngine : IOcrEngine
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
-    private static async Task<byte[]> ReadImageAsync(Stream stream, CancellationToken cancellationToken)
+    private static async Task<byte[]> ReadImageAsync(Stream stream, long? pixelBudget, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (pixelBudget is <= 0) return [];
         var originalPosition = stream.CanSeek ? stream.Position : -1;
+        // One extra byte distinguishes an input at the limit from an oversized input.
+        var limit = pixelBudget is { } budget && budget < long.MaxValue ? budget + 1 : long.MaxValue;
         try
         {
             using var memory = new MemoryStream();
-            await stream.CopyToAsync(memory, cancellationToken).ConfigureAwait(false);
+            var buffer = new byte[81_920];
+            while (true)
+            {
+                var room = (int)Math.Min(buffer.Length, limit - memory.Length);
+                if (room <= 0) break;
+                var read = await stream.ReadAsync(buffer.AsMemory(0, room), cancellationToken).ConfigureAwait(false);
+                if (read == 0) break;
+                memory.Write(buffer, 0, read);
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             return memory.ToArray();
         }
         finally

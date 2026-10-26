@@ -4,6 +4,15 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.8]
+
+- Exposed stored token estimates and the recorded multiplier in AI-package API reads/searches and CLI JSON output, without applying the multiplier again.
+- Kept absent token metadata nullable and rejected invalid recorded multipliers; manifest/report schema versions remain `2.2`/`1.2`.
+- Bounded OCR input reads by the configured budget and included diagnostic streams in OCR/Mermaid timeout and cancellation handling.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.8.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.8.md)
+
 ## [0.3.7]
 
 - Fixed PDF table markers taking diagram labels and made label matching independent of shape drawing order; ambiguous labels remain unresolved.
