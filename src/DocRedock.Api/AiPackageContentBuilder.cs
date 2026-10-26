@@ -41,6 +41,10 @@ public static class AiPackageContentBuilder
         ArgumentNullException.ThrowIfNull(partOptions);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceFileName);
         var targetCharacters = partOptions.TargetCharacters;
+        var multiplier = partOptions.TokenEstimateMultiplier;
+        if (!AiTokenEstimate.IsSupportedMultiplier(multiplier))
+            throw new ArgumentOutOfRangeException(nameof(partOptions), multiplier,
+                $"Token estimate multiplier must be between {AiTokenEstimate.MinimumMultiplier:0.#} and {AiTokenEstimate.MaximumMultiplier:0.#}.");
         if (targetCharacters < MinimumTargetCharacters)
             throw new ArgumentOutOfRangeException(nameof(partOptions), targetCharacters,
                 $"Target characters must be at least {MinimumTargetCharacters}.");
@@ -118,6 +122,8 @@ public static class AiPackageContentBuilder
             }
         }
 
+        if (multiplier != 1)
+            for (var i = 0; i < parts.Count; i++) parts[i] = parts[i] with { TokenEstimateMultiplier = multiplier };
         return parts;
     }
 

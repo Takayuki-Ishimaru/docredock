@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.6 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.7 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 ## 1. Get DocRedock
 
@@ -35,7 +35,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.6. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.7. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -43,6 +43,8 @@ docredock export input.xlsx --ai-package zip --sheets Summary,Data --output work
 docredock export input.docx --ai-package zip --chunk-chars 16000 --output input.ai-package.zip
 docredock export input.xlsx --ai-package dir --table-row-blocks --output workbook.ai-package
 ```
+
+To add a margin to heuristic token estimates, add `--token-estimate-multiplier 2` in the CLI. Values range from 1 to 100; the default is 1. Text and splitting are unchanged. Estimates are not model-tokenizer measurements or a token-limit guarantee. The GUI has no multiplier control.
 
 Use **Read package** (「パッケージを読む」) in the GUI to open an existing folder/ZIP, inspect verification and review guidance, then search and copy the parts you need. The CLI also provides:
 

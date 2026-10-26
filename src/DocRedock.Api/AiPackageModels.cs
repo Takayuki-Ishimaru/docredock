@@ -13,12 +13,20 @@ public sealed record AiPackageExportOptions(
     string OutputPath,
     AiPackageForm Form = AiPackageForm.Directory,
     int TargetCharacters = 12_000,
-    bool TableRowBlocks = false);
+    bool TableRowBlocks = false)
+{
+    /// <summary>Optional margin for heuristic token estimates; finite, from 1 to 100.</summary>
+    public double TokenEstimateMultiplier { get; init; } = 1;
+}
 
 /// <summary>How <see cref="AiPackageContentBuilder"/> divides a document into parts.</summary>
 /// <param name="TargetCharacters">Soft size target in .NET characters, not a token budget.</param>
 /// <param name="TableRowBlocks">See <see cref="AiPackageExportOptions.TableRowBlocks"/>.</param>
-public sealed record AiPackagePartOptions(int TargetCharacters = 12_000, bool TableRowBlocks = false);
+public sealed record AiPackagePartOptions(int TargetCharacters = 12_000, bool TableRowBlocks = false)
+{
+    /// <summary>See <see cref="AiPackageExportOptions.TokenEstimateMultiplier"/>.</summary>
+    public double TokenEstimateMultiplier { get; init; } = 1;
+}
 
 /// <summary>One block of a worksheet table that was cut between rows across consecutive parts.
 /// Ranges are original A1 addresses on the part's sheet. Every block starts with the table's
@@ -60,7 +68,11 @@ public sealed record AiPackagePart(
 {
     /// <summary>Rough, model-independent size of <see cref="Markdown"/> in tokens; see
     /// <see cref="AiTokenEstimate"/>.</summary>
-    public int EstimatedTokens => AiTokenEstimate.Estimate(Markdown);
+    public int EstimatedTokens => AiTokenEstimate.Estimate(Markdown, TokenEstimateMultiplier);
+
+    /// <summary>Safety margin applied to <see cref="EstimatedTokens"/>; see
+    /// <see cref="AiPackageExportOptions.TokenEstimateMultiplier"/>. 1 keeps the plain estimate.</summary>
+    public double TokenEstimateMultiplier { get; init; } = 1;
 }
 
 /// <summary>A rough token count that needs no tokenizer: about four ASCII characters per token and
@@ -68,8 +80,23 @@ public sealed record AiPackagePart(
 /// to compare parts and plan batches, not as a model limit.</summary>
 public static class AiTokenEstimate
 {
-    public static int Estimate(string text)
+    /// <summary>Smallest and largest accepted <see cref="AiPackageExportOptions.TokenEstimateMultiplier"/>.</summary>
+    public const double MinimumMultiplier = 1;
+    public const double MaximumMultiplier = 100;
+
+    /// <summary>True for a finite multiplier from <see cref="MinimumMultiplier"/> through <see cref="MaximumMultiplier"/>.</summary>
+    public static bool IsSupportedMultiplier(double multiplier) =>
+        multiplier is >= MinimumMultiplier and <= MaximumMultiplier;
+
+    public static int Estimate(string text) => Estimate(text, 1);
+
+    /// <summary>The same estimate widened by a user-chosen safety margin, rounded up and capped at
+    /// <see cref="int.MaxValue"/>. A margin is still a heuristic, never a model tokenizer count.</summary>
+    public static int Estimate(string text, double multiplier)
     {
+        if (!IsSupportedMultiplier(multiplier))
+            throw new ArgumentOutOfRangeException(nameof(multiplier), multiplier,
+                $"Token estimate multiplier must be between {MinimumMultiplier:0.#} and {MaximumMultiplier:0.#}.");
         ArgumentNullException.ThrowIfNull(text);
         var ascii = 0;
         var other = 0;
@@ -78,7 +105,10 @@ public static class AiTokenEstimate
             if (rune.IsAscii) ascii++;
             else other++;
         }
-        return (ascii + 3) / 4 + other;
+        var estimate = ((long)ascii + 3) / 4 + other;
+        if (multiplier == 1) return (int)Math.Min(estimate, int.MaxValue);
+        var widened = Math.Ceiling(estimate * multiplier);
+        return widened >= int.MaxValue ? int.MaxValue : (int)widened;
     }
 }
 
