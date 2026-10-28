@@ -26,6 +26,16 @@ public sealed class TokenEstimateMultiplierTests : IDisposable
         Assert.Equal(expected * 100, AiTokenEstimate.Estimate(text, 100));
     }
 
+    [Fact]
+    public void Numeric_tables_are_not_priced_like_plain_ascii_prose()
+    {
+        const string table = "| 123456 | 789012 |\n| 345678 | 901234 |";
+        Assert.True(AiTokenEstimate.Estimate(table) > (table.Length + 3) / 4);
+        Assert.Equal(8, AiTokenEstimate.Estimate("123456789012345678901234"));
+        Assert.Equal(2, AiTokenEstimate.Estimate("||||"));
+        Assert.Equal(4, AiTokenEstimate.Estimate("1 2 3"));
+    }
+
     public static TheoryData<double> InvalidMargins => new()
     {
         double.NaN, double.PositiveInfinity, double.NegativeInfinity, 0, -1, .5, 100.01

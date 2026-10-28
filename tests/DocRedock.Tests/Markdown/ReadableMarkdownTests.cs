@@ -8,6 +8,43 @@ namespace DocRedock.Tests.Markdown;
 
 public sealed class ReadableMarkdownTests
 {
+    [Fact]
+    public void Chart_table_keeps_values_when_categories_are_incomplete_or_missing()
+    {
+        var series = new[]
+        {
+            new { Name = "Partial", Categories = new[] { "Q1" }, Values = new[] { "35", "27" } },
+            new { Name = "None", Categories = Array.Empty<string>(), Values = new[] { "10", "20" } }
+        };
+        var chart = new DocumentNode("chart", NodeKind.Chart, null, 0, ContentLayer.Body, new TextNodeContent("chart"),
+            Extensions: new Dictionary<string, JsonElement> { ["chart_series"] = JsonSerializer.SerializeToElement(series) });
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "chart", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, [chart])]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph);
+        Assert.Contains("| Q1 | 35 |", markdown);
+        Assert.Contains("| 2 | 27 |", markdown);
+        Assert.Contains("| 1 | 10 |", markdown);
+        Assert.Contains("| 2 | 20 |", markdown);
+    }
+
+    [Fact]
+    public void Adjacent_word_code_paragraphs_share_a_fence_and_keep_indentation()
+    {
+        var nodes = new[]
+        {
+            new DocumentNode("a", NodeKind.CodeBlock, null, 0, ContentLayer.Body, new TextNodeContent("if (x) {")),
+            new DocumentNode("b", NodeKind.CodeBlock, null, 1, ContentLayer.Body, new TextNodeContent("    run();")),
+            new DocumentNode("c", NodeKind.CodeBlock, null, 2, ContentLayer.Body, new TextNodeContent("}")),
+            new DocumentNode("d", NodeKind.Paragraph, null, 3, ContentLayer.Body, new TextNodeContent("After")),
+            new DocumentNode("e", NodeKind.CodeBlock, null, 4, ContentLayer.Body, new TextNodeContent("  next();"))
+        };
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "code", DocumentFormatKind.Docx,
+            [new DocumentPartition("document", 0, nodes)]);
+        var markdown = new ReadableMarkdownSerializer().Serialize(graph).Replace("\r\n", "\n");
+        Assert.Contains("```\nif (x) {\n    run();\n}\n```", markdown);
+        Assert.Contains("After\n\n```\n  next();\n```", markdown);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

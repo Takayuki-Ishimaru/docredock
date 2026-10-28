@@ -14,6 +14,23 @@ namespace DocRedock.Tests.Docx;
 public sealed class DocxAdapterTests
 {
     [Fact]
+    public async Task Word_code_paragraphs_keep_indentation_and_blank_lines_in_one_fence()
+    {
+        const string body = "<w:p><w:pPr><w:pStyle w:val=\"Code\"/></w:pPr><w:r><w:t>if (x) {</w:t></w:r></w:p>" +
+            "<w:p><w:pPr><w:pStyle w:val=\"Code\"/></w:pPr><w:r><w:t xml:space=\"preserve\">    run();</w:t></w:r></w:p>" +
+            "<w:p><w:pPr><w:pStyle w:val=\"Code\"/></w:pPr></w:p>" +
+            "<w:p><w:pPr><w:pStyle w:val=\"Code\"/></w:pPr><w:r><w:t>}</w:t></w:r></w:p>";
+        var source = await WriteOverlayDocxAsync("code-" + Guid.NewGuid().ToString("N") + ".docx", body);
+        try
+        {
+            var graph = (await new DocxAdapter().ExtractAsync(source)).Graph;
+            var markdown = new ReadableMarkdownSerializer().Serialize(graph).Replace("\r\n", "\n");
+            Assert.Contains("```\nif (x) {\n    run();\n\n}\n```", markdown);
+        }
+        finally { File.Delete(source); }
+    }
+
+    [Fact]
     public async Task Concurrent_final_and_default_extractions_keep_revision_settings_isolated()
     {
         var deleted = "<w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>DELETED</w:t></w:r></w:p></w:tc>";

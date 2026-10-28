@@ -4,6 +4,18 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.9]
+
+- Improved PDF wrapped paragraphs, narrow-column reading order and clearly ruled tables with merged cells or unequal column widths; joined well-supported table continuations in full-document Markdown while keeping package parts page-based.
+- Kept detailed PDF vector inventories in the report while retaining unresolved connector labels and line styles in the body; prevented source-review images from duplicating native text through OCR.
+- Preserved indentation and blank lines in adjacent Word code paragraphs and retained stored chart values when category names are incomplete.
+- Fixed warning-only CLI exits for excluded final-view Word revisions and made Japanese characters readable in package/report JSON.
+- Enabled platform-specific GUI export shortcuts and clarified Japanese result and source-review messages.
+- Adjusted token estimates for digit runs and Markdown table delimiters; existing stored estimates and manifest/report schemas remain unchanged.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.9.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.9.md)
+
 ## [0.3.8]
 
 - Exposed stored token estimates and the recorded multiplier in AI-package API reads/searches and CLI JSON output, without applying the multiplier again.

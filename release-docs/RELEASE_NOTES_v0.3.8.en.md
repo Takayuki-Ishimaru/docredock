@@ -9,7 +9,7 @@ v0.3.8 exposes stored token estimates when reading or searching AI packages and 
 CLI `package read --json` and `package search --json` now include each part's stored `estimated_tokens` and the package's recorded `token_estimate_multiplier`. This gives integrations a size estimate alongside the content when selecting parts for an AI tool.
 
 ```sh
-docredock package read input.ai-package.zip --part p0001 --json
+docredock package read input.ai-package.zip --part part-0001 --json
 docredock package search input.ai-package.zip "search term" --json
 ```
 

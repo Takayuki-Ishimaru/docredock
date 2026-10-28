@@ -284,7 +284,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
     }
 
     [Fact]
-    public void Two_columns_without_a_box_read_as_they_did_and_their_wrapped_lines_stay_lines()
+    public void Two_columns_without_a_box_keep_column_order_and_fold_wrapped_paragraphs()
     {
         // Five baselines, a gutter between the columns: the page-level column detection takes this, no box is involved.
         var sheet = new Sheet();
@@ -292,7 +292,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
 
         var result = PdfTextExtractor.Extract(sheet.Pdf());
 
-        Assert.Equal([.. left, .. right], Texts(result));
+        Assert.Equal([string.Join(" ", left), string.Join(" ", right)], Texts(result));
         Assert.Equal(2, result.Pages[0].ColumnCount);
     }
 
@@ -314,17 +314,18 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
     }
 
     [Fact]
-    public void A_grid_of_more_rows_that_is_no_table_is_not_read_by_columns()
+    public void A_ruled_grid_with_unequal_column_widths_is_reconstructed_in_row_order()
     {
-        // Three rows, two columns of very different widths: table inference declines (the columns are not regular), and
-        // each row is read across, as it always was.
+        // A narrow item column and a wide description column are ordinary table geometry.
         var sheet = new Sheet();
         for (var line = 0; line <= 3; line++) sheet.Rule(50, 600 + line * 30, 550, 600 + line * 30);
         sheet.Rule(50, 600, 50, 690).Rule(100, 600, 100, 690).Rule(550, 600, 550, 690);
         for (var row = 0; row < 3; row++) sheet.Text(55, 670 - row * 30, 9, $"Item {row + 1}").Text(105, 670 - row * 30, 9, $"Its description {row + 1}");
         var result = PdfTextExtractor.Extract(sheet.Pdf());
-        Assert.Empty(result.Tables ?? new Dictionary<int, IReadOnlyList<PdfTable>>());
-        Assert.Equal(["Item 1 Its description 1", "Item 2 Its description 2", "Item 3 Its description 3"], Texts(result));
+        var table = Assert.Single(result.Tables![1]);
+        Assert.Equal(new[] { "Item 1", "Its description 1", "Item 2", "Its description 2", "Item 3", "Its description 3" },
+            table.Rows.SelectMany(row => row.Cells).Select(cell => cell.Text));
+        Assert.True(PdfTextAccounting.Reconcile(result.Pages[0], [table]).IsComplete);
     }
 
     [Fact]
@@ -625,8 +626,10 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
             "• DLQ滞留が100件を超えた場合は重大アラートを発報する。",
             "5. 画像・注釈・測定結果",
         ], texts.Skip(start).Take(15));
-        // The heading above the frame stays above it; the ruled list of notes below keeps its label column before its values.
+        // The heading stays above the frame, and the ruled notes keep each label with its value.
         Assert.Equal("4. 左右カラムの業務仕様", texts[start - 1]);
-        Assert.True(Array.IndexOf(texts, "注記A") < Array.IndexOf(texts, "注記B") && Array.IndexOf(texts, "注記C") < Array.IndexOf(texts, "画像の文字は本文テキストではなく、OCRを有効化した場合のみ派生テキストになる。"));
+        var notes = Assert.Single(result.Tables![2], table => table.Rows.SelectMany(row => row.Cells).Any(cell => cell.Text == "注記A"));
+        Assert.Equal(new[] { "注記A", "注記B", "注記C" }, notes.Rows.Select(row => row.Cells[0].Text));
+        Assert.Equal("画像の文字は本文テキストではなく、OCRを有効化した場合のみ派生テキストになる。", notes.Rows[0].Cells[1].Text);
     }
 }

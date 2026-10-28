@@ -133,21 +133,12 @@ public sealed class ComplexPdfFixtureTests
         Assert.True(left41 >= 0 && left42 >= 0 && left41 < left42,
             $"expected '4.1 申請者向け' before '4.2 API境界' in: {text}");
 
-        // Page 2 also carries a short-label / long-value two-column list (注記A/B/C) later in the
-        // same "6. 付録" section, with clean baseline-aligned rows (unlike the wrapped paragraph
-        // block above): SortReadingOrder's gutter detection confirms and reorders it column-major,
-        // which is the clearest positive demonstration on this real fixture that detection fires
-        // and the whole label column precedes the whole value column.
-        Assert.True(page2.ColumnCount >= 2,
-            "expected the extractor to detect at least one column block on page 2");
-        var noteA = text.IndexOf("注記A", StringComparison.Ordinal);
-        var noteB = text.IndexOf("注記B", StringComparison.Ordinal);
-        var noteC = text.IndexOf("注記C", StringComparison.Ordinal);
-        var noteAValue = text.IndexOf("画像の文字は本文テキストではなく", StringComparison.Ordinal);
-        Assert.True(noteA >= 0 && noteB >= 0 && noteC >= 0 && noteAValue >= 0,
-            $"expected to find all three note labels and the first note's value in: {text}");
-        Assert.True(noteA < noteB && noteB < noteC && noteC < noteAValue,
-            $"expected all three note labels (column 1) before their values (column 2) in: {text}");
+        // The ruled short-label/long-value notes are a table despite unequal column widths.
+        Assert.True(page2.ColumnCount >= 2);
+        var notes = Assert.Single(page2Tables, table => table.Rows.SelectMany(row => row.Cells).Any(cell => cell.Text == "注記A"));
+        Assert.Equal(new[] { "注記A", "注記B", "注記C" }, notes.Rows.Select(row => row.Cells[0].Text));
+        Assert.StartsWith("画像の文字は本文テキストではなく", notes.Rows[0].Cells[1].Text, StringComparison.Ordinal);
+        Assert.True(PdfTextAccounting.Reconcile(page2, page2Tables).IsComplete);
     }
 
     private static string FixturePath()

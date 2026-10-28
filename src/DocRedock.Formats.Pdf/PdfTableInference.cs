@@ -3,8 +3,8 @@ using DocRedock.Core.Documents;
 
 namespace DocRedock.Formats.Pdf;
 
-/// <summary>Geometry-only table detection. It deliberately rejects partial grids, rotated
-/// content, overlapping cells, and text that cannot be placed in exactly one cell.</summary>
+/// <summary>Geometry-only table detection. Closed rectilinear grids may contain rectangular
+/// merged cells. Open or ambiguous grids, rotated content and non-unique text assignments are rejected.</summary>
 public static class PdfTableInference
 {
     private const int MaxGridLines = 4_096;
@@ -84,15 +84,16 @@ public static class PdfTableInference
         if (horizontal.Length < 3 || vertical.Length < 3 || maxCandidates <= 0) return [];
         if ((long)horizontal.Length * vertical.Length > MaxGridIntersections) return [];
 
-        // A structural rule must cover the established component extent, possibly as
-        // adjoining cell-border segments. Length alone cannot turn an interior bar or
-        // an unresolved arrow shaft into a new row/column boundary.
+        // A structural rule covers the component extent, possibly as adjoining cell borders,
+        // or terminates at other rules to delimit a merged cell. A floating bar cannot add a boundary.
         var leftEstimate = horizontal.Min(line => line.Minimum);
         var rightEstimate = horizontal.Max(line => line.Maximum);
         var bottomEstimate = vertical.Min(line => line.Minimum);
         var topEstimate = vertical.Max(line => line.Maximum);
-        horizontal = FullyCoveredLevels(horizontal, leftEstimate, rightEstimate);
-        vertical = FullyCoveredLevels(vertical, bottomEstimate, topEstimate);
+        var originalHorizontal = horizontal;
+        var originalVertical = vertical;
+        horizontal = StructuralLevels(originalHorizontal, originalVertical, leftEstimate, rightEstimate);
+        vertical = StructuralLevels(originalVertical, originalHorizontal, bottomEstimate, topEstimate);
         if (horizontal.Length < 3 || vertical.Length < 3) return [];
         // Propagate the exclusion back into `lines` itself: `sourceIds` below re-derives which
         // paths belong to this table from `lines`, not from `horizontal`/`vertical` alone, so a
@@ -101,20 +102,24 @@ public static class PdfTableInference
         // whole bar from PdfTableOverlayDetector instead of leaving it as overlay content.
         lines = [.. horizontal, .. vertical];
 
-        // This release recognizes one fully covered, rectilinear grid at a time. A second
-        // independent grid is still safely left as native text/vector fallback.
+        // Each connected component needs a complete outer frame; interior separators may
+        // stop at another border when the resulting merged cells are rectangular.
         var xs = Cluster(vertical.Select(line => line.Fixed));
         var ys = Cluster(horizontal.Select(line => line.Fixed));
         if (xs.Length < 3 || ys.Length < 3 || !Regular(xs) || !Regular(ys)) return [];
         var left = xs[0]; var right = xs[^1]; var bottom = ys[0]; var top = ys[^1];
-        if (!CoversLevel(horizontal, left, right) || !CoversLevel(vertical, bottom, top)) return [];
+        if (!CoversLevel(horizontal.Where(line => Math.Abs(line.Fixed - bottom) <= 1.5), left, right) ||
+            !CoversLevel(horizontal.Where(line => Math.Abs(line.Fixed - top) <= 1.5), left, right) ||
+            !CoversLevel(vertical.Where(line => Math.Abs(line.Fixed - left) <= 1.5), bottom, top) ||
+            !CoversLevel(vertical.Where(line => Math.Abs(line.Fixed - right) <= 1.5), bottom, top)) return [];
+        var gridCells = PartitionCells(xs, ys, horizontal, vertical);
+        if (gridCells is null) return [];
 
         var cells = new List<PdfTableCell>();
         var assigned = new HashSet<int>();
-        for (var row = 0; row < ys.Length - 1; row++)
-        for (var column = 0; column < xs.Length - 1; column++)
+        foreach (var (row, column, rowSpan, columnSpan) in gridCells)
         {
-            var cell = new Geometry("pdf-user-space", xs[column], ys[row], xs[column + 1] - xs[column], ys[row + 1] - ys[row]);
+            var cell = new Geometry("pdf-user-space", xs[column], ys[row], xs[column + columnSpan] - xs[column], ys[row + rowSpan] - ys[row]);
             var inside = regions.Where(region => IsInside(cell, region.BoundingBox) ||
                 region.MeasuredWidth && IsCentredOnRightEdge(cell, region.BoundingBox, right)).ToArray();
             var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
@@ -139,7 +144,8 @@ public static class PdfTableInference
                 text.Append(region.Text);
                 (last, spaced) = (region, false);
             }
-            cells.Add(new PdfTableCell(row, column, 1, 1, cell, text.ToString(), ids) { Struck = struck, Underlined = underlined });
+            cells.Add(new PdfTableCell(ys.Length - 1 - row - rowSpan, column, rowSpan, columnSpan, cell, text.ToString(), ids)
+                { Struck = struck, Underlined = underlined });
         }
         var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
         // Text touching a cell boundary has no unique owner. Do not silently leave it in
@@ -148,10 +154,18 @@ public static class PdfTableInference
             region.SourceTextIds.Any(id => !assigned.Contains(id)))) return [];
         // At least a 2x2 grid and four independently located text regions avoid promoting
         // decorative grids or a single-axis ruled list.
-        if (assigned.Count < 4 || assigned.Select(id => CellFor(cells, id)).Distinct().Count() < 4) return [];
-        var ordered = cells.GroupBy(cell => cell.Row).OrderByDescending(group => group.Key)
-            .Select((group, outputRow) => new PdfTableRow(group.OrderBy(cell => cell.Column)
-                .Select(cell => cell with { Row = outputRow }).ToArray())).ToArray();
+        var minimumPopulatedCells = xs.Length == 3 && ys.Length == 3 && gridCells.Count == 3 &&
+            gridCells.Any(cell => cell.RowSpan > 1 || cell.ColumnSpan > 1) ? 3 : 4;
+        if (assigned.Count < minimumPopulatedCells ||
+            assigned.Select(id => CellFor(cells, id)).Distinct().Count() < minimumPopulatedCells) return [];
+        // TableGrid uses explicit, empty vertical continuation cells (RowSpan=0).
+        // Keep these physical coordinates so a later row's first real value cannot shift left.
+        var continuations = cells.Where(cell => cell.RowSpan > 1).SelectMany(cell =>
+            Enumerable.Range(cell.Row + 1, cell.RowSpan - 1).Select(row => new PdfTableCell(row, cell.Column, 0, cell.ColumnSpan,
+                new Geometry("pdf-user-space", cell.Bounds.X, ys[ys.Length - 2 - row], cell.Bounds.Width,
+                    ys[ys.Length - 1 - row] - ys[ys.Length - 2 - row]), string.Empty, []))).ToArray();
+        var ordered = Enumerable.Range(0, ys.Length - 1)
+            .Select(row => new PdfTableRow(cells.Concat(continuations).Where(cell => cell.Row == row).OrderBy(cell => cell.Column).ToArray())).ToArray();
         var bounds = candidateBounds;
         var sourceIds = lines.Where(line => line.Horizontal
                 ? line.Fixed >= bottom - 1.5 && line.Fixed <= top + 1.5 && line.Maximum >= left - 1.5 && line.Minimum <= right + 1.5
@@ -334,6 +348,75 @@ public static class PdfTableInference
         return matches;
     }
 
+    // A partial separator is structural only when both ends terminate on perpendicular rules.
+    // Floating schedule bars therefore remain overlay evidence rather than becoming cell borders.
+    private static AxisLine[] StructuralLevels(AxisLine[] lines, AxisLine[] perpendicular, double minimum, double maximum)
+    {
+        var full = FullyCoveredLevels(lines, minimum, maximum).ToHashSet();
+        bool Anchored(AxisLine candidate, double end) => perpendicular.Any(line =>
+            !line.PathIds.Intersect(candidate.PathIds).Any() &&
+            Math.Abs(line.Fixed - end) <= 1.5 && line.Minimum <= candidate.Fixed + 1.5 && line.Maximum >= candidate.Fixed - 1.5);
+        return lines.Where(line => full.Contains(line) ||
+            Anchored(line, line.Minimum) && Anchored(line, line.Maximum)).ToArray();
+    }
+
+    // Remove absent borders between elementary grid slots, accepting only rectangular unions.
+    // A partial border within a slot, or an L-shaped union, has no defensible rowspan/colspan.
+    private static List<(int Row, int Column, int RowSpan, int ColumnSpan)>? PartitionCells(
+        double[] xs, double[] ys, AxisLine[] horizontal, AxisLine[] vertical)
+    {
+        var rows = ys.Length - 1;
+        var columns = xs.Length - 1;
+        if ((long)rows * columns > MaxGridIntersections) return null;
+        var parent = Enumerable.Range(0, rows * columns).ToArray();
+        int Root(int index)
+        {
+            while (parent[index] != index) index = parent[index] = parent[parent[index]];
+            return index;
+        }
+        bool? Border(AxisLine[] lines, double level, double start, double end)
+        {
+            var spans = lines.Where(line => Math.Abs(line.Fixed - level) <= 1.5 &&
+                line.Maximum > start + 1.5 && line.Minimum < end - 1.5).ToArray();
+            return spans.Length == 0 ? false : CoversLevel(spans, start, end) ? true : null;
+        }
+        for (var row = 0; row < rows; row++)
+        for (var column = 0; column < columns; column++)
+        {
+            var index = row * columns + column;
+            if (column + 1 < columns)
+            {
+                var border = Border(vertical, xs[column + 1], ys[row], ys[row + 1]);
+                if (border is null) return null;
+                if (border == false) parent[Root(index)] = Root(index + 1);
+            }
+            if (row + 1 < rows)
+            {
+                var border = Border(horizontal, ys[row + 1], xs[column], xs[column + 1]);
+                if (border is null) return null;
+                if (border == false) parent[Root(index)] = Root(index + columns);
+            }
+        }
+        var result = new List<(int Row, int Column, int RowSpan, int ColumnSpan)>();
+        foreach (var group in Enumerable.Range(0, parent.Length).GroupBy(Root))
+        {
+            var minRow = group.Min(index => index / columns);
+            var maxRow = group.Max(index => index / columns);
+            var minColumn = group.Min(index => index % columns);
+            var maxColumn = group.Max(index => index % columns);
+            if (group.Count() != (maxRow - minRow + 1) * (maxColumn - minColumn + 1)) return null;
+            // No retained separator may divide the interior of a merged rectangle.
+            for (var row = minRow; row <= maxRow; row++)
+            for (var column = minColumn; column <= maxColumn; column++)
+            {
+                if (column < maxColumn && Border(vertical, xs[column + 1], ys[row], ys[row + 1]) != false) return null;
+                if (row < maxRow && Border(horizontal, ys[row + 1], xs[column], xs[column + 1]) != false) return null;
+            }
+            result.Add((minRow, minColumn, maxRow - minRow + 1, maxColumn - minColumn + 1));
+        }
+        return result;
+    }
+
     private static AxisLine[] FullyCoveredLevels(AxisLine[] lines, double minimum, double maximum) =>
         Cluster(lines.Select(line => line.Fixed))
             .Select(level => lines.Where(line => Math.Abs(line.Fixed - level) <= 1.5).ToArray())
@@ -432,7 +515,7 @@ public static class PdfTableInference
     private static bool Regular(IReadOnlyList<double> values)
     {
         var gaps = values.Zip(values.Skip(1), (a, b) => b - a).Where(gap => gap > 1.5).ToArray();
-        return gaps.Length >= 2 && gaps.Min() >= gaps.Max() * .4;
+        return gaps.Length == values.Count - 1 && gaps.Length >= 2;
     }
     private static bool Intersects(Geometry left, Geometry right) => left.X <= right.X + right.Width && left.X + left.Width >= right.X &&
         left.Y <= right.Y + right.Height && left.Y + left.Height >= right.Y;

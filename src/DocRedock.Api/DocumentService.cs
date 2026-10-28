@@ -874,7 +874,13 @@ public sealed partial class DocumentService
         foreach (var asset in assets)
         {
             OcrAttemptResult attempt;
-            if (!enabled)
+            // A source-comparison raster is an attachment, not a new text source.
+            // Sending it to OCR repeats native text and invents image text from vector rules.
+            if (format == DocumentFormatKind.Pdf && graph.Nodes.Any(node =>
+                    node.Content is ReferenceNodeContent reference && reference.Reference == asset.Id &&
+                    HasTrueExtension(node, "pdf_review_image") && !HasTrueExtension(node, "pdf_ocr_required")))
+                attempt = new(OcrProcessingStatus.NotRequired, null, []);
+            else if (!enabled)
                 attempt = new(OcrProcessingStatus.SkippedByPolicy, null,
                     [new OcrDiagnostic("OcrDisabled", "OCR was disabled by policy for this asset.", DiagnosticSeverity.Information)]);
             else if (!asset.MediaType.StartsWith("image/", StringComparison.Ordinal))
@@ -941,8 +947,15 @@ public sealed partial class DocumentService
     {
         var reviewPages = graph.Partitions.Where(partition => includeVisualFallback &&
             partition.Nodes.Any(ReadableMarkdownSerializer.RequiresSourceReview)).Select(p => p.Order + 1).ToHashSet();
+        var ocrPages = graph.Partitions.Where(partition => enableOcr &&
+                (partition.Nodes.Count == 0 || partition.Nodes.Any(IsPdfImagePlaceholder)))
+            .Select(partition => partition.Order + 1).ToHashSet();
+        var wholePageOcr = graph.Partitions.Where(partition => enableOcr &&
+                (partition.Nodes.Count == 0 || partition.Nodes.Any(node =>
+                    HasTrueExtension(node, "pdf_textless_placeholder") || ExportReviewBuilder.CountUnanalyzedContent(node) > 0)))
+            .Select(partition => partition.Order + 1).ToHashSet();
         var pages = graph.Partitions.Where(partition => reviewPages.Contains(partition.Order + 1) ||
-                enableOcr && (partition.Nodes.Count == 0 || partition.Nodes.Any(IsPdfImagePlaceholder)))
+                ocrPages.Contains(partition.Order + 1))
             .Select(partition => int.TryParse(partition.Id.AsSpan("page-".Length), out var page) ? page : partition.Order + 1)
             .ToArray();
         if (pages.Length == 0) return ([], graph);
@@ -1001,13 +1014,13 @@ public sealed partial class DocumentService
                 if (page.PixelWidth <= 0 || page.PixelHeight <= 0 || pixels > 40_000_000 || totalPixels > 200_000_000)
                     throw new InvalidDataException("PDF rasterizer exceeded the configured pixel budget.");
                 var bytes = page.Content.ToArray();
-                var crops = reviewPages.Contains(page.PageNumber) ? null
-                    : CropPdfEmbeddedImages(page, bytes, plans.GetValueOrDefault(page.PageNumber), diagnostics);
+                var crops = ocrPages.Contains(page.PageNumber) && !wholePageOcr.Contains(page.PageNumber)
+                    ? CropPdfEmbeddedImages(page, bytes, plans.GetValueOrDefault(page.PageNumber), diagnostics) : null;
                 if (crops is { Count: > 0 })
                 {
                     cropped[page.PageNumber] = crops;
                     result.AddRange(crops.Select(crop => crop.Asset));
-                    continue;
+                    if (!reviewPages.Contains(page.PageNumber)) continue;
                 }
                 var id = $"page-{page.PageNumber:D4}";
                 var extension = page.MediaType == "image/jpeg" ? ".jpg" : ".png";
@@ -1036,6 +1049,7 @@ public sealed partial class DocumentService
                 {
                     ["pdf_page_raster"] = JsonSerializer.SerializeToElement(true),
                     ["pdf_review_image"] = JsonSerializer.SerializeToElement(true),
+                    ["pdf_ocr_required"] = JsonSerializer.SerializeToElement(ocrPages.Contains(pageNumber) && !cropped.ContainsKey(pageNumber)),
                     ["pdf_page_rotation"] = JsonSerializer.SerializeToElement(page?.Rotation ?? 0),
                 };
                 if (pageBox is not null) reviewExtensions["pdf_page_box"] = JsonSerializer.SerializeToElement(pageBox);
@@ -1188,8 +1202,7 @@ public sealed partial class DocumentService
     private static bool IsPdfImagePlaceholder(DocumentNode node) =>
         HasTrueExtension(node, "pdf_textless_placeholder") ||
         HasTrueExtension(node, "pdf_embedded_image_placeholder") ||
-        ExportReviewBuilder.CountUnanalyzedContent(node) > 0 ||
-        node.Content is TextNodeContent text && text.Text.StartsWith("[PDF page ", StringComparison.Ordinal);
+        ExportReviewBuilder.CountUnanalyzedContent(node) > 0;
 
     private static bool HasTrueExtension(DocumentNode node, string key) =>
         node.Extensions?.TryGetValue(key, out var value) == true && value.ValueKind == JsonValueKind.True;
