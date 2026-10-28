@@ -87,8 +87,13 @@ public static class PdfPageProjection
             var extensions = new Dictionary<string, JsonElement>
             {
                 ["pdf_table_confidence"] = JsonSerializer.SerializeToElement(table.Confidence.ToString()),
-                ["pdf_source_path_ids"] = JsonSerializer.SerializeToElement(table.SourcePathIds)
+                ["pdf_page_rotation"] = JsonSerializer.SerializeToElement(page.Rotation),
+                ["pdf_source_path_ids"] = JsonSerializer.SerializeToElement(table.SourcePathIds),
+                ["pdf_table_columns"] = JsonSerializer.SerializeToElement(table.Rows.SelectMany(row => row.Cells)
+                    .SelectMany(cell => new[] { cell.Bounds.X, cell.Bounds.X + cell.Bounds.Width }).Distinct().Order().ToArray())
             };
+            if ((page.CropBox ?? page.MediaBox) is { } pageBox)
+                extensions["pdf_page_box"] = JsonSerializer.SerializeToElement(pageBox);
             // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already format-neutral --
             // any NodeKind.Table node with a non-empty "table_overlays" extension gets its cell
             // text folded with glyphs, no PDF-specific serializer change needed.

@@ -3866,8 +3866,17 @@ public static partial class PdfTextExtractor
         var minX = flowRegions.Min(region => region.BoundingBox.X);
         var maxX = flowRegions.Max(region => region.BoundingBox.X + region.BoundingBox.Width);
         var pageSpan = Math.Max(1, maxX - minX);
-        double GutterThreshold(PdfTextRegion left, PdfTextRegion right) =>
-            Math.Max(Math.Max(left.BoundingBox.Height, right.BoundingBox.Height) * 3, pageSpan * 0.08);
+        double GutterThreshold(PdfTextRegion left, PdfTextRegion right)
+        {
+            var em = Math.Max(left.BoundingBox.Height, right.BoundingBox.Height);
+            // With measured glyph advances, a persistent 1.5-em channel between substantial
+            // text runs is sufficient evidence. A page-wide percentage erased real 6-8mm gutters.
+            // Short labels and uncertain widths retain the conservative legacy threshold.
+            if (left.MeasuredWidth && right.MeasuredWidth &&
+                left.BoundingBox.Width >= 8 * em && right.BoundingBox.Width >= 8 * em)
+                return Math.Max(12, 1.5 * Math.Max(left.FontSize ?? em, right.FontSize ?? em));
+            return Math.Max(em * 3, pageSpan * 0.08);
+        }
 
         var openRuns = new List<GutterRun>();
         var confirmedRuns = new List<GutterRun>();

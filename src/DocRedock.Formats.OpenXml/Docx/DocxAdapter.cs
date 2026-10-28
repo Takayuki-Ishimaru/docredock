@@ -330,7 +330,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 : options.FinalRevisionView
                 ? "DOCX contains tracked revisions; final readable output excludes deleted content and revision annotations. The source still retains the history."
                 : "DOCX contains tracked revisions; extracted body follows Word's final view (insertions shown, deletions retained as hidden content), and edits crossing revision markup are strict-rejected.",
-            DiagnosticSeverity.Warning));
+            options.FinalRevisionView && !options.ShowTrackedRevisions ? DiagnosticSeverity.Information : DiagnosticSeverity.Warning));
         if (options.ShowTrackedRevisions && deletedRevisionContent)
             diagnostics.Add(new("DeletedRevisionContentIncluded", "Revision markup may include deleted text or objects; review sharing permissions.", DiagnosticSeverity.Warning));
         // One document-level notice, not one per equation: OMML is structured markup that only
@@ -554,7 +554,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         var isCode = IsCodeStyle(style);
         var kind = isList ? NodeKind.ListItem : headingLevel > 0 || isDocumentTitle ? NodeKind.Heading : isCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
         var map = BuildRunMap(id, paragraph, hiddenStyles);
-        var projectionLayer = string.IsNullOrWhiteSpace(text) ? ContentLayer.Hidden : layer;
+        var projectionLayer = string.IsNullOrWhiteSpace(text) && !(isCode && string.IsNullOrEmpty(hiddenText))
+            ? ContentLayer.Hidden : layer;
         var richRuns = ExtractRichTextRuns(paragraph, relationships, hiddenStyles);
         // Preserve the simple text projection for ordinary paragraphs: it keeps existing
         // graph clients compatible while only opting into rich text when the OOXML contains

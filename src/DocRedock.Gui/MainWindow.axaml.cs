@@ -106,6 +106,7 @@ public partial class MainWindow : Window
         Closed += (_, _) => _previewCancellation?.Cancel();
         _componentsInitialized = true;
         CurrentVersionText.Text = $"v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}";
+        ExportButtonShortcut.Text = ExportShortcutLabel;
         LoadSettings();
         ApplyPdfOcrCapability();
         // Office round-trip, restore, and PDF workflows are available in the GUI.
@@ -125,6 +126,21 @@ public partial class MainWindow : Window
         OnReadableChanged(null, new RoutedEventArgs());
         OnModeChanged(null, new RoutedEventArgs());
         UpdateWorkspaceInteractionState();
+    }
+
+    private static string ExportShortcutLabel => OperatingSystem.IsMacOS() ? "⌘↩" : "Ctrl+Enter";
+
+    private void OnWindowKeyDown(object? sender, KeyEventArgs e)
+    {
+        var modifier = OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control;
+        if (e.Key != Key.Enter || e.KeyModifiers != modifier || !ExportButton.IsEnabled || ExportModeRadio.IsChecked != true)
+            return;
+
+        // Do not submit while the user is editing a text or selection field.
+        if (e.Source is TextBox or ComboBox) return;
+
+        e.Handled = true;
+        OnExport(null, new RoutedEventArgs());
     }
 
     private async void OnPickExportFile(object? sender, RoutedEventArgs e)
@@ -748,7 +764,7 @@ public partial class MainWindow : Window
     {
         _exportBusy = busy;
         ExportButtonLabel.Text = busy ? "処理中…" : "書き出す";
-        ExportButtonShortcut.Text = busy ? "…" : "⌘↩";
+        ExportButtonShortcut.Text = busy ? "…" : ExportShortcutLabel;
         UpdateWorkspaceInteractionState();
         UpdateButtons();
         if (status is not null) ShowTransientStatus(status);
@@ -829,7 +845,7 @@ public partial class MainWindow : Window
         ResultSymbolText.Classes.Set("on-dark", success && !warning);
         ResultSymbolText.Classes.Set("on-accent", !success || warning);
         ResultSymbolText.Text = success && !warning ? "✓" : "!";
-        ResultKickerText.Text = !success ? "FAILED" : warning ? "COMPLETED WITH WARNINGS" : "COMPLETE";
+        ResultKickerText.Text = !success ? "失敗" : warning ? "完了・要確認" : "完了";
         ResultTitleText.Text = warning ? "保存は完了しました・原本との照合が必要です" : title;
         // The primary explanation names what to check and where, in the reader's terms. Codes,
         // object IDs, and confidences stay in the collapsed details below.
@@ -875,7 +891,7 @@ public partial class MainWindow : Window
         CancelOperationButton.IsVisible = false;
     }
 
-    // "要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件／OCR確認 3件": pages, images, and
+    // "要確認 1ページ／照合画像 1ページ添付／未解決の線・図形 1件／OCR確認 3件": pages, images, and
     // elements a person acts on, never the number of diagnostic records.
     private static string ReviewCountsText(GuiReviewItem[] review, int ocrReviewItems, int tableBoundaries = 0)
     {
@@ -887,7 +903,7 @@ public partial class MainWindow : Window
             var unanalyzed = review.Sum(item => item.Page.CountOf(ReviewElementKind.UnanalyzedContent));
             var uncertain = review.Sum(item => item.Page.CountOf(ReviewElementKind.UncertainText) + item.Page.CountOf(ReviewElementKind.StrikethroughUnplaced));
             var elements = review.Sum(item => item.Page.Elements.Count) - unanalyzed - uncertain;
-            if (elements > 0) parts.Add($"未解決の図形 {elements}件");
+            if (elements > 0) parts.Add($"未解決の線・図形 {elements}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
             if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
         }
@@ -918,7 +934,7 @@ public partial class MainWindow : Window
             .Select(group => $"{group.Key} {group.Sum(item => item.Count)}件")
             .ToArray();
         return parts.Length == 0 ? string.Empty
-            : $"表示されない内容を除外しました（{string.Join("、", parts)}）。含めるには「内容の公開範囲」で「非表示内容も含める」を選んでください。";
+            : $"表示されない内容を除外しました（{string.Join("、", parts)}）。含めるには「Markdownに含める内容」で「非表示内容も含める」を選んでください。";
     }
 
     private static string? HiddenContentLabel(string code) => code switch

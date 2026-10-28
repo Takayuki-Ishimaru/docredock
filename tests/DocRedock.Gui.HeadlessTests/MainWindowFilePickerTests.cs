@@ -3,6 +3,7 @@ using System.Threading;
 using Avalonia.Controls;
 using Avalonia.Headless.XUnit;
 using Avalonia.Interactivity;
+using Avalonia.Input;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
 using DocRedock.Gui;
@@ -31,7 +32,7 @@ public sealed class MainWindowFilePickerTests
             var warnings = new[] { new DocRedock.Core.Reporting.Diagnostic("VisualConnectorUnresolved",
                 "PDF page 2: unresolved arrow", DocRedock.Core.Reporting.DiagnosticSeverity.Warning, PartUri: "pdf:page:2") };
             Invoke(window, "ShowResult", true, "完了", "保存済み", null, warnings);
-            Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("完了・要確認", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("!", Get<TextBlock>(window, "ResultSymbolText").Text);
             Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
             // v0.2.9 evaluation: the primary explanation is short Japanese with the page, never the
@@ -44,13 +45,13 @@ public sealed class MainWindowFilePickerTests
             Assert.True(Get<Expander>(window, "DiagnosticsExpander").IsVisible);
             Assert.False(Get<Expander>(window, "DiagnosticsExpander").IsExpanded);
             Invoke(window, "ShowResult", true, "完了", "保存済み", null, Array.Empty<DocRedock.Core.Reporting.Diagnostic>());
-            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("完了", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.False(Get<TextBlock>(window, "ResultReviewText").IsVisible);
             Invoke(window, "ShowResult", false, "失敗", "保存できません", null, Array.Empty<DocRedock.Core.Reporting.Diagnostic>());
-            Assert.Equal("FAILED", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("失敗", Get<TextBlock>(window, "ResultKickerText").Text);
             Invoke(window, "ShowResult", true, "完了", "保存済み", null,
                 new[] { warnings[0] with { Severity = DocRedock.Core.Reporting.DiagnosticSeverity.Error } });
-            Assert.Equal("FAILED", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("失敗", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("変換結果にエラーがあります", Get<TextBlock>(window, "ResultTitleText").Text);
         }
         finally { window.Close(); }
@@ -143,13 +144,19 @@ public sealed class MainWindowFilePickerTests
             Assert.True(Get<RadioButton>(window, "ReadableExportToggle").IsChecked == true);
             Assert.True(Get<Button>(window, "ExportButton").IsEnabled);
 
-            Invoke(window, "OnExport", null, new RoutedEventArgs());
+            var exportShortcut = new KeyEventArgs
+            {
+                Key = Key.Enter,
+                KeyModifiers = OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control,
+            };
+            Invoke(window, "OnWindowKeyDown", window, exportShortcut);
+            Assert.True(exportShortcut.Handled);
             PumpUntil(() => GetPrivateField(window, "_exportBusy") is false, TimeSpan.FromSeconds(30));
 
             var markdownFiles = Directory.GetFiles(outputRoot.FullName, "*.md");
             Assert.Single(markdownFiles);
             Assert.True(Get<Control>(window, "ResultPanel").IsVisible);
-            Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("完了・要確認", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("保存は完了しました・変更履歴の共有確認が必要です", Get<TextBlock>(window, "ResultTitleText").Text);
             Assert.Contains("変更履歴を含みます", Get<TextBlock>(window, "ResultReviewText").Text);
             Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);

@@ -173,14 +173,16 @@ public static partial class PdfTextExtractor
         if (boxes is not null && ArrangeBoxedColumns(geometric, tableSourceIds, boxes) is { } arranged)
         {
             var ordered = ApplyColumnLayout(arranged.Remaining, tableSourceIds, out columnCount, arranged.Leaders);
-            var lines = arranged.Expand(MergeAdjacentIntoLines(ordered, tableSourceIds, arranged.Leaders));
+            var lines = arranged.Expand(JoinFlowParagraphs(MergeAdjacentIntoLines(ordered, tableSourceIds, arranged.Leaders),
+                geometric, tableSourceIds, arranged.Leaders));
             if (HoldsEveryFragmentOnce(geometric, lines))
             {
                 columnCount = Math.Max(columnCount, arranged.Columns);
                 return lines;
             }
         }
-        return MergeAdjacentIntoLines(ApplyColumnLayout(geometric, tableSourceIds, out columnCount), tableSourceIds);
+        return JoinFlowParagraphs(MergeAdjacentIntoLines(ApplyColumnLayout(geometric, tableSourceIds, out columnCount), tableSourceIds),
+            geometric, tableSourceIds, boxes?.Fixed);
     }
 
     private static bool HoldsEveryFragmentOnce(IEnumerable<PdfTextRegion> fragments, IEnumerable<PdfTextRegion> lines) =>

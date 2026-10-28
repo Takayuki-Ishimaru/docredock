@@ -23,8 +23,8 @@ public enum ExitCode
 
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
 {
-    private static readonly JsonSerializerOptions PackageJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true };
-    private static readonly JsonSerializerOptions ReportJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    private static readonly JsonSerializerOptions PackageJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All) };
+    private static readonly JsonSerializerOptions ReportJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All) };
 
     private DocumentService Service { get; } = documentService ?? new DocumentService(OcrEngineFactory.CreateDefault(),
         PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),

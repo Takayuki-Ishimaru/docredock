@@ -6,13 +6,19 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.9 Public Beta
+
+- [v0.3.9 release notes](RELEASE_NOTES_v0.3.9.en.md)
+- Improve PDF reading order, paragraphs, merged cells and table continuation
+- Preserve Word code and chart values; improve CLI/GUI operation and token estimates
+
+## Published releases
+
 ### v0.3.8 Public Beta
 
 - [v0.3.8 release notes](RELEASE_NOTES_v0.3.8.en.md)
 - Expose stored token estimates and multipliers in AI-package reads and searches
 - Bound OCR input reads and improve OCR/Mermaid timeout and cancellation handling
-
-## Published releases
 
 ### v0.3.7 Public Beta
 

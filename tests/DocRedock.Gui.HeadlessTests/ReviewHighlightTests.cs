@@ -139,7 +139,7 @@ public sealed class ReviewHighlightTests
         }])!;
 
         Assert.Equal("表示されない内容を除外しました（Wordの非表示・削除済みの文字 1件、PDFの表示範囲外の文字 2件）。" +
-            "含めるには「内容の公開範囲」で「非表示内容も含める」を選んでください。", text);
+            "含めるには「Markdownに含める内容」で「非表示内容も含める」を選んでください。", text);
         Assert.Equal(string.Empty, (string)typeof(MainWindow).GetMethod("HiddenContentText", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [Array.Empty<Diagnostic>()])!);
     }

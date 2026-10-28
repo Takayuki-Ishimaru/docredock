@@ -111,7 +111,7 @@ class QualityScoreTests(unittest.TestCase):
             case.update({"command": ["export"], "fixture_sha256": "b" * 64, "output_sha256": "c" * 64,
                          "exit_code": 0, "diagnostics": [], "assertions": ["contract"]})
         if not table: cases[0]["status"] = "fail"
-        document = {"rid": rid, "version": "0.3.8", "product_source_commit": "a" * 40, "status": status, "distribution_kind": "extracted-package", "package_checksum_sha256": "a" * 64,
+        document = {"rid": rid, "version": "0.3.9", "product_source_commit": "a" * 40, "status": status, "distribution_kind": "extracted-package", "package_checksum_sha256": "a" * 64,
                                     "doctor_capability_status": "passed", "pdf_semantic_cases": cases,
                                     "visual_semantics": {"determinism_failures": [], "relation_assertions": [{"status": "passed", "operation": "endpoint-gap", "expected_relations": [["START", "END", "directed", None]], "deterministic": True}]}}
         if not checksum:
@@ -205,7 +205,7 @@ class QualityScoreTests(unittest.TestCase):
             source = root / "source.json"
             source.write_text(json.dumps({"status": "fail", "table_fixture": {"passed": True}, "dense_vector_fixture": {"passed": False}, "no_diagram_fixture": {"passed": True}}), encoding="utf-8")
             output = root / "aggregate.json"
-            command = ["python3", "tools/v023_semantic_quality.py", "--source-evidence", str(source), "--output", str(output)]
+            command = [sys.executable, "tools/v023_semantic_quality.py", "--source-evidence", str(source), "--output", str(output)]
             for path in smoke: command.extend(("--smoke-evidence", str(path)))
             result = subprocess.run(command, cwd=Path(__file__).parents[1], check=False)
             self.assertNotEqual(0, result.returncode)

@@ -88,6 +88,8 @@ public sealed class MainWindowStartupTests
         {
             var version = Get<TextBlock>(window, "CurrentVersionText");
             var checkUpdates = Get<Button>(window, "CheckUpdatesButton");
+            var shortcut = Get<TextBlock>(window, "ExportButtonShortcut");
+            Assert.Equal(OperatingSystem.IsMacOS() ? "⌘↩" : "Ctrl+Enter", shortcut.Text);
 
             Assert.StartsWith("v", version.Text);
             Assert.Equal("更新を確認", checkUpdates.Content?.ToString());
@@ -311,7 +313,7 @@ public sealed class MainWindowStartupTests
             Assert.True(restoreWorkspace.IsEnabled);
             Assert.True(Get<ToggleSwitch>(window, "PdfFallbackToggle").IsEnabled);
             Assert.Equal("書き出す", Get<TextBlock>(window, "ExportButtonLabel").Text);
-            Assert.Equal("⌘↩", Get<TextBlock>(window, "ExportButtonShortcut").Text);
+            Assert.Equal(OperatingSystem.IsMacOS() ? "⌘↩" : "Ctrl+Enter", Get<TextBlock>(window, "ExportButtonShortcut").Text);
             Assert.IsType<StackPanel>(Get<Button>(window, "ExportButton").Content);
 
             Invoke(window, "SetRestoreBusy", true, null);
