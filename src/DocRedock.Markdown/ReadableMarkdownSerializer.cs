@@ -427,7 +427,9 @@ public sealed partial class ReadableMarkdownSerializer
         var output = new StringBuilder();
         var wroteTitle = false;
         var previousWasListItem = false;
-        var partitions = graph.Partitions.OrderBy(partition => partition.Order)
+        // Join only well-evidenced PDF page continuations in this readable view.
+        // The source graph and its per-page tables remain intact.
+        var partitions = PdfTableContinuationProjection.Project(graph).Partitions.OrderBy(partition => partition.Order)
             .ThenBy(partition => partition.Id, StringComparer.Ordinal).ToArray();
         var isPptx = graph.Format == DocumentFormatKind.Pptx;
         var documentTitleNode = partitions.SelectMany(partition => partition.Nodes)
@@ -489,7 +491,7 @@ public sealed partial class ReadableMarkdownSerializer
                 // A wrapper table can have no own paragraph text at all while its only content is
                 // a nested table. Its child is folded below, so keep the host in the rendering
                 // pass even though its un-folded projection is empty.
-                if (string.IsNullOrWhiteSpace(candidateText) &&
+                if (string.IsNullOrWhiteSpace(candidateText) && candidate.Kind != NodeKind.CodeBlock &&
                     !(candidate.Kind == NodeKind.Table && nestedTableFolds.ChildrenByParentId.ContainsKey(candidate.Id))) return false;
                 // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
                 // displayText is what every other branch below actually renders.
@@ -519,11 +521,20 @@ public sealed partial class ReadableMarkdownSerializer
                 .OfType<string>()
                 .ToHashSet(StringComparer.Ordinal);
             var writtenRevisionNotes = new HashSet<string>(StringComparer.Ordinal);
+            var pendingCode = new List<string>();
+            void FlushCode()
+            {
+                if (pendingCode.Count == 0) return;
+                var block = string.Join("\n", pendingCode);
+                var fence = CodeFence(block);
+                output.AppendLine(fence).AppendLine(block).AppendLine(fence).AppendLine();
+                pendingCode.Clear();
+            }
             foreach (var node in isPptx
                          ? PresentationReadingOrder(partition.Nodes)
                          : partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
             {
-                if (!TryPrepareNode(node, out var text, out var displayText)) continue;
+                if (!TryPrepareNode(node, out var text, out var displayText)) { FlushCode(); continue; }
                 if (ExtensionBool(node, "decorative_toc_leader")) continue;
                 // P-Overlay suppression: no heading, no paragraph, and no rotation annotation -- the
                 // host table already rendered this shape's text/marker in its own cells. DOCX tags a
@@ -537,6 +548,10 @@ public sealed partial class ReadableMarkdownSerializer
                     (ExtensionString(node, "table_overlay_host") is { Length: > 0 } overlayHostId && renderedOverlayTableIds.Contains(overlayHostId) ||
                      ExtensionString(node, "table_grid_member_host") is { Length: > 0 } gridHostId && renderedOverlayTableIds.Contains(gridHostId)))
                     continue;
+                var plainCode = node.Kind == NodeKind.CodeBlock && ExtensionRanges(node, "strike_ranges") is null &&
+                    ExtensionRanges(node, "underline_ranges") is null &&
+                    (node.Content is not RichTextNodeContent rich || !rich.Runs.Any(run => run.Strike || run.Underline || run.Inserted));
+                if (!plainCode) FlushCode();
                 var isListItem = node.Kind is NodeKind.List or NodeKind.ListItem or NodeKind.Connector;
                 if (previousWasListItem && !isListItem) output.AppendLine();
                 switch (node.Kind)
@@ -581,10 +596,12 @@ public sealed partial class ReadableMarkdownSerializer
                         // inline elsewhere — a code fence's content must stay verbatim, never
                         // Markdown-escaped; only the fence length adapts to what it wraps.
                         var codeText = node.Content is RichTextNodeContent codeRich
-                            ? string.Concat(codeRich.Runs.Select(run => run.Text)).Trim()
-                            : text;
-                        var codeFence = CodeFence(codeText);
-                        output.AppendLine(codeFence).AppendLine(codeText).AppendLine(codeFence).AppendLine();
+                            ? string.Concat(codeRich.Runs.Select(run => run.Text))
+                            : node.Content is TextNodeContent codePlain ? codePlain.Text : text;
+                        pendingCode.Add(codeText);
+                        // Only adjacent Word paragraphs are one code block. Other formats keep
+                        // their existing block boundaries, as do paragraphs with revision notes.
+                        if (graph.Format != DocumentFormatKind.Docx || HasExtension(node, "revision_changes")) FlushCode();
                         break;
                     case NodeKind.List:
                     case NodeKind.ListItem:
@@ -686,6 +703,7 @@ public sealed partial class ReadableMarkdownSerializer
                 writtenRevisionNotes.Add(node.Id);
                 previousWasListItem = isListItem;
             }
+            FlushCode();
             foreach (var annotated in partition.Nodes.Where(node => !writtenRevisionNotes.Contains(node.Id)))
                 WriteRevisionChanges(output, annotated);
             if (previousWasListItem) output.AppendLine();
@@ -2904,9 +2922,12 @@ public sealed partial class ReadableMarkdownSerializer
                 ? valElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
             var name = JsonString(series, "Name", "name");
             WriteChartSummary(output, string.IsNullOrWhiteSpace(name) ? "値" : name, categories, values, rawType);
-            if (categories.Length == 0) continue;
+            var rowCount = Math.Max(categories.Length, values.Length);
+            if (rowCount == 0) continue;
             var headers = new[] { "カテゴリ", string.IsNullOrWhiteSpace(name) ? "値" : name };
-            var rows = categories.Select((category, index) => new[] { category, index < values.Length ? values[index] : string.Empty });
+            var rows = Enumerable.Range(0, rowCount).Select(index => new[]
+                { index < categories.Length ? categories[index] : ChartCategory(categories, index),
+                  index < values.Length ? values[index] : string.Empty });
             WriteTable(output, headers, rows);
         }
     }
@@ -3110,11 +3131,21 @@ public sealed partial class ReadableMarkdownSerializer
     private void WritePartialVisualDetails(StringBuilder output, VisualGraph graph, DocumentNode node) =>
         WriteBoundedVisualDetails(output, graph, node, partial: true);
 
-    private void WriteVisualGraphFallbackDetails(StringBuilder output, VisualGraph graph, DocumentNode node) =>
+    private void WriteVisualGraphFallbackDetails(StringBuilder output, VisualGraph graph, DocumentNode node)
+    {
         WriteBoundedVisualDetails(output, graph, node, partial: false);
+    }
 
     private void WriteBoundedVisualDetails(StringBuilder output, VisualGraph graph, DocumentNode node, bool partial)
     {
+        if (ExtensionBool(node, "visual_diagnostics_in_report"))
+        {
+            // Preserve unresolved connector labels and line styles, which are source content,
+            // while leaving primitive inventories and diagnostic messages in the report.
+            if (!(graph.Edges ?? []).Any(edge => edge is not null && (edge.SourceId is null || edge.TargetId is null))) return;
+            graph = graph with { Nodes = [], Paths = [], SourceItems = [], Diagnostics = [] };
+            partial = true;
+        }
         var result = VisualFallbackMarkdownWriter.Write(output, graph, partial,
             ExtensionInt(node, "visual_output_max_paths") ?? VisualFallbackMarkdownWriter.MaxItems,
             ExtensionInt(node, "visual_output_max_characters") ?? VisualFallbackMarkdownWriter.MaxCharacters);

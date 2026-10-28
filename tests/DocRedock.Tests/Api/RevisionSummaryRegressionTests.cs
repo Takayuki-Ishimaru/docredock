@@ -56,6 +56,44 @@ public sealed class RevisionSummaryRegressionTests
         finally { Directory.Delete(Path.GetDirectoryName(source)!, true); }
     }
 
+    [Fact]
+    public async Task Cli_default_policy_excludes_hidden_text_without_a_warning_exit()
+    {
+        const string body = "<w:p><w:r><w:t>Visible</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>Secret</w:t></w:r></w:p>";
+        var source = WriteDocx(body);
+        try
+        {
+            var app = new DocRedock.Cli.CliApplication(new StringWriter(), new StringWriter(), new DocumentService(null, null, discoverPdfRasterizer: false));
+            var target = Path.ChangeExtension(source, ".md");
+            Assert.Equal(0, await app.RunAsync(["export", source, "--output", target, "--ocr", "off"]));
+            var markdown = await File.ReadAllTextAsync(target);
+            Assert.Contains("Visible", markdown);
+            Assert.DoesNotContain("Secret", markdown);
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(source)!, true); }
+    }
+
+    [Fact]
+    public async Task Cli_successfully_excludes_hidden_text_and_final_revision_history()
+    {
+        const string body = "<w:p><w:r><w:t>Visible</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>Secret</w:t></w:r>" +
+            "<w:del><w:r><w:delText>Old</w:delText></w:r></w:del></w:p>";
+        var source = WriteDocx(body);
+        try
+        {
+            var output = new StringWriter();
+            var app = new DocRedock.Cli.CliApplication(output, new StringWriter(), new DocumentService(null, null, discoverPdfRasterizer: false));
+            var target = Path.ChangeExtension(source, ".md");
+            Assert.Equal(0, await app.RunAsync(["export", source, "--output", target, "--ocr", "off", "--revisions", "final", "--verbose"]));
+            var markdown = await File.ReadAllTextAsync(target);
+            Assert.Contains("Visible", markdown);
+            Assert.DoesNotContain("Secret", markdown);
+            Assert.DoesNotContain("Old", markdown);
+            Assert.Contains("TrackedRevisionsPresent", output.ToString());
+        }
+        finally { Directory.Delete(Path.GetDirectoryName(source)!, true); }
+    }
+
     [Theory]
     [InlineData("visible", "final")]
     [InlineData("sanitized", null)]

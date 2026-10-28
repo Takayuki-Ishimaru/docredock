@@ -47,7 +47,7 @@ public sealed class CliPackageSearchDisplayTests : IDisposable
 
         const string partId = "part-\u001b[31m\u202e";
         const string label = "Sheet\nFORGED\r\u202eLABEL\u2066";
-        const string line = "MARKER\t\u0002\u001b[2J\u007f\u0085\u061c\u200e\u200f\u2028\u2029\u202a\u202e\u2066\u2069\rFORGED 😀";
+        const string line = "MARKER\t\u0002\u001b[2J\u007f\u0085\u061c\u200e\u200f\u2028\u2029\u202a\u202e\u2066\u2069\rFORGED 😀 日本語";
         var markdown = "# Text\n" + line + "\n";
         var manifestPath = Path.Combine(directory, "manifest.json");
         var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!;
@@ -77,6 +77,7 @@ public sealed class CliPackageSearchDisplayTests : IDisposable
         Assert.Empty(error.ToString());
         if (json)
         {
+            Assert.Contains("日本語", output.ToString());
             using var result = JsonDocument.Parse(output.ToString());
             var match = Assert.Single(result.RootElement.GetProperty("matches").EnumerateArray());
             Assert.Equal(partId, match.GetProperty("part_id").GetString());

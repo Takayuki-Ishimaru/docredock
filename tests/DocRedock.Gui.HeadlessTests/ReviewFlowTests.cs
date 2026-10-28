@@ -117,8 +117,8 @@ public sealed class ReviewFlowTests
             };
             Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, warnings);
 
-            Assert.Equal("COMPLETED WITH WARNINGS", Get<TextBlock>(window, "ResultKickerText").Text);
-            Assert.Equal("要確認 1ページ／照合画像 1ページ添付／未解決の図形 1件／OCR確認 2件", Get<TextBlock>(window, "ResultCountsText").Text);
+            Assert.Equal("完了・要確認", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("要確認 1ページ／照合画像 1ページ添付／未解決の線・図形 1件／OCR確認 2件", Get<TextBlock>(window, "ResultCountsText").Text);
             var review = Get<TextBlock>(window, "ResultReviewText").Text!;
             Assert.Equal(item.Description, review);
             Assert.DoesNotContain("source_object", review);
@@ -199,7 +199,7 @@ public sealed class ReviewFlowTests
             SetField(window, "_latestReviewItems", (IReadOnlyList<GuiReviewItem>)[]);
             SetField(window, "_latestOcrReviewItems", 3);
             Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, Array.Empty<Diagnostic>());
-            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("完了", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("書き出しが完了しました", Get<TextBlock>(window, "ResultTitleText").Text);
             Assert.False(Get<TextBlock>(window, "ResultReviewText").IsVisible);
             Assert.True(Get<TextBlock>(window, "ResultOcrText").IsVisible);
@@ -230,7 +230,7 @@ public sealed class ReviewFlowTests
                 ReadingOrder: StructureBasis.Inferred, TableStructure: StructureBasis.NeedsComparison);
             SetField(window, "_latestEvaluation", (IReadOnlyList<string>)[ExportSummaryText.EvaluationJapanese(summary)]);
             Invoke(window, "ShowResult", true, "書き出しが完了しました", "Markdown: x.md", null, Array.Empty<Diagnostic>());
-            Assert.Equal("COMPLETE", Get<TextBlock>(window, "ResultKickerText").Text);
+            Assert.Equal("完了", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("書き出しが完了しました", Get<TextBlock>(window, "ResultTitleText").Text);
             Assert.Equal("表の区切りの確認 1件", Get<TextBlock>(window, "ResultCountsText").Text);
             Assert.True(Get<TextBlock>(window, "ResultTableText").IsVisible);

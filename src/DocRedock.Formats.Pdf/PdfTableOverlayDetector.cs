@@ -287,20 +287,13 @@ public static class PdfTableOverlayDetector
 
     /// <summary>Reconstructs column boundaries (ascending, left to right) and row boundaries
     /// (descending, top to bottom -- PDF user space grows upward, so this is "row 0 is the top
-    /// row") directly from the inferred table's own cell bounds. PdfTableInference.Infer always
-    /// emits exactly one cell per column per row (RowSpan/ColumnSpan are always 1), so the first
-    /// row alone carries every column boundary and each row's own cell carries that row's height.</summary>
+    /// row") from all cell bounds. Merged headers can omit a column boundary in the first row;
+    /// vertical continuation cells retain row boundaries beneath a rowspan.</summary>
     private static (double[] Xs, double[] YsTopDown) BuildGrid(PdfTable table)
     {
-        var firstRow = table.Rows[0].Cells.OrderBy(cell => cell.Column).ToArray();
-        var xs = new double[firstRow.Length + 1];
-        xs[0] = firstRow[0].Bounds.X;
-        for (var index = 0; index < firstRow.Length; index++)
-            xs[index + 1] = firstRow[index].Bounds.X + firstRow[index].Bounds.Width;
-        var ys = new double[table.Rows.Count + 1];
-        ys[0] = table.Rows[0].Cells[0].Bounds.Y + table.Rows[0].Cells[0].Bounds.Height;
-        for (var index = 0; index < table.Rows.Count; index++)
-            ys[index + 1] = table.Rows[index].Cells[0].Bounds.Y;
+        var cells = table.Rows.SelectMany(row => row.Cells).ToArray();
+        var xs = cells.SelectMany(cell => new[] { cell.Bounds.X, cell.Bounds.X + cell.Bounds.Width }).Distinct().Order().ToArray();
+        var ys = cells.SelectMany(cell => new[] { cell.Bounds.Y, cell.Bounds.Y + cell.Bounds.Height }).Distinct().OrderDescending().ToArray();
         return (xs, ys);
     }
 

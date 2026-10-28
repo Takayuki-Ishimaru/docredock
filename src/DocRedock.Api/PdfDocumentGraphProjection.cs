@@ -181,6 +181,7 @@ internal static class PdfDocumentGraphProjection
                     {
                         ["visual_graph"] = JsonSerializer.SerializeToElement(visualGraph),
                         ["diagram_language"] = JsonSerializer.SerializeToElement("mermaid"),
+                        ["visual_diagnostics_in_report"] = JsonSerializer.SerializeToElement(true),
                         ["visual_fallback_suppressed"] = JsonSerializer.SerializeToElement(visualGraph.HasTopology)
                     }));
             }

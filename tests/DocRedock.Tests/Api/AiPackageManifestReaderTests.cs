@@ -96,8 +96,9 @@ public sealed class AiPackageManifestReaderTests : IDisposable
         Assert.Contains("A2", cells);
         Assert.Contains("A3", cells);
         Assert.DoesNotContain("A4", cells);
-        foreach (var part in manifest.Parts)
-            Assert.Equal(AiTokenEstimate.Estimate(await File.ReadAllTextAsync(Path.Combine(path, part.Path))), part.EstimatedTokens);
+        // The released package retains the estimates written by its original heuristic.
+        Assert.Equal([22, 52, 54, 54, 46, 48], manifest.Parts.Select(part => part.EstimatedTokens));
+        Assert.Empty(await AiPackageManifestReader.VerifyFilesAsync(path, manifest));
     }
 
     [Theory]

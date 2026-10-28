@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Formats.Pdf;
@@ -1044,8 +1045,12 @@ public sealed class PdfUnderlineRecognitionTests : IDisposable
         Assert.Contains("~~dropped~~", markdown, StringComparison.Ordinal);
         Assert.Contains("<u>planned</u>", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("~~active~~", markdown, StringComparison.Ordinal);
-        // The over-empty-cells line, the shaft of the arrow and its head are what the reader is still told to compare.
-        Assert.Equal(3, markdown.Split('\n').Count(line => line.StartsWith("- パス:", StringComparison.Ordinal)));
+        // The line, arrow shaft and arrowhead remain in review evidence, outside the readable body.
+        Assert.DoesNotContain("- パス:", markdown, StringComparison.Ordinal);
+        var visualNode = Assert.Single(result.Graph.Nodes, node => node.Extensions?.ContainsKey("visual_graph") == true);
+        var visual = visualNode.Extensions!["visual_graph"].Deserialize<VisualGraph>();
+        Assert.NotNull(visual);
+        Assert.Equal(3, visual.Paths!.Count);
         Assert.Equal(1, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ReviewPages);
     }
 
