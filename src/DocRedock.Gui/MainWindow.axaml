@@ -9,7 +9,8 @@
         MinHeight="620"
         ExtendClientAreaToDecorationsHint="False"
         Opened="OnWindowOpened"
-        SizeChanged="OnWindowSizeChanged">
+        SizeChanged="OnWindowSizeChanged"
+        KeyDown="OnWindowKeyDown">
   <Window.Resources>
     <StreamGeometry x:Key="IconUpload">M12,3 L12,15 M7,8 L12,3 17,8 M4,14 L4,19 20,19 20,14</StreamGeometry>
     <StreamGeometry x:Key="IconShield">M12,2 L20,5.5 L20,11 C20,16.2 16.6,20.5 12,22 C7.4,20.5 4,16.2 4,11 L4,5.5 Z M8.5,12 L11,14.5 16,9.5</StreamGeometry>

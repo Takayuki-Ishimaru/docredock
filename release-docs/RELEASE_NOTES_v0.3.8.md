@@ -9,7 +9,7 @@ v0.3.8では、AI向けパッケージの読み取り・検索で概算トーク
 CLIの`package read --json`と`package search --json`で、各分割に保存された概算トークン数`estimated_tokens`と、パッケージに記録された見積もり倍率`token_estimate_multiplier`を取得できます。AIへ渡す分割を選ぶ際に、本文と同じ結果からサイズの目安を確認できます。
 
 ```sh
-docredock package read input.ai-package.zip --part p0001 --json
+docredock package read input.ai-package.zip --part part-0001 --json
 docredock package search input.ai-package.zip "検索する語" --json
 ```
 

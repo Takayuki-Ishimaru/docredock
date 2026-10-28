@@ -40,6 +40,90 @@ public sealed class DocumentServiceTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Native_pdf_review_raster_is_not_a_source_for_ocr(bool includeReview)
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "native.pdf");
+            const string content = "BT 1 0 0 1 10 10 Tm (Native text) Tj ET 50 60 m 170 180 l S";
+            await File.WriteAllTextAsync(source, $"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream\n%%EOF");
+            var ocr = new ImageRecordingOcrEngine("NOISE FROM PAGE OCR");
+            var result = await new DocumentService(ocr, new PngPdfRasterizer(200, 200), discoverPdfRasterizer: false)
+                .ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "native.md"),
+                    EnableOcr: true, IncludePdfFallbackImages: includeReview));
+
+            Assert.Empty(ocr.Seen);
+            Assert.DoesNotContain(result.Graph.Nodes, node => node.Kind == NodeKind.ImageText);
+            var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
+            Assert.Contains("Native text", markdown);
+            Assert.DoesNotContain("NOISE FROM PAGE OCR", markdown);
+            Assert.DoesNotContain("- 診断:", markdown);
+            Assert.DoesNotContain("- パス:", markdown);
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
+            Assert.Equal(includeReview, result.Graph.Nodes.Any(node => node.Kind == NodeKind.Image));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task Review_page_with_embedded_image_runs_ocr_on_the_crop_only()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "mixed-review.pdf");
+            await WriteBoxedTextAndImagePdfAsync(source, 0, (20, 30, 60, 40));
+            var pdf = await File.ReadAllTextAsync(source, Encoding.Latin1);
+            var contentStart = pdf.IndexOf("stream\n", StringComparison.Ordinal) + "stream\n".Length;
+            var contentEnd = pdf.IndexOf("\nendstream", contentStart, StringComparison.Ordinal);
+            var original = pdf[contentStart..contentEnd];
+            var content = original + "\n100 20 m 180 60 l S";
+            pdf = pdf.Replace("/Length " + original.Length + " >>", "/Length " + content.Length + " >>", StringComparison.Ordinal)
+                .Replace(original, content, StringComparison.Ordinal);
+            await File.WriteAllTextAsync(source, pdf, Encoding.Latin1);
+            var ocr = new ImageRecordingOcrEngine("Image content");
+            var result = await new DocumentService(ocr, new PngPdfRasterizer(400, 200, (40, 60, 120, 80)), discoverPdfRasterizer: false)
+                .ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "mixed-review.md"), EnableOcr: true));
+
+            var seen = Assert.Single(ocr.Seen);
+            Assert.Equal(("page-0001-img-01", 120, 80, true), seen);
+            Assert.Equal(2, result.Graph.Assets!.Count);
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PdfReviewImageAttached");
+            Assert.Contains("Image content", await File.ReadAllTextAsync(result.MarkdownPath));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Fact]
+    public async Task Embedded_image_crop_does_not_prevent_recovery_of_an_unparsed_form_on_the_same_page()
+    {
+        var root = TempDirectory();
+        try
+        {
+            var source = Path.Combine(root, "image-and-form.pdf");
+            const string content = "BT 10 80 Td (Native body line) Tj ET q 60 0 0 40 20 30 cm /Im1 Do Q /Fm1 Do";
+            const string form = "BT 100 10 Td (Form text) Tj ET";
+            await File.WriteAllTextAsync(source, "%PDF-1.4\n" +
+                "1 0 obj << /Type /Page /MediaBox [0 0 200 100] /Contents 2 0 R /Resources << /XObject << /Im1 5 0 R /Fm1 6 0 R >> >> >> endobj\n" +
+                $"2 0 obj << /Length {content.Length} >> stream\n{content}\nendstream endobj\n" +
+                "5 0 obj << /Type /XObject /Subtype /Image /Width 8 /Height 8 >> endobj\n" +
+                $"6 0 obj << /Type /XObject /Subtype /Form /BBox [100 0 180 20] /Filter /LZWDecode /Length {form.Length} >> stream\n{form}\nendstream endobj\n%%EOF", Encoding.Latin1);
+            var ocr = new ImageRecordingOcrEngine("Recovered form content");
+            var result = await new DocumentService(ocr, new PngPdfRasterizer(400, 200), discoverPdfRasterizer: false)
+                .ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "recovered.md"), EnableOcr: true));
+
+            var seen = Assert.Single(ocr.Seen);
+            Assert.Equal(("page-0001", 400, 200), (seen.AssetId, seen.Width, seen.Height));
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PdfFormXObjectUnparsed");
+            Assert.Contains("Recovered form content", await File.ReadAllTextAsync(result.MarkdownPath));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
     [InlineData(false, "auto")]
     [InlineData(false, "off")]
     [InlineData(false, "unavailable")]

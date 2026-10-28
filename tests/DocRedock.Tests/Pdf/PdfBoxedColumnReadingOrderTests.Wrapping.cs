@@ -204,7 +204,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
             Paragraph(sheet, 58, 590, 10.5, 12, 180, left);
             Paragraph(sheet, 268, 590, 10.5, 12, 179, right);
         }
-        Assert.NotEqual([left, right], ReadPlain(Text));
+        Assert.Equal([left, right], ReadPlain(Text));
         Assert.Equal([left, right], ReadDrawn(sheet => sheet.Frame(50, 520, 405, 90), Text));
     }
 

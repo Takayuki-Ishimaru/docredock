@@ -259,7 +259,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
         sheet.Text(60, first, 9, "Note:");
         sheet.Text(108, first, 9, "Left one").Text(108, first - 11, 9, "Left two").Text(204, first, 9, "Right one").Text(204, first - 11, 9, "Right two");
         var result = PdfTextExtractor.Extract(sheet.Pdf());
-        Assert.Equal([.. left, "Note:", "Left one", "Left two", "Right one", "Right two", .. right], Texts(result));
+        Assert.Equal([string.Join(" ", left), "Note:", "Left one", "Left two", "Right one", "Right two", string.Join(" ", right)], Texts(result));
         var ids = result.Pages[0].Regions.SelectMany(region => region.SourceTextIds).ToArray();
         Assert.Equal(sheet.Shows, ids.Length);
         Assert.Equal(ids.Length, ids.Distinct().Count());
@@ -393,7 +393,7 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
     }
 
     [Fact]
-    public void Two_blocks_in_a_frame_with_a_gutter_of_less_than_two_and_a_half_ems_are_not_columns()
+    public void Measured_text_blocks_with_a_persistent_narrow_gutter_keep_the_same_order_with_or_without_a_frame()
     {
         var left = Wrap(LeftSentence + " and then a few more words of the left block", 10, 232);
         var right = Wrap(RightSentence + " and then a few more words of the right block", 10, 232);
@@ -406,7 +406,8 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
         };
         // 15 points between the longest line of the left block and the right block, at a size of 10; and 40.
         Assert.Equal(ReadPlain(Text(15)), ReadDrawn(sheet => sheet.Frame(50, 480, 500, 230), Text(15)));
-        Assert.NotEqual(ReadPlain(Text(40)), ReadDrawn(sheet => sheet.Frame(50, 480, 500, 230), Text(40)));
+        Assert.Equal(ReadPlain(Text(40)), ReadDrawn(sheet => sheet.Frame(50, 480, 500, 230), Text(40)));
+        Assert.Equal([string.Join(" ", left), string.Join(" ", right)], ReadPlain(Text(15)));
     }
 
     // --- Lines that wrap

@@ -323,9 +323,9 @@ public sealed class AiPackageTableRowBlockTests
     [InlineData("abcd", 1)]
     [InlineData("abcde", 2)]
     [InlineData("売上表", 3)]
-    [InlineData("| 売上 | 100 |", 2 + 3)]
+    [InlineData("| 売上 | 100 |", 6)]
     [InlineData("😀", 1)]
-    public void Token_estimate_counts_ascii_by_four_and_other_characters_one_each(string text, int expected) =>
+    public void Token_estimate_accounts_for_digits_and_table_delimiters(string text, int expected) =>
         Assert.Equal(expected, AiTokenEstimate.Estimate(text));
 
     private static DocumentNode[] Table(int firstRow, int dataRows, string prefix = "Item")

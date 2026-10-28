@@ -75,8 +75,9 @@ public sealed record AiPackagePart(
     public double TokenEstimateMultiplier { get; init; } = 1;
 }
 
-/// <summary>A rough token count that needs no tokenizer: about four ASCII characters per token and
-/// one token per other character (Japanese text included). Real tokenizers differ by model; use it
+/// <summary>A rough token count that needs no tokenizer: about four ordinary ASCII characters,
+/// three consecutive digits, or two Markdown table delimiters per token, and one token per other Unicode rune.
+/// Real tokenizers differ by model; use it
 /// to compare parts and plan batches, not as a model limit.</summary>
 public static class AiTokenEstimate
 {
@@ -98,14 +99,18 @@ public static class AiTokenEstimate
             throw new ArgumentOutOfRangeException(nameof(multiplier), multiplier,
                 $"Token estimate multiplier must be between {MinimumMultiplier:0.#} and {MaximumMultiplier:0.#}.");
         ArgumentNullException.ThrowIfNull(text);
-        var ascii = 0;
-        var other = 0;
+        long ascii = 0, digitRun = 0, numberTokens = 0, delimiters = 0, other = 0;
         foreach (var rune in text.EnumerateRunes())
         {
-            if (rune.IsAscii) ascii++;
+            if (rune.Value is >= '0' and <= '9') { digitRun++; continue; }
+            numberTokens += (digitRun + 2) / 3;
+            digitRun = 0;
+            if (rune.Value == '|') delimiters++;
+            else if (rune.IsAscii) ascii++;
             else other++;
         }
-        var estimate = ((long)ascii + 3) / 4 + other;
+        numberTokens += (digitRun + 2) / 3;
+        var estimate = (ascii + 3) / 4 + numberTokens + (delimiters + 1) / 2 + other;
         if (multiplier == 1) return (int)Math.Min(estimate, int.MaxValue);
         var widened = Math.Ceiling(estimate * multiplier);
         return widened >= int.MaxValue ? int.MaxValue : (int)widened;

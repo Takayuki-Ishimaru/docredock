@@ -135,9 +135,11 @@ public sealed class V033ReviewResponseTests : IDisposable
         Assert.Equal(11, await cli.RunAsync(["export", Fixture("spec.docx"), "--output", Path.Combine(root, "markup.zip"),
             "--ai-package", "zip", "--fail-on-review", "--ocr", "off"]));
         var sanitized = Path.Combine(root, "sanitized.zip");
-        Assert.Equal(1, await cli.RunAsync(["export", Fixture("spec.docx"), "--output", sanitized,
+        Assert.Equal(0, await cli.RunAsync(["export", Fixture("spec.docx"), "--output", sanitized,
             "--ai-package", "zip", "--content-policy", "sanitized", "--fail-on-review", "--ocr", "off"]));
-        Assert.False((await AiPackageManifestReader.ReadVerifiedPackageAsync(sanitized)).Review.Required);
+        var sanitizedPackage = await AiPackageManifestReader.ReadVerifiedPackageAsync(sanitized);
+        Assert.False(sanitizedPackage.Review.Required);
+        Assert.DoesNotContain(sanitizedPackage.Parts, part => part.Markdown.Contains("DELETED_REVIEW_SECRET", StringComparison.Ordinal));
     }
 
     [Fact]
