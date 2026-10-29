@@ -117,10 +117,11 @@ Type=Application
 Name=DocRedock
 Comment=Local-first Office to Markdown utility
 TryExec=$binary_directory/docredock-gui
-Exec=$binary_directory/docredock-gui
+Exec=$binary_directory/docredock-gui %F
 Icon=$icon
 Terminal=false
 Categories=Office;Utility;
+MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/pdf;
 X-DocRedock-Managed=true
 DESKTOP
 printf 'DocRedock installed in %s\n' "$prefix"

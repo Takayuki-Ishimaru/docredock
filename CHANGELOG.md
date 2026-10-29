@@ -4,6 +4,18 @@ Notable user-facing changes to DocRedock are summarized here. GitHub Releases is
 
 ## [Unreleased]
 
+## [0.3.10]
+
+- Improved PDF column/table reading order, headings, spacing, repeated page furniture and source-review previews; improved rasterizer concurrency and cleanup.
+- Improved localized Word list/code recognition, merged-cell expansion, Excel titles and category-aligned chart tables.
+- Added CLI batch/directory conversion, Markdown stdout, result display options, PDF opt-in with `--allow-pdf`, and output language selection with `--lang ja|en`.
+- Clarified GUI OCR/review guidance and added startup-file selection and Linux file-manager integration.
+- The bundled Python reader now blocks review-required `--part`/`--search` body output with exit 11 by default; `--allow-review` permits output after review and legacy `--fail-on-review` retains exit 3.
+- Manifest/report schemas and Word revision defaults remain unchanged.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.10.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.10.md)
+
 ## [0.3.9]
 
 - Improved PDF wrapped paragraphs, narrow-column reading order and clearly ruled tables with merged cells or unequal column widths; joined well-supported table continuations in full-document Markdown while keeping package parts page-based.

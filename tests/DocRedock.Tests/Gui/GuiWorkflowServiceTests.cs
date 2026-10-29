@@ -316,9 +316,9 @@ public sealed class GuiWorkflowServiceTests : IDisposable
                 source, Path.Combine(fixture.Root, "export"), enableOcr: false, readable: true);
 
             Assert.NotNull(exported.VisualSummary);
-            Assert.Contains("図: 1件（vector page 1）", exported.VisualSummary, StringComparison.Ordinal);
-            Assert.Contains("unresolved 0", exported.VisualSummary, StringComparison.Ordinal);
-            Assert.Contains("fallback 0", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("図の復元: 1件（ベクター図のページ 1）", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("未解決 0", exported.VisualSummary, StringComparison.Ordinal);
+            Assert.Contains("代替表示 0", exported.VisualSummary, StringComparison.Ordinal);
             Assert.Contains("Diagrams reconstructed: 1", exported.ExportSummary, StringComparison.Ordinal);
             Assert.Contains("Fallback pages: 0", exported.ExportSummary, StringComparison.Ordinal);
         }

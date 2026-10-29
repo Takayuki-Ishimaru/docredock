@@ -257,6 +257,9 @@ public static class ExportSummaryBuilder
     private static StructureBasis TableStructureBasis(DocumentGraph graph, ReadableProjectionReport? projection)
     {
         if (projection is null) return StructureBasis.NotEvaluated;
+        if (graph.Nodes.Any(node => node.Extensions?.TryGetValue("pdf_review_reason", out var reason) == true &&
+            reason.ValueKind == JsonValueKind.String && reason.GetString() == "PdfTableReconstructionFailed"))
+            return StructureBasis.Unresolved;
         if (graph.Nodes.Any(node => node.Extensions?.TryGetValue(ReviewExtensionKeys.FinalTableGridUnresolved, out var unresolved) == true &&
             unresolved.ValueKind == JsonValueKind.True)) return StructureBasis.Unresolved;
         if (projection.RenderedTables == 0) return StructureBasis.NotApplicable;

@@ -9,8 +9,7 @@
         MinHeight="620"
         ExtendClientAreaToDecorationsHint="False"
         Opened="OnWindowOpened"
-        SizeChanged="OnWindowSizeChanged"
-        KeyDown="OnWindowKeyDown">
+        SizeChanged="OnWindowSizeChanged">
   <Window.Resources>
     <StreamGeometry x:Key="IconUpload">M12,3 L12,15 M7,8 L12,3 17,8 M4,14 L4,19 20,19 20,14</StreamGeometry>
     <StreamGeometry x:Key="IconShield">M12,2 L20,5.5 L20,11 C20,16.2 16.6,20.5 12,22 C7.4,20.5 4,16.2 4,11 L4,5.5 Z M8.5,12 L11,14.5 16,9.5</StreamGeometry>
@@ -130,6 +129,8 @@
                      AutomationProperties.Name="検出された要確認事項と読み順・表構造の評価" />
           <TextBlock x:Name="ResultHiddenText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="除外した非表示の内容" />
+          <TextBlock x:Name="ResultRevisionText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False"
+                     AutomationProperties.Name="変更履歴の共有確認" />
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
           <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5"
                        AutomationProperties.Name="処理の進捗" />
@@ -223,7 +224,7 @@
               <RadioButton x:Name="ReadableExportToggle" Classes="radio-card" GroupName="ExportFormat" IsChecked="True"
                            IsCheckedChanged="OnReadableChanged">
                 <StackPanel Spacing="3">
-                  <TextBlock Text="Markdownのみ" FontWeight="Bold" />
+                  <TextBlock Text="閲覧用Markdown（片道変換）" FontWeight="Bold" />
                   <TextBlock Text=".mdだけを書き出します。見出し・段落・表に再構成するため、元の形式へは戻せません。"
                              Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
@@ -247,6 +248,20 @@
                 </StackPanel>
               </RadioButton>
             </StackPanel>
+
+            <Border x:Name="ContentPolicyPanel" Classes="workspace-card">
+              <StackPanel Spacing="6">
+                <TextBlock Text="Markdownに含める内容" Classes="section-label" />
+                <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
+                          AutomationProperties.Name="内容の公開範囲">
+                  <ComboBoxItem Content="表示中の内容のみ（推奨）" Tag="visible" />
+                  <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
+                  <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
+                </ComboBox>
+                <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
+                           Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+              </StackPanel>
+            </Border>
 
             <StackPanel x:Name="AiPackageOptionsPanel" Spacing="8" IsVisible="False">
               <TextBlock Text="分割を確認" Classes="section-label" />
@@ -305,22 +320,13 @@
                   <TextBlock Text="接続推定" Classes="muted caption" />
                   <ComboBox x:Name="VisualInferenceModeComboBox" SelectedIndex="1" SelectionChanged="OnSettingsChanged"
                             AutomationProperties.Name="視覚接続の推定モード">
-                    <ComboBoxItem Content="接続推定なし（native only）" Tag="native-only" />
-                    <ComboBoxItem Content="安全優先（safe・推奨）" Tag="safe" />
-                    <ComboBoxItem Content="復元優先（balanced）" Tag="balanced" />
+                    <ComboBoxItem Content="元文書の接続だけを使う" Tag="native-only" />
+                    <ComboBoxItem Content="安全を優先（推奨）" Tag="safe" />
+                    <ComboBoxItem Content="復元を優先" Tag="balanced" />
                   </ComboBox>
-                  <TextBlock Text="曖昧な接続は未解決としてsource text／fallback／diagnosticに残ります。" Classes="muted caption" TextWrapping="Wrap" />
+                  <TextBlock Text="曖昧な接続は確定せず、元の文字や代替画像、詳細の診断に残します。" Classes="muted caption" TextWrapping="Wrap" />
                   <TextBlock x:Name="BalancedInferenceWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
-                             Text="注意: 復元優先（balanced）の出力には、図形配置から推定した接続が含まれる可能性があります。診断を確認してください。" />
-                  <TextBlock Text="Markdownに含める内容" Classes="muted caption" />
-                  <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
-                            AutomationProperties.Name="内容の公開範囲">
-                    <ComboBoxItem Content="表示中の内容のみ（推奨）" Tag="visible" />
-                    <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
-                    <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
-                  </ComboBox>
-                  <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
-                             Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+                             Text="注意: 復元を優先する設定では、図形の配置から推定した接続が含まれる場合があります。詳細を確認してください。" />
                   <TextBlock Text="Wordの変更履歴" Classes="muted caption" />
                   <ComboBox x:Name="RevisionsComboBox" SelectedIndex="0" SelectionChanged="OnSettingsChanged" AutomationProperties.Name="Wordの変更履歴の出力方法">
                     <ComboBoxItem Content="共有範囲に合わせる（プライバシー優先は最終版）" Tag="auto" />
@@ -328,6 +334,11 @@
                     <ComboBoxItem Content="履歴付き（挿入・削除・変更を含む）" Tag="markup" />
                     <ComboBoxItem Content="変更履歴がある文書を拒否" Tag="reject" />
                   </ComboBox>
+                  <CheckBox x:Name="ExpandMergedCellsCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
+                            AutomationProperties.Name="結合セルの値を繰り返して表示">
+                    <TextBlock Text="閲覧用Markdownで結合セルの値を各行に表示する" TextWrapping="Wrap" />
+                  </CheckBox>
+                  <TextBlock Text="AI向けパッケージでは常に有効です。" Classes="muted caption" />
                   <CheckBox x:Name="RevisionSharingConsent" IsChecked="False" IsCheckedChanged="OnSettingsChanged">
                     <TextBlock Text="プライバシー優先でも履歴付き出力を許可する（削除内容・著者・日時の共有可否を確認）" TextWrapping="Wrap" />
                   </CheckBox>

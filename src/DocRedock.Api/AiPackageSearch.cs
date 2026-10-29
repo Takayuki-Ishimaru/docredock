@@ -33,9 +33,17 @@ public static class AiPackageSearch
             cancellationToken.ThrowIfCancellationRequested();
             var lines = part.Markdown.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
             var found = new List<AiPackageSearchLine>();
+            var metadataEnd = 0;
+            if (lines.Length > 1 && lines[0].StartsWith("# ", StringComparison.Ordinal) &&
+                lines[1].StartsWith("ソース: ", StringComparison.Ordinal))
+            {
+                metadataEnd = 1;
+                while (metadataEnd < lines.Length && lines[metadataEnd].Length > 0) metadataEnd++;
+            }
             for (var index = 0; index < lines.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (index > 0 && index < metadataEnd) continue;
                 var plain = Escapes.Replace(lines[index], "$1");
                 var searchable = Escapes.Replace(Markup.Replace(lines[index], ""), "$1");
                 if (Normalize(plain).Contains(needle, StringComparison.Ordinal) || Normalize(searchable).Contains(needle, StringComparison.Ordinal))

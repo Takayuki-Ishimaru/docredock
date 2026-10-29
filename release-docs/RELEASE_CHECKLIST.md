@@ -4,7 +4,7 @@
 
 この文書は、公開用 commit/tag と各 OS 向け配布物を作る際の再利用可能な基準テンプレートです。ここにある未チェック欄は過去リリースが未確認だったことを示す証跡ではありません。各リリースの検証結果は、workflow run URL、commit、成果物ハッシュを含むCIの検証記録として管理します。公開リリースノートと配布物には利用者向けの変更内容・制約・導入手順を記載し、内部評価の点数、開発指標、検証メモは含めません。Release Owner が証跡と公開判断を所有し、CI/QA Owner が技術ゲートを実行します。必須ゲートが一つでも未完了または失敗している場合は公開しません。
 
-デスクトップGUIのPDF入力は既定で利用できます。CLIのPDF変換・復元・生成、および往復編集や元ファイル形式への復元は実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
+デスクトップGUIのPDF入力は既定で利用できます。CLIのPDF変換は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にします。復元・生成、および往復編集は引き続き実験機能で、`DOCREDOCK_ENABLE_EXPERIMENTAL=1`により明示的にgateされます。署名・notarizationは設定されている場合に適用し、各配布物に適用状況を記録します。
 
 ## P0: 公開ブランチの確定
 
@@ -101,7 +101,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] headless CI ではパッケージ前にAvalonia headlessでMainWindowを構築し、Windows GUIのPE形式・CPU、macOS GUIのMach-O形式・CPU・実行権限を検証し、LinuxではXvfb上で実配布GUI子プロセスの生存を確認した
 - [ ] 対象releaseのCLIバージョン、visible／complete／sanitized、実験機能gate、DOCX／XLSX／PPTX／PDF readable export、F0 SHA比較、F1編集、pack/unpack、改ざん拒否、Markdownリテラル文字列の保全、ハードリンク出力の衝突拒否を確認した
 - [ ] 展開後の実バイナリでDOCX／XLSX／PPTX／PDF visual-semantics smokeを実行し、結果をリリース証跡に記録した
-- [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換／復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
+- [ ] GUIのPDF入力が既定利用可能であること、CLIのPDF変換には--allow-pdfまたはDOCREDOCK_ENABLE_EXPERIMENTAL=1、復元／生成にはDOCREDOCK_ENABLE_EXPERIMENTAL=1が必要なことをREADMEとリリース証跡に記録した
 - [ ] 表示可能な実環境で GUI の内容ポリシー選択、complete 警告、DOCREDOCK_DISABLE_UPDATE_CHECK=1、DOCX／XLSX／PPTX／PDF入力と閲覧用Markdownの見た目を確認した
 - [ ] macOS の .app bundle と Windows 実行ファイルについて、署名／notarization を設定時のみ適用し、未設定時も未署名状態を明示して継続する
 - [ ] 実行ファイルへバージョンと commit を追跡できる情報を付与した

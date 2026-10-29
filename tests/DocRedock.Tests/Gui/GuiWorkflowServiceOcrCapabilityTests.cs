@@ -30,8 +30,8 @@ public sealed class GuiWorkflowServiceOcrCapabilityTests
             Status("ocr-eng", "unavailable"));
 
         Assert.False(decision.Enabled);
-        Assert.DoesNotContain("PDF OCR: Ready", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("Install Tesseract", decision.StatusText, StringComparison.Ordinal);
+        Assert.DoesNotContain("OCR: 利用可能", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("Tesseract OCR", decision.StatusText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -47,10 +47,9 @@ public sealed class GuiWorkflowServiceOcrCapabilityTests
             Status("ocr-eng", "ready", "tesseract"));
 
         Assert.True(decision.Enabled);
-        Assert.Contains("PDF OCR: Ready", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("pdftoppm", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("mutool", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("DOCX/XLSX/PPTX", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OCR: 利用可能", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("PDFを画像に変換する機能", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("PowerPoint", decision.StatusText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -64,12 +63,12 @@ public sealed class GuiWorkflowServiceOcrCapabilityTests
             Status("ocr-eng", "ready", "tesseract"));
 
         Assert.True(decision.Enabled);
-        Assert.Contains("PDF OCR: Ready", decision.StatusText, StringComparison.Ordinal);
-        Assert.DoesNotContain("pdftoppm", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OCR: 利用可能", decision.StatusText, StringComparison.Ordinal);
+        Assert.DoesNotContain("PDFを画像に変換する機能", decision.StatusText, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Partial_native_provider_enables_ocr_with_verification_pending_message_and_rasterizer_note()
+    public void Partial_native_provider_enables_ocr_with_a_localized_verification_message_and_rasterizer_note()
     {
         var decision = GuiWorkflowService.DescribeOcrCapability(
             Rasterizer("unavailable", "Install pdftoppm or mutool, or configure an executable path."),
@@ -79,13 +78,13 @@ public sealed class GuiWorkflowServiceOcrCapabilityTests
             Status("ocr-eng", "unavailable"));
 
         Assert.True(decision.Enabled);
-        Assert.Contains("Verification pending", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("apple-vision", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("pdftoppm", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("最初のOCR実行時", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OS標準機能", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("PDFを画像に変換する機能", decision.StatusText, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Ready_native_provider_enables_ocr_and_names_it_as_the_provider()
+    public void Ready_native_provider_enables_ocr_and_describes_its_language_source()
     {
         var decision = GuiWorkflowService.DescribeOcrCapability(
             Rasterizer("ready"),
@@ -95,8 +94,8 @@ public sealed class GuiWorkflowServiceOcrCapabilityTests
             Status("ocr-eng", "unavailable"));
 
         Assert.True(decision.Enabled);
-        Assert.Contains("PDF OCR: Ready (windows-media)", decision.StatusText, StringComparison.Ordinal);
-        Assert.Contains("OS 標準 OCR", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OCR: 利用可能", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OS標準OCR", decision.StatusText, StringComparison.Ordinal);
         Assert.DoesNotContain("日本語 unavailable", decision.StatusText, StringComparison.Ordinal);
         Assert.DoesNotContain("English unavailable", decision.StatusText, StringComparison.Ordinal);
     }

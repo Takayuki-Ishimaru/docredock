@@ -131,7 +131,11 @@ public sealed class ExcelMergeScaleTests : IDisposable
         try
         {
             var result = await conversion.WaitAsync(Limit);
-            return ((await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal), result);
+            var markdown = (await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var expectedTitle = $"# {Path.GetFileNameWithoutExtension(source)}\n";
+            Assert.StartsWith(expectedTitle, markdown, StringComparison.Ordinal);
+            // Fixture names differ when comparing equivalent sheets; normalize only the checked H1.
+            return ("# ドキュメント\n" + markdown[expectedTitle.Length..], result);
         }
         catch (TimeoutException)
         {
@@ -191,7 +195,7 @@ public sealed class ExcelMergeScaleTests : IDisposable
 
         var rows = Enumerable.Range(1, GraphPaperRows).Select(row =>
             "- " + string.Join(" — ", Enumerable.Range(1, GraphPaperBlocks).Select(block => $"r{row}c{block}")));
-        Assert.Equal("# r1c1\n\n## Items\n\n" + string.Join("\n\n", rows) + "\n", markdown);
+        Assert.Equal("# ドキュメント\n\n## Items\n\n" + string.Join("\n\n", rows) + "\n", markdown);
         var merged = result.Graph.Nodes.Where(node => node.Extensions?.ContainsKey("merged_to_column") == true).ToArray();
         Assert.Equal(GraphPaperRows * GraphPaperBlocks, merged.Length);
         // The origin of a block holds the far corner of its merge.
@@ -221,7 +225,7 @@ public sealed class ExcelMergeScaleTests : IDisposable
 
         var (markdown, _) = await ConvertAsync(source);
 
-        Assert.StartsWith("# Specification\n\n## Items\n\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# ドキュメント\n\n## Items\n\n### Specification\n\n", markdown, StringComparison.Ordinal);
         Assert.Equal(3000, markdown.Split('\n').Count(line => line.StartsWith("- **Label ", StringComparison.Ordinal)));
         Assert.Contains("- **Label 3000**: Value 3000\n", markdown, StringComparison.Ordinal);
     }

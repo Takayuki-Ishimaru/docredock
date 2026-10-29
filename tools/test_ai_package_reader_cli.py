@@ -141,8 +141,8 @@ class OneCallJson(ReaderTest):
         document = json.loads(out)
         self.assertIs(True, document['review']['required'])
         self.assertNotIn('part', document)
-        # Without --fail-on-review the text comes with the state, for the caller to decide.
-        code, out, err = self.run_cli(package, '--verify', '--part', 'part-0003', '--json')
+        # Explicit acknowledgement permits body output after review.
+        code, out, err = self.run_cli(package, '--verify', '--part', 'part-0003', '--json', '--allow-review')
         self.assertEqual((0, ''), (code, err))
         self.assertIs(True, json.loads(out)['review']['required'])
 
@@ -228,8 +228,7 @@ class Search(ReaderTest):
         code, out, err = self.run_cli(sample, '--search', 'candidate_one')  # written CANDIDATE\_ONE
         self.assertEqual(['part-0005'], [line.split()[0] for line in out.splitlines() if not line.startswith(' ')])
         code, out, err = self.run_cli(sample, '--search', 'workbook_base', '--json')
-        self.assertEqual(['part-%04d' % i for i in range(1, 7)], [part['id'] for part in json.loads(out)['search']['parts']])
-        self.assertEqual([{'number': 2, 'text': 'ソース: workbook\\_base.xlsx'}], json.loads(out)['search']['parts'][0]['lines'])
+        self.assertEqual([], json.loads(out)['search']['parts'])  # injected source metadata is not document content
 
     def test_searchable_drops_inline_markup_but_keeps_escaped_characters_and_references(self):
         # Underline, strikethrough and bold marks do not stand between the words of a line.

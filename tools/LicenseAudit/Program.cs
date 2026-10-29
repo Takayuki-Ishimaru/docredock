@@ -81,7 +81,10 @@ internal static class Program
     private static List<PackageRef> ReadPackages(string root)
     {
         var result = new List<PackageRef>();
-        foreach (var lockPath in Directory.EnumerateFiles(root, "packages.lock.json", SearchOption.AllDirectories)
+        var sourceRoot = Path.Combine(root, "src");
+        if (!Directory.Exists(sourceRoot))
+            throw new DirectoryNotFoundException($"Runtime project directory not found: {sourceRoot}");
+        foreach (var lockPath in Directory.EnumerateFiles(sourceRoot, "packages.lock.json", SearchOption.AllDirectories)
                      .Where(path => !IsExcluded(path)).OrderBy(path => path, StringComparer.Ordinal))
         {
             using var document = JsonDocument.Parse(File.ReadAllText(lockPath));

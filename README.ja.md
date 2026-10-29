@@ -16,9 +16,9 @@ DocRedockは、Word・Excel・PowerPoint・PDFの内容を、お手元のPCでAI
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.3.9 Public Betaの対応状況
+## v0.3.10 Public Betaの対応状況
 
-v0.3.9では、PDFの読み順・段落・表の変換、Wordのコードとグラフ値の保持、CLIとGUIの使いやすさを改善しました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
+v0.3.10では、PDFの読み順と原本確認、Officeの表・グラフの出力、CLIの複数文書変換を改善しました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
 
 | 機能 | 扱い |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.9では、PDFの読み順・段落・表の変換、Wordのコードとグ�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.9リリースノート](release-docs/RELEASE_NOTES_v0.3.9.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.10リリースノート](release-docs/RELEASE_NOTES_v0.3.10.md)へ集約します。
 
 ## 30秒で使う
 
@@ -77,10 +77,10 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.3.9はPublic Betaであり、本番向けの安定版ではありません。
+- v0.3.10はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
-- 実験的なCLIワークフローには`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。CLIのPDF変換、往復／audit操作、復元、レンダリング／新規文書生成も対象です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
+- CLIのPDF変換は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にできます。往復／audit操作、復元、レンダリング／新規文書生成には引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
 - PDF OCRとvisual fallbackにはrasterizerとOCR providerの構成が必要な場合があります。利用できない場合はpage placeholderとWarningを確認してください。
 - DocRedockは日本語PDFフォントを同梱・ダウンロードしません。フォントの導入・選択と埋め込みライセンスの確認は利用者の責任です。
 - GUIは実行中バージョンを常時表示し、起動時または「更新を確認」からPublic Betaを含む非draftの公開版を確認できます。更新は自動インストールせず、`DOCREDOCK_DISABLE_UPDATE_CHECK=1`で起動時確認を無効化できます。
@@ -89,9 +89,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.3.9の対応状況](docs/ja/supported-features.md)
+- [v0.3.10の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.3.9リリースノート](release-docs/RELEASE_NOTES_v0.3.9.md)
+- [v0.3.10リリースノート](release-docs/RELEASE_NOTES_v0.3.10.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

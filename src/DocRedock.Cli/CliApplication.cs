@@ -67,6 +67,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 _ => Invalid($"Unknown command '{args[0]}'."),
             };
         }
+        catch (OutOfMemoryException) { await error.WriteLineAsync("Not enough memory to convert this document. Try --sheets to select worksheets or --table-row-blocks with an AI package."); return (int)ExitCode.InternalError; }
         catch (OperationCanceledException) { await error.WriteLineAsync("Operation cancelled."); return (int)ExitCode.InvalidInput; }
         catch (AiPackageVerificationException ex) { await error.WriteLineAsync(ex.Message); return (int)ExitCode.ValidationFailed; }
         catch (WorkspaceIntegrityException ex) { await error.WriteLineAsync($"Workspace verification failed: {ex.Message}"); return (int)ExitCode.WorkspaceInvalid; }
@@ -235,7 +236,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         var synopsis = command.ToLowerInvariant() switch
         {
-            "export" => "export <source> [--output file.md|package] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--token-estimate-multiplier 1] [--fail-on-review] [--revisions final|markup|reject] [--allow-revision-sharing] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
+            "export" => "export <source...|directory> [--output|-o file.md|-] [--output-dir directory] [--content-policy visible|complete|sanitized] [--sheets names] [--force] [--quiet|--verbose|--json] [--allow-pdf] [--expand-merged-cells] [--lang ja|en] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--title text] [--sidecar dir|zip] [--profile readable|roundtrip|audit] [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--token-estimate-multiplier 1] [--fail-on-review] [--revisions final|markup|reject] [--allow-revision-sharing] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced]",
             "restore" => "restore <file.md> [--output file] [--force] [--replace-original (requires --force; retains backup)] [--allow-render-fallback]",
             "preflight" => "preflight <file.md> [--json] [--allow-render-fallback] (checks edits, integrity, and trial restore without modifying inputs)",
             "render" => "render <file.md> --format docx|pptx|xlsx|pdf|html [--mermaid-cli mmdc] [--output file]",
@@ -259,10 +260,14 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         if (args.HasFlag("strict") || args.Option("strict") is not null)
             return Invalid("--strict was removed because strict Markdown validation is always enabled.");
+        if (args.Positionals.Count == 0) return Invalid("At least one input file or directory is required.");
+        if (args.Option("output") == "-") return await ExportStdoutAsync(args, token);
+        if (args.Positionals.Count > 1 || Directory.Exists(args.Positionals[0]) || args.Option("output-dir") is not null) return await ExportBatchAsync(args, token);
         var source = RequireExistingFile(args);
+        if (new[] { ".doc", ".xls", ".ppt" }.Contains(Path.GetExtension(source), StringComparer.OrdinalIgnoreCase)) return Unsupported("Legacy Office files are not supported. Open the file in Microsoft Office or LibreOffice and save it as DOCX, XLSX, or PPTX first.");
         var profile = args.Option("profile") ?? "readable";
         if (profile is not ("roundtrip" or "readable" or "audit")) return Unsupported("Built-in export supports roundtrip, readable, and audit profiles.");
-        if (!ExperimentalFeatures.IsEnabled && (profile != "readable" || await DocumentService.DetectFormatAsync(source, token) == DocumentFormatKind.Pdf))
+        if (!ExperimentalFeatures.IsEnabled && (profile != "readable" || (await DocumentService.DetectFormatAsync(source, token) == DocumentFormatKind.Pdf && !args.HasFlag("allow-pdf"))))
             return ExperimentalDisabled(profile == "readable" ? "PDF export" : profile + " export");
         var aiPackage = args.Option("ai-package");
         if (aiPackage is not null && (profile != "readable" || aiPackage is not ("dir" or "zip")))
@@ -300,6 +305,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         if (revisions is not (null or "final" or "markup" or "reject")) return Invalid("--revisions must be final, markup, or reject.");
         if (profile != "readable" && (revisions is not null || args.HasFlag("allow-revision-sharing")))
             return Invalid("Revision policies apply to readable exports; roundtrip/audit retain the original source.");
+        var language = args.Option("lang");
+        if (language is not (null or "ja" or "en")) return Invalid("--lang must be ja or en.");
         var languages = (args.Option("ocr-lang") ?? "jpn+eng").Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         if (languages.Length == 0) return Invalid("--ocr-lang must contain at least one language identifier.");
         var pdfFallbackImages = args.Option("pdf-fallback-images") ?? "auto";
@@ -334,7 +341,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 InferenceMode: inferenceMode, IncludePdfFallbackImages: pdfFallbackImages != "off",
                 OcrReview: ocrReview switch { "all" => DocRedock.Markdown.OcrReviewMode.All,
                     "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
-                Revisions: revisions, AllowRevisionSharing: args.HasFlag("allow-revision-sharing"));
+                Revisions: revisions, AllowRevisionSharing: args.HasFlag("allow-revision-sharing"),
+                ExpandMergedCells: args.HasFlag("expand-merged-cells"), OcrAuto: ocrMode == "auto", Language: language);
             if (aiPackage is not null)
             {
                 // Replacing a package directory must not remove an input anywhere below it.
@@ -347,10 +355,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                     { TokenEstimateMultiplier = tokenEstimateMultiplier }, token);
                 token.ThrowIfCancellationRequested();
                 packageTransaction.Commit();
-                await output.WriteLineAsync($"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))");
-                await output.WriteLineAsync(packageResult.Summary.ToString());
-                await output.WriteLineAsync("Review: review.md; report.json; source locations: manifest.json");
-                await WriteDiagnosticsAsync(packageResult.Diagnostics, quiet, args.HasFlag("verbose"));
+                await WriteExportResultAsync(args, markdown, packageResult.Review, packageResult.Diagnostics, packageResult.Summary.ToString(), $"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))\nReview: review.md; report.json; source locations: manifest.json");
                 return await ReviewExitCodeAsync(args, packageResult.Review,
                     packageResult.Parts.Count == 0 || packageResult.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
             }
@@ -360,26 +365,16 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                 : new StagedOutputTransaction([markdown], force, [readableAssets], protectedInputs: [source]);
             var stagedMarkdown = stagedOutputs.PathFor(markdown);
             var readable = await Service.ExportReadableAsync(ReadableOptions(stagedMarkdown), token);
+            token.ThrowIfCancellationRequested();
             stagedOutputs.Commit();
-            await output.WriteLineAsync($"Exported: {markdown}");
-            await output.WriteLineAsync($"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}");
-            await output.WriteLineAsync("Mode:     Readable Markdown (one-way; no sidecar)");
-            await output.WriteLineAsync($"Visual inference: {visualInference} (ambiguous relations remain unresolved)");
-            // Both lines render from the same finalized summary so the figures a user sees
-            // (Visual summary's diagrams=/fallback= and the export block below) can never
-            // disagree with each other (F-05).
             var visualSummary = ExportSummaryBuilder.BuildReadable(readable.Graph, readable.Diagnostics, readable.Projection);
-            await output.WriteLineAsync(VisualInferenceSummary(visualSummary));
-            await output.WriteLineAsync(visualSummary.ToString());
             var readableReview = ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics, readable.Projection);
-            await WriteReviewAsync(readableReview, markdown, sidecarPath: null);
-            if (args.HasFlag("verbose"))
-                foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null))
-                    await output.WriteLineAsync(VisualEvidence(edge));
-            await WriteDiagnosticsAsync(readable.Diagnostics, quiet, args.HasFlag("verbose"));
+            await WriteExportResultAsync(args, markdown, readableReview, readable.Diagnostics, VisualInferenceSummary(visualSummary) + Environment.NewLine + visualSummary, $"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}\nMode:     Readable Markdown (one-way; no sidecar)\nVisual inference: {visualInference} (ambiguous relations remain unresolved)");
+            if (args.HasFlag("verbose") && !args.HasFlag("json") && !args.HasFlag("quiet"))
+                foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null)) await output.WriteLineAsync(VisualEvidence(edge));
             if (!readable.Graph.Nodes.Any())
             {
-                await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found.");
+                if (!args.HasFlag("quiet") && !args.HasFlag("json")) await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found.");
                 return await ReviewExitCodeAsync(args, readableReview, 1);
             }
             return await ReviewExitCodeAsync(args, readableReview,
@@ -392,23 +387,81 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var stagedSidecar = stagedRoundTrip.PathFor(sidecarPath);
         var result = await Service.ExportAsync(new DocumentExportOptions(source, stagedSidecar, stagedRoundTripMarkdown,
             ocrMode != "off", languages, contentPolicy, Profile: profile,
-            InferenceMode: ParseInferenceMode(visualInference), IncludePdfFallbackImages: pdfFallbackImages != "off"), token);
+            InferenceMode: ParseInferenceMode(visualInference), IncludePdfFallbackImages: pdfFallbackImages != "off", OcrAuto: ocrMode == "auto", Language: args.Option("lang")), token);
         if (sidecarForm == "zip")
             await SidecarContainer.PackInPlaceAsync(result.Workspace.RootPath, stagedRoundTripMarkdown, token);
+        token.ThrowIfCancellationRequested();
         stagedRoundTrip.Commit();
-        await output.WriteLineAsync($"Exported: {markdown}");
-        await output.WriteLineAsync($"Sidecar:  {sidecarPath} ({(sidecarForm == "zip" ? "zip" : "directory")})");
-        await output.WriteLineAsync($"Format:   {result.Graph.Format.ToString().ToLowerInvariant()}");
-        await output.WriteLineAsync(result.Graph.Format == DocumentFormatKind.Pdf
-            ? "Fidelity: F0 baseline; edited PDF requires explicit F3 render fallback"
-            : "Fidelity: F0 baseline; supported Office edits use F1");
-        await output.WriteLineAsync(ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString());
         var review = ExportReviewBuilder.Build(result.Graph, result.Diagnostics);
-        await WriteReviewAsync(review, markdown, sidecarForm == "dir" ? sidecarPath : null);
-        await WriteDiagnosticsAsync(result.Diagnostics, quiet, args.HasFlag("verbose"));
-        if (!result.Graph.Nodes.Any()) { await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return await ReviewExitCodeAsync(args, review, 1); }
+        await WriteExportResultAsync(args, markdown, review, result.Diagnostics, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString(), $"Sidecar:  {sidecarPath} ({(sidecarForm == "zip" ? "zip" : "directory")})\nFormat:   {result.Graph.Format.ToString().ToLowerInvariant()}\nFidelity: F0 baseline");
+        if (!result.Graph.Nodes.Any()) { if (!args.HasFlag("quiet") && !args.HasFlag("json")) await output.WriteLineAsync("WARNING EmptyProjection: no extractable content was found."); return await ReviewExitCodeAsync(args, review, 1); }
         return await ReviewExitCodeAsync(args, review,
             result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
+    }
+
+    private async Task WriteExportResultAsync(Arguments args, string path, ExportReview review, IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> diagnostics, string details, string kind)
+    {
+        var warnings = diagnostics.Count(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information);
+        if (args.HasFlag("json")) { await output.WriteLineAsync(JsonSerializer.Serialize(new { output = path, kind, review_required = review.Required, warning_count = warnings, diagnostics, review }, PackageJson)); return; }
+        if (args.HasFlag("quiet")) return;
+        await output.WriteLineAsync($"Exported: {path}");
+        await output.WriteLineAsync($"Review: {(review.Required ? "required" : "none")}; warnings: {warnings}");
+        if (diagnostics.Any(d => d.Code == "OcrUnavailableAuto")) await output.WriteLineAsync("Image text was not read (OCR unavailable).");
+        if (!args.HasFlag("verbose")) { await WriteDiagnosticsAsync(diagnostics, true, false); return; }
+        await output.WriteLineAsync(kind); await output.WriteLineAsync(details);
+        await WriteReviewAsync(review, path, null); await WriteDiagnosticsAsync(diagnostics, false, true);
+    }
+
+    private async Task<int> ExportStdoutAsync(Arguments args, CancellationToken token)
+    {
+        if (args.Positionals.Count != 1 || Directory.Exists(args.Positionals[0]) || args.Option("output-dir") is not null || args.Option("ai-package") is not null || (args.Option("profile") ?? "readable") != "readable" || args.HasFlag("json")) return Invalid("--output - requires one file, readable Markdown, and no --json or --ai-package.");
+        var root = Path.Combine(Path.GetTempPath(), "docredock-stdout-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        try
+        {
+            var path = Path.Combine(root, "output.md"); var child = args.Copy(); child.SetOption("output", path); child.SetFlag("embed-images");
+            var summary = new StringWriter(); var code = await new CliApplication(summary, error, Service).RunAsync(child.ToCommandLine(), token);
+            if (File.Exists(path)) await output.WriteAsync(await File.ReadAllTextAsync(path, token));
+            if (!args.HasFlag("quiet")) await error.WriteAsync(summary.ToString().Replace(path, "standard output", StringComparison.Ordinal)); return code;
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private async Task<int> ExportBatchAsync(Arguments args, CancellationToken token)
+    {
+        if (args.Option("output") is not null) return Invalid("--output is for one input; use --output-dir for multiple inputs.");
+        var inputs = new List<string>();
+        foreach (var input in args.Positionals)
+        {
+            if (Directory.Exists(input)) inputs.AddRange(Directory.EnumerateFiles(input).Where(p => new[] { ".docx", ".xlsx", ".pptx", ".pdf", ".doc", ".xls", ".ppt" }.Contains(Path.GetExtension(p), StringComparer.OrdinalIgnoreCase)).OrderBy(p => p, StringComparer.Ordinal));
+            else if (File.Exists(input)) inputs.Add(input); else return Invalid($"Input file or directory not found: {input}");
+        }
+        if (inputs.Count == 0) return Invalid("No supported input files found.");
+        var outputDir = args.Option("output-dir");
+        var targets = inputs.Select(p => Path.GetFullPath(Path.Combine(outputDir ?? Path.GetDirectoryName(Path.GetFullPath(p))!, Path.GetFileNameWithoutExtension(p) + (args.Option("ai-package") is { } form ? ".ai-package" + (form == "zip" ? ".zip" : "") : ".md")))).ToArray();
+        if (targets.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).Count() != targets.Length) return Invalid("Multiple inputs would produce the same output path.");
+        // An assets or sidecar directory for one export must not remove another input.
+        var allOutputs = new List<string>(targets);
+        if (args.Option("ai-package") is null)
+            foreach (var target in targets)
+                if ((args.Option("profile") ?? "readable") != "readable") allOutputs.Add(SidecarFor(target));
+                else if (!args.HasFlag("embed-images")) allOutputs.Add(Path.Combine(Path.GetDirectoryName(target)!, Path.GetFileNameWithoutExtension(target) + ".assets"));
+        OutputCollisionGuard.EnsureNoCollision(allOutputs, inputs);
+        var comparer = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var canonicalOutputs = allOutputs.Select(OutputCollisionGuard.CanonicalPath).ToArray();
+        var outputSet = canonicalOutputs.ToHashSet(comparer);
+        if (outputSet.Count != allOutputs.Count) return Invalid("Batch outputs overlap.");
+        foreach (var path in canonicalOutputs)
+            for (var parent = Path.GetDirectoryName(path); parent is not null; parent = Path.GetDirectoryName(parent))
+                if (outputSet.Contains(parent)) return Invalid("Batch outputs overlap.");
+        var results = new List<object>(); var exit = 0;
+        for (var i = 0; i < inputs.Count; i++)
+        {
+            token.ThrowIfCancellationRequested(); var child = args.Copy(); child.Positionals.Clear(); child.Positionals.Add(inputs[i]); child.RemoveOption("output-dir"); child.SetOption("output", targets[i]);
+            var resultOutput = new StringWriter(); var resultError = new StringWriter(); var code = await new CliApplication(resultOutput, resultError, Service).RunAsync(child.ToCommandLine(), token); exit = code is > 1 and not 11 ? (exit is > 1 and not 11 ? exit : code) : exit == 0 ? code : exit;
+            if (args.HasFlag("json")) { JsonElement? summary = null; if (!string.IsNullOrWhiteSpace(resultOutput.ToString())) { using var doc = JsonDocument.Parse(resultOutput.ToString()); summary = doc.RootElement.Clone(); } results.Add(new { input = inputs[i], exit_code = code, summary, error = resultError.ToString().Trim() }); }
+            else { await output.WriteAsync(resultOutput.ToString()); await error.WriteAsync(resultError.ToString()); }
+        }
+        if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new { results }, PackageJson)); return exit;
     }
 
     // Review items never change the exit code by default. With --fail-on-review an export whose
@@ -418,7 +471,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private async Task<int> ReviewExitCodeAsync(Arguments args, ExportReview review, int exitCode)
     {
         if (!args.HasFlag("fail-on-review") || !review.Required) return exitCode;
-        await output.WriteLineAsync($"Review required: compare the review items with the source before using the output (exit code {(int)ExitCode.ReviewRequired}, --fail-on-review).");
+        if (!args.HasFlag("quiet") && !args.HasFlag("json")) await output.WriteLineAsync($"Review required: compare the review items with the source before using the output (exit code {(int)ExitCode.ReviewRequired}, --fail-on-review).");
         return (int)ExitCode.ReviewRequired;
     }
 
@@ -898,29 +951,31 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private int LicenseFailure(string message) { error.WriteLine(message); return 9; }
     private void WriteHelp() => output.WriteLine($"""
         DocRedock {Version} Public Beta
+        Supported commands:
           docredock --version
-          docredock export <source> [--output file.md] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
+          docredock export <source...|directory> [--output|-o file.md|-] [--output-dir directory] [--json] [--allow-pdf] [--profile readable|roundtrip|audit (default: readable)] [--sidecar dir|zip] [--content-policy visible|complete|sanitized] [--ocr auto|on|off] [--ocr-lang jpn+eng] [--ocr-review low-confidence|all|summary] [--pdf-fallback-images auto|off] [--visual-inference native-only|safe|balanced (default: safe)] [--fail-on-review] [--verbose] [--force] [--quiet]
                       readable: [--ai-package dir|zip] [--chunk-chars 12000] [--table-row-blocks] [--token-estimate-multiplier 1] [--revisions final|markup|reject] [--allow-revision-sharing] [--show-formulas] [--svg-previews] [--no-diagrams] [--embed-images] [--sheets Sheet1,Sheet2] [--title text]
           docredock package review <directory|zip> [--json] [--fail-on-review] [--require-hidden-review]
           docredock package search <directory|zip> <text> [--json] [--allow-review] [--require-hidden-review]
           docredock package read <directory|zip> --part part-0001 [--json] [--with-sources] [--allow-review] [--require-hidden-review]
+          docredock inspect <source-or-file.md>
+          docredock verify <file.md|file.drmd|file.drmdpkg>
+          docredock rules
+          docredock licenses [--json] [--verify]
+          docredock doctor [--json] [--strict]
+        Experimental commands (require DOCREDOCK_ENABLE_EXPERIMENTAL=1):
           docredock restore <file.md> [--output file] [--force] [--replace-original] [--allow-render-fallback]
           docredock render <file.md> --format docx|pptx|xlsx|pdf|html [--template file] [--font-path file.ttf|file.ttc] [--font-face-index n] [--mermaid-cli mmdc] [--output file] [--verbose] [--quiet]
-          docredock inspect <source-or-file.md>
           docredock diff <file.md> [--json]
-          docredock verify <file.md|file.drmd|file.drmdpkg>
           docredock preflight <file.md> [--json] [--allow-render-fallback]
           docredock rebase <file.md> --source <document> [--output rebased.md]
           docredock pack <file.md> [--output file.drmdpkg]
           docredock pack <file.md> --sidecar (--in-place | --output file.drmd)
           docredock unpack <file.drmdpkg> [--output directory]
           docredock unpack <file.drmd> (--in-place | --output directory)
-          docredock rules
-          docredock licenses [--json] [--verify]
           docredock migrate <file.md> --to-schema 1.1
-          docredock doctor [--json] [--strict]
 
-        Experimental commands and PDF export require DOCREDOCK_ENABLE_EXPERIMENTAL=1.
+        Experimental commands require DOCREDOCK_ENABLE_EXPERIMENTAL=1. PDF export can also be enabled with --allow-pdf.
         """);
 
     private static IEnumerable<VisualGraph> VisualGraphs(DocumentGraph graph) => graph.Nodes
@@ -966,13 +1021,18 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "lang", "output-dir", "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "expand-merged-cells", "allow-pdf", "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
+        public Arguments Copy() { var copy = new Arguments(); copy.Positionals.AddRange(Positionals); foreach (var item in options) copy.options[item.Key] = item.Value; foreach (var flag in flags) copy.flags.Add(flag); return copy; }
+        public void SetOption(string name, string value) => options[name] = value;
+        public void RemoveOption(string name) => options.Remove(name);
+        public void SetFlag(string name) => flags.Add(name);
+        public string[] ToCommandLine() => new[] { "export" }.Concat(Positionals).Concat(options.SelectMany(o => new[] { "--" + o.Key, o.Value })).Concat(flags.Select(f => "--" + f)).ToArray();
         public static Arguments Parse(string[] values)
         {
-            var result = new Arguments(); for (var index = 0; index < values.Length; index++) { var value = values[index]; if (!value.StartsWith("--", StringComparison.Ordinal)) { result.Positionals.Add(value); continue; } var equals = value.IndexOf('='); var key = value[2..(equals < 0 ? value.Length : equals)]; if (key == "sidecar" && (equals >= 0 || index + 1 < values.Length && !values[index + 1].StartsWith("--", StringComparison.Ordinal))) { result.options[key] = equals >= 0 ? value[(equals + 1)..] : values[++index]; continue; } if (FlagOptions.Contains(key)) { if (equals >= 0) throw new IOException($"Flag '--{key}' does not accept a value."); result.flags.Add(key); continue; } if (!ValueOptions.Contains(key)) throw new IOException($"Unknown option '--{key}'."); var optionValue = equals >= 0 ? value[(equals + 1)..] : ++index < values.Length && !values[index].StartsWith("--", StringComparison.Ordinal) ? values[index] : throw new IOException($"Option '--{key}' requires a value."); result.options[key] = optionValue; }
+            var result = new Arguments(); for (var index = 0; index < values.Length; index++) { var value = values[index]; if (value == "-o") value = "--output"; else if (value.StartsWith("-", StringComparison.Ordinal) && value != "-" && !value.StartsWith("--", StringComparison.Ordinal)) throw new IOException($"Unknown option '{value}'."); if (!value.StartsWith("--", StringComparison.Ordinal)) { result.Positionals.Add(value); continue; } var equals = value.IndexOf('='); var key = value[2..(equals < 0 ? value.Length : equals)]; if (key == "sidecar" && (equals >= 0 || index + 1 < values.Length && !values[index + 1].StartsWith("--", StringComparison.Ordinal))) { result.options[key] = equals >= 0 ? value[(equals + 1)..] : values[++index]; continue; } if (FlagOptions.Contains(key)) { if (equals >= 0) throw new IOException($"Flag '--{key}' does not accept a value."); result.flags.Add(key); continue; } if (!ValueOptions.Contains(key)) throw new IOException($"Unknown option '--{key}'."); var optionValue = equals >= 0 ? value[(equals + 1)..] : ++index < values.Length && !values[index].StartsWith("--", StringComparison.Ordinal) ? values[index] : throw new IOException($"Option '--{key}' requires a value."); result.options[key] = optionValue; }
             return result;
         }
     }

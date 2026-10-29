@@ -22,7 +22,7 @@ public sealed class CliApplicationTests : IDisposable
         await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule("170 165 m 410 85 l S"));
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(null, null, discoverPdfRasterizer: false));
-        var exit = await app.RunAsync(["export", source, "--output", fixture.MarkdownPath, "--ocr", "off", "--pdf-fallback-images", "auto", "--verbose"]);
+        var exit = await app.RunAsync(["export", "--verbose", source, "--output", fixture.MarkdownPath, "--ocr", "off", "--pdf-fallback-images", "auto", "--verbose"]);
         Assert.Equal(1, exit);
         Assert.Contains("Pages requiring review: 1", stdout.ToString());
         Assert.Contains("Review image pages: 0", stdout.ToString());
@@ -50,7 +50,7 @@ public sealed class CliApplicationTests : IDisposable
                 await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
             var stdout = new StringWriter();
             var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(engine, null, discoverPdfRasterizer: false));
-            exits.Add(await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on"]));
+            exits.Add(await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on"]));
             var text = stdout.ToString();
             if (engine is ReviewOcrEngine)
             {
@@ -94,7 +94,7 @@ public sealed class CliApplicationTests : IDisposable
             await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
         var app = new CliApplication(new StringWriter(), new StringWriter(),
             new DocRedock.Api.DocumentService(new ReviewOcrEngine(), null, discoverPdfRasterizer: false));
-        var args = new List<string> { "export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on" };
+        var args = new List<string> { "export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "on" };
         if (mode is not null) args.AddRange(["--ocr-review", mode]);
         var exit = await app.RunAsync(args.ToArray());
         if (shown < 0)
@@ -132,7 +132,7 @@ public sealed class CliApplicationTests : IDisposable
         var original = await File.ReadAllBytesAsync(fixture.SourcePath);
         var log = new StringWriter();
         var app = new CliApplication(log, new StringWriter());
-        Assert.Equal(0, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
         await File.WriteAllTextAsync(fixture.MarkdownPath, (await File.ReadAllTextAsync(fixture.MarkdownPath)).Replace("Before", "After"));
         Assert.Equal(2, await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.SourcePath, "--force"]));
         Assert.Equal(original, await File.ReadAllBytesAsync(fixture.SourcePath));
@@ -153,7 +153,7 @@ public sealed class CliApplicationTests : IDisposable
         fixture.CreateDocx();
         var log = new StringWriter();
         var app = new CliApplication(log, new StringWriter());
-        Assert.Equal(0, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--ocr", "off"]));
         await File.WriteAllTextAsync(fixture.MarkdownPath, (await File.ReadAllTextAsync(fixture.MarkdownPath)).Replace("Before", "After"));
         var before = Directory.GetFiles(fixture.Root, "*", SearchOption.AllDirectories)
             .ToDictionary(path => path, File.ReadAllBytes);
@@ -185,7 +185,7 @@ public sealed class CliApplicationTests : IDisposable
         fixture.CreateDocx();
         var error = new StringWriter();
         var result = await new CliApplication(new StringWriter(), error).RunAsync(
-            ["export", fixture.SourcePath, "--profile", profile, "--strict", "--output", fixture.MarkdownPath]);
+            ["export", "--verbose", fixture.SourcePath, "--profile", profile, "--strict", "--output", fixture.MarkdownPath]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("--strict was removed", error.ToString(), StringComparison.Ordinal);
@@ -222,7 +222,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
 
-        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
+        var result = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         Assert.True(File.Exists(fixture.MarkdownPath));
@@ -241,7 +241,7 @@ public sealed class CliApplicationTests : IDisposable
         var stdout = new StringWriter();
 
         var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
-            ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         Assert.Contains("Tables reconstructed: 1", stdout.ToString(), StringComparison.Ordinal);
@@ -257,7 +257,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
 
-        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "off"]);
+        var result = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", "off"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         Assert.Contains("Mode:     Readable Markdown", stdout.ToString(), StringComparison.Ordinal);
@@ -277,13 +277,20 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
 
-        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off", "--embed-images"]);
+        var result = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off", "--embed-images"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         var text = await File.ReadAllTextAsync(fixture.MarkdownPath);
         Assert.Contains("data:image/png;base64,iVBORw0KGgo=", text, StringComparison.Ordinal);
         Assert.False(Directory.Exists(Path.Combine(fixture.Root, "projection.assets")));
         Assert.Empty(stderr.ToString());
+
+        var body = new StringWriter(); var summary = new StringWriter();
+        var stdoutResult = await new CliApplication(body, summary).RunAsync(["export", fixture.SourcePath, "--output", "-", "--ocr", "off"]);
+        Assert.Equal((int)ExitCode.Success, stdoutResult);
+        Assert.Contains("data:image/png;base64,iVBORw0KGgo=", body.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain(".assets/", body.ToString(), StringComparison.Ordinal);
+        Assert.Contains("standard output", summary.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -377,7 +384,7 @@ public sealed class CliApplicationTests : IDisposable
         {
             var stderr = new StringWriter();
             var result = await new CliApplication(new StringWriter(), stderr).RunAsync(
-                ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", profile]);
+                ["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", profile]);
 
             Assert.Equal((int)ExitCode.Unsupported, result);
             Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", stderr.ToString(), StringComparison.Ordinal);
@@ -399,7 +406,7 @@ public sealed class CliApplicationTests : IDisposable
         fixture.CreateDocx();
         var output = new StringWriter();
         var result = await new CliApplication(output, new StringWriter()).RunAsync(
-            ["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--visual-inference", mode]);
+            ["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--visual-inference", mode]);
 
         Assert.InRange(result, (int)ExitCode.Success, (int)ExitCode.SuccessWithWarnings);
         Assert.Contains($"Visual inference: {mode}", output.ToString(), StringComparison.Ordinal);
@@ -415,7 +422,7 @@ public sealed class CliApplicationTests : IDisposable
         {
             var exportError = new StringWriter();
             var export = await new CliApplication(new StringWriter(), exportError).RunAsync(
-                ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
+                ["export", "--verbose", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
 
             Assert.Equal((int)ExitCode.Unsupported, export);
             Assert.Contains("DOCREDOCK_ENABLE_EXPERIMENTAL=1", exportError.ToString(), StringComparison.Ordinal);
@@ -473,7 +480,7 @@ public sealed class CliApplicationTests : IDisposable
         var stdout = new StringWriter();
 
         var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
-            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+            ["export", "--verbose", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         var text = stdout.ToString();
@@ -516,7 +523,7 @@ public sealed class CliApplicationTests : IDisposable
         var stdout = new StringWriter();
 
         var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
-            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+            ["export", "--verbose", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         var text = stdout.ToString();
@@ -555,7 +562,7 @@ public sealed class CliApplicationTests : IDisposable
         var stdout = new StringWriter();
 
         var result = await new CliApplication(stdout, new StringWriter()).RunAsync(
-            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+            ["export", "--verbose", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
 
         Assert.Equal((int)ExitCode.Success, result);
         var text = stdout.ToString();
@@ -598,9 +605,9 @@ public sealed class CliApplicationTests : IDisposable
         var verboseMarkdown = Path.Combine(fixture.Root, "verbose.md");
 
         await new CliApplication(defaultOutput, new StringWriter()).RunAsync(
-            ["export", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
+            ["export", "--verbose", fixture.PdfPath, "--output", fixture.MarkdownPath, "--profile", "readable", "--ocr", "off"]);
         await new CliApplication(verboseOutput, new StringWriter()).RunAsync(
-            ["export", fixture.PdfPath, "--output", verboseMarkdown, "--profile", "readable", "--ocr", "off", "--verbose"]);
+            ["export", "--verbose", fixture.PdfPath, "--output", verboseMarkdown, "--profile", "readable", "--ocr", "off", "--verbose"]);
 
         Assert.Single(defaultOutput.ToString().Split(Environment.NewLine, StringSplitOptions.RemoveEmptyEntries),
             line => line.StartsWith("WARNING VisualConnectorUnresolved:", StringComparison.Ordinal));
@@ -618,9 +625,9 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, stderr);
 
         Assert.Equal((int)ExitCode.Success,
-            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]));
-        var refused = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
-        var forced = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--force", "--quiet"]);
+            await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]));
+        var refused = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable"]);
+        var forced = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--force", "--quiet"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, refused);
         Assert.Equal((int)ExitCode.Success, forced);
@@ -637,7 +644,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "readable", "--force"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "readable", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -656,7 +663,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "roundtrip", "--force"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", fixture.SourcePath, "--profile", "roundtrip", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -675,7 +682,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.XlsxPath, "--profile", "readable", "--force"]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.XlsxPath, "--profile", "readable", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -699,7 +706,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.SourcePath, "--output", upperCaseOutput, "--profile", "readable", "--force"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", upperCaseOutput, "--profile", "readable", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -718,7 +725,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.SourcePath, "--output", hardLink, "--profile", "readable", "--force"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", hardLink, "--profile", "readable", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -741,7 +748,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.SourcePath, "--output", hardLink, "--profile", "roundtrip", "--force"]);
+            ["export", "--verbose", fixture.SourcePath, "--output", hardLink, "--profile", "roundtrip", "--force"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("Output path must differ from the input path", stderr.ToString(), StringComparison.Ordinal);
@@ -799,7 +806,7 @@ public sealed class CliApplicationTests : IDisposable
         fixture.CreateDocx();
         var setup = new CliApplication(new StringWriter(), new StringWriter());
         Assert.Equal((int)ExitCode.Success,
-            await setup.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+            await setup.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var package = Path.Combine(fixture.Root, "projection.drmdpkg");
         Assert.Equal((int)ExitCode.Success, await setup.RunAsync(["pack", fixture.MarkdownPath, "--output", package]));
         var beforeHash = await Sha256Async(package);
@@ -826,7 +833,7 @@ public sealed class CliApplicationTests : IDisposable
         fixture.CreateDocx();
         var setup = new CliApplication(new StringWriter(), new StringWriter());
         Assert.Equal((int)ExitCode.Success,
-            await setup.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+            await setup.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var hardLink = Path.Combine(fixture.Root, "markdown-hardlink.md");
         if (!HardLinkTestHelper.TryCreate(fixture.MarkdownPath, hardLink)) return; // unsupported file system
         var beforeHash = await Sha256Async(fixture.MarkdownPath);
@@ -857,7 +864,7 @@ public sealed class CliApplicationTests : IDisposable
         await File.WriteAllTextAsync(fixture.MarkdownPath, "previous-good-output");
         var app = new CliApplication(new StringWriter(), new StringWriter());
 
-        var result = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--force"]);
+        var result = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "readable", "--force"]);
 
         Assert.NotEqual((int)ExitCode.Success, result);
         Assert.Equal("previous-good-output", await File.ReadAllTextAsync(fixture.MarkdownPath));
@@ -873,7 +880,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
 
-        var export = await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]);
+        var export = await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]);
         var verify = await app.RunAsync(["verify", fixture.MarkdownPath]);
         var restore = await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.RestoredPath]);
 
@@ -897,7 +904,7 @@ public sealed class CliApplicationTests : IDisposable
         var stderr = new StringWriter();
         var app = new CliApplication(stdout, stderr);
         Assert.Equal((int)ExitCode.Success,
-            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+            await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var markdown = await File.ReadAllTextAsync(fixture.MarkdownPath, Encoding.UTF8);
         await File.WriteAllTextAsync(
             fixture.MarkdownPath,
@@ -927,7 +934,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, stderr);
         var sidecar = Path.ChangeExtension(fixture.MarkdownPath, ".drmd");
 
-        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
         var markdown = await File.ReadAllBytesAsync(fixture.MarkdownPath);
         Assert.True(Directory.Exists(sidecar));
 
@@ -955,7 +962,7 @@ public sealed class CliApplicationTests : IDisposable
         var sidecar = Path.ChangeExtension(fixture.MarkdownPath, ".drmd");
 
         Assert.Equal((int)ExitCode.Success,
-            await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--sidecar", "zip"]));
+            await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip", "--sidecar", "zip"]));
 
         Assert.True(File.Exists(sidecar));
         Assert.False(Directory.Exists(sidecar));
@@ -970,7 +977,7 @@ public sealed class CliApplicationTests : IDisposable
         using var fixture = new Fixture();
         fixture.CreateDocx();
         var app = new CliApplication(new StringWriter(), new StringWriter());
-        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
+        Assert.Equal((int)ExitCode.Success, await app.RunAsync(["export", "--verbose", fixture.SourcePath, "--output", fixture.MarkdownPath, "--profile", "roundtrip"]));
 
         Assert.Equal((int)ExitCode.InvalidInput, await app.RunAsync(["pack", fixture.MarkdownPath, "--sidecar"]));
     }
@@ -1165,7 +1172,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "DoesNotExist"]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "DoesNotExist"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("DoesNotExist", stderr.ToString(), StringComparison.Ordinal);
@@ -1183,7 +1190,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview,DoesNotExist"]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview,DoesNotExist"]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("DoesNotExist", stderr.ToString(), StringComparison.Ordinal);
@@ -1201,7 +1208,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), stderr);
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", sheetsValue]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", sheetsValue]);
 
         Assert.Equal((int)ExitCode.InvalidInput, result);
         Assert.Contains("--sheets", stderr.ToString(), StringComparison.Ordinal);
@@ -1216,7 +1223,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(new StringWriter(), new StringWriter());
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview"]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Overview"]);
 
         Assert.InRange(result, (int)ExitCode.Success, (int)ExitCode.SuccessWithWarnings);
         Assert.True(File.Exists(fixture.MarkdownPath));
@@ -1231,7 +1238,7 @@ public sealed class CliApplicationTests : IDisposable
         var app = new CliApplication(stdout, new StringWriter());
 
         var result = await app.RunAsync(
-            ["export", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Secret"]);
+            ["export", "--verbose", fixture.XlsxPath, "--output", fixture.MarkdownPath, "--sheets", "Secret"]);
 
         Assert.Equal((int)ExitCode.SuccessWithWarnings, result);
         Assert.Contains("XlsxSheetExcludedByPolicy", stdout.ToString(), StringComparison.Ordinal);

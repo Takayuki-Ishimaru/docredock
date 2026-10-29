@@ -19,6 +19,15 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
     /// text, whose decorations are not looked for.</summary>
     public double? FontSize { get; init; }
 
+    /// <summary>Inferred column within its local reading-order block; null for ordinary page flow.</summary>
+    public int? ReadingColumn { get; init; }
+
+    /// <summary>Repeated short text in a page margin, retained as furniture in the source graph.</summary>
+    public bool IsPageFurniture { get; init; }
+
+    /// <summary>A joined line ends with an ambiguous lexical or discretionary ASCII hyphen.</summary>
+    public bool HasUncertainHyphenation { get; init; }
+
     /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Struck { get; init; }
 
@@ -349,10 +358,10 @@ public static partial class PdfTextExtractor
             }
             if (imageOnly)
             {
-                diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
-                regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
+                diagnostics.Add($"PdfNativeTextUnavailable: PDF page {pageNumber}: native text is unavailable; compare the original page or enable OCR to recover image text.");
+                regions.Add(new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; native text unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0));
             }
-            // An image-only page already reports PdfRasterizerUnavailable; only the mixed page - the
+            // An image-only page already reports PdfNativeTextUnavailable; only the mixed page - the
             // one that silently lost its image because native text made the page look complete -
             // needs its own warning.
             if (!imageOnly && embeddedImages.Count > 0)
@@ -429,12 +438,14 @@ public static partial class PdfTextExtractor
             // Whether the page's diagram is projected as one - it has a resolved edge - which takes the text of
             // its nodes out of the flow (see PdfDocumentGraphProjection): reading order must not touch those lines.
             var diagramProjected = false;
+            IReadOnlySet<int>? failedGridTextIds = null;
             if (vector && visualGraph is not null)
             {
                 visualGraphs[pageNumber] = visualGraph;
+                var rejectedTableBounds = new List<Geometry>();
                 var inferredTables = PdfTableInference.Infer(pageNumber, regions, visualGraph,
                     (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxTableCandidatesPerPage,
-                    PdfTableInference.HasNativeTableMarkedContent(content));
+                    PdfTableInference.HasNativeTableMarkedContent(content), onRejected: rejectedTableBounds.Add);
                 if (inferredTables.Count > 0)
                 {
                     // P-Overlay: detect schedule-arrow/bar/marker/line overlays against the full,
@@ -449,6 +460,21 @@ public static partial class PdfTextExtractor
                     pageTables = inferredTables;
                     foreach (var table in inferredTables)
                         diagnostics.Add($"{(table.Confidence == PdfTableConfidence.NativeTagged ? "PdfTableNative" : "PdfTableInferred")}: PDF page {pageNumber}: reconstructed {table.Rows.Count}x{table.Rows[0].Cells.Count} table from regular vector grid.");
+                }
+                var consumedPaths = inferredTables.SelectMany(table => table.SourcePathIds).ToHashSet(StringComparer.Ordinal);
+                var failedPaths = (visualGraph.SourceItems ?? []).Where(item =>
+                    item.Reason?.StartsWith("regular orthogonal table/grid line", StringComparison.Ordinal) == true &&
+                    !consumedPaths.Contains(item.Id)).Select(item => item.Id).ToHashSet(StringComparer.Ordinal);
+                if (failedPaths.Count > 0 || rejectedTableBounds.Count > 0)
+                {
+                    diagnostics.Add($"PdfTableReconstructionFailed: PDF page {pageNumber}: a vector grid could not be reconstructed as a table; compare cell associations with the original page.");
+                    var bounds = (visualGraph.Paths ?? []).Where(path => failedPaths.Contains(path.Id) && path.Geometry is not null)
+                        .Select(path => path.Geometry!).ToArray();
+                    if (bounds.Length > 0) rejectedTableBounds.Add(UnionBounds(bounds)!);
+                    failedGridTextIds = regions.Where(region => rejectedTableBounds.Any(area =>
+                        region.BoundingBox.X >= area.X - 2 && region.BoundingBox.X <= area.X + area.Width + 2 &&
+                        region.BoundingBox.Y >= area.Y - 2 && region.BoundingBox.Y <= area.Y + area.Height + 2))
+                        .SelectMany(region => region.SourceTextIds).ToHashSet();
                 }
                 var readableGraph = inferredTables.Count > 0
                     ? PdfVisualOutputCompactor.RemoveConsumedTableVisuals(visualGraph, inferredTables)
@@ -498,7 +524,7 @@ public static partial class PdfTextExtractor
                     throw new PdfExtractionException(string.Join(" ", invariantIssues));
             }
             var boxes = FindBoxLayout(visualGraph, pageTables, VisibleArea(attributes), diagramProjected ? visualLabelNodeIds : null);
-            var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount, boxes);
+            var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount, boxes, failedGridTextIds);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
             var embeddedBounds = embeddedImages.Where(bounds => bounds is not null).Select(bounds => bounds!).ToArray();
@@ -513,19 +539,20 @@ public static partial class PdfTextExtractor
         if (pages.Count == 0)
         {
             var attributes = pageAttributes.GetValueOrDefault(1);
-            diagnostics.Add("PdfRasterizerUnavailable: PDF page 1: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
-            pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
+            diagnostics.Add("PdfNativeTextUnavailable: PDF page 1: native text is unavailable; compare the original page or enable OCR to recover image text.");
+            pages.Add(new PdfPageText(1, [new PdfTextRegion("[PDF page 1 contains image-only content; native text unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
                 MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         for (var pageNumber = 1; pageNumber <= pageCount; pageNumber++)
         {
             if (pages.Any(page => page.PageNumber == pageNumber)) continue;
             var attributes = pageAttributes.GetValueOrDefault(pageNumber);
-            diagnostics.Add($"PdfRasterizerUnavailable: PDF page {pageNumber}: native text is unavailable; configure rasterizer/OCR and run docredock doctor.");
-            pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; rasterizer/OCR unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
+            diagnostics.Add($"PdfNativeTextUnavailable: PDF page {pageNumber}: native text is unavailable; compare the original page or enable OCR to recover image text.");
+            pages.Add(new PdfPageText(pageNumber, [new PdfTextRegion($"[PDF page {pageNumber} contains image-only content; native text unavailable]", new Geometry("pdf-user-space", 0, 0, 1, 1), 0)], false, true,
                 MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
+        MarkRepeatedPageFurniture(pages);
         return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs, tables, visualFallbacks, visualProjections);
     }
 
@@ -622,10 +649,14 @@ public static partial class PdfTextExtractor
     /// table swallow unrelated native text, then reconciles every parsed fragment against the two
     /// places it may legitimately live: a table cell, or a surviving flow region.</summary>
     private static PdfTextRegion[] BuildFlowRegions(IReadOnlyList<PdfTextRegion> regions,
-        IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount, BoxLayout? boxes = null)
+        IReadOnlyList<PdfTable> tables, int pageNumber, List<string> diagnostics, out int columnCount, BoxLayout? boxes = null, IReadOnlySet<int>? failedGridTextIds = null)
     {
         var tableSourceIds = PdfTextAccounting.TableSourceIds(tables);
+        if (failedGridTextIds is { Count: > 0 }) tableSourceIds = tableSourceIds.Concat(failedGridTextIds).ToHashSet();
         var flow = SortReadingOrder(regions, tableSourceIds, out columnCount, boxes);
+        if (columnCount > 1) diagnostics.Add($"PdfColumnLayoutDetected: PDF page {pageNumber}: inferred {columnCount} text columns; compare the reading order with the original page.");
+        if (flow.Any(region => region.HasUncertainHyphenation))
+            diagnostics.Add($"PdfHyphenationUncertain: PDF page {pageNumber}: line-ending hyphens were retained because they may be part of a word; compare word spelling with the original.");
         if (tables.Count == 0) return flow;
         var accounting = PdfTextAccounting.Reconcile(regions.SelectMany(region => region.SourceTextIds).ToArray(), flow, tables);
         if (accounting.IsComplete) return flow;
@@ -3443,7 +3474,7 @@ public static partial class PdfTextExtractor
                 var measurable = font is { Widths: not null, Vertical: false } && show is { FontSize: > 0, HorizontalScale: > 0 } state &&
                     double.IsFinite(state.FontSize!.Value) && double.IsFinite(state.HorizontalScale) && IsAxisAligned(textMatrix);
                 var read = ReadShow(content[operandStart..operandEnd], font, measurable, show);
-                var text = actualText ?? read.Text;
+                var text = (actualText ?? read.Text).Replace('\uF0B7', '\u2022');
                 var measured = read.Measured;
                 if (text.Length > 0)
                 {
@@ -3688,7 +3719,8 @@ public static partial class PdfTextExtractor
             // Table cells and unrelated body text routinely share a baseline. Gluing them into one
             // line would force the table projection to either drop native body text or duplicate a
             // cell, so the two families never join the same readable line.
-            if (PdfTextAccounting.IsTableOwned(previous, tableSourceIds) != PdfTextAccounting.IsTableOwned(region, tableSourceIds))
+            if (previous.ReadingColumn != region.ReadingColumn ||
+                PdfTextAccounting.IsTableOwned(previous, tableSourceIds) != PdfTextAccounting.IsTableOwned(region, tableSourceIds))
             {
                 lines.Add(tail = region);
                 continue;
@@ -3719,6 +3751,8 @@ public static partial class PdfTextExtractor
                     Math.Max(previous.BoundingBox.Height, region.BoundingBox.Height)), previous.ReadingOrder,
                 [.. previous.SourceTextIds, .. region.SourceTextIds])
             {
+                ReadingColumn = previous.ReadingColumn,
+                FontSize = previous.FontSize == region.FontSize ? previous.FontSize : null,
                 Struck = PdfTextDecorations.Join(previous.Struck, PdfTextDecorations.Shift(region.Struck, previous.Text.Length + separator.Length)),
                 Underlined = PdfTextDecorations.Join(previous.Underlined, PdfTextDecorations.Shift(region.Underlined, previous.Text.Length + separator.Length)),
             };
@@ -3878,6 +3912,11 @@ public static partial class PdfTextExtractor
             return Math.Max(em * 3, pageSpan * 0.08);
         }
 
+        // A larger heading and several smaller body lines provide independent block evidence
+        // when the short column has only two baselines. Plain labels keep the stricter rule.
+        var sizes = flowRegions.Where(region => region.FontSize > 0).Select(region => region.FontSize!.Value).Order().ToArray();
+        var regionLayout = sizes.Length >= 5 && sizes[^1] >= sizes[sizes.Length / 2] * 1.2;
+        var confirmations = regionLayout ? 2 : 3;
         var openRuns = new List<GutterRun>();
         var confirmedRuns = new List<GutterRun>();
         for (var baselineIndex = 0; baselineIndex < baselines.Count; baselineIndex++)
@@ -3895,9 +3934,9 @@ public static partial class PdfTextExtractor
                 if (run.Pitches.Count >= 2)
                 {
                     var pitches = run.Pitches.Order().ToArray();
-                    if (baselineTops[baselineIndex] < run.LastBaselineY - pitches[pitches.Length / 2] * BlockEndPitchFactor)
+                    if (baselineTops[baselineIndex] < run.LastBaselineY - (regionLayout ? Math.Max(pitches[pitches.Length / 2], baseline.Max(region => region.FontSize ?? region.BoundingBox.Height)) : pitches[pitches.Length / 2]) * BlockEndPitchFactor)
                     {
-                        if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+                        if (run.TrueMatchCount >= confirmations) confirmedRuns.Add(run);
                         continue;
                     }
                 }
@@ -3915,12 +3954,21 @@ public static partial class PdfTextExtractor
                     run.End = end;
                     break;
                 }
+                // Tighten using unilateral lines too: unequal line pitches and short headings
+                // leave baselines with only one column, whose longer body line still belongs to it.
+                var minimumChannel = Math.Max(12, baseline.Max(fragment => fragment.FontSize ?? fragment.BoundingBox.Height));
+                foreach (var fragment in regionLayout ? baseline : [])
+                {
+                    var edge = fragment.BoundingBox.X + fragment.BoundingBox.Width;
+                    if (fragment.BoundingBox.X < run.Start && edge <= run.End - minimumChannel) run.Start = Math.Max(run.Start, edge);
+                    else if (fragment.BoundingBox.X >= run.Start + minimumChannel && edge > run.End) run.End = Math.Min(run.End, fragment.BoundingBox.X);
+                }
                 var sides = baseline.Select(fragment => ClassifyGutterSide(fragment, run.Start, run.End)).ToArray();
                 if (Array.IndexOf(sides, GutterSide.Straddle) >= 0)
                 {
                     // A fragment now spans where the gutter used to be - a genuine full-width
                     // line (title, footer, or unrelated paragraph) ends the run here.
-                    if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+                    if (run.TrueMatchCount >= confirmations) confirmedRuns.Add(run);
                     continue;
                 }
                 var lastLeftIndex = Array.LastIndexOf(sides, GutterSide.Left);
@@ -3956,7 +4004,7 @@ public static partial class PdfTextExtractor
             }
             openRuns = stillOpen;
         }
-        foreach (var run in openRuns) if (run.TrueMatchCount >= 3) confirmedRuns.Add(run);
+        foreach (var run in openRuns) if (run.TrueMatchCount >= confirmations) confirmedRuns.Add(run);
         if (confirmedRuns.Count == 0) return [.. geometric];
 
         // Reassemble the flow fragments: a baseline outside every confirmed block keeps its plain
@@ -3990,7 +4038,8 @@ public static partial class PdfTextExtractor
                     columnLines[covering.Count(run => ClassifyGutterSide(fragment, run.Start, run.End) == GutterSide.Right)]
                         .Add(fragment);
             }
-            foreach (var column in columnLines) reorderedFlow.AddRange(column);
+            for (var column = 0; column < columnLines.Length; column++)
+                reorderedFlow.AddRange(columnLines[column].Select(region => region with { ReadingColumn = column }));
             cursor = blockEnd + 1;
         }
 

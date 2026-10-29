@@ -27,7 +27,8 @@ public sealed partial class DocumentService
         var (extracted, _, _) = await ExtractReadableGraphAsync(Path.GetFullPath(options.SourcePath), previewOptions, cancellationToken).ConfigureAwait(false);
         var graph = AiPackageGraph(extracted, previewOptions);
         var markdownOptions = new ReadableMarkdownOptions(options.ShowFormulas, options.IncludeSvgPreviews,
-            options.IncludeDiagrams, options.Sheets, options.Title, options.ContentPolicy, options.OcrReview);
+            options.IncludeDiagrams, options.Sheets, ReadableTitle(graph, options.SourcePath, options.Title), options.ContentPolicy, options.OcrReview,
+            ExpandMergedCells: true, Language: options.Language);
         var markdown = new ReadableMarkdownSerializer(markdownOptions).Serialize(graph);
         var parts = AiPackageContentBuilder.Build(AiMapImageReferences(graph, "../assets/"), markdownOptions,
             Path.GetFileName(options.SourcePath), partOptions, cancellationToken);
@@ -75,7 +76,7 @@ public sealed partial class DocumentService
         {
             var sourceHash = await AiHashAsync(source, cancellationToken).ConfigureAwait(false);
             var documentPath = Path.Combine(package, "document.md");
-            var documentOptions = options.Document with { MarkdownPath = documentPath, EmbedImages = false };
+            var documentOptions = options.Document with { MarkdownPath = documentPath, EmbedImages = false, ExpandMergedCells = true };
             var exported = await ExportReadableAsync(documentOptions, cancellationToken).ConfigureAwait(false);
             if (sourceHash != await AiHashAsync(source, cancellationToken).ConfigureAwait(false))
                 throw new IOException("Source document changed during conversion; run the export again.");
@@ -84,7 +85,8 @@ public sealed partial class DocumentService
             var graph = AiPackageGraph(exported.Graph, documentOptions);
             var markdownOptions = new ReadableMarkdownOptions(documentOptions.ShowFormulas,
                 documentOptions.IncludeSvgPreviews, documentOptions.IncludeDiagrams, documentOptions.Sheets,
-                documentOptions.Title, documentOptions.ContentPolicy, documentOptions.OcrReview);
+                ReadableTitle(graph, source, documentOptions.Title), documentOptions.ContentPolicy, documentOptions.OcrReview,
+                ExpandMergedCells: true, Language: documentOptions.Language);
             // Re-render from graph references; string replacement could corrupt literal text or code.
             var documentSerializer = new ReadableMarkdownSerializer(markdownOptions);
             var documentMarkdown = documentSerializer.Serialize(graph);

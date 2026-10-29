@@ -483,8 +483,9 @@ class ReaderContracts(unittest.TestCase):
                 self.assertIn('review required: read review.md', err)
         code, out, err = self.run_cli(path, '--verify', '--fail-on-review')
         self.assertEqual((3, 'files ok\n'), (code, out))
-        # Without the option the part is printed as before.
-        self.assertEqual(0, self.run_cli(path, '--part', 'part-0002')[0])
+        # Body output stops by default, and requires explicit acknowledgement.
+        self.assertEqual((11, ''), self.run_cli(path, '--part', 'part-0002')[:2])
+        self.assertEqual(0, self.run_cli(path, '--part', 'part-0002', '--allow-review')[0])
         # A changed report is a verification failure first.
         (path / 'report.json').write_text(json.dumps(dict(report, review={'required': False})), encoding='utf-8')
         self.assertEqual(1, self.run_cli(path, '--verify', '--fail-on-review')[0])

@@ -57,6 +57,18 @@ public sealed class MainWindowFilePickerTests
         finally { window.Close(); }
     }
 
+    [Fact]
+    public void Hidden_text_summary_does_not_call_revision_deletions_hidden_text()
+    {
+        var diagnostic = new DocRedock.Core.Reporting.Diagnostic("DocxHiddenTextExcluded",
+            "Hidden text was excluded (1).", DocRedock.Core.Reporting.DiagnosticSeverity.Information);
+        var summarize = typeof(MainWindow).GetMethod("HiddenContentText", BindingFlags.Static | BindingFlags.NonPublic)!;
+        var summary = (string)summarize.Invoke(null, [new[] { diagnostic }])!;
+
+        Assert.Contains("Wordの非表示文字 1件", summary, StringComparison.Ordinal);
+        Assert.DoesNotContain("削除", summary, StringComparison.Ordinal);
+    }
+
     [AvaloniaFact]
     public async Task Export_file_picker_selection_shows_file_and_defaults_export_directory()
     {
@@ -106,6 +118,30 @@ public sealed class MainWindowFilePickerTests
     }
 
     [AvaloniaFact]
+    public async Task Startup_file_arguments_preselect_supported_documents()
+    {
+        var root = Directory.CreateTempSubdirectory("docredock-gui-arguments-");
+        var window = new MainWindow();
+        try
+        {
+            SetPrivateField(window, "_exportDirectory", null);
+            var sourcePath = Path.Combine(root.FullName, "invoice.docx");
+            File.Copy(FindFixture("complex-design-doc.docx"), sourcePath);
+
+            Invoke(window, "SelectStartupFiles", new object?[] { new[] { sourcePath } });
+            PumpUntil(() => Get<Button>(window, "ExportButton").IsEnabled, TimeSpan.FromSeconds(5));
+
+            Assert.Equal("invoice.docx", Get<TextBlock>(window, "ExportFileNameText").Text);
+            Assert.Equal(root.FullName, GetPrivateField(window, "_exportDirectory") as string);
+        }
+        finally
+        {
+            window.Close();
+            root.Delete(true);
+        }
+    }
+
+    [AvaloniaFact]
     public async Task Export_end_to_end_converts_selected_file_to_markdown()
     {
         var sourceRoot = Directory.CreateTempSubdirectory("docredock-gui-picker-src-");
@@ -129,8 +165,13 @@ public sealed class MainWindowFilePickerTests
             // text-based DOCX, so keep OCR off to avoid an unrelated dependency on this path.
             Get<ToggleSwitch>(window, "OcrToggle").IsChecked = false;
 
-            SetFilePickerOverride(window, _ => Task.FromResult<IReadOnlyList<IStorageFile>>([sourceFile!]));
             SetFolderPickerOverride(window, _ => Task.FromResult<IReadOnlyList<IStorageFolder>>([outputFolder!]));
+            var filePickerCalls = 0;
+            SetFilePickerOverride(window, _ =>
+            {
+                filePickerCalls++;
+                return Task.FromResult<IReadOnlyList<IStorageFile>>([sourceFile!]);
+            });
 
             Invoke(window, "OnPickExportFile", null, new RoutedEventArgs());
             Invoke(window, "OnPickExportFolder", null, new RoutedEventArgs());
@@ -140,26 +181,31 @@ public sealed class MainWindowFilePickerTests
             Assert.Equal(
                 Path.TrimEndingDirectorySeparator(outputRoot.FullName),
                 Path.TrimEndingDirectorySeparator((string)GetPrivateField(window, "_exportDirectory")!));
-            // "Markdownのみ" (readable) mode was forced above, so a bare .md is expected below.
+            // Readable Markdown mode was forced above, so a bare .md is expected below.
             Assert.True(Get<RadioButton>(window, "ReadableExportToggle").IsChecked == true);
             Assert.True(Get<Button>(window, "ExportButton").IsEnabled);
 
             var exportShortcut = new KeyEventArgs
             {
+                RoutedEvent = InputElement.KeyDownEvent,
                 Key = Key.Enter,
                 KeyModifiers = OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control,
             };
-            Invoke(window, "OnWindowKeyDown", window, exportShortcut);
+            var dropZone = Get<Button>(window, "ExportDropZone");
+            dropZone.Focus();
+            dropZone.RaiseEvent(exportShortcut);
             Assert.True(exportShortcut.Handled);
             PumpUntil(() => GetPrivateField(window, "_exportBusy") is false, TimeSpan.FromSeconds(30));
+            Assert.Equal(1, filePickerCalls);
 
             var markdownFiles = Directory.GetFiles(outputRoot.FullName, "*.md");
             Assert.Single(markdownFiles);
             Assert.True(Get<Control>(window, "ResultPanel").IsVisible);
             Assert.Equal("完了・要確認", Get<TextBlock>(window, "ResultKickerText").Text);
             Assert.Equal("保存は完了しました・変更履歴の共有確認が必要です", Get<TextBlock>(window, "ResultTitleText").Text);
-            Assert.Contains("変更履歴を含みます", Get<TextBlock>(window, "ResultReviewText").Text);
-            Assert.True(Get<TextBlock>(window, "ResultReviewText").IsVisible);
+            Assert.Contains("変更履歴", Get<TextBlock>(window, "ResultRevisionText").Text);
+            Assert.Contains("削除した文字", Get<TextBlock>(window, "ResultRevisionText").Text);
+            Assert.True(Get<TextBlock>(window, "ResultRevisionText").IsVisible);
         }
         finally
         {
