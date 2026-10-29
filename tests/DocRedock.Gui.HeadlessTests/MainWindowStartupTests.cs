@@ -145,8 +145,7 @@ public sealed class MainWindowStartupTests
             Assert.False(ocrToggle.IsEnabled);
             Assert.NotEqual(true, ocrToggle.IsChecked);
             Assert.True(unavailable.IsVisible);
-            Assert.Contains("rasterizer: unavailable", unavailable.Text, StringComparison.Ordinal);
-            Assert.DoesNotContain("PDF OCR: Ready", unavailable.Text, StringComparison.Ordinal);
+            Assert.DoesNotContain("OCR: 利用可能", unavailable.Text, StringComparison.Ordinal);
         }
         finally
         {
@@ -175,8 +174,8 @@ public sealed class MainWindowStartupTests
             var status = Get<TextBlock>(window, "OcrUnavailableText");
 
             Assert.True(ocrToggle.IsEnabled);
-            Assert.Contains("PDF OCR: Ready", status.Text, StringComparison.Ordinal);
-            Assert.Contains("pdftoppm", status.Text, StringComparison.Ordinal);
+            Assert.Contains("OCR: 利用可能", status.Text, StringComparison.Ordinal);
+            Assert.Contains("画像だけのPDFページ", status.Text, StringComparison.Ordinal);
         }
         finally { window.Close(); }
     }
@@ -195,7 +194,7 @@ public sealed class MainWindowStartupTests
         var decision = GuiWorkflowService.DescribeOcrCapability(rasterizer, engineReady, nativeUnavailable, jpn, eng);
 
         Assert.True(decision.Enabled);
-        Assert.Contains("PDF OCR: Ready", decision.StatusText, StringComparison.Ordinal);
+        Assert.Contains("OCR: 利用可能", decision.StatusText, StringComparison.Ordinal);
     }
 
     [AvaloniaFact]
@@ -213,7 +212,7 @@ public sealed class MainWindowStartupTests
             var status = Get<TextBlock>(window, "OcrUnavailableText");
 
             Assert.True(ocrToggle.IsEnabled);
-            Assert.Contains("Verification pending", status.Text, StringComparison.Ordinal);
+            Assert.Contains("最初のOCR実行時", status.Text, StringComparison.Ordinal);
         }
         finally { window.Close(); }
     }
@@ -288,7 +287,7 @@ public sealed class MainWindowStartupTests
 
             var inferenceMode = Get<ComboBox>(window, "VisualInferenceModeComboBox");
             var inferenceLabels = inferenceMode.Items.Cast<ComboBoxItem>().Select(item => item.Content?.ToString() ?? string.Empty).ToArray();
-            Assert.Equal(["接続推定なし（native only）", "安全優先（safe・推奨）", "復元優先（balanced）"], inferenceLabels);
+            Assert.Equal(["元文書の接続だけを使う", "安全を優先（推奨）", "復元を優先"], inferenceLabels);
             var balancedWarning = Get<TextBlock>(window, "BalancedInferenceWarning");
             inferenceMode.SelectedIndex = 2;
             Assert.True(balancedWarning.IsVisible);

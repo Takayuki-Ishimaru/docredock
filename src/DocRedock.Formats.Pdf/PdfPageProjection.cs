@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 using DocRedock.Core.Documents;
 
 namespace DocRedock.Formats.Pdf;
@@ -36,6 +37,25 @@ public static class PdfPageProjection
             .Select(item => new object[] { item.rowIndex, item.cellIndex, item.Ranges!.Select(range => new[] { range.Start, range.End }).ToArray() })
             .ToArray();
 
+    private sealed record HeadingMetrics(double BodySize);
+    private static readonly ConditionalWeakTable<PdfPageText, HeadingMetrics> HeadingSizes = new();
+
+    /// <summary>Conservative font-size evidence for a short heading above ordinary body text.</summary>
+    public static int HeadingLevel(PdfPageText page, PdfTextRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(page);
+        ArgumentNullException.ThrowIfNull(region);
+        if (region.IsPageFurniture || region.FontSize is not > 0 || region.Text.Length is 0 or > 120 ||
+            region.Text.TrimEnd().EndsWith('.')) return 0;
+        var bodySize = HeadingSizes.GetValue(page, static source =>
+        {
+            var sizes = source.Regions.Where(item => item.FontSize > 0 && item.Text.Length >= 20 && !item.IsPageFurniture)
+                .Select(item => item.FontSize!.Value).Order().ToArray();
+            return new HeadingMetrics(sizes.Length >= 3 ? sizes[sizes.Length / 2] : double.PositiveInfinity);
+        }).BodySize;
+        return region.FontSize >= bodySize * 1.6 ? 1 : region.FontSize >= bodySize * 1.2 ? 2 : 0;
+    }
+
     public static IReadOnlyList<DocumentNode> ToDocumentNodes(PdfPageText page,
         IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0)
     {
@@ -59,6 +79,17 @@ public static class PdfPageProjection
             // to the surrounding flow text without letting geometry override the flow's own order.
             var top = table.Bounds.Y + table.Bounds.Height;
             var position = Array.FindIndex(flow, region => region.BoundingBox.Y < top);
+            // A right-column table belongs after the left column, even when its top is higher.
+            var columns = flow.Where(region => region.ReadingColumn is not null).GroupBy(region => region.ReadingColumn!.Value)
+                .Select(group => new { Column = group.Key, Left = group.Min(region => region.BoundingBox.X),
+                    Right = group.Max(region => region.BoundingBox.X + region.BoundingBox.Width) }).ToArray();
+            var matching = columns.Where(column => table.Bounds.X >= column.Left - 12 &&
+                table.Bounds.X < column.Right && table.Bounds.X + table.Bounds.Width <= column.Right + 24).ToArray();
+            if (matching is [var match])
+            {
+                position = Array.FindIndex(flow, region => region.ReadingColumn == match.Column && region.BoundingBox.Y < top);
+                if (position < 0) position = Array.FindLastIndex(flow, region => region.ReadingColumn == match.Column) + 1;
+            }
             return (Table: table, Position: position < 0 ? flow.Length : position);
         }).OrderBy(placement => placement.Position).ThenByDescending(placement => placement.Table.Bounds.Y).ToArray();
 
@@ -73,8 +104,11 @@ public static class PdfPageProjection
                 Dictionary<string, JsonElement>? extensions = null;
                 if (StrikeRanges(region) is { } struck) (extensions ??= [])["strike_ranges"] = struck;
                 if (UnderlineRanges(region) is { } underlined) (extensions ??= [])["underline_ranges"] = underlined;
-                nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", NodeKind.Paragraph, null, order,
-                    ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
+                var headingLevel = HeadingLevel(page, region);
+                if (headingLevel > 0) (extensions ??= [])["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
+                if (region.IsPageFurniture) (extensions ??= [])["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
+                nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, order,
+                    region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));
             }
         }

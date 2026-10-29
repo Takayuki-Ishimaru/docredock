@@ -2,7 +2,9 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.9 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.10 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+
+[Quick guides by task](quick-tasks.md)
 
 ## 1. Get DocRedock
 
@@ -21,7 +23,7 @@ The desktop GUI accepts PDF by default. Native text and vector graphics are extr
 
 PDF text order and paragraph grouping rely on measured positions and remain conservative. Unboxed body lines are joined into a wrapped paragraph only when measured glyph widths, font size, baseline spacing, and alignment support that continuation; unknown font widths, fixed-pitch text, headings, list boundaries, tables, and diagram labels stay separate. A multi-column layout is selected only for a persistent measured gutter across at least three consecutive lines; narrow gutters around 6–8 mm may qualify when TrueType glyph widths are known. A single wide gap on one line is not a column boundary. Framed boxes and cards are read box by box, left to right then top to bottom; labels beside values, forms crossed by rules, charts, and diagrams keep their detected reading order. When ruled lines define a clear rectangular grid, tables with unequal column widths and rectangular row or column spans can be reconstructed; ambiguous grids remain inferred and may need review. In Readable Markdown for a full document, a repeated-header table continues across adjacent page edges only when the columns match and neither page has overlays or marked cells. AI package parts remain page-based, so cross-page table continuation is not performed there. On reconstructed-table pages, body text outside the table is retained, and unexplained omissions are reported as `PdfNativeTextUnaccounted`.
 
-CLI PDF export, restoration, and rendering remain experimental and require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`, like other experimental CLI workflows. Read-only `docredock inspect <file.pdf>` remains available without the flag.
+Enable CLI PDF export with `--allow-pdf` or `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Restoration, rendering and other experimental CLI workflows still require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Read-only `docredock inspect <file.pdf>` remains available without the flag.
 
 CLI export defaults to Readable Markdown:
 
@@ -35,7 +37,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.9. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.10. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -93,7 +95,7 @@ The current manifest uses schema `2.2`: schema `2.1` (v0.3.2: `table_row_blocks`
 
 You do not need to give a model both `document.md` and `source-index.json` on every request. Send `document.md` when it fits, or the parts one by one (they name their source and location); keep `source-index.json` locally and load it only to trace an answer back to node IDs or Excel cells. See the [format contract](../reference/ai-package.md#giving-a-package-to-a-model).
 
-Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-package`. Existing conversion switches, including `--no-diagrams`, `--show-formulas`, `--ocr-review`, and PDF fallback settings, still apply. CLI PDF conversion retains its experimental flag requirement. A successful export with conversion warnings returns 1; failed/cancelled conversion leaves no partial package. For automated pipelines, `--fail-on-review` returns 11 when the export needs review (source-review pages, OCR items, Excel table boundaries or Word revision-sharing review; `review.required` in `report.json`), after writing the package, so the package is not handed to a model on exit code 0 alone. Without it, review items do not change the exit code. Existing targets require `--force` in the CLI; the GUI selects a numbered name for repeated exports. Packages are one-way inputs and are not restoration sidecars. See the [format contract](../reference/ai-package.md) for the API and JSON details.
+Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-package`. Existing conversion switches, including `--no-diagrams`, `--show-formulas`, `--ocr-review`, and PDF fallback settings, still apply. Enable CLI PDF conversion with `--allow-pdf` or the experimental environment variable. A successful export with conversion warnings returns 1; failed/cancelled conversion leaves no partial package. For automated pipelines, `--fail-on-review` returns 11 when the export needs review (source-review pages, OCR items, Excel table boundaries or Word revision-sharing review; `review.required` in `report.json`), after writing the package, so the package is not handed to a model on exit code 0 alone. Without it, review items do not change the exit code. Existing targets require `--force` in the CLI; the GUI selects a numbered name for repeated exports. Packages are one-way inputs and are not restoration sidecars. See the [format contract](../reference/ai-package.md) for the API and JSON details.
 
 ## 3. Generated files
 
@@ -115,7 +117,7 @@ Package settings expose row splitting, target characters, estimated part count, 
 - **complete**: includes hidden/metadata content and emits a warning.
 - **sanitized**: also filters metadata, derived/OCR content, and furniture such as headers and footers.
 
-Choose Word revisions with `--revisions final|markup|reject` (GUI Word revision selector, API `Revisions`). The CLI defaults to `final` for every content policy; it excludes deletions, move sources, and history annotations and records the exclusion as information, not a warning. Other unresolved conversion warnings still produce exit code 1. The GUI defaults to markup for `visible`/`complete` and final for `sanitized`. `markup` includes revision history and deleted content; `reject` refuses documents with tracked changes. Explicit sanitized markup requires `--allow-revision-sharing` or the GUI's session-only consent checkbox. Revision markup requires sharing review and causes export `--fail-on-review` to return 11. Original documents and restoration sidecars still retain history.
+Choose Word revisions with `--revisions final|markup|reject` (GUI Word revision selector, API `Revisions`). See [revision defaults](../reference/revision-defaults.md) for the CLI, GUI and API defaults under each content policy. `final` excludes deletions, move sources and history annotations and records the exclusion as information, not a warning. `markup` displays tracked changes and may include deleted text; `reject` refuses documents with tracked changes. Explicit sanitized markup requires `--allow-revision-sharing` or the GUI's session-only consent checkbox. Revision markup requires sharing review and causes export `--fail-on-review` to return 11. Original documents and restoration sidecars still retain history.
 
 XLSX exports also accept `--sheets Sheet1,Sheet2` (CLI only) to project only the named worksheets. Every requested name must exactly match an existing worksheet (case-insensitive); an unknown name fails the export with exit code 2 and writes no output file — a partial mismatch (some names found, some not) is never silently ignored. Requesting a hidden worksheet that the `visible`/`sanitized` policy excludes is not an error, but it emits an `XlsxSheetExcludedByPolicy` warning (exit code 1) instead of a silently empty-looking result; use `--content-policy complete` to include it.
 

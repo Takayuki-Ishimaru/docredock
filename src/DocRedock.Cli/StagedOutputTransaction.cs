@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace DocRedock.Cli;
 
 internal interface IStagedOutputFileSystem
@@ -69,6 +71,7 @@ internal sealed class StagedOutputTransaction : IDisposable
 
         foreach (var target in targets)
         {
+            EnsureSafeTarget(target);
             if (!force && Exists(target))
                 throw new IOException("Output already exists; refusing to overwrite it. Use --force to replace the requested output.");
         }
@@ -112,6 +115,8 @@ internal sealed class StagedOutputTransaction : IDisposable
         if (!force && stagedPaths.Keys.Any(Exists))
             throw new IOException("Output already exists; refusing to overwrite it. Use --force to replace the requested output.");
 
+        foreach (var target in stagedPaths.Keys) EnsureSafeTarget(target);
+
         var backups = new Dictionary<string, string>(PathComparer);
         var installed = new List<string>();
         try
@@ -124,6 +129,8 @@ internal sealed class StagedOutputTransaction : IDisposable
                     $".{Path.GetFileName(target)}.{Guid.NewGuid():N}.backup");
                 Move(target, backup);
                 backups[target] = backup;
+                // Recheck the moved object: a path can change between inspection and rename.
+                EnsureSafeTarget(backup);
             }
 
             foreach (var (target, staged) in stagedPaths)
@@ -223,6 +230,44 @@ internal sealed class StagedOutputTransaction : IDisposable
             // See TryCleanupBackups: cleanup failures are non-transactional.
         }
     }
+
+    private void EnsureSafeTarget(string path)
+    {
+        // Test doubles describe virtual paths and must not consult the physical filesystem.
+        if (fileSystem is not PhysicalStagedOutputFileSystem) return;
+        if (OperatingSystem.IsWindows())
+        {
+            try
+            {
+                if ((File.GetAttributes(path) & (FileAttributes.ReparsePoint | FileAttributes.Device)) != 0)
+                    throw new IOException($"Refusing to replace symbolic link, reparse point, or device: {path}");
+            }
+            catch (FileNotFoundException) { }
+            catch (DirectoryNotFoundException) { }
+            return;
+        }
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+            throw new IOException("Cannot safely inspect output file type on this platform.");
+        if (RuntimeInformation.ProcessArchitecture is not (Architecture.X64 or Architecture.Arm64))
+            throw new IOException("Cannot safely inspect output file type on this architecture.");
+        var buffer = new byte[256];
+        if (LStat(path, buffer) != 0)
+        {
+            var errno = Marshal.GetLastPInvokeError();
+            if (errno == 2 || errno == 20) return; // ENOENT / ENOTDIR
+            throw new IOException($"Cannot inspect output path '{path}' (errno {errno}).");
+        }
+        var mode = OperatingSystem.IsMacOS() ? BitConverter.ToUInt16(buffer, 4)
+            : BitConverter.ToUInt32(buffer, RuntimeInformation.ProcessArchitecture == Architecture.X64 ? 24 : 16);
+        var type = mode & 0xf000;
+        if (type != 0x8000 && type != 0x4000)
+            throw new IOException($"Refusing to replace a symbolic link or special file: {path}");
+    }
+
+    [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Globalization", "CA2101", Justification = "libc requires UTF-8 paths.")]
+    [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
+    private static extern int LStat([MarshalAs(UnmanagedType.LPUTF8Str)] string path, byte[] buffer);
 
     private bool Exists(string path) => fileSystem.FileExists(path) || fileSystem.DirectoryExists(path);
 

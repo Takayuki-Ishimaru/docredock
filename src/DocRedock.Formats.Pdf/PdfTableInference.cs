@@ -18,8 +18,15 @@ public static class PdfTableInference
     // indefinitely. An ordinary page's independent tables/diagrams resolve in 1-2 levels.
     private const int MaxComponentRecursionDepth = 8;
 
+    // The general layout rectangle deliberately uses a fixed height. Only the outside-text
+    // collision guard needs the ink estimate: a paragraph immediately below a table must not
+    // invalidate it merely because its layout rectangle reaches above the bottom rule.
+    private static Geometry ContactBounds(PdfTextRegion region) => region.FontSize is > 0 and var size
+        ? region.BoundingBox with { Y = region.BoundingBox.Y - size * 0.2, Height = size }
+        : region.BoundingBox;
+
     public static IReadOnlyList<PdfTable> Infer(int pageNumber, IReadOnlyList<PdfTextRegion> regions,
-        VisualGraph graph, int maxCandidates = 64, bool nativeTagged = false, int recursionDepth = 0)
+        VisualGraph graph, int maxCandidates = 64, bool nativeTagged = false, int recursionDepth = 0, Action<Geometry>? onRejected = null)
     {
         ArgumentNullException.ThrowIfNull(regions); ArgumentNullException.ThrowIfNull(graph);
         var rawPaths = graph.Paths ?? [];
@@ -73,7 +80,7 @@ public static class PdfTableInference
             {
                 var ids = component.SelectMany(line => line.PathIds).ToHashSet(StringComparer.Ordinal);
                 var componentGraph = graph with { Paths = (graph.Paths ?? []).Where(path => ids.Contains(path.Id)).ToArray() };
-                var componentTables = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1);
+                var componentTables = Infer(pageNumber, regions, componentGraph, 1, nativeTagged: false, recursionDepth + 1, onRejected);
                 var table = componentTables.Count > 0 ? componentTables[0] : null;
                 if (table is not null) tables.Add(table with { Id = $"pdf-p{pageNumber}-table-{tables.Count + 1}" });
             }
@@ -112,8 +119,14 @@ public static class PdfTableInference
             !CoversLevel(horizontal.Where(line => Math.Abs(line.Fixed - top) <= 1.5), left, right) ||
             !CoversLevel(vertical.Where(line => Math.Abs(line.Fixed - left) <= 1.5), bottom, top) ||
             !CoversLevel(vertical.Where(line => Math.Abs(line.Fixed - right) <= 1.5), bottom, top)) return [];
+        var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
+        IReadOnlyList<PdfTable> Reject()
+        {
+            onRejected?.Invoke(candidateBounds);
+            return [];
+        }
         var gridCells = PartitionCells(xs, ys, horizontal, vertical);
-        if (gridCells is null) return [];
+        if (gridCells is null) return Reject();
 
         var cells = new List<PdfTableCell>();
         var assigned = new HashSet<int>();
@@ -123,7 +136,7 @@ public static class PdfTableInference
             var inside = regions.Where(region => IsInside(cell, region.BoundingBox) ||
                 region.MeasuredWidth && IsCentredOnRightEdge(cell, region.BoundingBox, right)).ToArray();
             var ids = inside.SelectMany(region => region.SourceTextIds).ToArray();
-            if (ids.Any(id => !assigned.Add(id))) return [];
+            if (ids.Any(id => !assigned.Add(id))) return Reject();
             // Parts are joined by a space, except a part measured to continue the one before it (the next
             // format of a word, a subscript), and each part's struck and underlined characters are placed
             // where the part starts in the joined text. A part of nothing but white space is a space of its own.
@@ -147,17 +160,16 @@ public static class PdfTableInference
             cells.Add(new PdfTableCell(ys.Length - 1 - row - rowSpan, column, rowSpan, columnSpan, cell, text.ToString(), ids)
                 { Struck = struck, Underlined = underlined });
         }
-        var candidateBounds = new Geometry("pdf-user-space", left, bottom, right - left, top - bottom);
         // Text touching a cell boundary has no unique owner. Do not silently leave it in
         // native flow while also emitting the surrounding table.
-        if (regions.Any(region => Intersects(candidateBounds, region.BoundingBox) &&
-            region.SourceTextIds.Any(id => !assigned.Contains(id)))) return [];
+        if (regions.Any(region => Intersects(candidateBounds, ContactBounds(region)) &&
+            region.SourceTextIds.Any(id => !assigned.Contains(id)))) return Reject();
         // At least a 2x2 grid and four independently located text regions avoid promoting
         // decorative grids or a single-axis ruled list.
         var minimumPopulatedCells = xs.Length == 3 && ys.Length == 3 && gridCells.Count == 3 &&
             gridCells.Any(cell => cell.RowSpan > 1 || cell.ColumnSpan > 1) ? 3 : 4;
         if (assigned.Count < minimumPopulatedCells ||
-            assigned.Select(id => CellFor(cells, id)).Distinct().Count() < minimumPopulatedCells) return [];
+            assigned.Select(id => CellFor(cells, id)).Distinct().Count() < minimumPopulatedCells) return Reject();
         // TableGrid uses explicit, empty vertical continuation cells (RowSpan=0).
         // Keep these physical coordinates so a later row's first real value cannot shift left.
         var continuations = cells.Where(cell => cell.RowSpan > 1).SelectMany(cell =>
@@ -199,7 +211,7 @@ public static class PdfTableInference
         // exactly as before.
         if (graph.Edges.Any(edge => edge.EdgeDirection == VisualEdgeDirection.Directed && edge.Geometry is { } geometry &&
                 Intersects(bounds, geometry) && !IsOverlayCandidateEdge(geometry, bounds, xs, ys)))
-            return [];
+            return Reject();
         return [new PdfTable($"pdf-p{pageNumber}-table-1", pageNumber, bounds, ordered,
             nativeTagged ? PdfTableConfidence.NativeTagged : PdfTableConfidence.HighConfidenceInferred, sourceIds)];
     }

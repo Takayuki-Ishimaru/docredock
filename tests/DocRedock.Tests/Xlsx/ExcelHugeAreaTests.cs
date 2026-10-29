@@ -131,7 +131,11 @@ public sealed class ExcelHugeAreaTests : IDisposable
         try
         {
             var result = await conversion.WaitAsync(Limit);
-            return ((await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal), result);
+            var markdown = (await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal);
+            var expectedTitle = $"# {Path.GetFileNameWithoutExtension(source)}\n";
+            Assert.StartsWith(expectedTitle, markdown, StringComparison.Ordinal);
+            // Fixture names differ when comparing equivalent sheets; normalize only the checked H1.
+            return ("# ドキュメント\n" + markdown[expectedTitle.Length..], result);
         }
         catch (TimeoutException)
         {
@@ -182,7 +186,7 @@ public sealed class ExcelHugeAreaTests : IDisposable
         // 17 pt below the top of the sheet is nowhere near it: the line stays a drawing, and the sheet's shapes are looked
         // at for overlays, which has to resolve every cell of the merge to its origin.
         const string expected =
-            "# Whole sheet merged text\n\n" +
+            "# ドキュメント\n\n" +
             "## Items\n\n" +
             "<!-- inferred: セル配置から文書情報セクションを推定 -->\n" +
             "### 文書情報\n\n" +
@@ -211,7 +215,7 @@ public sealed class ExcelHugeAreaTests : IDisposable
 
         var (markdown, result) = await ConvertAsync(source);
 
-        Assert.Equal("# ~~Whole row merged text~~\n\n## Items\n\n- Item — Qty\n", markdown);
+        Assert.Equal("# ドキュメント\n\n## Items\n\n### ~~Whole row merged text~~\n\n- Item — Qty\n", markdown);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Message.Contains("1 DrawingML shape(s) were retained", StringComparison.Ordinal));
     }
 
@@ -250,7 +254,7 @@ public sealed class ExcelHugeAreaTests : IDisposable
 
         var (markdown, result) = await ConvertAsync(source);
 
-        Assert.Equal("# Banner 1\n\n## Items\n\n" + string.Join("\n\n", banners.Skip(1).Select(number => $"Banner {number}")) + "\n", markdown);
+        Assert.Equal("# ドキュメント\n\n## Items\n\n### Banner 1\n\n" + string.Join("\n\n", banners.Skip(1).Select(number => $"Banner {number}")) + "\n", markdown);
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Message.Contains("1 DrawingML shape(s) were retained", StringComparison.Ordinal));
         Assert.InRange(await AllocatedByExtraction(source), 0, 100 * Megabyte);
     }

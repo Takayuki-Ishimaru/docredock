@@ -760,18 +760,28 @@ public static partial class PdfTextExtractor
         var text = lines[0].Line;
         foreach (var next in lines.Skip(1))
         {
-            var separator = JoinSeparator(text.Text, next.Line.Text);
-            text = new PdfTextRegion(text.Text + separator + next.Line.Text,
+            var softHyphen = text.Text.EndsWith('\u00AD') && next.Line.Text.Length > 0 && char.IsLetter(next.Line.Text[0]);
+            var before = softHyphen ? text.Text[..^1] : text.Text;
+            var uncertainHyphen = before.Length >= 2 && before[^1] == '-' && char.IsLetter(before[^2]) &&
+                next.Line.Text.Length > 0 && char.IsLower(next.Line.Text[0]);
+            var separator = softHyphen ? string.Empty : JoinSeparator(before, next.Line.Text);
+            text = new PdfTextRegion(before + separator + next.Line.Text,
                 new Geometry(text.BoundingBox.CoordinateSpace, Math.Min(text.BoundingBox.X, next.Left),
                     Math.Max(text.BoundingBox.Y, next.Baseline), Math.Max(text.BoundingBox.X + text.BoundingBox.Width, next.Right) - Math.Min(text.BoundingBox.X, next.Left),
                     Math.Max(text.BoundingBox.Height, next.Line.BoundingBox.Height)),
                 text.ReadingOrder, [.. text.SourceTextIds, .. next.Line.SourceTextIds])
             {
-                Struck = PdfTextDecorations.Join(text.Struck, PdfTextDecorations.Shift(next.Line.Struck, text.Text.Length + separator.Length)),
-                Underlined = PdfTextDecorations.Join(text.Underlined, PdfTextDecorations.Shift(next.Line.Underlined, text.Text.Length + separator.Length)),
+                ReadingColumn = text.ReadingColumn,
+                FontSize = text.FontSize,
+                HasUncertainHyphenation = text.HasUncertainHyphenation || uncertainHyphen,
+                Struck = PdfTextDecorations.Join(Clip(text.Struck, before.Length), PdfTextDecorations.Shift(next.Line.Struck, before.Length + separator.Length)),
+                Underlined = PdfTextDecorations.Join(Clip(text.Underlined, before.Length), PdfTextDecorations.Shift(next.Line.Underlined, before.Length + separator.Length)),
             };
         }
         return text;
+
+        static IReadOnlyList<TextRange>? Clip(IReadOnlyList<TextRange>? ranges, int length) => ranges?
+            .Where(range => range.Start < length).Select(range => new TextRange(range.Start, Math.Min(range.End, length))).ToArray();
     }
 
     private static bool SimilarSize(double a, double b) => Math.Abs(a - b) <= SameSize * Math.Max(a, b);

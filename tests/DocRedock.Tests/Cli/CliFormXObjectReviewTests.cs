@@ -23,7 +23,7 @@ public sealed class CliFormXObjectReviewTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(null, null, discoverPdfRasterizer: false));
-        var exit = await app.RunAsync(["export", PdfFormXObjectFixtureTests.FixturePath(fixture),
+        var exit = await app.RunAsync(["export", "--verbose", PdfFormXObjectFixtureTests.FixturePath(fixture),
             "--output", Path.Combine(root, Path.GetFileNameWithoutExtension(fixture) + ".md"), "--ocr", "off"]);
         return (exit, stdout.ToString());
     }

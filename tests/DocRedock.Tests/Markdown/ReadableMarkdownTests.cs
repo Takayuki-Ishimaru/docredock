@@ -21,10 +21,10 @@ public sealed class ReadableMarkdownTests
         var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "chart", DocumentFormatKind.Docx,
             [new DocumentPartition("document", 0, [chart])]);
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
-        Assert.Contains("| Q1 | 35 |", markdown);
-        Assert.Contains("| 2 | 27 |", markdown);
-        Assert.Contains("| 1 | 10 |", markdown);
-        Assert.Contains("| 2 | 20 |", markdown);
+        Assert.Contains("| Q1 | 35 |  |", markdown);
+        Assert.Contains("| 2 | 27 | 20 |", markdown);
+        Assert.Contains("| 1 |  | 10 |", markdown);
+        Assert.Contains("| 2 | 27 | 20 |", markdown);
     }
 
     [Fact]
@@ -509,7 +509,8 @@ public sealed class ReadableMarkdownTests
 
         var markdown = new ReadableMarkdownSerializer().Serialize(graph);
 
-        Assert.Contains("# 経費精算システム 設計書", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# ブック\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("### 経費精算システム 設計書", markdown, StringComparison.Ordinal);
         Assert.Contains("## 00 表紙・文書情報", markdown, StringComparison.Ordinal);
         Assert.Contains("### 文書情報", markdown, StringComparison.Ordinal);
         Assert.Contains("- **文書ID**: EXP-001", markdown, StringComparison.Ordinal);

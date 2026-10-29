@@ -241,16 +241,18 @@ public sealed class WorkbookTableBoundaryTests
         };
         if (withTitle) cells.Add(C("A1", "Fruit inventory", bold: true, toColumn: 2));
         var markdown = Serialize(cells.Select(cell => withTitle ? cell : Move(cell, -1)).ToArray()).Markdown;
-        Assert.StartsWith(withTitle ? "# Fruit inventory\n" : "# ドキュメント\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# ブック\n", markdown, StringComparison.Ordinal);
+        if (withTitle) Assert.Contains("### Fruit inventory\n", markdown, StringComparison.Ordinal);
         Assert.True(SameTableRow(markdown, "1", "Apple"), markdown);
     }
 
     [Fact]
-    public void A_title_followed_by_a_distant_note_still_titles_the_workbook()
+    public void A_title_followed_by_a_distant_note_remains_on_its_sheet()
     {
         var markdown = Serialize(C("A1", "Expense system design"), C("H1", "Updated"), C("I1", "2026-08-23"),
             C("A3", "No", bold: true), C("B3", "Topic", bold: true), N("A4", 1), C("B4", "Scope"), N("A5", 2), C("B5", "Terms")).Markdown;
-        Assert.StartsWith("# Expense system design\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# ブック\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("Expense system design", markdown, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -491,11 +493,12 @@ public sealed class WorkbookTableBoundaryTests
     }
 
     [Fact]
-    public void A_title_beside_a_document_number_still_titles_the_workbook()
+    public void A_title_beside_a_document_number_remains_on_its_sheet()
     {
         var markdown = Serialize(C("A1", "見積書"), C("C1", "No.123"),
             C("A3", "品目", bold: true), C("B3", "金額", bold: true), C("A4", "設計"), N("B4", 100), C("A5", "試験"), N("B5", 50)).Markdown;
-        Assert.StartsWith("# 見積書\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# ブック\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("見積書", markdown, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -241,7 +241,8 @@ public static partial class PdfTextExtractor
         // nothing of how other letters are spaced), and the moves of all kinds wide enough for a word space: where a space would
         // go (an index of the text and of its characters alike), the move, the characters either side, and where the glyph after it starts.
         var gaps = new List<double>();
-        var wide = new List<(int At, double Gap, Rune Before, Rune After, double Edge)>();
+        var wide = new List<(int At, double Gap, Rune Before, Rune After, double Edge, bool WordRun, bool FunctionBoundary)>();
+        var previousChunk = string.Empty;
         foreach (var part in ShowParts(operand))
         {
             if (part.Bytes is not { } bytes)
@@ -281,8 +282,13 @@ public static partial class PdfTextExtractor
                     var gap = moved + charSpacing / size;
                     if (!PdfTextRuns.IsAsian(before) && !PdfTextRuns.IsAsian(first)) gaps.Add(gap);
                     // Never a word space below this, whatever the show's typical move is.
-                    if (gap >= PdfTextRuns.WordGapEm)
-                        wide.Add((text.Length, gap, before, first, widths is null ? 0 : extents[sources[from].Start].Start));
+                    // Justified prose can compress a word space below 0.2 em. A TJ move
+                    // between multi-letter string operands supplies stronger evidence than
+                    // tracking between individual glyphs (e.g. A/V kerning).
+                    var wordRun = from == 0 && previousChunk.Length >= 2 && decoded.Length >= 2 &&
+                        Rune.IsLetter(before) && Rune.IsLetter(first) && moved >= 0.12;
+                    if (gap >= PdfTextRuns.WordGapEm || wordRun)
+                        wide.Add((text.Length, gap, before, first, widths is null ? 0 : extents[sources[from].Start].Start, wordRun, previousChunk.Trim().ToLowerInvariant() is "is" or "the" or "of" or "to" or "in" or "and" or "are" or "for"));
                 }
                 text.Append(chunk);
                 if (widths is not null)
@@ -292,11 +298,16 @@ public static partial class PdfTextExtractor
                 moved = 0;
                 from = to;
             }
+            previousChunk = decoded;
         }
         if (wide.Count > 0)
         {
             var typical = PdfTextRuns.TypicalGap(gaps);
-            var spaces = wide.Where(move => PdfTextRuns.IsWordGap(move.Before, move.After, move.Gap - typical, 1)).ToArray();
+            // One small move inside an ordinary word can be kerning (Kern/ing). Require
+            // repeated word-sized moves or a complete English function word at that boundary.
+            var repeatedWordMoves = wide.Count(move => move.WordRun && move.Gap - typical >= 0.12) >= 2;
+            var spaces = wide.Where(move => PdfTextRuns.IsWordGap(move.Before, move.After, move.Gap - typical, 1) ||
+                move.WordRun && (repeatedWordMoves || move.FunctionBoundary) && move.Gap - typical >= 0.12 && !PdfTextRuns.IsAsian(move.Before) && !PdfTextRuns.IsAsian(move.After)).ToArray();
             if (spaces.Length > 0)
             {
                 var written = text.ToString();

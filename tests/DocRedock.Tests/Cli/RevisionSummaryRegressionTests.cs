@@ -36,7 +36,7 @@ public sealed class RevisionSummaryRegressionTests : IDisposable
     {
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(null, null, discoverPdfRasterizer: false));
-        var args = new List<string> { "export", SourcePath, "--output", MarkdownPath, "--ocr", "off" };
+        var args = new List<string> { "export", "--verbose", SourcePath, "--output", MarkdownPath, "--ocr", "off" };
         args.AddRange(options);
         return (await app.RunAsync(args.ToArray()), stdout.ToString());
     }

@@ -87,6 +87,8 @@ internal static class OutputCollisionGuard
         }
     }
 
+    internal static string CanonicalPath(string path) => ResolveReal(Normalize(path));
+
     private static bool PathsEqual(string normalizedA, string normalizedB)
     {
         if (PathComparer.Equals(normalizedA, normalizedB)) return true;
@@ -128,19 +130,21 @@ internal static class OutputCollisionGuard
     {
         try
         {
-            if (File.Exists(normalizedFullPath))
+            var root = Path.GetPathRoot(normalizedFullPath)!;
+            var resolved = root;
+            var parts = normalizedFullPath[root.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries);
+            for (var index = 0; index < parts.Length; index++)
             {
-                var target = File.ResolveLinkTarget(normalizedFullPath, returnFinalTarget: true);
-                if (target is not null) return Normalize(target.FullName);
+                resolved = Path.Combine(resolved, parts[index]);
+                // Resolve every existing component, including directory aliases above a new file.
+                if (!File.Exists(resolved) && !Directory.Exists(resolved)) continue;
+                FileSystemInfo info = index == parts.Length - 1 && !Directory.Exists(resolved)
+                    ? new FileInfo(resolved) : new DirectoryInfo(resolved);
+                if (info.ResolveLinkTarget(returnFinalTarget: true) is { } target) resolved = target.FullName;
             }
-            else if (Directory.Exists(normalizedFullPath))
-            {
-                var target = Directory.ResolveLinkTarget(normalizedFullPath, returnFinalTarget: true);
-                if (target is not null) return Normalize(target.FullName);
-            }
+            return Normalize(resolved);
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
-        return normalizedFullPath;
+        catch (IOException) { return normalizedFullPath; }
+        catch (UnauthorizedAccessException) { return normalizedFullPath; }
     }
 }

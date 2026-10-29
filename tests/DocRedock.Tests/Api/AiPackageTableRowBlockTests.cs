@@ -158,9 +158,9 @@ public sealed class AiPackageTableRowBlockTests
         foreach (var part in parts)
         {
             var block = part.TableBlock!;
-            Assert.Equal("A3:A4", block.ContextRange);
+            Assert.Equal("A1:A4", block.ContextRange);
             var repeated = block.Index > 1 ? " (repeated)" : string.Empty;
-            Assert.Contains($"; header A5:B5{repeated}; context A3:A4{repeated}\n", part.Markdown, StringComparison.Ordinal);
+            Assert.Contains($"; header A5:B5{repeated}; context A1:A4{repeated}\n", part.Markdown, StringComparison.Ordinal);
             foreach (var text in new[] { "売上実績（単位: 千円、税抜）", "対象: 国内全店" })
             {
                 Assert.Equal(1, Count(part.Markdown, text));
@@ -173,7 +173,7 @@ public sealed class AiPackageTableRowBlockTests
         }
         // Repeating the context never repeats, drops or reorders a data row.
         Assert.Equal(whole.Split('\n').Where(line => line.StartsWith("| 商品", StringComparison.Ordinal) && line != "| 商品 | 売上 |"), dataRows);
-        var data = parts.SelectMany(part => part.NodeIds).Where(id => id is not ("cell-A3" or "cell-A4" or "cell-A5" or "cell-B5")).ToArray();
+        var data = parts.SelectMany(part => part.NodeIds).Where(id => id is not ("cell-A1" or "cell-A3" or "cell-A4" or "cell-A5" or "cell-B5")).ToArray();
         Assert.Equal(data.Length, data.Distinct().Count());
     }
 
@@ -249,7 +249,7 @@ public sealed class AiPackageTableRowBlockTests
         var merged = new List<DocumentNode> { Cell("A1", "Report", 0), Cell("A3", "Sales (thousands)", 0, toColumn: 3) };
         merged.AddRange(Table(5, 200));
         parts = AiPackageContentBuilder.Build(Sheet(merged.ToArray()), new(), Source, new AiPackagePartOptions(1500, TableRowBlocks: true));
-        Assert.All(parts, part => Assert.Equal("A3:C3", part.TableBlock!.ContextRange));
+        Assert.All(parts, part => Assert.Equal("A1:C3", part.TableBlock!.ContextRange));
         Assert.All(parts, part => Assert.Equal(1, Count(part.Markdown, "Sales (thousands)")));
     }
 

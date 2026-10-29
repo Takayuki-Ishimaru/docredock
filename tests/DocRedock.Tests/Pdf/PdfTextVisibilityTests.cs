@@ -201,7 +201,7 @@ public sealed class PdfTextVisibilityTests
         Assert.False(page.IsImageOnly);
         Assert.Empty(page.Regions);
         Assert.Equal(["ONLY_OFF_PAGE"], Hidden(result).Select(hidden => hidden.Text));
-        Assert.DoesNotContain(result.Diagnostics!, d => d.StartsWith("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics!, d => d.StartsWith("PdfNativeTextUnavailable", StringComparison.Ordinal));
     }
 
     /// <summary>A catalog whose default configuration turns off <paramref name="off"/> of the two

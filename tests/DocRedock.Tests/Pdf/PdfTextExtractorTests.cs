@@ -311,7 +311,7 @@ public sealed class PdfTextExtractorTests
         Assert.True(result.Pages[0].IsImageOnly);
         Assert.False(result.Pages[0].HasVectorContent);
         Assert.Contains("image-only content", result.Text, StringComparison.Ordinal);
-        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.Contains(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfNativeTextUnavailable", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -323,7 +323,7 @@ public sealed class PdfTextExtractorTests
 
         Assert.Contains("Hello", result.Text, StringComparison.Ordinal);
         Assert.False(result.Pages[0].IsImageOnly);
-        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics!, diagnostic => diagnostic.Contains("PdfNativeTextUnavailable", StringComparison.Ordinal));
     }
 
     /// <summary>A one-page PDF whose single content stream mixes native text with
@@ -545,7 +545,7 @@ public sealed class PdfTextExtractorTests
         var result = PdfTextExtractor.Extract(pdf);
 
         Assert.True(result.Pages[0].IsImageOnly);
-        Assert.Contains(result.Diagnostics!, item => item.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.Contains(result.Diagnostics!, item => item.Contains("PdfNativeTextUnavailable", StringComparison.Ordinal));
         Assert.DoesNotContain(result.Diagnostics!,
             item => item.StartsWith("PdfEmbeddedImageOmitted", StringComparison.Ordinal));
     }
@@ -584,7 +584,7 @@ public sealed class PdfTextExtractorTests
 
         Assert.True(extraction.Pages[0].IsImageOnly);
         Assert.Contains("image-only content", extraction.Text, StringComparison.Ordinal);
-        Assert.Contains(extraction.Diagnostics!, diagnostic => diagnostic.Contains("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.Contains(extraction.Diagnostics!, diagnostic => diagnostic.Contains("PdfNativeTextUnavailable", StringComparison.Ordinal));
 
         var root = Path.Combine(Path.GetTempPath(), "docredock-pdf-image-only-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -594,7 +594,7 @@ public sealed class PdfTextExtractorTests
             var output = Path.Combine(root, "image-only.md");
             await File.WriteAllBytesAsync(source, pdf);
             var result = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
-            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PdfRasterizerUnavailable");
+            Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "PdfNativeTextUnavailable");
             Assert.Contains("image-only content", await File.ReadAllTextAsync(output), StringComparison.Ordinal);
         }
         finally

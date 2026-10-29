@@ -88,8 +88,8 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
     {
         var plain = new Sheet();
         DividedText(plain);
-        DividedFrame(out var byColumns);
-        Assert.NotEqual(Texts(plain), byColumns);
+        // Headings now also supply column evidence without a complete frame. An incomplete
+        // frame must still leave the text in exactly the same order as the unframed control.
         // A divided frame whose bottom, or right, edge runs a third of the way only.
         var sheet = new Sheet().Rule(50, 660, 550, 660).Rule(50, 500, 50, 660).Rule(300, 500, 300, 660);
         if (shortEdge == "bottom") sheet.Rule(50, 500, 200, 500).Rule(550, 500, 550, 660);
