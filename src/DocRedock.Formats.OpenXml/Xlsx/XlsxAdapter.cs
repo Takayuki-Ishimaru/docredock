@@ -649,45 +649,69 @@ public sealed partial class XlsxAdapter
 
     private static DocumentNode ToNode(XlsxCellRecord cell, string partUri, int order)
     {
-        var extension = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        extension["sheet_name"] = JsonSerializer.SerializeToElement(cell.SheetName);
-        extension["address"] = JsonSerializer.SerializeToElement(cell.CellReference);
-        extension["row"] = JsonSerializer.SerializeToElement(cell.RowIndex);
-        extension["column"] = JsonSerializer.SerializeToElement(cell.ColumnIndex);
-        extension["is_blank"] = JsonSerializer.SerializeToElement(cell.IsBlank);
-        extension["is_formula"] = JsonSerializer.SerializeToElement(cell.Formula is not null);
-        extension["is_numeric"] = JsonSerializer.SerializeToElement(IsNumericCell(cell));
-        if (cell.CellType is not null) extension["cell_type"] = JsonSerializer.SerializeToElement(cell.CellType);
-        if (cell.Formula is not null) extension["formula"] = JsonSerializer.SerializeToElement(cell.Formula);
-        if (cell.StyleId is not null) extension["style_id"] = JsonSerializer.SerializeToElement(cell.StyleId);
-        if (cell.DisplayValue is not null) extension["display_value"] = JsonSerializer.SerializeToElement(cell.DisplayValue);
-        if (cell.MergedToRow is not null) extension["merged_to_row"] = JsonSerializer.SerializeToElement(cell.MergedToRow);
-        if (cell.MergedToColumn is not null) extension["merged_to_column"] = JsonSerializer.SerializeToElement(cell.MergedToColumn);
-        if (cell.CenterAcrossToColumn is not null) extension["center_across_to_column"] = JsonSerializer.SerializeToElement(cell.CenterAcrossToColumn);
-        if (cell.TableName is not null) extension["excel_table"] = JsonSerializer.SerializeToElement(cell.TableName);
-        extension["sheet_state"] = JsonSerializer.SerializeToElement(cell.SheetState);
-        extension["hidden_row"] = JsonSerializer.SerializeToElement(cell.IsHiddenRow);
-        extension["hidden_column"] = JsonSerializer.SerializeToElement(cell.IsHiddenColumn);
+        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
+        values["sheet_name"] = cell.SheetName;
+        values["address"] = cell.CellReference;
+        values["row"] = cell.RowIndex;
+        values["column"] = cell.ColumnIndex;
+        values["is_blank"] = cell.IsBlank;
+        values["is_formula"] = cell.Formula is not null;
+        values["is_numeric"] = IsNumericCell(cell);
+        if (cell.CellType is not null) values["cell_type"] = cell.CellType;
+        if (cell.Formula is not null) values["formula"] = cell.Formula;
+        if (cell.StyleId is not null) values["style_id"] = cell.StyleId;
+        if (cell.DisplayValue is not null) values["display_value"] = cell.DisplayValue;
+        if (cell.MergedToRow is not null) values["merged_to_row"] = cell.MergedToRow;
+        if (cell.MergedToColumn is not null) values["merged_to_column"] = cell.MergedToColumn;
+        if (cell.CenterAcrossToColumn is not null) values["center_across_to_column"] = cell.CenterAcrossToColumn;
+        if (cell.TableName is not null) values["excel_table"] = cell.TableName;
+        values["sheet_state"] = cell.SheetState;
+        values["hidden_row"] = cell.IsHiddenRow;
+        values["hidden_column"] = cell.IsHiddenColumn;
         if (cell.DisplayStyle is not null)
         {
-            extension["is_bold"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.IsBold);
-            extension["has_fill"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.HasFill);
-            extension["has_border"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.HasBorder);
-            extension["is_centered"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.IsCentered);
-            if (cell.DisplayStyle.FontSize is not null) extension["font_size"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.FontSize.Value);
-            if (cell.DisplayStyle.NumberFormat is not null) extension["number_format"] = JsonSerializer.SerializeToElement(cell.DisplayStyle.NumberFormat);
+            values["is_bold"] = cell.DisplayStyle.IsBold;
+            values["has_fill"] = cell.DisplayStyle.HasFill;
+            values["has_border"] = cell.DisplayStyle.HasBorder;
+            values["is_centered"] = cell.DisplayStyle.IsCentered;
+            if (cell.DisplayStyle.FontSize is not null) values["font_size"] = cell.DisplayStyle.FontSize.Value;
+            if (cell.DisplayStyle.NumberFormat is not null) values["number_format"] = cell.DisplayStyle.NumberFormat;
         }
+        // One backing JSON document per cell, instead of one allocation per property.
+        var serialized = JsonSerializer.SerializeToElement(values);
+        IReadOnlyDictionary<string, JsonElement> extension;
         // Struck-through text: "strike" when the whole value is struck (it holds for the displayed
         // value too), else the struck character ranges [start, end) of the value. Underlined text is
         // recorded the same way as "underline" and "underline_ranges".
-        AddMarkedRanges(extension, cell, cell.StruckRanges, "strike", "strike_ranges");
-        AddMarkedRanges(extension, cell, cell.UnderlinedRanges, "underline", "underline_ranges");
+        if (cell.StruckRanges is { Count: > 0 } || cell.UnderlinedRanges is { Count: > 0 })
+        {
+            var marked = serialized.EnumerateObject().ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            AddMarkedRanges(marked, cell, cell.StruckRanges, "strike", "strike_ranges");
+            AddMarkedRanges(marked, cell, cell.UnderlinedRanges, "underline", "underline_ranges");
+            extension = marked;
+        }
+        else extension = new CellExtensionDictionary(serialized, values.Count);
         var layer = cell.IsHiddenRow || cell.IsHiddenColumn || !string.Equals(cell.SheetState, "visible", StringComparison.OrdinalIgnoreCase)
             ? ContentLayer.Hidden
             : ContentLayer.Body;
         return new($"n_{Hash(cell.SheetName + "!" + cell.CellReference)[..16]}", NodeKind.Cell, null, order,
             layer, new TextNodeContent(cell.Value ?? string.Empty),
             new SourceAnchor("xlsx", partUri, [new AnchorLocator("cell_address", cell.CellReference)]), Extensions: extension);
+    }
+
+    // Keep ordinary cell metadata in the compact immutable JSON backing store. A
+    // Dictionary entry for every property otherwise dominates large-sheet memory.
+    private sealed class CellExtensionDictionary(JsonElement value, int count) : IReadOnlyDictionary<string, JsonElement>
+    {
+        public int Count => count;
+        public IEnumerable<string> Keys => value.EnumerateObject().Select(property => property.Name);
+        public IEnumerable<JsonElement> Values => value.EnumerateObject().Select(property => property.Value);
+        public JsonElement this[string key] => value.TryGetProperty(key, out var item) ? item : throw new KeyNotFoundException(key);
+        public bool ContainsKey(string key) => value.TryGetProperty(key, out _);
+        public bool TryGetValue(string key, out JsonElement item) => value.TryGetProperty(key, out item);
+        public IEnumerator<KeyValuePair<string, JsonElement>> GetEnumerator() => value.EnumerateObject()
+            .Select(property => new KeyValuePair<string, JsonElement>(property.Name, property.Value)).GetEnumerator();
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
     private static void AddMarkedRanges(Dictionary<string, JsonElement> extension, XlsxCellRecord cell, IReadOnlyList<TextRange>? marked,

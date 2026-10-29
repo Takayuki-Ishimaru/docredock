@@ -8,7 +8,7 @@
 
 - Windows: `DocRedock.exe`。CLIは`docredock.cmd`を使います。
 - macOS: `DocRedock.app`。CLIはターミナルから`./docredock`を使います。
-- Linux: 展開先で`./DocRedock`、CLIは`./docredock`を使います。ユーザー領域へ導入する場合は`./install.sh`、削除は`./uninstall.sh`です。既定の導入先は`$HOME/.local`です。
+- Linux: 展開先で`./DocRedock`、CLIは`./docredock`を使います。ユーザー領域へ導入する場合は`./install.sh`、削除は`./uninstall.sh`です。既定の導入先は`$HOME/.local`です。対応文書をファイルマネージャーの「アプリケーションで開く」からDocRedockで開くこともできます。
 
 ## 更新
 
@@ -17,4 +17,4 @@
 - [利用ガイド](docs/ja/user-guide.md)
 - [対応機能](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [この版の変更点](release-docs/RELEASE_NOTES_v0.3.9.md)
+- [この版の変更点](release-docs/RELEASE_NOTES_v0.3.10.md)

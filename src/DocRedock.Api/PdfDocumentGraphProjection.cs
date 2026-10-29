@@ -51,16 +51,24 @@ internal static class PdfDocumentGraphProjection
                     }
                     : page.IsImageOnly
                         ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
-                        { ["pdf_textless_placeholder"] = JsonSerializer.SerializeToElement(true) }
+                        {
+                            ["pdf_textless_placeholder"] = JsonSerializer.SerializeToElement(true),
+                            [ReadableMarkdownSerializer.SourceReviewRequiredExtension] = JsonSerializer.SerializeToElement(true)
+                        }
                         : null;
                 // Struck-through and underlined characters of the line (those the extractor could place).
                 if (PdfPageProjection.StrikeRanges(region) is { } struck)
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["strike_ranges"] = struck;
                 if (PdfPageProjection.UnderlineRanges(region) is { } underlined)
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["underline_ranges"] = underlined;
+                if (region.IsPageFurniture)
+                    (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
+                var headingLevel = PdfPageProjection.HeadingLevel(page, region);
+                if (headingLevel > 0)
+                    (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
                 return new DocumentNode(
-                $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", NodeKind.Paragraph, null, region.ReadingOrder,
-                ContentLayer.Body, new TextNodeContent(region.Text),
+                $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, region.ReadingOrder,
+                region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text),
                 new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                 Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
                 Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)], Extensions: extensions);
@@ -183,6 +191,23 @@ internal static class PdfDocumentGraphProjection
                         ["diagram_language"] = JsonSerializer.SerializeToElement("mermaid"),
                         ["visual_diagnostics_in_report"] = JsonSerializer.SerializeToElement(true),
                         ["visual_fallback_suppressed"] = JsonSerializer.SerializeToElement(visualGraph.HasTopology)
+                    }));
+            }
+            foreach (var code in new[] { "PdfTableReconstructionFailed", "PdfColumnLayoutDetected", "PdfHyphenationUncertain" })
+            {
+                if (!(extraction.Diagnostics ?? []).Any(message => message.StartsWith(code + ":", StringComparison.Ordinal) &&
+                    message.Contains($"PDF page {page.PageNumber}:", StringComparison.Ordinal))) continue;
+                nodes.Add(new DocumentNode($"n_{hashPrefix}_{page.PageNumber}_{code}", NodeKind.Annotation, null, nodes.Count,
+                    ContentLayer.Body, new TextNodeContent(code == "PdfTableReconstructionFailed"
+                        ? "[Table reconstruction was incomplete; compare the source page.]"
+                        : code == "PdfHyphenationUncertain" ? "[Line-ending hyphens may be word breaks; compare the source page.]"
+                        : "[Column reading order was inferred; compare the source page.]"),
+                    new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", []),
+                    Geometry: page.MediaBox ?? page.CropBox, Editability: NodeEditability.RenderOnly,
+                    Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        [ReadableMarkdownSerializer.SourceReviewRequiredExtension] = JsonSerializer.SerializeToElement(true),
+                        ["pdf_review_reason"] = JsonSerializer.SerializeToElement(code)
                     }));
             }
             return new DocumentPartition($"page-{page.PageNumber:D4}", page.PageNumber - 1, nodes, $"pdf:page:{page.PageNumber}");

@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.3.9
+        default: v0.3.10
 
 permissions:
   contents: read
@@ -211,7 +211,7 @@ jobs:
           Copy-Item -Recurse "docs/ja", "docs/en" "$staging/docs/"
           Copy-Item "docs/FORMAT_CAPABILITY_MATRIX.md" "$staging/docs/FORMAT_CAPABILITY_MATRIX.md"
           New-Item -ItemType Directory -Force -Path "$staging/docs/reference" | Out-Null
-          Copy-Item "docs/reference/ai-package.md" "$staging/docs/reference/ai-package.md"
+          Copy-Item "docs/reference/ai-package.md", "docs/reference/revision-defaults.md" "$staging/docs/reference/"
           New-Item -ItemType Directory -Force -Path "$staging/docs/examples" | Out-Null
           Copy-Item "docs/examples/ai_package_reader.py" "$staging/docs/examples/ai_package_reader.py"
           Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
@@ -269,7 +269,7 @@ jobs:
           cp -R docs/ja docs/en "$staging/docs/"
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
           mkdir -p "$staging/docs/reference"
-          cp docs/reference/ai-package.md "$staging/docs/reference/"
+          cp docs/reference/ai-package.md docs/reference/revision-defaults.md "$staging/docs/reference/"
           mkdir -p "$staging/docs/examples"
           cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
@@ -356,11 +356,12 @@ jobs:
           Name=DocRedock
           Comment=Local-first Office to Markdown utility
           TryExec=docredock-gui
-          Exec=docredock-gui
+          Exec=docredock-gui %F
           Icon=docredock
           X-DocRedock-Managed=true
           Terminal=false
           Categories=Office;Utility;
+          MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/pdf;
           DESKTOP
           cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
           cp release-docs/PACKAGE_QUICKSTART.md "$staging/QUICKSTART.ja.md"
@@ -369,7 +370,7 @@ jobs:
           cp -R docs/ja docs/en "$staging/docs/"
           cp docs/FORMAT_CAPABILITY_MATRIX.md "$staging/docs/"
           mkdir -p "$staging/docs/reference"
-          cp docs/reference/ai-package.md "$staging/docs/reference/"
+          cp docs/reference/ai-package.md docs/reference/revision-defaults.md "$staging/docs/reference/"
           mkdir -p "$staging/docs/examples"
           cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"

@@ -32,7 +32,7 @@ public static partial class PdfTextExtractor
                 var previous = run[^1];
                 var gap = previous.BoundingBox.Y - line.BoundingBox.Y;
                 var size = parts.Max(part => part!.FontSize!.Value);
-                if (gap < size * 0.6 || gap > size * MaxLeadingEm ||
+                if (previous.ReadingColumn != line.ReadingColumn || gap < size * 0.6 || gap > size * MaxLeadingEm ||
                     Math.Abs(previous.BoundingBox.X - line.BoundingBox.X) > size * 2)
                     Flush();
             }

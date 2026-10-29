@@ -53,7 +53,7 @@ public sealed class UnanalyzedContentProjectionTests
                 .ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "both.md"), IncludePdfFallbackImages: true));
 
             var image = Assert.Single(result.Graph.Nodes, node => node.Kind == NodeKind.Image);
-            Assert.Equal("PDF page 1: 原本照合用画像（未解決の表・図と解析できなかった描画部品を確認）",
+            Assert.Equal("PDF page 1: source comparison image (unresolved tables/figures and content that could not be analyzed)",
                 Assert.IsType<ReferenceNodeContent>(image.Content).AltText);
             Assert.Contains(result.Diagnostics, d => d.Code == "PdfReviewImageAttached" &&
                 d.Message.Contains("unresolved tables/figures and content that could not be analyzed", StringComparison.Ordinal));

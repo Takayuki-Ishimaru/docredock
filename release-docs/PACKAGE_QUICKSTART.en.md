@@ -8,7 +8,7 @@ The running version is always visible at the top of the app. Use `docredock --ve
 
 - Windows: run `DocRedock.exe`; use `docredock.cmd` for the CLI.
 - macOS: run `DocRedock.app`; use `./docredock` in a terminal.
-- Linux: run `./DocRedock` after extraction and use `./docredock` for the CLI. Run `./install.sh` for a user-local installation and `./uninstall.sh` to remove it. The default prefix is `$HOME/.local`.
+- Linux: run `./DocRedock` after extraction and use `./docredock` for the CLI. Run `./install.sh` for a user-local installation and `./uninstall.sh` to remove it. The default prefix is `$HOME/.local`. You can also open a supported document from the file manager with DocRedock.
 
 ## Update
 
@@ -17,4 +17,4 @@ The app checks non-draft published releases, including Public Beta builds, in th
 - [User guide](docs/en/user-guide.md)
 - [Supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [Changes in this release](release-docs/RELEASE_NOTES_v0.3.9.en.md)
+- [Changes in this release](release-docs/RELEASE_NOTES_v0.3.10.en.md)

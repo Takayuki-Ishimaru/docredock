@@ -2,7 +2,9 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.9 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.10 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+
+[目的別クイックガイド](quick-tasks.md)
 
 ## 1. 入手する
 
@@ -21,7 +23,7 @@ GitHub ReleasesからOS／CPUに合うパッケージを取得し、公開され
 
 PDFの読み順と段落の結合は、測定位置を使って慎重に判断します。枠のない本文行は、実測字幅・文字サイズ・基準線の間隔と揃い方から続きの行と判断できる場合だけ、折り返し段落に結合します。フォント字幅が不明、等幅フォント、見出し、リスト境界、表、図のラベルは結合しません。段組みとして読むのは、3行以上にわたって実測できる段間の余白が続く場合だけです。TrueTypeの字幅が分かる場合は、6～8mm程度の狭い余白も段間として扱えることがあります。1行だけの大きな空白は段の境界にしません。枠やカードは箱ごとに左から右、上から下へ読み、ラベルと値が並ぶ欄、罫線が横切る帳票、グラフ、図は検出された読み順を保ちます。罫線から明確な矩形格子を確認できる場合は、列幅が不均等でも、矩形の行・列結合を持つ表を再構成できます。曖昧な格子は推定として扱い、確認が必要な場合があります。全文の閲覧用Markdownでは、隣接ページの端で同じ列構成の表に繰り返し見出しがあり、重なる図形や変更印付きセルがない場合に限り、表を次ページへ継続します。AI向けパッケージの`document.md`にもこの継続表示が適用されますが、分割本文は引き続きPDFのページ単位です。再構成した表の外にある本文は保持し、説明できない欠落は`PdfNativeTextUnaccounted`で報告します。
 
-CLIのPDF変換（export）・復元・生成（render）は、他の実験的CLIワークフローと同様に`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
+CLIのPDF変換（export）は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にできます。復元・生成（render）など、ほかの実験的CLIワークフローには引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
 
 CLIの既定も閲覧用Markdownです。
 
@@ -35,7 +37,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.9では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.10では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -93,7 +95,7 @@ Wordは見出しと意味のまとまりで分割し、既定のサイズ目安�
 
 AIへの依頼ごとに`document.md`と`source-index.json`の両方を渡す必要はありません。収まる場合は`document.md`、収まらない場合は分割を順に渡します（各分割に元ファイルと位置が書かれています）。`source-index.json`は手元に置き、回答をノードIDやExcelのセルへ戻すときだけ読み込みます。詳しくは[形式仕様](../reference/ai-package.md#giving-a-package-to-a-model)を参照してください。
 
-画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換には引き続き実験機能の環境変数が必要です。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。自動処理では`--fail-on-review`を付けると、照合が必要な項目（原本照合ページ、OCR確認、Excelの表の区切り、Word変更履歴の共有確認。`report.json`の`review.required`）がある場合に、パッケージを書き出したうえで終了コード11を返します。終了コード0だけを見てAIへ渡してしまうことを防ぐためで、付けない場合は照合項目で終了コードは変わりません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
+画像は`assets/`へ保存するため、`--embed-images`とは併用できません。`--no-diagrams`、`--show-formulas`、`--ocr-review`、PDF照合画像など、既存の変換設定も利用できます。CLIのPDF変換は`--allow-pdf`または実験機能の環境変数で有効にします。変換にWarningがある場合は終了コード1です。失敗・キャンセル時は不完全なパッケージを残しません。自動処理では`--fail-on-review`を付けると、照合が必要な項目（原本照合ページ、OCR確認、Excelの表の区切り、Word変更履歴の共有確認。`report.json`の`review.required`）がある場合に、パッケージを書き出したうえで終了コード11を返します。終了コード0だけを見てAIへ渡してしまうことを防ぐためで、付けない場合は照合項目で終了コードは変わりません。CLIの既存出力の置換には`--force`が必要で、GUIの再実行は連番の名前を選びます。パッケージはAI入力向けの一方向出力で、復元用サイドカーとしては利用できません。APIとJSONの詳細は[形式仕様](../reference/ai-package.md)を参照してください。
 
 ## 3. 生成されるファイル
 
@@ -115,7 +117,7 @@ GUIのパッケージ設定には、行分割、目安文字数、予想分割�
 - **complete**: 非表示情報とメタデータを含め、警告を出します。
 - **sanitized**: メタデータ、派生・OCR情報、ヘッダー／フッター等も除外します。
 
-Wordの変更履歴は`--revisions final|markup|reject`（GUIの「Wordの変更履歴」、APIの`Revisions`）で指定します。CLIはポリシーによらず`final`が既定で、削除内容・移動元・履歴注記を除外し、その除外は警告ではなく情報として記録します。ほかの未解決な変換警告は引き続き終了コード1になります。GUIは`visible`／`complete`で履歴付き、`sanitized`で最終版が既定です。`markup`は削除内容も含む履歴付き表示、`reject`は変更履歴がある文書の書き出しを拒否します。`sanitized`で`markup`を選ぶ場合は`--allow-revision-sharing`またはGUIの許可チェックが必要です。許可チェックは保存されません。履歴付き出力は共有確認対象となり、`--fail-on-review`で終了11になります。原本と復元用サイドカーには履歴が残ります。
+Wordの変更履歴は`--revisions final|markup|reject`（GUIの「Wordの変更履歴」、APIの`Revisions`）で指定します。各ポリシーでのCLI・GUI・APIの既定値は[変更履歴の既定値](../reference/revision-defaults.md)を参照してください。`final`は削除内容・移動元・履歴注記を除外し、その除外は警告ではなく情報として記録します。`markup`は変更履歴を表示し、削除した文字を含む場合があります。`reject`は変更履歴がある文書の書き出しを拒否します。`sanitized`で`markup`を選ぶ場合は`--allow-revision-sharing`またはGUIの許可チェックが必要です。許可チェックは保存されません。履歴付き出力は共有確認対象となり、`--fail-on-review`で終了11になります。原本と復元用サイドカーには履歴が残ります。
 
 XLSXの書き出しでは、`--sheets Sheet1,Sheet2`（CLI限定）で指定したシートだけを対象にできます。指定した名前は既存のシート名と（大文字小文字を区別せず）完全一致する必要があります。存在しない名前を指定するとexit code 2で失敗し、出力ファイルは作成されません。一部の名前だけ一致しない場合（部分的な不一致）も、その名前を黙って無視せず失敗します。指定したシートが非表示で`visible`/`sanitized`ポリシーにより除外される場合はエラーにはなりませんが、`XlsxSheetExcludedByPolicy`という警告（exit code 1）を出し、出力が空に見える理由を説明します。含めるには`--content-policy complete`を使用してください。
 

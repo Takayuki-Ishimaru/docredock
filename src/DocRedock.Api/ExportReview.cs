@@ -37,6 +37,12 @@ public enum ReviewElementKind
     StrikethroughUnplaced,
     /// <summary>Surviving table text is present in row order, but its column relationships could not be resolved.</summary>
     TableStructureUncertain,
+    /// <summary>Inferred column order that needs source comparison.</summary>
+    ReadingOrderUncertain,
+    /// <summary>Ambiguous line-ending hyphens retained in native text.</summary>
+    HyphenationUncertain,
+    /// <summary>A page without native or recognized text.</summary>
+    PageTextUnavailable,
 }
 
 /// <summary>A rectangle on the review image, normalized to 0..1 with the origin at the top left.</summary>
@@ -230,6 +236,22 @@ public static class ExportReviewBuilder
     /// <see cref="ReadableMarkdownSerializer.RequiresSourceReview"/> can never disagree.</summary>
     internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping)
     {
+        if (node.Extensions?.TryGetValue("pdf_review_reason", out var reason) == true && reason.ValueKind == JsonValueKind.String)
+        {
+            var kind = reason.GetString() switch
+            {
+                "PdfTableReconstructionFailed" => ReviewElementKind.TableStructureUncertain,
+                "PdfHyphenationUncertain" => ReviewElementKind.HyphenationUncertain,
+                _ => ReviewElementKind.ReadingOrderUncertain,
+            };
+            yield return new ReviewElement(kind, node.Id);
+            yield break;
+        }
+        if (ExtensionBool(node, "pdf_textless_placeholder"))
+        {
+            yield return new ReviewElement(ReviewElementKind.PageTextUnavailable, node.Id);
+            yield break;
+        }
         if (ExtensionBool(node, ReviewExtensionKeys.FinalTableGridUnresolved))
         {
             yield return new ReviewElement(ReviewElementKind.TableStructureUncertain, node.Id);

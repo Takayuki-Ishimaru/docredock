@@ -16,9 +16,9 @@ DocRedock converts Word, Excel, PowerPoint, and PDF documents into AI-friendly M
 
 [日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
 
-## v0.3.9 Public Beta support
+## v0.3.10 Public Beta support
 
-v0.3.9 improves PDF reading order, paragraphs and tables, preserves Word code and chart values, and makes the CLI and GUI easier to use. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
+v0.3.10 improves PDF reading order and source review, Office table and chart output, and CLI conversion of multiple documents. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
 
 | Feature | Status |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.9 improves PDF reading order, paragraphs and tables, preserves Word code an
 | Edited Markdown → Office restoration | Experimental; explicit opt-in required |
 | New PDF / Office document generation | Experimental; explicit opt-in required |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.9 release notes](release-docs/RELEASE_NOTES_v0.3.9.en.md).
+The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.10 release notes](release-docs/RELEASE_NOTES_v0.3.10.en.md).
 
 ## Use it in 30 seconds
 
@@ -77,10 +77,10 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 ## Important limitations
 
-- v0.3.9 is a Public Beta, not a production-stable release.
+- v0.3.10 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
-- Experimental CLI workflows require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. This includes CLI PDF export, round-trip/audit operations, restoration, and rendering/new-document generation. Read-only `docredock inspect <file.pdf>` remains available without the flag.
+- Enable CLI PDF conversion with `--allow-pdf` or `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Round-trip/audit operations, restoration, and rendering/new-document generation still require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Read-only `docredock inspect <file.pdf>` remains available without the flag.
 - PDF OCR and visual fallback may require a configured rasterizer and OCR provider. If unavailable, review the page placeholder and warning.
 - DocRedock does not bundle or download a Japanese PDF font. The user is responsible for selecting a font and complying with its embedding license.
 - The GUI always shows the running version and checks published releases, including Public Beta builds, at startup or on demand. It never auto-installs an update; set `DOCREDOCK_DISABLE_UPDATE_CHECK=1` to disable startup checks.
@@ -90,9 +90,9 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.3.9 supported features](docs/en/supported-features.md)
+- [v0.3.10 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.3.9 release notes](release-docs/RELEASE_NOTES_v0.3.9.en.md)
+- [v0.3.10 release notes](release-docs/RELEASE_NOTES_v0.3.10.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

@@ -43,6 +43,9 @@ public static class ExportReviewText
                 ReviewElementKind.UnanalyzedContent => $"解析できなかった描画部品{count}件の文字・図はMarkdownに含まれていません",
                 ReviewElementKind.UncertainText => $"文字{count}件は、文字の対応または表示の有無を確定できませんでした（Markdownには含めています）",
                 ReviewElementKind.TableStructureUncertain => $"表{count}件は列対応を確定できませんでした（残存セルの文字を行順にMarkdownへ含めています）",
+                ReviewElementKind.ReadingOrderUncertain => $"段組み{count}件の読み順を原本と照合してください",
+                ReviewElementKind.HyphenationUncertain => $"行末ハイフン{count}件が単語の分割か原本で確認してください",
+                ReviewElementKind.PageTextUnavailable => $"{count}ページの文字を抽出できませんでした。原本または照合画像を確認してください",
                 ReviewElementKind.StrikethroughUnplaced => $"文字{count}件は、一部に取り消し線がありますが、どの文字が取り消されているかを確定できませんでした（取り消し線の印を付けずにMarkdownに含めています）",
                 _ => $"図形{style}{count}件を図として再構成できませんでした",
             });
@@ -75,10 +78,17 @@ public static class ExportReviewText
             var unanalyzed = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UnanalyzedContent));
             var uncertain = review.Pages.Sum(page => page.CountOf(ReviewElementKind.UncertainText) + page.CountOf(ReviewElementKind.StrikethroughUnplaced));
             var tables = review.Pages.Sum(page => page.CountOf(ReviewElementKind.TableStructureUncertain));
-            if (review.Elements > unanalyzed + uncertain + tables) parts.Add($"未解決の図形 {review.Elements - unanalyzed - uncertain - tables}件");
+            var reading = review.Pages.Sum(page => page.CountOf(ReviewElementKind.ReadingOrderUncertain));
+            var hyphens = review.Pages.Sum(page => page.CountOf(ReviewElementKind.HyphenationUncertain));
+            var textless = review.Pages.Sum(page => page.CountOf(ReviewElementKind.PageTextUnavailable));
+            if (review.Elements > unanalyzed + uncertain + tables + reading + hyphens + textless)
+                parts.Add($"未解決の図形 {review.Elements - unanalyzed - uncertain - tables - reading - hyphens - textless}件");
             if (tables > 0) parts.Add($"列対応の確認が必要な表 {tables}件");
             if (unanalyzed > 0) parts.Add($"未解析の描画部品 {unanalyzed}件");
             if (uncertain > 0) parts.Add($"確認が必要な文字 {uncertain}件");
+            if (reading > 0) parts.Add($"読み順の確認 {reading}件");
+            if (hyphens > 0) parts.Add($"ハイフンの確認 {hyphens}件");
+            if (textless > 0) parts.Add($"文字未抽出 {textless}ページ");
         }
         if (review.Ocr.Required) parts.Add($"OCR確認 {review.Ocr.ReviewItems}件");
         if (review.TableBoundaries is { Count: > 0 } boundaries) parts.Add($"表の区切りの確認 {boundaries.Count}件");
@@ -129,6 +139,9 @@ public static class ExportReviewText
                 ReviewElementKind.UnanalyzedContent => $"{count} drawing component(s) not analyzed; their text and graphics are missing from the Markdown",
                 ReviewElementKind.UncertainText => $"{count} text item(s) whose characters or visibility could not be determined; kept in the Markdown",
                 ReviewElementKind.TableStructureUncertain => $"{count} table(s) whose columns could not be resolved; surviving cell text kept in row order in the Markdown",
+                ReviewElementKind.ReadingOrderUncertain => $"{count} inferred column layout(s); compare reading order with the source",
+                ReviewElementKind.HyphenationUncertain => $"{count} ambiguous line-ending hyphen(s); compare word spelling with the source",
+                ReviewElementKind.PageTextUnavailable => $"{count} page(s) without extracted text; compare the original or review image",
                 ReviewElementKind.StrikethroughUnplaced => $"{count} text item(s) with a strikethrough over part of them whose struck characters could not be determined; kept in the Markdown without the mark",
                 _ => $"{count} shape(s){style} kept as vector fallback",
             });

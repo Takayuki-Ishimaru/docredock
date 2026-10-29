@@ -4,7 +4,7 @@
 
 This document is a reusable policy template for creating a public commit/tag and every OS-specific distribution. Unchecked boxes here are not evidence that a past release skipped them. Keep each release's verification record in CI, including the workflow run URL, commit, and artifact hashes. Public release notes and distributions describe user-facing changes, limitations, and installation; do not include internal scores, development metrics, or validation notes. The Release Owner owns the evidence and publication decision; the CI/QA Owner executes technical gates. Do not publish while any mandatory gate is incomplete or failing.
 
-Desktop GUI PDF input is available by default. CLI PDF export, restoration, and rendering, together with round-trip editing and restoration to original file formats, remain experimental and explicitly gated by `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Signing and notarization are applied when configured, and each distribution records the applied status.
+Desktop GUI PDF input is available by default. CLI PDF export is enabled with `--allow-pdf` or `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Restoration, rendering and round-trip editing remain experimental and explicitly gated by `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Signing and notarization are applied when configured, and each distribution records the applied status.
 
 ## P0: Finalize the public branch
 
@@ -101,7 +101,7 @@ dotnet run --project tools/LicenseAudit/LicenseAudit.csproj --configuration Rele
 - [ ] On headless CI, construct MainWindow with Avalonia headless before packaging; verify PE/CPU for Windows, Mach-O/CPU/executable permission for macOS, and require the actual packaged GUI child process to stay alive under Xvfb for Linux
 - [ ] Exercise the target-release CLI version, visible/complete/sanitized policies, experimental gate, DOCX/XLSX/PPTX/PDF readable export, F0 SHA comparison, F1 editing, pack/unpack, tamper rejection, literal-text integrity, and hard-link output-collision rejection
 - [ ] Run DOCX/XLSX/PPTX/PDF visual-semantics smoke against each extracted distribution and record the result in release evidence
-- [ ] Record in the README and release evidence that GUI PDF input is available by default while CLI PDF export/restore/render requires DOCREDOCK_ENABLE_EXPERIMENTAL=1
+- [ ] Record in the README and release evidence that GUI PDF input is available by default while CLI PDF export requires --allow-pdf or DOCREDOCK_ENABLE_EXPERIMENTAL=1, while restore/render requires DOCREDOCK_ENABLE_EXPERIMENTAL=1
 - [ ] In an attended graphical environment, verify the GUI content-policy selector, complete warning, DOCREDOCK_DISABLE_UPDATE_CHECK=1, DOCX/XLSX/PPTX/PDF input, and the rendered appearance of Readable Markdown
 - [ ] Apply Windows signing and macOS signing/notarization only when configured; otherwise continue with an explicit unsigned status
 - [ ] Embed enough version and commit information to trace every executable

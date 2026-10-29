@@ -96,6 +96,8 @@ public sealed class GuiWorkflowService
         bool zipAiPackage = false,
         bool tableRowBlocks = false,
         int targetCharacters = 12000,
+        bool expandMergedCells = false,
+        string? language = null,
         string? revisions = null,
         bool allowRevisionSharing = false)
     {
@@ -132,12 +134,13 @@ public sealed class GuiWorkflowService
                 new ReadableDocumentExportOptions(sourcePath, "document.md", enableOcr, NormalizeLanguages(ocrLanguages),
                     contentPolicy, showFormulas, includeSvgPreviews, includeDiagrams,
                     InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
-                    Revisions: revisions, AllowRevisionSharing: allowRevisionSharing),
+                    Revisions: revisions, AllowRevisionSharing: allowRevisionSharing,
+                    ExpandMergedCells: true, OcrAuto: true, Language: language),
                 aiOutput, zipAiPackage ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters, tableRowBlocks), cancellationToken).ConfigureAwait(false);
             var aiMarkdown = zipAiPackage ? aiOutput : Path.Combine(aiOutput, "document.md");
             var reviewItems = BuildReviewItems(sourcePath, aiMarkdown, null, exported.Graph, exported.Review,
                 new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
-                    ContentPolicy: contentPolicy, OcrReview: ocrReview));
+                    ContentPolicy: contentPolicy, OcrReview: ocrReview, ExpandMergedCells: true, Language: language));
             if (zipAiPackage)
             {
                 // Review images can be displayed directly from the ZIP; no temporary extraction
@@ -156,7 +159,7 @@ public sealed class GuiWorkflowService
                 }).ToArray();
             }
             return new GuiExportResult(aiMarkdown, string.Empty, exported.Graph.Format.ToString().ToLowerInvariant(),
-                "AI package (one-way)", exported.Diagnostics, IsReadable: true, InferenceMode: inferenceMode,
+                "AIパッケージ（片道変換）", exported.Diagnostics, IsReadable: true, InferenceMode: inferenceMode,
                 VisualSummary: SummarizeVisualGraph(exported.Summary),
                 ExportSummary: $"AIパッケージ: {aiOutput}\n{exported.Size?.DescribeJapanese()}\n{exported.Summary}",
                 ReviewItems: reviewItems, OcrReview: exported.Review.Ocr, AiPackagePath: aiOutput,
@@ -184,7 +187,8 @@ public sealed class GuiWorkflowService
                 IncludeDiagrams: includeDiagrams,
                 EmbedImages: embedReadableImages,
                 InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
-                Revisions: revisions, AllowRevisionSharing: allowRevisionSharing), cancellationToken).ConfigureAwait(false);
+                Revisions: revisions, AllowRevisionSharing: allowRevisionSharing,
+                ExpandMergedCells: expandMergedCells, OcrAuto: true, Language: language), cancellationToken).ConfigureAwait(false);
             // Built once so the two GUI summary lines (this one and ExportSummary below) can
             // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
             var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
@@ -193,7 +197,7 @@ public sealed class GuiWorkflowService
                 markdownPath,
                 string.Empty,
                 exported.Graph.Format.ToString().ToLowerInvariant(),
-                "Readable Markdown (one-way)",
+                "閲覧用Markdown（片道変換）",
                 AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
                 IsReadable: true,
                 InferenceMode: exported.InferenceMode,
@@ -203,7 +207,7 @@ public sealed class GuiWorkflowService
                 ExportSummary: summary.ToString(),
                 ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
                     new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
-                        ContentPolicy: contentPolicy, OcrReview: ocrReview)),
+                        ContentPolicy: contentPolicy, OcrReview: ocrReview, ExpandMergedCells: expandMergedCells, Language: language)),
                 OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries, SharingReview: review.SharingReview);
         }
 
@@ -230,8 +234,8 @@ public sealed class GuiWorkflowService
             }
             var format = exported.Graph.Format.ToString().ToLowerInvariant();
             var fidelity = format == "pdf"
-                ? "F0 baseline / edited PDF is F3"
-                : "F0 baseline / supported edits are F1";
+                ? "基準出力 F0 / PDFを再描画して編集すると F3"
+                : "基準出力 F0 / 対応する編集は F1";
             // Built once so the two GUI summary lines (this one and ExportSummary below) can
             // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
             var summary = ExportSummaryBuilder.Build(exported.Graph, exported.Diagnostics);
@@ -346,35 +350,33 @@ public sealed class GuiWorkflowService
         var enabled = engine.Status == "ready" || native.Status is "ready" or "partial";
         if (!enabled)
         {
-            var actions = new[] { engine.Action, native.Action }
-                .Where(action => !string.IsNullOrWhiteSpace(action))
-                .Distinct()
-                .ToArray();
-            var reason = actions.Length > 0
-                ? string.Join(" ", actions)
-                : "Tesseract と対応言語データを構成するか、OS 標準の OCR 機能を有効にしてください。";
             return new OcrCapabilityDecision(false,
-                $"画像/PDFのOCRは現在利用できません（engine: {engine.Status}, native: {native.Status}, rasterizer: {rasterizer.Status}）。{reason}");
+                "画像やPDFの文字を読み取るOCRは利用できません。Tesseract OCRと対応言語データを用意するか、OS標準のOCR機能を有効にしてください。");
         }
 
         var rasterizerNote = rasterizer.Status == "ready"
             ? string.Empty
-            : $"\n注意: 画像のみのPDFページをOCRするにはpdftoppmまたはmutoolが必要です（rasterizer: {rasterizer.Status}）。"
-              + (string.IsNullOrWhiteSpace(rasterizer.Action) ? string.Empty : rasterizer.Action + " ")
-              + "DOCX/XLSX/PPTXに埋め込まれた画像のOCRには影響しません。";
+            : "\n注意: 画像だけのPDFページをOCRするには、PDFを画像に変換する機能が必要です。Word、Excel、PowerPointに埋め込まれた画像のOCRには影響しません。";
 
         if (native.Status == "partial" && engine.Status != "ready")
             return new OcrCapabilityDecision(true,
-                $"PDF OCR: Verification pending ({native.Provider})\n画像の最初のOCR時にネイティブプロバイダーを確認します。失敗時は警告を表示します。{rasterizerNote}");
+                $"OCR: 利用可能\n最初のOCR実行時にOS標準機能を確認します。使えない場合は警告を表示します。{rasterizerNote}");
 
-        var providerLabel = engine.Status == "ready" ? engine.Provider : native.Provider;
         // ocr-jpn/ocr-eng describe Tesseract data, not the native provider's languages.
         var languageNote = engine.Status == "ready"
-            ? $"言語: 日本語 {jpn.Status}, English {eng.Status}"
-            : "言語: OS 標準 OCR の導入済み言語を使用します。";
+            ? $"言語データ: 日本語 {OcrStatusJapanese(jpn.Status)}, 英語 {OcrStatusJapanese(eng.Status)}"
+            : "言語: OS標準OCRにインストール済みの言語を使います。";
         return new OcrCapabilityDecision(true,
-            $"PDF OCR: Ready ({providerLabel})\n{languageNote}{rasterizerNote}");
+            $"OCR: 利用可能\n{languageNote}{rasterizerNote}");
     }
+
+    private static string OcrStatusJapanese(string status) => status switch
+    {
+        "ready" => "利用可能",
+        "partial" => "一部利用可能",
+        "unavailable" => "未導入",
+        _ => "確認できません",
+    };
 
     private static IReadOnlyList<Diagnostic> AddProjectionDiagnostics(
         DocumentGraph graph,
@@ -424,7 +426,7 @@ public sealed class GuiWorkflowService
     private static string? SummarizeVisualGraph(ExportSummary summary)
     {
         if (summary.VectorPages == 0) return null;
-        return $"図: {summary.DiagramsReconstructed}件（vector page {summary.VectorPages}） / native {summary.NativeEdges} / high {summary.HighConfidenceEdges} / medium {summary.MediumConfidenceEdges} / unresolved {summary.UnresolvedRelations} / fallback {summary.FallbackPaths}";
+        return $"図の復元: {summary.DiagramsReconstructed}件（ベクター図のページ {summary.VectorPages}）／元文書の接続 {summary.NativeEdges}／確度の高い推定 {summary.HighConfidenceEdges}／中程度の推定 {summary.MediumConfidenceEdges}／未解決 {summary.UnresolvedRelations}／代替表示 {summary.FallbackPaths}";
     }
 
     public static string SafeFileName(string untrustedName, string fallbackBaseName)

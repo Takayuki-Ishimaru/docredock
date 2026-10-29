@@ -30,7 +30,9 @@ public sealed record DocumentExportOptions(
     string? DocumentId = null,
     string Profile = "roundtrip",
     VisualInferenceMode InferenceMode = VisualInferenceMode.Safe,
-    bool IncludePdfFallbackImages = true);
+    bool IncludePdfFallbackImages = true,
+    bool OcrAuto = false,
+    string? Language = null);
 public sealed record DocumentExportResult(string MarkdownPath, RoundTripWorkspace Workspace, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe);
 public sealed record ReadableDocumentExportOptions(
     string SourcePath,
@@ -48,7 +50,10 @@ public sealed record ReadableDocumentExportOptions(
     bool IncludePdfFallbackImages = true,
     OcrReviewMode OcrReview = OcrReviewMode.LowConfidence,
     string? Revisions = null,
-    bool AllowRevisionSharing = false);
+    bool AllowRevisionSharing = false,
+    bool ExpandMergedCells = false,
+    bool OcrAuto = false,
+    string? Language = null);
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
@@ -178,11 +183,11 @@ public sealed partial class DocumentService
         if (format == DocumentFormatKind.Pdf)
         {
             (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
-                options.EnableOcr, options.IncludePdfFallbackImages).ConfigureAwait(false);
+                options.EnableOcr, options.IncludePdfFallbackImages, options.Language).ConfigureAwait(false);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
-            options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
+            options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken, options.OcrAuto).ConfigureAwait(false);
         graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
         AddImageDisplayDiagnostics(diagnostics, graph);
 
@@ -345,9 +350,9 @@ public sealed partial class DocumentService
                 options.IncludeSvgPreviews,
                 options.IncludeDiagrams,
                 options.Sheets,
-                options.Title,
+                ReadableTitle(graph, source, options.Title),
                 options.ContentPolicy,
-                options.OcrReview));
+                options.OcrReview, options.ExpandMergedCells, options.Language));
             var markdown = serializer.Serialize(graph);
             foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
                          existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
@@ -442,7 +447,7 @@ public sealed partial class DocumentService
         if (format == DocumentFormatKind.Pdf)
         {
             (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
-                options.EnableOcr, options.IncludePdfFallbackImages).ConfigureAwait(false);
+                options.EnableOcr, options.IncludePdfFallbackImages, options.Language).ConfigureAwait(false);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         // Complete output normally keeps unreferenced Office media as metadata. A final DOCX
@@ -462,11 +467,14 @@ public sealed partial class DocumentService
             assets = assets.Where(asset => selectedImageIds.Contains(asset.Id)).ToArray();
         }
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
-            options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken).ConfigureAwait(false);
+            options.OcrLanguages ?? ["jpn", "eng"], diagnostics, cancellationToken, options.OcrAuto).ConfigureAwait(false);
         graph = AttachAssetsAndOcr(graph, assets, ocrResults, diagnostics);
         AddImageDisplayDiagnostics(diagnostics, ReadableScopeGraph(graph, options.Sheets));
         return (graph, diagnostics, assets);
     }
+
+    private static string? ReadableTitle(DocumentGraph graph, string source, string? requested) =>
+        requested ?? (graph.Format == DocumentFormatKind.Xlsx ? Path.GetFileNameWithoutExtension(source) : null);
 
     private static DocumentGraph RebindReadableImageReferences(
         DocumentGraph graph,
@@ -868,7 +876,8 @@ public sealed partial class DocumentService
         bool enabled,
         IReadOnlyList<string> languages,
         List<Diagnostic> diagnostics,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool automatic = false)
     {
         var records = new List<OcrAssetRecord>();
         foreach (var asset in assets)
@@ -901,6 +910,16 @@ public sealed partial class DocumentService
                 await using var image = new MemoryStream(asset.Content.ToArray(), writable: false);
                 attempt = await ocr.RecognizeAsync(new OcrInput(asset.Id, image, asset.MediaType), new OcrOptions(languages), cancellationToken).ConfigureAwait(false);
             }
+            // Auto OCR is optional for ordinary illustrations. Keep a visible information
+            // record when its engine is absent; large scan-shaped images still warn.
+            if (automatic && format != DocumentFormatKind.Pdf && attempt.Status == OcrProcessingStatus.Unavailable &&
+                attempt.Diagnostics.Any(item => item.Code is "ExecutableUnavailable" or "OcrProviderUnavailable") &&
+                !(ImageDimensions.TryRead(asset.Content.Span, out var imageWidth, out var imageHeight) &&
+                  Math.Min(imageWidth, imageHeight) >= 600 && (long)imageWidth * imageHeight >= 600_000))
+                attempt = attempt with { Diagnostics = attempt.Diagnostics.Select(item =>
+                    item.Code is "ExecutableUnavailable" or "OcrProviderUnavailable"
+                        ? new OcrDiagnostic("OcrUnavailableAuto", "Image text was not read because OCR is not installed.", DiagnosticSeverity.Information)
+                        : item).ToArray() };
             records.Add(new OcrAssetRecord(asset.Id, attempt.Status, languages, attempt.Result, attempt.Diagnostics));
             foreach (var item in attempt.Diagnostics)
                 diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity, asset.Id));
@@ -943,8 +962,17 @@ public sealed partial class DocumentService
         ICollection<Diagnostic> diagnostics,
         CancellationToken cancellationToken,
         bool enableOcr = true,
-        bool includeVisualFallback = true)
+        bool includeVisualFallback = true,
+        string? language = null)
     {
+        var sample = string.Concat(graph.Nodes.Where(node => node.Kind is NodeKind.Paragraph or NodeKind.Heading)
+            .Take(200).Select(node => node.Content is TextNodeContent text ? text.Text : string.Empty));
+        var english = language == "en" || language is null && sample.Any(char.IsAsciiLetter) &&
+            !sample.Any(character => character is >= '\u3040' and <= '\u30ff' or >= '\u3400' and <= '\u9fff');
+        if (!enableOcr)
+            foreach (var page in pdfPages.Where(page => page.IsImageOnly))
+                diagnostics.Add(new Diagnostic("OcrDisabled", $"PDF page {page.PageNumber}: OCR was disabled; image text was not read.",
+                    DiagnosticSeverity.Information, PartUri: $"pdf:page:{page.PageNumber}"));
         var reviewPages = graph.Partitions.Where(partition => includeVisualFallback &&
             partition.Nodes.Any(ReadableMarkdownSerializer.RequiresSourceReview)).Select(p => p.Order + 1).ToHashSet();
         var ocrPages = graph.Partitions.Where(partition => enableOcr &&
@@ -952,7 +980,7 @@ public sealed partial class DocumentService
             .Select(partition => partition.Order + 1).ToHashSet();
         var wholePageOcr = graph.Partitions.Where(partition => enableOcr &&
                 (partition.Nodes.Count == 0 || partition.Nodes.Any(node =>
-                    HasTrueExtension(node, "pdf_textless_placeholder") || ExportReviewBuilder.CountUnanalyzedContent(node) > 0)))
+                    HasTrueExtension(node, "pdf_textless_placeholder") || PdfContentNeedsOcr(node))))
             .Select(partition => partition.Order + 1).ToHashSet();
         var pages = graph.Partitions.Where(partition => reviewPages.Contains(partition.Order + 1) ||
                 ocrPages.Contains(partition.Order + 1))
@@ -968,17 +996,26 @@ public sealed partial class DocumentService
         var unanalyzedPages = PagesWith(ReviewElementKind.UnanalyzedContent);
         var uncertainTextPages = PagesWith(ReviewElementKind.UncertainText);
         var unplacedStrikePages = PagesWith(ReviewElementKind.StrikethroughUnplaced);
+        var readingOrderPages = PagesWith(ReviewElementKind.ReadingOrderUncertain);
+        var hyphenPages = PagesWith(ReviewElementKind.HyphenationUncertain);
+        var textlessPages = PagesWith(ReviewElementKind.PageTextUnavailable);
+        var unresolvedTablePages = PagesWith(ReviewElementKind.TableStructureUncertain);
         var visualReviewPages = graph.Partitions.Where(partition => partition.Nodes.Any(node =>
                 ExportReviewBuilder.CountUnanalyzedContent(node) == 0 && ReadableMarkdownSerializer.RequiresSourceReview(node)))
             .Select(partition => partition.Order + 1).ToHashSet();
         (string Subject, string Verb, string Alt) ReviewReason(int page)
         {
             var subjects = new List<(string English, string Japanese)>();
-            if (visualReviewPages.Contains(page) || !unanalyzedPages.Contains(page) && !uncertainTextPages.Contains(page) && !unplacedStrikePages.Contains(page))
+            if (visualReviewPages.Contains(page))
                 subjects.Add(("unresolved tables/figures", "未解決の表・図"));
             if (unanalyzedPages.Contains(page)) subjects.Add(("content that could not be analyzed", "解析できなかった描画部品"));
             if (uncertainTextPages.Contains(page)) subjects.Add(("text whose characters or visibility could not be determined", "確定できなかった文字"));
             if (unplacedStrikePages.Contains(page)) subjects.Add(("text with a strikethrough that could not be placed", "取り消し線の位置を確定できなかった文字"));
+            if (readingOrderPages.Contains(page)) subjects.Add(("inferred column reading order", "段組みの読み順"));
+            if (hyphenPages.Contains(page)) subjects.Add(("ambiguous line-ending hyphens", "行末ハイフン"));
+            if (textlessPages.Contains(page)) subjects.Add(("pages without extracted text", "文字を抽出できなかったページ"));
+            if (unresolvedTablePages.Contains(page)) subjects.Add(("unresolved table columns", "表の列対応"));
+            if (subjects.Count == 0) subjects.Add(("source content", "原本の内容"));
             return (string.Join(" and ", subjects.Select(subject => subject.English)),
                 subjects.Count == 1 && subjects[0].English != "unresolved tables/figures" ? "needs" : "need",
                 string.Join("と", subjects.Select(subject => subject.Japanese)) + "を確認");
@@ -992,7 +1029,12 @@ public sealed partial class DocumentService
         }
         try
         {
-            var rasterized = await pdfRasterizer.RasterizeAsync(sourcePath, pages, new PdfRasterizationOptions(), cancellationToken).ConfigureAwait(false);
+            // Comparison previews need less detail than OCR input. Bound their
+            // dimensions separately to avoid multi-megabyte attachments per page.
+            var rasterOptions = ocrPages.Count == 0
+                ? new PdfRasterizationOptions(Dpi: 120, MaxPixelsPerPage: 2_250_000)
+                : new PdfRasterizationOptions();
+            var rasterized = await pdfRasterizer.RasterizeAsync(sourcePath, pages, rasterOptions, cancellationToken).ConfigureAwait(false);
             var plans = BuildPdfCropPlans(graph, pdfPages, pdfRasterizer.Descriptor.ProviderId);
             var result = new List<WorkspaceAsset>();
             var cropped = new Dictionary<int, IReadOnlyList<PdfCroppedImage>>();
@@ -1064,7 +1106,9 @@ public sealed partial class DocumentService
                     };
                 else
                     nodes.Add(new DocumentNode(partition.Id + "_review", NodeKind.Image, null, nodes.Count, ContentLayer.Body,
-                        new ReferenceNodeContent(partition.Id, $"PDF page {pageNumber}: 原本照合用画像（{ReviewReason(pageNumber).Alt}）"),
+                        new ReferenceNodeContent(partition.Id, english
+                            ? $"PDF page {pageNumber}: source comparison image ({ReviewReason(pageNumber).Subject})"
+                            : $"PDF page {pageNumber}: 原本照合用画像（{ReviewReason(pageNumber).Alt}）"),
                         new SourceAnchor("pdf", partition.SourcePartUri ?? $"pdf:page:{partition.Order + 1}", []),
                         Editability: NodeEditability.RenderOnly,
                         Extensions: reviewExtensions));
@@ -1202,7 +1246,10 @@ public sealed partial class DocumentService
     private static bool IsPdfImagePlaceholder(DocumentNode node) =>
         HasTrueExtension(node, "pdf_textless_placeholder") ||
         HasTrueExtension(node, "pdf_embedded_image_placeholder") ||
-        ExportReviewBuilder.CountUnanalyzedContent(node) > 0;
+        PdfContentNeedsOcr(node);
+
+    private static bool PdfContentNeedsOcr(DocumentNode node) =>
+        node.Extensions?.ContainsKey("pdf_review_reason") != true && ExportReviewBuilder.CountUnanalyzedContent(node) > 0;
 
     private static bool HasTrueExtension(DocumentNode node, string key) =>
         node.Extensions?.TryGetValue(key, out var value) == true && value.ValueKind == JsonValueKind.True;
@@ -1377,7 +1424,12 @@ public sealed partial class DocumentService
                 if (graph.Format == DocumentFormatKind.Pdf && placements.Any(item => item.PartitionIndex == partitionIndex) &&
                     node.Extensions?.TryGetValue("pdf_textless_placeholder", out var placeholder) == true &&
                     placeholder.ValueKind == JsonValueKind.True)
+                {
+                    foreach (var diagnostic in diagnostics.Where(item => item.Code == "PdfNativeTextUnavailable" &&
+                        item.Message.StartsWith($"PDF page {partition.Order + 1}:", StringComparison.Ordinal)).ToArray())
+                        diagnostics.Remove(diagnostic);
                     continue;
+                }
                 output.Add(node);
                 foreach (var placement in placements.Where(placement =>
                              placement.PartitionIndex == partitionIndex &&

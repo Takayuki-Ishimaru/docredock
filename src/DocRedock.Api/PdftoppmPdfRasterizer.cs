@@ -10,6 +10,9 @@ namespace DocRedock.Api;
 public class PdftoppmPdfRasterizer : IPdfRasterizer
 {
     private const int MaxPages = 200;
+    // Low fixed bound: each page is a separate external process, so a few overlapping processes
+    // hide startup latency while bounding peak memory and the number of live children.
+    private const int MaxConcurrentPages = 3;
     private const long MaxImageBytes = 64L * 1024 * 1024;
     private const long MaxTotalImageBytes = 256L * 1024 * 1024;
     private const int MaxDiagnosticCharacters = 32_768;
@@ -53,45 +56,65 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
             // A private, ordinary filename prevents option/URI interpretation by the external tool.
             var privateInput = Path.Combine(root, "input.pdf");
             File.Copy(source.FullName, privateInput);
-            var result = new List<RasterizedPdfPage>();
+            var pages = pageNumbers.Distinct().Order().ToArray();
+            var result = new List<RasterizedPdfPage>(pages.Length);
             long totalPixels = 0, totalBytes = 0;
-            foreach (var page in pageNumbers.Distinct().Order())
+            // Bounded page parallelism: at most MaxConcurrentPages external processes overlap, which
+            // removes the sequential startup latency of a many-page document. Outputs are read and
+            // budgeted strictly in ascending page order, so the shared budgets and the first reported
+            // failure never depend on how the processes interleave.
+            using var abort = new CancellationTokenSource();
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, abort.Token);
+            var token = lifetime.Token;
+            var inflight = new Queue<Task<string>>();
+            var launched = 0;
+            try
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var output = Path.Combine(root, "page-" + page.ToString(CultureInfo.InvariantCulture));
-                var start = new ProcessStartInfo
+                for (var index = 0; index < pages.Length; index++)
                 {
-                    FileName = executable, UseShellExecute = false, CreateNoWindow = true,
-                    RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = root
-                };
-                ConfigureArguments(start, privateInput, output, [page], limits);
-                await RunAsync(start, limits.Timeout!.Value, cancellationToken).ConfigureAwait(false);
-                var path = OutputPath(output, page);
-                var file = new FileInfo(path);
-                if (!file.Exists || file.LinkTarget is not null)
-                    throw new InvalidDataException($"PDF rasterizer did not produce an ordinary image for page {page}.");
-                if (file.Length is < 45 or > MaxImageBytes || totalBytes + file.Length > MaxTotalImageBytes)
-                    throw new InvalidDataException("PDF rasterizer output exceeded the image byte budget.");
-                await using var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-                    4096, FileOptions.Asynchronous | FileOptions.SequentialScan);
-                var header = new byte[33];
-                await input.ReadExactlyAsync(header, cancellationToken).ConfigureAwait(false);
-                var (width, height) = ReadPngDimensions(header);
-                var pixels = checked((long)width * height);
-                if (pixels > limits.MaxPixelsPerPage || pixels > limits.MaxTotalPixels - totalPixels)
-                    throw new InvalidDataException("PDF rasterizer output exceeded the pixel budget.");
-                // Length and dimensions are checked before allocating the complete image.
-                var bytes = new byte[checked((int)input.Length)];
-                header.CopyTo(bytes, 0);
-                await input.ReadExactlyAsync(bytes.AsMemory(header.Length), cancellationToken).ConfigureAwait(false);
-                result.Add(new RasterizedPdfPage(page, "image/png", bytes, width, height));
-                totalPixels += pixels;
-                totalBytes += bytes.Length;
-                // Windows forbids deleting a file while our read handle is open.
-                await input.DisposeAsync().ConfigureAwait(false);
-                File.Delete(path);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    while (launched < pages.Length && inflight.Count < MaxConcurrentPages)
+                        inflight.Enqueue(RasterizePageAsync(root, privateInput, pages[launched++], limits, token));
+                    var page = pages[index];
+                    var path = await inflight.Dequeue().ConfigureAwait(false);
+                    var file = new FileInfo(path);
+                    if (!file.Exists || file.LinkTarget is not null)
+                        throw new InvalidDataException($"PDF rasterizer did not produce an ordinary image for page {page}.");
+                    if (file.Length is < 45 or > MaxImageBytes || totalBytes + file.Length > MaxTotalImageBytes)
+                        throw new InvalidDataException("PDF rasterizer output exceeded the image byte budget.");
+                    await using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+                        4096, FileOptions.Asynchronous | FileOptions.SequentialScan))
+                    {
+                        var header = new byte[33];
+                        await input.ReadExactlyAsync(header, token).ConfigureAwait(false);
+                        var (width, height) = ReadPngDimensions(header);
+                        var pixels = checked((long)width * height);
+                        if (pixels > limits.MaxPixelsPerPage || pixels > limits.MaxTotalPixels - totalPixels)
+                            throw new InvalidDataException("PDF rasterizer output exceeded the pixel budget.");
+                        // Length and dimensions are checked before allocating the complete image.
+                        var bytes = new byte[checked((int)input.Length)];
+                        header.CopyTo(bytes, 0);
+                        await input.ReadExactlyAsync(bytes.AsMemory(header.Length), token).ConfigureAwait(false);
+                        result.Add(new RasterizedPdfPage(page, "image/png", bytes, width, height));
+                        totalPixels += pixels;
+                        totalBytes += bytes.Length;
+                    }
+                    // Windows forbids deleting a file while our read handle is open.
+                    File.Delete(path);
+                }
+                return result;
             }
-            return result;
+            finally
+            {
+                // Stop every launched process and observe every task, including the ones whose
+                // results were discarded, so no child or faulted task outlives this call.
+                abort.Cancel();
+                while (inflight.Count > 0)
+                {
+                    try { await inflight.Dequeue().ConfigureAwait(false); }
+                    catch (Exception) { }
+                }
+            }
         }
         finally
         {
@@ -112,6 +135,21 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
                 }
             }
         }
+    }
+
+    /// <summary>Runs one page through the external tool and returns its expected output path.</summary>
+    private async Task<string> RasterizePageAsync(string root, string privateInput, int page,
+        PdfRasterizationOptions limits, CancellationToken cancellationToken)
+    {
+        var output = Path.Combine(root, "page-" + page.ToString(CultureInfo.InvariantCulture));
+        var start = new ProcessStartInfo
+        {
+            FileName = executable, UseShellExecute = false, CreateNoWindow = true,
+            RedirectStandardOutput = true, RedirectStandardError = true, WorkingDirectory = root
+        };
+        ConfigureArguments(start, privateInput, output, [page], limits);
+        await RunAsync(start, limits.Timeout!.Value, cancellationToken).ConfigureAwait(false);
+        return OutputPath(output, page);
     }
 
     protected virtual void ConfigureArguments(ProcessStartInfo start, string pdfPath, string output,
@@ -167,8 +205,14 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
         }
         catch (OperationCanceledException)
         {
+            // A cancelled or timed-out child must not outlive this call: stop its tree, then let the
+            // exit wait and both pipe drains finish so no process, pipe or task is left unobserved.
             Stop(process);
-            try { await process.WaitForExitAsync(CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false); }
+            try
+            {
+                await CompletedAsync(process.WaitForExitAsync(CancellationToken.None), stdout, stderr)
+                    .WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
+            }
             catch (TimeoutException) { }
             if (cancellationToken.IsCancellationRequested) throw;
             throw new TimeoutException("PDF rasterization timed out; reduce the document size or check the configured provider.");
@@ -190,6 +234,15 @@ public class PdftoppmPdfRasterizer : IPdfRasterizer
             if (keep > 0) captured.Append(buffer, 0, keep);
         }
         return captured.ToString();
+    }
+
+    private static async Task CompletedAsync(Task exit, params Task[] additional)
+    {
+        foreach (var task in new[] { exit }.Concat(additional))
+        {
+            try { await task.ConfigureAwait(false); }
+            catch (Exception) { }
+        }
     }
 
     private static void Stop(Process process)

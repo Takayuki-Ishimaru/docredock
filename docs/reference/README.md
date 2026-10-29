@@ -23,4 +23,7 @@ These documents describe formats and capabilities implemented in the repository.
 | Restoration data / 復元データ | .drmd |
 | Portable package / 持ち運び用パッケージ | .drmdpkg |
 
-Round-trip editing, restoration, new-document generation, `.drmd`, and `.drmdpkg` are experimental and unsupported for current Public Beta user operation. The desktop GUI supports PDF-to-Markdown conversion by default; CLI PDF conversion and experimental CLI paths require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.
+Round-trip editing, restoration, new-document generation, `.drmd`, and `.drmdpkg` are experimental and unsupported for current Public Beta user operation. The desktop GUI supports PDF-to-Markdown conversion by default; CLI PDF conversion requires `--allow-pdf` or `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Other experimental CLI paths require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`.
+# Reference
+
+- [Word revision defaults / Word変更履歴の既定値](revision-defaults.md)

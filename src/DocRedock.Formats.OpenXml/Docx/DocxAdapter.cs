@@ -98,6 +98,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (options.FinalRevisionView) ApplyFinalRevisionView(doc);
         var relationships = ReadRelationships(archive, "word/_rels/document.xml.rels", cancellationToken);
         var numberingInfo = ReadNumberingInfo(archive, cancellationToken);
+        var styleTable = DocxStyleTable.Read(archive, cancellationToken);
         var hiddenStyles = ReadHiddenStyles(archive, cancellationToken)
             .WithRevisionView(options.ShowTrackedRevisions, options.FinalRevisionView);
         var listCounters = new Dictionary<(int NumId, int Ilvl), int>();
@@ -183,6 +184,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             alternateMirrors.Clear();
         }
         var bodyElements = bodyEntries.Select(entry => entry.Element).ToArray();
+        var monospaceCode = DocxMonospaceCode.Find(bodyElements, styleTable, run => IsHiddenRun(run, hiddenStyles), element => IsHiddenContentElement(element, hiddenStyles));
         var readabilityStyles = archive.GetEntry("word/styles.xml") is { } readabilityStylesEntry
             ? SafeXml.LoadDocument(await ReadEntryAsync(readabilityStylesEntry, cancellationToken).ConfigureAwait(false)) : null;
         var settingsDocument = archive.GetEntry("word/settings.xml") is { } settingsEntry
@@ -222,7 +224,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 var paragraphOrder = ordinal++;
                 lastParagraphOrder = paragraphOrder;
                 var textBoxes = BindHostTextBoxes(entry.Original, entry.Slice, textBoxLedger, alternateMirrors, hiddenStyles);
-                AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes);
+                AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes, styleTable: styleTable, monospaceCode: monospaceCode.GetValueOrDefault(element));
                 nodes[firstBlockNode] = readability.ApplyHeading(element, nodes[firstBlockNode]);
                 nodes[firstBlockNode] = ApplyDrawnParagraphMarks(nodes[firstBlockNode], element, drawnLines);
             }
@@ -533,7 +535,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         Dictionary<string, string> relationships, ContentLayer layer,
         NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> listCounters,
         DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, bool includeVisualGraph = true,
-        IReadOnlyList<DocxTextBoxBinding?>? textBoxSlices = null)
+        IReadOnlyList<DocxTextBoxBinding?>? textBoxSlices = null, DocxStyleTable? styleTable = null, DocxMonospaceCode.Line? monospaceCode = null)
     {
         var paraId = (string?)paragraph.Attribute(W14 + "paraId");
         var anchor = new SourceAnchor("docx", partUri,
@@ -542,19 +544,26 @@ public sealed partial class DocxAdapter : IFormatProbe
         var text = ParagraphText(paragraph, hiddenStyles);
         var hiddenText = HiddenParagraphText(paragraph, hiddenStyles);
         var style = (string?)paragraph.Element(W + "pPr")?.Element(W + "pStyle")?.Attribute(W + "val");
+        styleTable ??= DocxStyleTable.Empty;
         // Word commonly stores list semantics through a paragraph style (ListBullet /
         // ListNumber) while other producers emit an explicit w:numPr.  Treat both as
         // list items so real-world documents do not lose their list structure on export.
-        var isList = paragraph.Element(W + "pPr")?.Element(W + "numPr") is not null ||
-                     IsListStyle(style);
+        var directNumbering = paragraph.Element(W + "pPr")?.Element(W + "numPr");
+        var effectiveNumId = DocxStyleTable.ParseNonNegative((string?)directNumbering?.Element(W + "numId")?.Attribute(W + "val"))
+            ?? styleTable.NumberingOf(style)?.NumId;
+        var isList = effectiveNumId != 0 && (directNumbering is not null ||
+            IsListStyle(style) || styleTable.IsListStyle(style) || styleTable.NumberingOf(style)?.NumId is > 0);
         var headingLevel = HeadingLevel(style);
         var isDocumentTitle = IsTitleStyle(style);
         // A character-level CodeChar run is inline code, not a code block.  Only
         // paragraph styles classify the whole paragraph as a Markdown code block.
-        var isCode = IsCodeStyle(style);
-        var kind = isList ? NodeKind.ListItem : headingLevel > 0 || isDocumentTitle ? NodeKind.Heading : isCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
+        var isCode = IsCodeStyle(style) || styleTable.IsCodeStyle(style);
+        // Normal paragraphs typed in a monospace face are a code block even though no style says so;
+        // a lone such paragraph is inline monospace inside prose and stays a paragraph.
+        var isMonospaceCode = monospaceCode is not null && !isList && !isCode && HeadingLevel(style) == 0 && !IsTitleStyle(style);
+        var kind = isList ? NodeKind.ListItem : headingLevel > 0 || isDocumentTitle ? NodeKind.Heading : isCode || isMonospaceCode ? NodeKind.CodeBlock : NodeKind.Paragraph;
         var map = BuildRunMap(id, paragraph, hiddenStyles);
-        var projectionLayer = string.IsNullOrWhiteSpace(text) && !(isCode && string.IsNullOrEmpty(hiddenText))
+        var projectionLayer = string.IsNullOrWhiteSpace(text) && !((isCode || isMonospaceCode) && string.IsNullOrEmpty(hiddenText))
             ? ContentLayer.Hidden : layer;
         var richRuns = ExtractRichTextRuns(paragraph, relationships, hiddenStyles);
         // Preserve the simple text projection for ordinary paragraphs: it keeps existing
@@ -575,8 +584,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (isDocumentTitle) extensions["document_title"] = JsonSerializer.SerializeToElement(true);
         if (isList)
         {
-            extensions["list_level"] = JsonSerializer.SerializeToElement(ListLevel(paragraph, style));
-            var (isOrdered, orderedNumber) = ResolveListNumbering(paragraph, style, numberingInfo, listCounters);
+            extensions["list_level"] = JsonSerializer.SerializeToElement(ListLevel(paragraph, style, styleTable));
+            var (isOrdered, orderedNumber) = ResolveListNumbering(paragraph, style, numberingInfo, listCounters, styleTable);
             if (isOrdered && orderedNumber is { } number)
             {
                 extensions["list_format"] = JsonSerializer.SerializeToElement("ordered");
@@ -584,6 +593,14 @@ public sealed partial class DocxAdapter : IFormatProbe
             }
         }
         if (isCode) extensions["code_style"] = JsonSerializer.SerializeToElement(style);
+        if (isMonospaceCode && monospaceCode is { } codeLine)
+        {
+            extensions["code_block_source"] = JsonSerializer.SerializeToElement("monospace-runs");
+            extensions["code_block_group"] = JsonSerializer.SerializeToElement(codeLine.Group);
+            extensions["code_block_line"] = JsonSerializer.SerializeToElement(codeLine.Index);
+            if (DocxMonospaceCode.MonospaceFont(paragraph, styleTable, run => IsHiddenRun(run, hiddenStyles)) is { } codeFont)
+                extensions["code_font"] = JsonSerializer.SerializeToElement(codeFont);
+        }
         AddContentControlExtensions(extensions, contentControl);
         var equations = RelevantDescendants(paragraph).Where(IsMathRoot).ToArray();
         if (equations.Length > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
@@ -2927,7 +2944,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     // (non-skippable) Descendants().
     private static readonly XName[] OpaqueParagraphContainers = [W + "tbl", W + "txbxContent"];
 
-    private static IEnumerable<XElement> RelevantDescendants(XContainer container)
+    internal static IEnumerable<XElement> RelevantDescendants(XContainer container)
     {
         foreach (var child in container.Elements())
         {
@@ -3190,7 +3207,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         return output.ToString();
     }
 
-    private static bool IsRevisionContainer(XElement element) => element.Name == W + "ins" || element.Name == W + "del" ||
+    internal static bool IsRevisionContainer(XElement element) => element.Name == W + "ins" || element.Name == W + "del" ||
         element.Name == W + "moveFrom" || element.Name == W + "moveTo" || element.Name.Namespace == W && PropertyRevisionNames.Contains(element.Name.LocalName);
 
     private static bool IsDeletedRevision(XElement element) =>
@@ -3274,7 +3291,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         var fonts = properties?.Element(W + "rFonts");
         var fontNames = new[] { (string?)fonts?.Attribute(W + "ascii"), (string?)fonts?.Attribute(W + "hAnsi"), (string?)fonts?.Attribute(W + "eastAsia") };
         var code = styleId?.Contains("code", StringComparison.OrdinalIgnoreCase) == true ||
-                   fontNames.Any(IsMonospaceFont);
+                   fontNames.Any(IsInlineCodeFont);
         // Direct character color/highlight (D15). These are readable-only decorations: they are
         // deliberately outside the round-trippable rich-text contract (see TextRun's doc comment).
         var colorValue = (string?)properties?.Element(W + "color")?.Attribute(W + "val");
@@ -3416,12 +3433,25 @@ public sealed partial class DocxAdapter : IFormatProbe
         }
     }
 
-    private static bool IsMonospaceFont(string? fontName) => fontName is not null &&
+    // Japanese fixed-pitch faces are ordinary body fonts too. They can help
+    // recognize a code block, but alone must not turn prose into inline code.
+    private static bool IsInlineCodeFont(string? fontName) => fontName is not null &&
         (fontName.Contains("consolas", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("courier", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("menlo", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("monaco", StringComparison.OrdinalIgnoreCase) ||
          fontName.Contains("source code", StringComparison.OrdinalIgnoreCase));
+
+    internal static bool IsMonospaceFont(string? fontName)
+    {
+        if (string.IsNullOrWhiteSpace(fontName)) return false;
+        var name = fontName.Normalize(NormalizationForm.FormKC).Replace(" ", string.Empty, StringComparison.Ordinal).ToLowerInvariant();
+        // P/UDP faces are proportional: their names must not match the fixed-pitch families.
+        return name is "consolas" or "courier" or "couriernew" or "menlo" or "monaco" or
+            "msgothic" or "msゴシック" or "msmincho" or "ms明朝" or "bizudゴシック" or "bizudgothic" or
+            "osaka-等幅" or "osaka等幅" || name.StartsWith("sourcecode", StringComparison.Ordinal) ||
+            name.StartsWith("notosansmono", StringComparison.Ordinal);
+    }
     private static DocxRunCharacterMap BuildRunMap(string nodeId, XElement paragraph, DocxHiddenStyles hiddenStyles)
     {
         var spans = new List<RunCharacterSpan>();
@@ -3472,7 +3502,7 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     private static string NormalizeEntryName(string name) => name.TrimStart('/');
     private static ZipArchiveEntry RequireEntry(ZipArchive archive, string name) => archive.GetEntry(name) ?? throw new InvalidDataException($"DOCX required part '{name}' is missing.");
-    private static async Task<byte[]> ReadEntryAsync(ZipArchiveEntry entry, CancellationToken cancellationToken)
+    internal static async Task<byte[]> ReadEntryAsync(ZipArchiveEntry entry, CancellationToken cancellationToken)
     {
         await using var stream = await entry.OpenAsync(cancellationToken).ConfigureAwait(false);
         using var output = new MemoryStream();
@@ -3892,10 +3922,10 @@ public sealed partial class DocxAdapter : IFormatProbe
         return SafeXml.Utf8(paragraph.ToString(SaveOptions.DisableFormatting));
     }
 
-    private static bool IsTitleStyle(string? style) =>
+    internal static bool IsTitleStyle(string? style) =>
         style is not null && style.Equals("Title", StringComparison.OrdinalIgnoreCase);
 
-    private static int HeadingLevel(string? style)
+    internal static int HeadingLevel(string? style)
     {
         if (string.IsNullOrWhiteSpace(style)) return 0;
         // Word allows Heading styles beyond 6 (e.g. "Heading 7"); Markdown only has six levels,
@@ -3905,14 +3935,24 @@ public sealed partial class DocxAdapter : IFormatProbe
         return match.Success && int.TryParse(match.Groups["level"].Value, out var level) ? level : 0;
     }
 
-    private static bool IsCodeStyle(string? style) => style is not null &&
-        (style.Contains("code", StringComparison.OrdinalIgnoreCase) || style.Contains("preformatted", StringComparison.OrdinalIgnoreCase) ||
-         style.Contains("source", StringComparison.OrdinalIgnoreCase) || style.Contains("monospace", StringComparison.OrdinalIgnoreCase));
+    internal static bool IsCodeStyle(string? style) => style is not null &&
+        (IsCodeStyleName(style) || style.Contains("source", StringComparison.OrdinalIgnoreCase));
 
-    private static int ListLevel(XElement paragraph, string? style)
+    /// <summary>Japanese Word names its code style コード and its preformatted style プリフォーマット, while the
+    /// id a document applies is often opaque, so the style name carries the whole signal.</summary>
+    internal static bool IsCodeStyleName(string? name) => name is not null &&
+        (name.Contains("code", StringComparison.OrdinalIgnoreCase) || name.Contains("preformatted", StringComparison.OrdinalIgnoreCase) ||
+         name.Contains("monospace", StringComparison.OrdinalIgnoreCase) || name.Contains("コード", StringComparison.Ordinal) ||
+         name.Contains("プリフォーマット", StringComparison.Ordinal) || name.Contains("ソース", StringComparison.Ordinal));
+
+    private static int ListLevel(XElement paragraph, string? style, DocxStyleTable styleTable)
     {
         var ilvl = paragraph.Element(W + "pPr")?.Element(W + "numPr")?.Element(W + "ilvl")?.Attribute(W + "val")?.Value;
         if (int.TryParse(ilvl, out var level)) return Math.Max(0, level);
+        // A style-only list states its level in the chain: w:numPr/w:ilvl, else the localized name
+        // ("List Bullet 2" is the second level) that an opaque id such as a4 or 21 hides.
+        if (styleTable.NumberingOf(style)?.Ilvl is { } inheritedLevel) return inheritedLevel;
+        if (styleTable.LevelOf(style) is > 0 and var namedLevel) return namedLevel;
         // Word style-only lists such as "List Bullet 2" do not carry w:ilvl. The
         // trailing style number is the conventional nesting level (1 is top-level).
         var match = System.Text.RegularExpressions.Regex.Match(style ?? string.Empty,
@@ -3921,10 +3961,19 @@ public sealed partial class DocxAdapter : IFormatProbe
         return match.Success && int.TryParse(match.Groups["level"].Value, out var styleLevel) ? Math.Max(0, styleLevel - 1) : 0;
     }
 
-    private static bool IsListStyle(string? style) => style is not null &&
+    internal static bool IsListStyle(string? style) => style is not null &&
         (style.Contains("listbullet", StringComparison.OrdinalIgnoreCase) ||
          style.Contains("listnumber", StringComparison.OrdinalIgnoreCase) ||
          style.Contains("listparagraph", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The nesting level a style name or id states by its trailing number (1 is top level).</summary>
+    internal static int? StyleListLevel(string? name)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(name ?? string.Empty,
+            @"list\s*(?:bullet|number|paragraph)?\s*(?<level>[1-9][0-9]*)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return match.Success && int.TryParse(match.Groups["level"].Value, out var level) ? Math.Max(0, level - 1) : null;
+    }
 
     // numbering.xml/styles.xml resolution for D10: distinguishing an ordered list (numFmt
     // decimal/decimalZero/lowerRoman/... ) from a bullet list (numFmt bullet/none), which
@@ -3962,12 +4011,12 @@ public sealed partial class DocxAdapter : IFormatProbe
             foreach (var num in numberingXml.Root?.Elements(W + "num") ?? Enumerable.Empty<XElement>())
             {
                 var numId = ParsePositiveInt((string?)num.Attribute(W + "numId"));
-                var abstractNumId = ParsePositiveInt((string?)num.Element(W + "abstractNumId")?.Attribute(W + "val"));
+                var abstractNumId = DocxStyleTable.ParseNonNegative((string?)num.Element(W + "abstractNumId")?.Attribute(W + "val"));
                 if (numId is not null && abstractNumId is not null) abstractNumIds[numId.Value] = abstractNumId.Value;
             }
             foreach (var abstractNum in numberingXml.Root?.Elements(W + "abstractNum") ?? Enumerable.Empty<XElement>())
             {
-                var abstractNumId = ParsePositiveInt((string?)abstractNum.Attribute(W + "abstractNumId"));
+                var abstractNumId = DocxStyleTable.ParseNonNegative((string?)abstractNum.Attribute(W + "abstractNumId"));
                 if (abstractNumId is null) continue;
                 foreach (var level in abstractNum.Elements(W + "lvl"))
                 {
@@ -3986,14 +4035,29 @@ public sealed partial class DocxAdapter : IFormatProbe
     // paragraphs, matching Word's own numbering semantics (D10: a numbered list continues across
     // an interrupting paragraph rather than restarting).
     private static (bool IsOrdered, int? Number) ResolveListNumbering(
-        XElement paragraph, string? style, NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> counters)
+        XElement paragraph, string? style, NumberingInfo numberingInfo, IDictionary<(int NumId, int Ilvl), int> counters,
+        DocxStyleTable styleTable)
     {
         var numPr = paragraph.Element(W + "pPr")?.Element(W + "numPr");
-        var numId = ParsePositiveInt((string?)numPr?.Element(W + "numId")?.Attribute(W + "val"))
+        // A paragraph inheriting numbering from its style chain has no w:numPr of its own, so both the
+        // list and its level come from the style; a direct w:numPr still wins.
+        var styleNumbering = styleTable.NumberingOf(style);
+        var numId = DocxStyleTable.ParseNonNegative((string?)numPr?.Element(W + "numId")?.Attribute(W + "val"))
+            ?? styleNumbering?.NumId
             ?? (style is not null && numberingInfo.StyleNumIds.TryGetValue(style, out var styleNumId) ? styleNumId : (int?)null);
-        if (numId is null) return (false, null);
+        if (numId == 0) return (false, null);
+        if (numId is null)
+        {
+            if (!styleTable.IsOrderedStyle(style) && !(style?.Contains("listnumber", StringComparison.OrdinalIgnoreCase) ?? false))
+                return (false, null);
+            var fallbackKey = (-1, ListLevel(paragraph, style, styleTable));
+            var fallbackNumber = counters.TryGetValue(fallbackKey, out var prior) ? prior + 1 : 1;
+            counters[fallbackKey] = fallbackNumber;
+            return (true, fallbackNumber);
+        }
         var ilvlText = (string?)numPr?.Element(W + "ilvl")?.Attribute(W + "val");
-        var ilvl = int.TryParse(ilvlText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedIlvl) ? parsedIlvl : 0;
+        var ilvl = int.TryParse(ilvlText, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsedIlvl) ? parsedIlvl :
+            styleNumbering?.Ilvl ?? ListLevel(paragraph, style, styleTable);
         if (!numberingInfo.AbstractNumIdsByNumId.TryGetValue(numId.Value, out var abstractNumId) ||
             !numberingInfo.FormatsByLevel.TryGetValue((abstractNumId, ilvl), out var numFmt) ||
             StringComparer.OrdinalIgnoreCase.Equals(numFmt, "bullet") || StringComparer.OrdinalIgnoreCase.Equals(numFmt, "none"))
