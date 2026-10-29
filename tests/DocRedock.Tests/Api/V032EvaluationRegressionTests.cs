@@ -45,12 +45,12 @@ public sealed class V032EvaluationRegressionTests : IDisposable
         foreach (var part in result.Parts)
         {
             var block = part.TableBlock!;
-            Assert.Equal(("A3:A4", headerRange), (block.ContextRange, block.HeaderRange));
+            Assert.Equal(("A1:A4", headerRange), (block.ContextRange, block.HeaderRange));
             var markdown = part.Markdown;
             Assert.Equal(markdown.IndexOf(Unit, StringComparison.Ordinal), markdown.LastIndexOf(Unit, StringComparison.Ordinal));
             Assert.True(markdown.IndexOf(Unit, StringComparison.Ordinal) < markdown.IndexOf(Condition, StringComparison.Ordinal));
             Assert.True(markdown.IndexOf(Condition, StringComparison.Ordinal) < markdown.IndexOf("| 商品 | 売上", StringComparison.Ordinal));
-            Assert.Contains($"; context A3:A4{(block.Index > 1 ? " (repeated)" : string.Empty)}\n", markdown, StringComparison.Ordinal);
+            Assert.Contains($"; context A1:A4{(block.Index > 1 ? " (repeated)" : string.Empty)}\n", markdown, StringComparison.Ordinal);
             Assert.Contains(part.Sources, source => source.CellAddress == "A3");
             Assert.Contains(part.Sources, source => source.CellAddress == "A4");
             rows.AddRange(markdown.Split('\n').Where(line => line.StartsWith("| 商品0", StringComparison.Ordinal)));

@@ -128,7 +128,7 @@ public sealed class V031EvaluationRegressionTests : IDisposable
         {
             var stdout = new StringWriter();
             var app = new CliApplication(stdout, new StringWriter(), new DocumentService(null, null, discoverPdfRasterizer: false));
-            Assert.Equal(exit, await app.RunAsync(["export", Fixture(name), "--output", Path.Combine(root, name + ".md"), "--ocr", "off"]));
+            Assert.Equal(exit, await app.RunAsync(["export", Fixture(name), "--output", Path.Combine(root, name + ".md"), "--ocr", "off", "--verbose"]));
             var text = stdout.ToString();
             Assert.DoesNotContain("Human review", text, StringComparison.Ordinal);
             Assert.DoesNotContain("not required", text, StringComparison.Ordinal);

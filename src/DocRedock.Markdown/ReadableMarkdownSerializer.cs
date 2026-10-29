@@ -17,7 +17,9 @@ public sealed record ReadableMarkdownOptions(
     IReadOnlyList<string>? IncludedSheets = null,
     string? Title = null,
     string ContentPolicy = "visible",
-    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence);
+    OcrReviewMode OcrReview = OcrReviewMode.LowConfidence,
+    bool ExpandMergedCells = false,
+    string? Language = null);
 
 /// <summary>
 /// Produces Markdown intended for reading rather than round-tripping. Unlike the
@@ -76,6 +78,7 @@ public sealed partial class ReadableMarkdownSerializer
     public string DocumentTitle(DocumentGraph graph)
     {
         ArgumentNullException.ThrowIfNull(graph);
+        SetOutputLanguage(graph);
         if (options.Title?.Trim() is { Length: > 0 } customTitle) return customTitle;
         var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
         var partitions = graph.Partitions
@@ -86,21 +89,22 @@ public sealed partial class ReadableMarkdownSerializer
                 Nodes = partition.Nodes.Where(node => DocumentContentPolicyRules.Includes(node, policy) || IsAlwaysReadableSheetOverlay(node))
                     .Select(WithoutMarkers).ToArray()
             }).ToList();
-        if (graph.Format == DocumentFormatKind.Xlsx) return FindWorkbookTitle(partitions) ?? "ドキュメント";
-        if (graph.Format == DocumentFormatKind.Pptx) return "プレゼンテーション";
+        if (graph.Format == DocumentFormatKind.Xlsx) return EnglishOutput ? "Workbook" : "ブック";
+        if (graph.Format == DocumentFormatKind.Pptx) return EnglishOutput ? "Presentation" : "プレゼンテーション";
         var title = partitions.SelectMany(partition => partition.Nodes)
             .FirstOrDefault(node => node.Kind == NodeKind.Heading && ExtensionBool(node, "document_title"));
         return title?.Content switch
         {
             TextNodeContent text when text.Text.Trim() is { Length: > 0 } plain => plain,
             RichTextNodeContent rich when string.Concat(rich.Runs.Select(run => run.Text)).Trim() is { Length: > 0 } plain => plain,
-            _ => "ドキュメント",
+            _ => EnglishOutput ? "Document" : "ドキュメント",
         };
     }
 
     public string Serialize(DocumentGraph graph)
     {
         ArgumentNullException.ThrowIfNull(graph);
+        SetOutputLanguage(graph);
         var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
         // Sheet filtering is an explicit projection boundary. Diagnostics must
         // describe the selected workbook, not sheets that cannot appear in output.
@@ -172,13 +176,11 @@ public sealed partial class ReadableMarkdownSerializer
         var partitions = graph.Partitions
             .Where(partition => IsIncludedPartition(partition.Id))
             .OrderBy(partition => partition.Order).ThenBy(partition => partition.Id, StringComparer.Ordinal).ToList();
-        var titleCell = options.Title?.Trim() is { Length: > 0 } ? null : FindWorkbookTitleCell(partitions);
-        // Compared with the rows as plain text (IsRedundantTitle), written with its strikethrough and
-        // without its underline (a title is not underlined).
+        // Worksheet titles and units belong to that worksheet, never the whole workbook.
         var title = options.Title?.Trim() is { Length: > 0 } customTitle
             ? customTitle
-            : titleCell is not null ? PlainText(titleCell.Text) : "ドキュメント";
-        WriteHeading(output, 1, EscapeLiteral(titleCell is not null ? PlainText(titleCell.ShownWithoutUnderline) : title));
+            : EnglishOutput ? "Workbook" : "ブック";
+        WriteHeading(output, 1, EscapeLiteral(title));
         var sheets = RecordWorkbookLayout ? new List<(string PartitionId, int Start, int ContentStart, int End, List<ReadableSheetSegment> Segments)>() : null;
 
         foreach (var partition in partitions)
@@ -195,6 +197,14 @@ public sealed partial class ReadableMarkdownSerializer
             var contentStart = output.Length;
             sheetRecorder = sheets is null ? null : new SheetLayoutRecorder();
             var hasSectionHeading = false;
+            if (rows.Count > 0 && rows[0].Cells.Count == 1 &&
+                FindSheetTitleCell(rows[0]) is { } sheetTitle && sheetTitle.NodeId == rows[0].Cells[0].NodeId)
+            {
+                var captionStart = output.Length;
+                WriteHeading(output, 3, EscapeLiteral(PlainText(sheetTitle.ShownWithoutUnderline)));
+                sheetRecorder?.Add(captionStart, output.Length, [sheetTitle.NodeId]);
+                rows = rows.Skip(1).ToList();
+            }
             var index = 0;
             var insertions = diagrams.Select(diagram => new WorkbookInsertion(diagram.MinRow, diagram.Mermaid, null, diagram))
                 .Concat(images.Select(image => new WorkbookInsertion(image.Row, image.Node.Id, image.Node, null)))
@@ -204,8 +214,7 @@ public sealed partial class ReadableMarkdownSerializer
             {
                 var next = index;
                 while (next < rows.Count && rows[next].Number < insertion.Row) next++;
-                RenderWorkbookRows(output, partition, rows[index..next]
-                    .Where(row => !IsRedundantTitle(row, title, partition.Id)).ToArray(), ref hasSectionHeading);
+                RenderWorkbookRows(output, partition, rows[index..next], ref hasSectionHeading);
                 var start = output.Length;
                 if (insertion.Diagram is { } diagram)
                 {
@@ -224,8 +233,7 @@ public sealed partial class ReadableMarkdownSerializer
                 }
                 index = next;
             }
-            RenderWorkbookRows(output, partition, rows[index..]
-                .Where(row => !IsRedundantTitle(row, title, partition.Id)).ToArray(), ref hasSectionHeading);
+            RenderWorkbookRows(output, partition, rows[index..], ref hasSectionHeading);
             var notesStart = output.Length;
             WriteSheetOverlayLineStyleNotes(output, partition);
             sheetRecorder?.Add(notesStart, output.Length, partition.Nodes
@@ -304,7 +312,7 @@ public sealed partial class ReadableMarkdownSerializer
         if (!hasSectionHeading && regions.Any(region => region.MinRow <= 15 && IsDocumentInformationGroup(region.Rows)))
         {
             WriteInference(output, "セル配置から文書情報セクションを推定");
-            WriteHeading(output, 3, "文書情報");
+            WriteHeading(output, 3, EnglishOutput ? "Document information" : "文書情報");
             hasSectionHeading = true;
         }
         sideBySideRegions += regions.Count(region => regions.Any(other => other.MinColumn < region.MinColumn &&
@@ -436,7 +444,7 @@ public sealed partial class ReadableMarkdownSerializer
             .FirstOrDefault(node => node.Kind == NodeKind.Heading && ExtensionBool(node, "document_title"));
         if (isPptx)
         {
-            WriteHeading(output, 1, options.Title?.Trim() is { Length: > 0 } presentationTitle ? EscapeLiteral(presentationTitle) : "プレゼンテーション");
+            WriteHeading(output, 1, options.Title?.Trim() is { Length: > 0 } presentationTitle ? EscapeLiteral(presentationTitle) : EnglishOutput ? "Presentation" : "プレゼンテーション");
             wroteTitle = true;
         }
         else if (options.Title?.Trim() is { Length: > 0 } documentTitle)
@@ -446,7 +454,7 @@ public sealed partial class ReadableMarkdownSerializer
         }
         else if (documentTitleNode is null)
         {
-            WriteHeading(output, 1, "ドキュメント");
+            WriteHeading(output, 1, EnglishOutput ? "Document" : "ドキュメント");
             wroteTitle = true;
         }
         // D04/D16/D17 readability pass: headers, footers, footnotes, and endnotes no longer
@@ -466,7 +474,8 @@ public sealed partial class ReadableMarkdownSerializer
             {
                 var slideTitle = partition.Nodes.FirstOrDefault(node =>
                     StringComparer.OrdinalIgnoreCase.Equals(ExtensionString(node, "shape_role"), "title"));
-                var label = $"スライド {partitionIndex + 1}";
+                var label = EnglishOutput ? $"Slide {partitionIndex + 1}" : $"スライド {partitionIndex + 1}";
+                if (partition.Nodes.Any(node => ExtensionBool(node, "hidden_slide"))) label += EnglishOutput ? " (hidden)" : "（非表示）";
                 var titleText = slideTitle is null ? string.Empty : DisplayText(slideTitle, NodeText(slideTitle).Trim());
                 WriteHeading(output, 2, titleText.Length == 0 ? label : $"{label} — {titleText}");
                 previousWasListItem = false;
@@ -475,7 +484,7 @@ public sealed partial class ReadableMarkdownSerializer
                 .Where(node => node.Kind == NodeKind.Diagram && HasVisualGraph(node)).ToArray();
             // Suppress source members only when a validated graph can represent them. Invalid
             // metadata must retain its original connector/label fallback for diagnostics.
-            var suppressVisualGraphMembers = visualGraphNodes.Any(node =>
+            var suppressVisualGraphMembers = visualGraphNodes.Where(node => graph.Format != DocumentFormatKind.Pdf || HasResolvedVisualEdges(node)).Any(node =>
                 options.IncludeDiagrams ? TryGetRenderableVisualGraph(node) : TryGetRelationVisualGraph(node));
             var consumedVisualShapeIds = visualGraphNodes
                 .SelectMany(VisualGraphMemberShapeIds).ToHashSet(StringComparer.Ordinal);
@@ -487,6 +496,7 @@ public sealed partial class ReadableMarkdownSerializer
                 rawText = string.Empty;
                 display = string.Empty;
                 if (aggregated.SkipIds.Contains(candidate.Id) || nestedTableFolds.FoldedChildIds.Contains(candidate.Id)) return false;
+                if (ExtensionBool(candidate, "pdf_page_furniture") && options.ContentPolicy != "complete") return false;
                 var candidateText = NodeText(candidate).Trim();
                 // A wrapper table can have no own paragraph text at all while its only content is
                 // a nested table. Its child is folded below, so keep the host in the rendering
@@ -496,6 +506,12 @@ public sealed partial class ReadableMarkdownSerializer
                 // F-Issue7: text above stays raw (comparisons, CodeBlock verbatim content);
                 // displayText is what every other branch below actually renders.
                 var candidateDisplay = DisplayText(candidate, candidateText);
+                if (!EnglishOutput && ExtensionBool(candidate, "pdf_textless_placeholder"))
+                    candidateDisplay = "[このページの文字を抽出できませんでした。原本の画像を確認してください。]";
+                else if (!EnglishOutput && HasExtension(candidate, "pdf_unparsed_form_xobjects"))
+                    candidateDisplay = "[解析できなかった描画部品があります。文字や図を原本で確認してください。]";
+                else if (!EnglishOutput && HasExtension(candidate, "pdf_uncertain_text"))
+                    candidateDisplay = "[文字や表示状態を確定できない箇所があります。原本と照合してください。]";
                 if (isPptx && (IsPresentationFurniture(candidate) || IsRepeatedPresentationFooter(partitions, candidate))) return false;
                 if (suppressVisualGraphMembers && (ExtensionBool(candidate, "visual_graph_member") ||
                     ExtensionBool(candidate, "visual_edge_label") || ExtensionBool(candidate, "visual_graph_edge") ||
@@ -583,6 +599,14 @@ public sealed partial class ReadableMarkdownSerializer
                         break;
                     case NodeKind.Quote:
                     case NodeKind.Annotation:
+                        if (node.Layer == ContentLayer.Hidden)
+                            displayText = (EnglishOutput ? "**Hidden text**: " : "**非表示文字**: ") + displayText;
+                        if (ExtensionString(node, "pdf_review_reason") is { } reason)
+                            displayText = reason == "PdfTableReconstructionFailed"
+                                ? EnglishOutput ? "Table reconstruction was incomplete; compare the source page." : "表を組み立てられませんでした。セルの対応を原本で確認してください。"
+                                : reason == "PdfHyphenationUncertain"
+                                ? EnglishOutput ? "Line-ending hyphens may be word breaks; compare the source page." : "行末のハイフンが単語の分割か確認してください。"
+                                : EnglishOutput ? "Column reading order was inferred; compare the source page." : "段組みの読み順を推定しました。原本と照合してください。";
                         WriteQuote(output, displayText);
                         break;
                     case NodeKind.CodeBlock when ExtensionRanges(node, "strike_ranges") is not null || ExtensionRanges(node, "underline_ranges") is not null ||
@@ -711,7 +735,7 @@ public sealed partial class ReadableMarkdownSerializer
         }
 
         WriteAggregatedSections(output, aggregated);
-        if (output.Length == 0) WriteHeading(output, 1, "ドキュメント");
+        if (output.Length == 0) WriteHeading(output, 1, EnglishOutput ? "Document" : "ドキュメント");
         return Finish(output);
     }
 
@@ -730,25 +754,25 @@ public sealed partial class ReadableMarkdownSerializer
         }
     }
 
-    private static void WriteAggregatedSections(StringBuilder output, AggregatedSections aggregated)
+    private void WriteAggregatedSections(StringBuilder output, AggregatedSections aggregated)
     {
         if (aggregated.FurnitureItems.Count > 0)
         {
-            WriteHeading(output, 3, "文書ヘッダー・フッター（参考）");
+            WriteHeading(output, 3, EnglishOutput ? "Document headers and footers (reference)" : "文書ヘッダー・フッター（参考）");
             foreach (var (label, text) in aggregated.FurnitureItems)
                 output.Append("- ").Append(label).Append(": ").AppendLine(InlineText(text));
             output.AppendLine();
         }
         if (aggregated.Footnotes.Count > 0)
         {
-            WriteHeading(output, 3, "脚注");
+            WriteHeading(output, 3, EnglishOutput ? "Footnotes" : "脚注");
             for (var index = 0; index < aggregated.Footnotes.Count; index++)
                 output.Append(index + 1).Append(". ").AppendLine(InlineText(aggregated.Footnotes[index]));
             output.AppendLine();
         }
         if (aggregated.Endnotes.Count > 0)
         {
-            WriteHeading(output, 3, "文末脚注");
+            WriteHeading(output, 3, EnglishOutput ? "Endnotes" : "文末脚注");
             for (var index = 0; index < aggregated.Endnotes.Count; index++)
                 output.Append(index + 1).Append(". ").AppendLine(InlineText(aggregated.Endnotes[index]));
             output.AppendLine();
@@ -931,7 +955,7 @@ public sealed partial class ReadableMarkdownSerializer
             .ThenBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
         if (images.Length == 0 && imageText.Length == 0 && charts.Length == 0) return;
 
-        if (images.Length > 0 || imageText.Length > 0) WriteHeading(output, 3, "埋め込み画像");
+        if (images.Length > 0 || imageText.Length > 0) WriteHeading(output, 3, EnglishOutput ? "Embedded images" : "埋め込み画像");
         var renderedTextIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var imageNode in images)
         {
@@ -946,7 +970,7 @@ public sealed partial class ReadableMarkdownSerializer
             WriteOcrDetails(output, DisplayText(textNode, NodeText(textNode).Trim()), textNode, partition);
         if (charts.Length > 0)
         {
-            WriteHeading(output, 3, "グラフ");
+            WriteHeading(output, 3, EnglishOutput ? "Charts" : "グラフ");
             foreach (var chart in charts) WriteChart(output, chart);
         }
     }
@@ -1525,6 +1549,25 @@ public sealed partial class ReadableMarkdownSerializer
 
     private void RenderRowGroup(StringBuilder output, IReadOnlyList<SheetRow> rows)
     {
+        // A new styled header after an actual blank band starts another table.
+        // Keeping two text-valued tables in one header hierarchy would repeat the
+        // first table's data as column names in every AI row block.
+        if (rows.Count >= 5 && IsHeaderRow(rows[0]))
+        {
+            var coveredThrough = rows.Take(3).SelectMany(row => row.Cells).Max(cell => cell.MaxRow);
+            var tabularPrefix = rows.Take(3).All(row => row.Cells.Count >= 2);
+            for (var split = 3; split < rows.Count; split++)
+            {
+                if (tabularPrefix && rows[split].Number - coveredThrough > 1 && IsHeaderRow(rows[split]))
+                {
+                    RenderRowGroup(output, rows.Take(split).ToArray());
+                    RenderRowGroup(output, rows.Skip(split).ToArray());
+                    return;
+                }
+                coveredThrough = Math.Max(coveredThrough, rows[split].Cells.Max(cell => cell.MaxRow));
+                tabularPrefix &= rows[split].Cells.Count >= 2;
+            }
+        }
         var leadingCells = rows[0].Cells.Where(cell => !string.IsNullOrWhiteSpace(cell.Text)).ToArray();
         var start = output.Length;
         if (rows.Count > 1 && leadingCells.Length == 1 && !leadingCells[0].IsOverlay &&
@@ -2317,36 +2360,12 @@ public sealed partial class ReadableMarkdownSerializer
         return true;
     }
 
-    private static bool IsRedundantTitle(SheetRow row, string documentTitle, string partitionId)
+    private static ReadableCell? FindSheetTitleCell(SheetRow row)
     {
-        if (row.Cells.Count != 1) return false;
-        var text = NormalizeComparison(PlainText(row.Cells[0].Text));
-        if (text.Length == 0) return false;
-        var title = NormalizeComparison(documentTitle);
-        var partition = NormalizeComparison(HumanizePartitionName(partitionId));
-        return StringComparer.OrdinalIgnoreCase.Equals(text, title) ||
-               StringComparer.OrdinalIgnoreCase.Equals(text, partition);
-    }
-
-    private string? FindWorkbookTitle(IEnumerable<DocumentPartition> partitions) =>
-        FindWorkbookTitleCell(partitions) is { } cell ? PlainText(cell.Text) : null;
-
-    private ReadableCell? FindWorkbookTitleCell(IEnumerable<DocumentPartition> partitions)
-    {
-        foreach (var partition in partitions)
-        {
-            var row = ReadRows(partition).FirstOrDefault();
-            if (row is null) continue;
-            // The first cell of a header row ("ID", "Item", ...) names a column, not the document. In
-            // a header the unmerged first cell has a neighbour right next to it, or within one spacer
-            // column when more headers follow. A title stands alone, is merged across, or is followed
-            // only by a note or number further away ("見積書 | | No.123", "Title ... Updated 2026-08-23").
-            var first = row.Cells[0];
-            var gap = row.Cells.Count > 1 ? row.Cells[1].Column - first.MaxColumn : int.MaxValue;
-            if (first.MaxColumn == first.Column && (gap == 1 || gap == 2 && row.Cells.Count >= 3)) return null;
-            if (PlainText(first.Text).Length <= 140) return first;
-        }
-        return null;
+        var first = row.Cells[0];
+        var gap = row.Cells.Count > 1 ? row.Cells[1].Column - first.MaxColumn : int.MaxValue;
+        if (first.MaxColumn == first.Column && (gap == 1 || gap == 2 && row.Cells.Count >= 3)) return null;
+        return PlainText(first.Text).Length <= 140 ? first : null;
     }
 
     // D08 readability pass: DocxAdapter.AddTable emits a nested w:tbl as an independent sibling
@@ -2469,7 +2488,7 @@ public sealed partial class ReadableMarkdownSerializer
 
     private sealed record NestedTableFolds(HashSet<string> FoldedChildIds, IReadOnlyDictionary<string, List<NestedTableSlot>> ChildrenByParentId);
 
-    private static void WriteArbitraryTable(StringBuilder output, IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    private void WriteArbitraryTable(StringBuilder output, IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
         if (rows.Count == 0) return;
         var (tableRows, noteRows) = SplitFullWidthNoteRows(rows);
@@ -2763,11 +2782,11 @@ public sealed partial class ReadableMarkdownSerializer
 
     // GFM has no colspan/rowspan. Preserve the visual grid width, but emit text only at a
     // merge origin; horizontal and vertical continuation coordinates are deliberately blank.
-    private static List<IReadOnlyList<string>> ExpandTableGrid(IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    private List<IReadOnlyList<string>> ExpandTableGrid(IReadOnlyList<IReadOnlyList<TableCell>> rows)
     {
         if (!TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _)) return [];
         return grid.Rows.Select(row => (IReadOnlyList<string>)row
-            .Select(slot => slot.IsContinuation ? string.Empty : slot.Origin.Text).ToArray()).ToList();
+            .Select(slot => slot.IsContinuation && !options.ExpandMergedCells ? string.Empty : slot.Origin.Text).ToArray()).ToList();
     }
 
     private static void WriteTable(StringBuilder output, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<string>> rows)
@@ -2832,7 +2851,7 @@ public sealed partial class ReadableMarkdownSerializer
     {
         if (string.IsNullOrWhiteSpace(text)) return;
         output.AppendLine("<details class=\"ocr-extraction\">")
-            .AppendLine("<summary>OCR抽出テキスト（クリックで展開）</summary>")
+            .AppendLine(EnglishOutput ? "<summary>OCR text (expand)</summary>" : "<summary>OCR抽出テキスト（クリックで展開）</summary>")
             .AppendLine();
         foreach (var line in text.Trim().Replace("\r\n", "\n", StringComparison.Ordinal).Replace("\r", "\n", StringComparison.Ordinal).Split('\n'))
             output.Append("> ").Append(line.Trim()).AppendLine("  ");
@@ -2848,19 +2867,21 @@ public sealed partial class ReadableMarkdownSerializer
                 OcrReviewMode.Summary => [],
                 _ => needsReview,
             };
-            output.AppendLine("OCR照合情報：信頼度はエンジンの推定値であり、正解率ではありません。識別子・品番・数値は原画像と照合してください。")
-                .AppendLine(CultureInfo.InvariantCulture, $"全{allRegions.Length}件、低信頼・信頼度不明{needsReview.Length}件、詳細表示{shown.Length}件。")
+            output.AppendLine(EnglishOutput ? "OCR review: confidence is an engine estimate, not accuracy. Compare identifiers and numbers with the source image."
+                    : "OCR照合情報：信頼度はエンジンの推定値であり、正解率ではありません。識別子・品番・数値は原画像と照合してください。")
+                .AppendLine(EnglishOutput ? $"Total {allRegions.Length}; low or unknown confidence {needsReview.Length}; shown {shown.Length}."
+                    : $"全{allRegions.Length}件、低信頼・信頼度不明{needsReview.Length}件、詳細表示{shown.Length}件。")
                 .AppendLine();
             if (shown.Length > 0)
-                output.AppendLine("| 行 | 認識文字 | 信頼度 | 原画像の位置 |")
+                output.AppendLine(EnglishOutput ? "| Line | Recognized text | Confidence | Source image position |" : "| 行 | 認識文字 | 信頼度 | 原画像の位置 |")
                     .AppendLine("| --- | --- | --- | --- |");
             foreach (var region in shown)
             {
                 var word = region.TryGetProperty("text", out var t) ? WithoutMarkers(t.GetString()) ?? "" : "";
                 var confidence = region.TryGetProperty("confidence", out var c) && c.ValueKind == JsonValueKind.Number && c.TryGetDouble(out var score) && double.IsFinite(score)
                     ? score : (double?)null;
-                var label = confidence is { } value ? value.ToString("P0", CultureInfo.InvariantCulture) + (value < .8 ? "（要照合）" : "") : "未提供";
-                var position = "未提供";
+                var label = confidence is { } value ? value.ToString("P0", CultureInfo.InvariantCulture) + (value < .8 ? EnglishOutput ? " (review)" : "（要照合）" : "") : EnglishOutput ? "not provided" : "未提供";
+                var position = EnglishOutput ? "not provided" : "未提供";
                 if (region.TryGetProperty("bounding_box", out var bbox) && bbox.ValueKind == JsonValueKind.Object &&
                     bbox.Deserialize<Geometry>() is { } box)
                 {
@@ -2876,7 +2897,7 @@ public sealed partial class ReadableMarkdownSerializer
                     else position = EscapeLiteral(position);
                 }
                 var line = region.TryGetProperty("line_number", out var lineNumber) && lineNumber.ValueKind == JsonValueKind.Number && lineNumber.TryGetInt32(out var number)
-                    ? number.ToString(CultureInfo.InvariantCulture) : "未提供";
+                    ? number.ToString(CultureInfo.InvariantCulture) : EnglishOutput ? "not provided" : "未提供";
                 output.Append("| ").Append(line).Append(" | ").Append(TableText(word)).Append(" | ").Append(label).Append(" | ").Append(position).AppendLine(" |");
             }
             output.AppendLine();
@@ -2900,11 +2921,11 @@ public sealed partial class ReadableMarkdownSerializer
     // P06: a native chart's c:title + c:ser category/value pairs, extracted by PptxAdapter into the
     // chart_title/chart_series extensions, become a bold title and one GFM table per series instead
     // of vanishing (the chart shape itself carries no text of its own).
-    private static void WriteChart(StringBuilder output, DocumentNode node)
+    private void WriteChart(StringBuilder output, DocumentNode node)
     {
         var title = ExtensionString(node, "chart_title");
         var rawType = ExtensionString(node, "chart_type");
-        var type = ChartTypeLabel(rawType);
+        var type = EnglishOutput ? rawType : ChartTypeLabel(rawType);
         if (!string.IsNullOrWhiteSpace(title))
         {
             output.Append("**").Append(EscapedInlineText(title)).Append("**");
@@ -2912,27 +2933,48 @@ public sealed partial class ReadableMarkdownSerializer
             output.AppendLine().AppendLine();
         }
         if (node.Extensions is null || !node.Extensions.TryGetValue("chart_series", out var seriesElement) || seriesElement.ValueKind != JsonValueKind.Array) return;
-        var seriesItems = seriesElement.EnumerateArray().ToArray();
-        output.Append("要約: ").Append(seriesItems.Length.ToString(CultureInfo.InvariantCulture)).AppendLine(" 系列のグラフです。");
+        var seriesItems = seriesElement.EnumerateArray().Select(series => new ChartSeriesData(
+            JsonString(series, "Name", "name"),
+            TryProperty(series, out var catElement, "Categories", "categories") && catElement.ValueKind == JsonValueKind.Array
+                ? catElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [],
+            TryProperty(series, out var valElement, "Values", "values") && valElement.ValueKind == JsonValueKind.Array
+                ? valElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [])).ToArray();
+        output.Append(EnglishOutput ? "Chart: " : "要約: ").Append(seriesItems.Length.ToString(CultureInfo.InvariantCulture))
+            .AppendLine(EnglishOutput ? " series." : " 系列のグラフです。");
+        var keys = new List<(string Category, int Occurrence, bool Synthetic)>();
+        var seen = new HashSet<(string Category, int Occurrence, bool Synthetic)>();
+        var columns = new List<Dictionary<(string Category, int Occurrence, bool Synthetic), string>>();
         foreach (var series in seriesItems)
         {
-            var categories = TryProperty(series, out var catElement, "Categories", "categories") && catElement.ValueKind == JsonValueKind.Array
-                ? catElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
-            var values = TryProperty(series, out var valElement, "Values", "values") && valElement.ValueKind == JsonValueKind.Array
-                ? valElement.EnumerateArray().Select(item => WithoutMarkers(item.GetString()) ?? string.Empty).ToArray() : [];
-            var name = JsonString(series, "Name", "name");
-            WriteChartSummary(output, string.IsNullOrWhiteSpace(name) ? "値" : name, categories, values, rawType);
+            var categories = series.Categories;
+            var values = series.Values;
+            var name = series.Name;
+            WriteChartSummary(output, string.IsNullOrWhiteSpace(name) ? EnglishOutput ? "Value" : "値" : name, categories, values, rawType);
             var rowCount = Math.Max(categories.Length, values.Length);
-            if (rowCount == 0) continue;
-            var headers = new[] { "カテゴリ", string.IsNullOrWhiteSpace(name) ? "値" : name };
-            var rows = Enumerable.Range(0, rowCount).Select(index => new[]
-                { index < categories.Length ? categories[index] : ChartCategory(categories, index),
-                  index < values.Length ? values[index] : string.Empty });
-            WriteTable(output, headers, rows);
+            var occurrences = new Dictionary<string, int>(StringComparer.Ordinal);
+            var column = new Dictionary<(string Category, int Occurrence, bool Synthetic), string>();
+            for (var index = 0; index < rowCount; index++)
+            {
+                var category = ChartCategory(categories, index);
+                var occurrence = occurrences.GetValueOrDefault(category) + 1;
+                occurrences[category] = occurrence;
+                var key = (category, occurrence, index >= categories.Length || string.IsNullOrWhiteSpace(categories[index]));
+                if (seen.Add(key)) keys.Add(key);
+                column[key] = index < values.Length ? values[index] : string.Empty;
+            }
+            columns.Add(column);
         }
+        if (keys.Count == 0) return;
+        output.AppendLine(); // A GFM table must be separated from the summary list.
+        var headers = new[] { EnglishOutput ? "Category" : "カテゴリ" }.Concat(seriesItems.Select(series =>
+            string.IsNullOrWhiteSpace(series.Name) ? EnglishOutput ? "Value" : "値" : series.Name)).ToArray();
+        WriteTable(output, headers, keys.Select(key => (IReadOnlyList<string>)new[] { key.Category }
+            .Concat(columns.Select(column => column.GetValueOrDefault(key, string.Empty))).ToArray()));
     }
 
-    private static void WriteChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories, IReadOnlyList<string> values, string? chartType)
+    private sealed record ChartSeriesData(string? Name, string[] Categories, string[] Values);
+
+    private void WriteChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories, IReadOnlyList<string> values, string? chartType)
     {
         var numeric = values.Select((display, index) =>
                 (Index: index, Display: display, Value: TryParseChartNumber(display, out var parsed) ? parsed : (double?)null))
@@ -2945,9 +2987,20 @@ public sealed partial class ReadableMarkdownSerializer
             return;
         }
 
+        if (categories.Count < 2 || !categories.All(IsTimeCategory)) return;
+
         var first = numeric[0]; var last = numeric[^1];
         var direction = last.Value > first.Value ? "増加" : last.Value < first.Value ? "減少" : "横ばい";
         var minimum = numeric.MinBy(item => item.Value); var maximum = numeric.MaxBy(item => item.Value);
+        if (EnglishOutput)
+        {
+            var trend = last.Value > first.Value ? "increased" : last.Value < first.Value ? "decreased" : "was unchanged";
+            output.Append("- ").Append(EscapedInlineText(name)).Append(": ").Append(trend).Append(" from ")
+                .Append(EscapedInlineText(first.Display)).Append(" (").Append(EscapedInlineText(ChartCategory(categories, first.Index)))
+                .Append(") to ").Append(EscapedInlineText(last.Display)).Append(" (").Append(EscapedInlineText(ChartCategory(categories, last.Index)))
+                .Append("); minimum ").Append(EscapedInlineText(minimum.Display)).Append(", maximum ").Append(EscapedInlineText(maximum.Display)).AppendLine(".");
+            return;
+        }
         output.Append("- ").Append(EscapedInlineText(name)).Append(": ").Append(EscapedInlineText(ChartCategory(categories, first.Index))).Append(" の ")
             .Append(EscapedInlineText(first.Display)).Append(" から ").Append(EscapedInlineText(ChartCategory(categories, last.Index))).Append(" の ")
             .Append(EscapedInlineText(last.Display)).Append(" へ ").Append(direction)
@@ -2955,19 +3008,23 @@ public sealed partial class ReadableMarkdownSerializer
             .Append(EscapedInlineText(maximum.Display)).AppendLine("。");
     }
 
-    private static void WriteCompositionChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories,
+    private static bool IsTimeCategory(string category) => Regex.IsMatch(category.Normalize(NormalizationForm.FormKC).Trim(),
+        @"^(?:\d{4}(?:年度?|[-/.]\d{1,2}(?:[-/.]\d{1,2})?)?|\d{1,2}月(?:\d{1,2}日)?|(?:\d{4}\s*)?Q[1-4]|[1-4]Q|第[1-4]四半期|Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)$",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    private void WriteCompositionChartSummary(StringBuilder output, string name, IReadOnlyList<string> categories,
         IReadOnlyList<(int Index, string Display, double Value)> numeric)
     {
         var minimum = numeric.MinBy(item => item.Value);
         var maximum = numeric.MaxBy(item => item.Value);
         var hasValidTotal = numeric.All(item => item.Value >= 0) && numeric.Sum(item => item.Value) > 0;
         var total = hasValidTotal ? numeric.Sum(item => item.Value) : 0;
-        output.Append("- ").Append(EscapedInlineText(name)).Append(": 最大 ")
+        output.Append("- ").Append(EscapedInlineText(name)).Append(EnglishOutput ? ": maximum " : ": 最大 ")
             .Append(EscapedInlineText(ChartCategory(categories, maximum.Index))).Append(' ').Append(EscapedInlineText(maximum.Display));
-        if (hasValidTotal) output.Append("（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append('）');
-        output.Append("、最小 ").Append(EscapedInlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(EscapedInlineText(minimum.Display));
-        if (hasValidTotal) output.Append("（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append('）');
-        output.AppendLine("。");
+        if (hasValidTotal) output.Append(EnglishOutput ? " (share " : "（全体の ").Append((maximum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append(EnglishOutput ? ')' : '）');
+        output.Append(EnglishOutput ? ", minimum " : "、最小 ").Append(EscapedInlineText(ChartCategory(categories, minimum.Index))).Append(' ').Append(EscapedInlineText(minimum.Display));
+        if (hasValidTotal) output.Append(EnglishOutput ? " (share " : "（全体の ").Append((minimum.Value / total).ToString("0.#%", CultureInfo.InvariantCulture)).Append(EnglishOutput ? ')' : '）');
+        output.AppendLine(EnglishOutput ? "." : "。");
     }
 
     private static string ChartCategory(IReadOnlyList<string> categories, int index) =>
@@ -3070,7 +3127,8 @@ public sealed partial class ReadableMarkdownSerializer
         var hasMediumConfidence = validation.Warnings.Any(warning => warning.Code == "VisualInferenceMediumConfidence");
         if (hasMediumConfidence)
         {
-            const string contract = "一部の接続は図形配置から推定されています。診断を確認してください。";
+            var contract = EnglishOutput ? "Some connections were inferred from shape positions; review the diagnostics."
+                : "一部の接続は図形配置から推定されています。診断を確認してください。";
             output.AppendLine("> ").AppendLine(contract).AppendLine();
             AddDiagnostic(new MarkdownDiagnostic("VisualSemanticProjectionPartial", contract,
                 MarkdownDiagnosticSeverity.Warning, node.Id + "\u001eMediumConfidence"));
@@ -3100,7 +3158,9 @@ public sealed partial class ReadableMarkdownSerializer
         // The shared projection is intentionally format-neutral. It keeps every recognized
         // node when a connector is unresolved and recognizes sequence layouts from participant
         // headers, lifelines, and horizontal messages in DOCX, PPTX, and vector PDF graphs.
-        var mermaid = ProjectVisualGraph(graph);
+        var mermaid = ExtensionBool(node, "visual_diagnostics_in_report") &&
+            !(graph.Edges ?? []).Any(edge => edge.SourceId is not null && edge.TargetId is not null)
+            ? null : ProjectVisualGraph(graph);
         if (mermaid is null)
         {
             foreach (var issue in validation.Errors)
@@ -3125,7 +3185,8 @@ public sealed partial class ReadableMarkdownSerializer
         if (quality is VisualGraphQuality.Partial or VisualGraphQuality.FallbackOnly || hasUnresolvedEdges)
             WritePartialVisualDetails(output, graph, node);
         else if (quality == VisualGraphQuality.HighConfidenceInferred)
-            output.AppendLine("> 視覚構造は配置情報から推定されたものであり、内容の意味を保証するものではありません。").AppendLine();
+            output.AppendLine(EnglishOutput ? "> Visual structure was inferred from layout; compare its meaning with the source."
+                : "> 視覚構造は配置情報から推定されたものであり、内容の意味を保証するものではありません。").AppendLine();
     }
 
     private void WritePartialVisualDetails(StringBuilder output, VisualGraph graph, DocumentNode node) =>
@@ -3140,11 +3201,8 @@ public sealed partial class ReadableMarkdownSerializer
     {
         if (ExtensionBool(node, "visual_diagnostics_in_report"))
         {
-            // Preserve unresolved connector labels and line styles, which are source content,
-            // while leaving primitive inventories and diagnostic messages in the report.
-            if (!(graph.Edges ?? []).Any(edge => edge is not null && (edge.SourceId is null || edge.TargetId is null))) return;
-            graph = graph with { Nodes = [], Paths = [], SourceItems = [], Diagnostics = [] };
-            partial = true;
+            output.AppendLine(EnglishOutput ? "> Compare this figure with the source document." : "> この図は原本を参照してください。").AppendLine();
+            return;
         }
         var result = VisualFallbackMarkdownWriter.Write(output, graph, partial,
             ExtensionInt(node, "visual_output_max_paths") ?? VisualFallbackMarkdownWriter.MaxItems,
@@ -3155,7 +3213,7 @@ public sealed partial class ReadableMarkdownSerializer
                 MarkdownDiagnosticSeverity.Warning, node.Id));
     }
 
-    private static void WriteVisualEdgeFallback(StringBuilder output, VisualGraph graph)
+    private void WriteVisualEdgeFallback(StringBuilder output, VisualGraph graph)
     {
         var labels = (graph.Nodes ?? []).Where(node => node is not null)
             .ToDictionary(node => node.Id, node => string.IsNullOrWhiteSpace(node.Label) ? "[unlabeled shape: " + node.Id + "]" : node.Label,
@@ -3163,7 +3221,7 @@ public sealed partial class ReadableMarkdownSerializer
         var edges = (graph.Edges ?? []).Where(edge => edge is not null && edge.SourceId is not null && edge.TargetId is not null)
             .OrderBy(edge => edge.Id, StringComparer.Ordinal).ToArray();
         if (edges.Length == 0) return;
-        output.AppendLine("### 図の接続関係").AppendLine();
+        output.AppendLine(EnglishOutput ? "### Figure connections" : "### 図の接続関係").AppendLine();
         foreach (var edge in edges)
         {
             var source = labels.TryGetValue(edge.SourceId!, out var sourceLabel) ? sourceLabel : edge.SourceId!;
@@ -3234,7 +3292,7 @@ public sealed partial class ReadableMarkdownSerializer
         return output.ToString().TrimEnd();
     }
 
-    private static void WriteStyledEdgeNote(StringBuilder output, VisualGraph graph, string mermaid)
+    private void WriteStyledEdgeNote(StringBuilder output, VisualGraph graph, string mermaid)
     {
         var sequence = mermaid.StartsWith("sequenceDiagram", StringComparison.Ordinal);
         if (!mermaid.Contains(sequence ? "-->>" : " -.-", StringComparison.Ordinal)) return;
@@ -3242,6 +3300,12 @@ public sealed partial class ReadableMarkdownSerializer
                 VisualLineStyles.IsKnown(edge.LineStyle))
             .Select(edge => edge.LineStyle!).Distinct(StringComparer.Ordinal).OrderBy(style => style, StringComparer.Ordinal).ToArray();
         if (styles.Length == 0) return;
+        if (EnglishOutput)
+        {
+            output.Append("> Line styles: dotted Mermaid connections represent ").Append(string.Join(", ", styles))
+                .AppendLine(" lines in the source.").AppendLine();
+            return;
+        }
         output.Append("> 線種の注記: ").Append(sequence ? "点線の矢印（-->>）" : "点線の接続（-.-）").Append("は原本で")
             .Append(string.Join("・", styles.Select(LineStyleName))).AppendLine("で描かれた線です。").AppendLine();
     }

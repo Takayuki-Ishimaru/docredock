@@ -321,6 +321,10 @@ class TestZipOddities(PackageFixture):
         for odd in ('parts\\0003.md', 'parts/0001.md\0', 'manifest.json\0x'):
             with self.subTest(name=odd):
                 archive = self.write_zip(self.entries_of(path) + [(odd, b'# odd\n')])
+                if os.name == 'nt' and '\\' in odd:
+                    # ZipInfo normalizes Windows separators while writing. Put the
+                    # malformed name into both raw ZIP headers so this tests reading it.
+                    archive.write_bytes(archive.read_bytes().replace(odd.replace('\\', '/').encode(), odd.encode()))
                 self.assertRaises(reader.PackageError, reader.open_package, archive)
                 self.assert_refused(archive, '--verify')
         with reader.open_package(self.zipped(path)) as package:
@@ -548,8 +552,9 @@ class TestPackageShapes(PackageFixture):
         # An unknown part id is refused before anything is verified or printed.
         self.assert_refused(path, '--verify', '--part', 'absent', says='unknown part id: absent')
         self.assert_refused(self.root / 'no-such-package', '--verify')
-        # Without the option the review does not change the result.
-        self.assertEqual((0, '# one\n', ''), self.run_cli(path, '--part', 'part-0001'))
+        # Stored review blocks body output by default.
+        self.assertEqual((11, ''), self.run_cli(path, '--part', 'part-0001')[:2])
+        self.assertEqual((0, '# one\n', ''), self.run_cli(path, '--part', 'part-0001', '--allow-review'))
 
 
 class TestReviewFindings(PackageFixture):

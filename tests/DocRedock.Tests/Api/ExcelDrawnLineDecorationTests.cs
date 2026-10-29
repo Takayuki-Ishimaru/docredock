@@ -854,7 +854,8 @@ public sealed class ExcelDrawnLineDecorationTests : IDisposable
         // The title is centered in the 252 pt merged area, about 95 pt wide: a line across the whole area covers it.
         var source = Workbook("merged.xlsx", sheet, Line(2, 0, 0, 0, StrikeY, ColumnA + ColumnB + ColumnC), mergeCells: merge);
         var (markdown, _) = await Export(source);
-        Assert.Contains("# ~~Cancelled order \\#12~~\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# merged\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("### ~~Cancelled order \\#12~~\n", markdown, StringComparison.Ordinal);
         // A line over the first column only, 126 pt of the area, ends short of the centered text: a partial strike.
         var partial = Extract(Workbook("mergedpart.xlsx", sheet, Line(2, 0, 0, 0, StrikeY, 100), mergeCells: merge));
         Assert.Equal("unplaced", Decoration(partial, "A1"));

@@ -113,6 +113,21 @@ public sealed partial class PdfBoxedColumnReadingOrderTests
         Assert.Equal(expected, RightBox(sheet => sheet.Text(318, 690, 10, first).Text(318, 678, 10, second)));
     }
 
+    [Theory]
+    [InlineData("\u00AD", "compile", false)]
+    [InlineData("-", "com-pile", true)]
+    public void Discretionary_soft_hyphen_is_removed_but_ambiguous_ascii_hyphen_is_retained_for_review(string hyphen, string word, bool review)
+    {
+        var first = FilledLine(10, 224, "the first line has words ending in", ending: " com" + hyphen);
+        var sheet = TwoFrames(new Sheet());
+        Paragraph(sheet, 58, 690, 10, 12, 224, LeftSentence);
+        sheet.Text(318, 690, 10, first).Text(318, 678, 10, "pile the remaining words.");
+        var result = PdfTextExtractor.Extract(sheet.Pdf());
+        Assert.Contains(word, result.Text);
+        Assert.Equal(review, result.Diagnostics!.Any(diagnostic => diagnostic.StartsWith("PdfHyphenationUncertain:")));
+        Assert.DoesNotContain("\u00AD", result.Text, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void A_word_of_Latin_text_ends_where_East_Asian_text_begins()
     {

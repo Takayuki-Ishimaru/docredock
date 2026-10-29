@@ -364,11 +364,11 @@ public sealed class DocumentServiceTests
         Assert.All(visualGraph.Edges, edge => Assert.Equal(VisualEdgeResolution.Unresolved, edge.Resolution));
         Assert.Equal(VisualGraphQuality.FallbackOnly, visualGraph.Quality);
         var readable = await File.ReadAllTextAsync(markdown);
-        Assert.Contains("```mermaid\nflowchart", readable, StringComparison.Ordinal);
-        Assert.Contains("[Start]", readable, StringComparison.Ordinal);
-        Assert.Contains("[End]", readable, StringComparison.Ordinal);
+        Assert.DoesNotContain("```mermaid", readable, StringComparison.Ordinal);
+        Assert.Contains("Start", readable, StringComparison.Ordinal);
+        Assert.Contains("End", readable, StringComparison.Ordinal);
         Assert.DoesNotContain(" --> ", readable, StringComparison.Ordinal);
-        Assert.Contains("接続先未確定", readable, StringComparison.Ordinal);
+        Assert.Contains("Compare this figure with the source document.", readable, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1096,7 +1096,7 @@ public sealed class DocumentServiceTests
     }
 
     [Fact]
-    public async Task Ocr_disabled_does_not_invoke_an_available_rasterizer()
+    public async Task Ocr_disabled_can_still_rasterize_for_source_review()
     {
         var root = TempDirectory();
         try
@@ -1106,7 +1106,7 @@ public sealed class DocumentServiceTests
             var provider = new FakePdfRasterizer();
             await new DocumentService(new FakeOcrEngine(), provider).ExportReadableAsync(
                 new ReadableDocumentExportOptions(source, Path.Combine(root, "scan.md"), EnableOcr: false));
-            Assert.Equal(0, provider.Calls);
+            Assert.Equal(1, provider.Calls);
         }
         finally { Directory.Delete(root, recursive: true); }
     }

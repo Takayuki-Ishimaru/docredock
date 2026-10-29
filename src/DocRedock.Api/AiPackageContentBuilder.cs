@@ -50,6 +50,9 @@ public static class AiPackageContentBuilder
                 $"Target characters must be at least {MinimumTargetCharacters}.");
         cancellationToken.ThrowIfCancellationRequested();
 
+        options = options with { ExpandMergedCells = true };
+        if (graph.Format == DocumentFormatKind.Xlsx && string.IsNullOrWhiteSpace(options.Title))
+            options = options with { Title = Path.GetFileNameWithoutExtension(sourceFileName) };
         var policy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
         var isWorkbook = graph.Format == DocumentFormatKind.Xlsx;
         graph = graph with { Partitions = graph.Partitions.Select(p => p with

@@ -6,6 +6,7 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using DocRedock.Api;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
@@ -64,6 +65,7 @@ public partial class MainWindow : Window
     private DateTimeOffset? _lastUpdateCheckAt;
     private Uri? _updateReleaseUri;
     private bool _componentsInitialized;
+    private bool _suppressDropZonePickerClick;
     private CancellationTokenSource? _previewCancellation;
     private string? _latestAiPackagePath;
     private IReadOnlyList<RevisionSharingReview> _latestSharingReviews = [];
@@ -103,6 +105,8 @@ public partial class MainWindow : Window
         _capabilityReporter = capabilityReporter ?? new CapabilityReporter();
         _pdfRasterizerCapability = pdfRasterizerCapability ?? DescribeRasterizer;
         InitializeComponent();
+        AddHandler(KeyDownEvent, OnWindowKeyDown, RoutingStrategies.Tunnel, handledEventsToo: true);
+        ExportDropZone.AddHandler(KeyDownEvent, OnWindowKeyDown, RoutingStrategies.Tunnel, handledEventsToo: true);
         Closed += (_, _) => _previewCancellation?.Cancel();
         _componentsInitialized = true;
         CurrentVersionText.Text = $"v{UpdateCheckService.FormatVersion(UpdateCheckService.GetCurrentVersion())}";
@@ -130,8 +134,25 @@ public partial class MainWindow : Window
 
     private static string ExportShortcutLabel => OperatingSystem.IsMacOS() ? "⌘↩" : "Ctrl+Enter";
 
+    private static string InferenceModeJapanese(VisualInferenceMode mode) => mode switch
+    {
+        VisualInferenceMode.NativeOnly => "元文書の接続だけを使用",
+        VisualInferenceMode.Balanced => "復元を優先",
+        _ => "安全を優先",
+    };
+
+    private static string FidelityJapanese(string fidelity) => fidelity switch
+    {
+        "F0" => "原本をそのまま復元（F0）",
+        "F1" => "対応する編集を反映（F1）",
+        "F3" => "PDFを再描画して復元（F3）",
+        "FX" => "復元できません（FX）",
+        _ => fidelity,
+    };
+
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
+        if (e.Handled) return;
         var modifier = OperatingSystem.IsMacOS() ? KeyModifiers.Meta : KeyModifiers.Control;
         if (e.Key != Key.Enter || e.KeyModifiers != modifier || !ExportButton.IsEnabled || ExportModeRadio.IsChecked != true)
             return;
@@ -139,12 +160,20 @@ public partial class MainWindow : Window
         // Do not submit while the user is editing a text or selection field.
         if (e.Source is TextBox or ComboBox) return;
 
+        _suppressDropZonePickerClick = true;
+        Dispatcher.UIThread.Post(() => _suppressDropZonePickerClick = false, DispatcherPriority.Background);
         e.Handled = true;
         OnExport(null, new RoutedEventArgs());
     }
 
     private async void OnPickExportFile(object? sender, RoutedEventArgs e)
     {
+        if (_suppressDropZonePickerClick)
+        {
+            _suppressDropZonePickerClick = false;
+            return;
+        }
+        if (_exportBusy || _restoreBusy) return;
         var options = new FilePickerOpenOptions
         {
             Title = "変換する文書を選択",
@@ -154,6 +183,20 @@ public partial class MainWindow : Window
         var files = FilePickerOverride is not null
             ? await FilePickerOverride(options)
             : await StorageProvider.OpenFilePickerAsync(options);
+        if (files.Count > 0) SelectExportFiles(files);
+    }
+
+    internal async void SelectStartupFiles(IEnumerable<string> arguments)
+    {
+        var files = new List<IStorageFile>();
+        foreach (var argument in arguments)
+        {
+            if (string.IsNullOrWhiteSpace(argument) || !File.Exists(argument) ||
+                !IsSupportedSourceExtension(Path.GetExtension(argument)))
+                continue;
+            if (await StorageProvider.TryGetFileFromPathAsync(new Uri(Path.GetFullPath(argument))) is { } file)
+                files.Add(file);
+        }
         if (files.Count > 0) SelectExportFiles(files);
     }
 
@@ -294,10 +337,12 @@ public partial class MainWindow : Window
         if (!_componentsInitialized) return;
         var readable = RoundTripExportRadio.IsChecked != true;
         ReadableOptionsPanel.IsVisible = readable;
+        ContentPolicyPanel.IsVisible = readable;
         SidecarOptionsPanel.IsVisible = !readable;
         RoundTripWarningText.IsVisible = !readable;
         AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
         EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+        ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         SchedulePackagePreview();
         SaveSettings();
         UpdateButtons();
@@ -362,7 +407,8 @@ public partial class MainWindow : Window
             var options = new ReadableDocumentExportOptions(source, "unused.md", ContentPolicy: SelectedContentPolicy(),
                 ShowFormulas: ShowFormulasCheckBox.IsChecked == true, IncludeSvgPreviews: IncludeSvgCheckBox.IsChecked == true,
                 IncludeDiagrams: IncludeDiagramsCheckBox.IsChecked == true, InferenceMode: SelectedInferenceMode(),
-                Revisions: SelectedRevisions(), AllowRevisionSharing: RevisionSharingConsent.IsChecked == true);
+                Revisions: SelectedRevisions(), AllowRevisionSharing: RevisionSharingConsent.IsChecked == true,
+                ExpandMergedCells: true, OcrAuto: true);
             var partOptions = new AiPackagePartOptions((int)(PackageTargetCharacters.Value ?? 12000), TableRowBlocksCheckBox.IsChecked == true);
             PackagePreviewText.Text = "分割の予想を計算しています…";
             await Task.Delay(300, cancellation.Token);
@@ -423,6 +469,7 @@ public partial class MainWindow : Window
                     zipAiPackage: AiPackageFormComboBox.SelectedIndex == 1,
                     tableRowBlocks: TableRowBlocksCheckBox.IsChecked == true,
                     targetCharacters: (int)(PackageTargetCharacters.Value ?? 12000),
+                    expandMergedCells: ExpandMergedCellsCheckBox.IsChecked == true,
                     revisions: SelectedRevisions(), allowRevisionSharing: RevisionSharingConsent.IsChecked == true));
             }
 
@@ -448,9 +495,9 @@ public partial class MainWindow : Window
                 message: string.Join(Environment.NewLine, results.Select(result => result.AiPackagePath is not null
                     ? result.ExportSummary
                     : result.IsReadable
-                    ? $"Markdown: {result.MarkdownPath}（推定: {result.InferenceMode}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
-                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}サイドカー: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "zip" : "ディレクトリ")}） 推定: {result.InferenceMode}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}")),
-                fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? results[0].Fidelity : "複数形式",
+                    ? $"Markdown: {result.MarkdownPath}（接続の推定: {InferenceModeJapanese(result.InferenceMode)}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
+                    : $"Markdown: {result.MarkdownPath}{Environment.NewLine}復元情報: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "ZIP" : "フォルダー")}） 接続の推定: {InferenceModeJapanese(result.InferenceMode)}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}")),
+                fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? FidelityJapanese(results[0].Fidelity) : "複数形式",
                 diagnostics: results.SelectMany(result => result.Diagnostics).ToArray());
         }
         catch (OperationCanceledException)
@@ -498,7 +545,7 @@ public partial class MainWindow : Window
                 success
                     ? $"{result.Format.ToUpperInvariant()}ファイルを生成しました。内容を対応するアプリで確認してください。\n{result.OutputPath}"
                     : "DocRedockの安全性チェックにより、この変更は適用されませんでした。",
-                result.Fidelity,
+                FidelityJapanese(result.Fidelity),
                 result.Diagnostics);
         }
         catch (OperationCanceledException)
@@ -805,7 +852,8 @@ public partial class MainWindow : Window
         ResultTableText.IsVisible = false;
         ResultEvaluationText.IsVisible = false;
         ResultHiddenText.IsVisible = false;
-        ResultKickerText.Text = "PROCESSING";
+        ResultRevisionText.IsVisible = false;
+        ResultKickerText.Text = "処理中";
         ResultTitleText.Text = "処理しています";
         ResultMessageText.Text = message;
         AutomationProperties.SetHelpText(ResultPanel, message);
@@ -857,10 +905,15 @@ public partial class MainWindow : Window
         ResultCountsText.IsVisible = counts.Length > 0;
         ResultReviewText.IsVisible = warning;
         ResultReviewText.Text = warning ? ReviewSummaryText(review, diagnostics) : "";
+        ResultRevisionText.IsVisible = false;
+        ResultRevisionText.Text = "";
         if (success && _latestSharingReviews.Any(sharing => sharing.Required))
         {
-            ResultReviewText.Text += "変更履歴を含みます。削除内容・著者・日時の共有可否を確認してください。";
-            ResultReviewText.IsVisible = true;
+            var includesDeletedText = _latestSharingReviews.Any(sharing => sharing.Required && sharing.DeletedTextIncluded);
+            ResultRevisionText.Text = includesDeletedText
+                ? "変更履歴の削除した文字を含みます。削除内容・著者・日時を共有してよいか確認してください。"
+                : "変更履歴を含みます。著者・日時を共有してよいか確認してください。";
+            ResultRevisionText.IsVisible = true;
             ResultTitleText.Text = "保存は完了しました・変更履歴の共有確認が必要です";
         }
         ResultOcrText.IsVisible = ocrReviewItems > 0;
@@ -876,7 +929,7 @@ public partial class MainWindow : Window
         ResultHiddenText.Text = hidden;
         ResultMessageText.Text = message;
         AutomationProperties.SetHelpText(ResultPanel, string.Join(" ", new[]
-            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultOcrText.Text, tables, evaluation, hidden, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
+            { ResultTitleText.Text, counts, ResultReviewText.Text, ResultRevisionText.Text, ResultOcrText.Text, tables, evaluation, hidden, message }.Where(text => !string.IsNullOrWhiteSpace(text))));
         OperationProgressBar.IsVisible = false;
         ResultFidelityText.Text = fidelity ?? string.Empty;
         ResultFidelityText.IsVisible = !string.IsNullOrWhiteSpace(fidelity);
@@ -939,7 +992,7 @@ public partial class MainWindow : Window
 
     private static string? HiddenContentLabel(string code) => code switch
     {
-        "DocxHiddenTextExcluded" => "Wordの非表示・削除済みの文字",
+        "DocxHiddenTextExcluded" => "Wordの非表示文字",
         "XlsxHiddenSheetExcluded" => "Excelの非表示シートのセル",
         "XlsxHiddenRowExcluded" => "Excelの非表示行のセル",
         "XlsxHiddenColumnExcluded" => "Excelの非表示列のセル",
@@ -1351,6 +1404,7 @@ public partial class MainWindow : Window
             TableRowBlocksCheckBox.IsChecked = settings.TableRowBlocks == true;
             PackageTargetCharacters.Value = settings.TargetCharacters is >= 128 and <= 1000000 ? settings.TargetCharacters : 12000;
             RevisionsComboBox.SelectedIndex = settings.Revisions switch { "final" => 1, "markup" => 2, "reject" => 3, _ => 0 };
+            ExpandMergedCellsCheckBox.IsChecked = settings.ExpandMergedCells == true;
             if (settings.OcrEnabled is not null) OcrToggle.IsChecked = settings.OcrEnabled;
             if (!string.IsNullOrWhiteSpace(settings.OcrLanguages)) OcrLanguagesTextBox.Text = settings.OcrLanguages;
             if (settings.PdfFallback is not null) PdfFallbackToggle.IsChecked = settings.PdfFallback;
@@ -1371,6 +1425,7 @@ public partial class MainWindow : Window
             SidecarOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked == true;
             AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
             EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+            ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         }
         catch (JsonException) { }
         catch (IOException) { }
@@ -1388,7 +1443,8 @@ public partial class MainWindow : Window
                 EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
                 (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
                 (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence",
-                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked, (int)(PackageTargetCharacters.Value ?? 12000), SelectedRevisions())));
+                AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked, (int)(PackageTargetCharacters.Value ?? 12000), SelectedRevisions(),
+                ExpandMergedCellsCheckBox.IsChecked)));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1418,7 +1474,7 @@ public partial class MainWindow : Window
         string? OcrReview = null,
         bool? AiPackage = null,
         bool? ZipAiPackage = null,
-        bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null);
+        bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null, bool? ExpandMergedCells = null);
 
     private static void ShowError(TextBlock control, string message)
     {

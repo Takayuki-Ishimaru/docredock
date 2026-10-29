@@ -25,6 +25,24 @@ public sealed class PdfTableContinuationTests
         Assert.Equal(markdown, serializer.Serialize(graph));
     }
 
+    [Fact]
+    public void Repeated_page_numbers_are_furniture_and_do_not_interrupt_table_continuation()
+    {
+        var extraction = PdfTextExtractor.Extract(Document(
+            Table(45, 800, "Name", "A") + "\n" + Text(270, 20, "- 1 -"),
+            Table(720, 800, "Name", "B") + "\n" + Text(270, 20, "- 2 -")));
+        Assert.All(extraction.Pages, page => Assert.Single(page.Regions, region => region.IsPageFurniture));
+        var graph = PdfDocumentGraphProjection.CreateGraph(extraction, "0123456789abcdef");
+        Assert.Equal(2, graph.Nodes.Count(node => node.Layer == ContentLayer.Furniture));
+        var serializer = new ReadableMarkdownSerializer();
+        var markdown = serializer.Serialize(graph);
+        Assert.Equal(1, serializer.RenderedTables);
+        Assert.DoesNotContain("- 1 -", markdown);
+        Assert.DoesNotContain("- 2 -", markdown);
+        Assert.Contains("| A | 100 |", markdown);
+        Assert.Contains("| B | 100 |", markdown);
+    }
+
     [Theory]
     [InlineData("header")]
     [InlineData("columns")]

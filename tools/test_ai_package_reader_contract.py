@@ -103,6 +103,8 @@ class FlagCombinations(EvoFixture):
         self.assertEqual(['review required: read review.md before giving this package to a model'],
                          err.splitlines())
         code, out, err = self.run_cli(package, '--verify', '--search', 'Cost')
+        self.assertEqual((11, ''), (code, out))
+        code, out, err = self.run_cli(package, '--verify', '--search', 'Cost', '--allow-review')
         self.assertEqual((0, ''), (code, err))
         self.assertIn('part-0003', out)
 
@@ -145,7 +147,7 @@ class FlagCombinations(EvoFixture):
     def test_search_json_reports_problems_and_no_text(self):
         package = self.copy_of('schema-2.1')
         (package / 'parts/0005.md').unlink()
-        (package / 'review.md').write_text('changed review page\n', encoding='utf-8')
+        (package / 'review.md').write_bytes(b'changed review page\n')
         code, out, err = self.run_cli(package, '--verify', '--search', 'Cost', '--json')
         self.assertEqual((1, ''), (code, err))
         document = json.loads(out)

@@ -608,7 +608,8 @@ public sealed class StrikethroughRecognitionTests : IDisposable
             fonts: "<font><sz val=\"11\"/></font><font><b/><sz val=\"11\"/></font><font><strike/><sz val=\"11\"/></font>",
             cellXfs: "<xf fontId=\"0\"/><xf fontId=\"1\"/><xf fontId=\"2\"/>");
         var (markdown, _) = await Export(source);
-        Assert.StartsWith("# ~~取消済みの見積書~~\n", markdown, StringComparison.Ordinal);
+        Assert.StartsWith("# struck-outside\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("### ~~取消済みの見積書~~\n", markdown, StringComparison.Ordinal);
         // Written once, as the title; the heading keeps its place above the rows it heads.
         Assert.Single(System.Text.RegularExpressions.Regex.Matches(markdown, "取消済みの見積書"));
         Assert.Contains("\n### ~~1. 概要~~\n", markdown, StringComparison.Ordinal);

@@ -191,7 +191,8 @@ public sealed class AiPackageContentBuilderTests
         var whole = new ReadableMarkdownSerializer().Serialize(workbook);
         var sheets = Build(workbook, target: 128);
         Assert.Equal(2, sheets.Count);
-        Assert.All(sheets, part => Assert.StartsWith("# Quality evaluation\n", part.Markdown, StringComparison.Ordinal));
+        Assert.All(sheets, part => Assert.StartsWith("# report\n", part.Markdown, StringComparison.Ordinal));
+        Assert.Contains("### Quality evaluation", sheets[0].Markdown, StringComparison.Ordinal);
         Assert.Contains("2018-01-01", sheets[1].Markdown, StringComparison.Ordinal);
         Assert.EndsWith(whole[whole.IndexOf("## Reference", StringComparison.Ordinal)..].TrimEnd(), sheets[1].Markdown.TrimEnd(), StringComparison.Ordinal);
         Assert.Equal(whole.Split('\n').Count(line => line == "Quality evaluation"), sheets.Sum(part => part.Markdown.Split('\n').Count(line => line == "Quality evaluation")));

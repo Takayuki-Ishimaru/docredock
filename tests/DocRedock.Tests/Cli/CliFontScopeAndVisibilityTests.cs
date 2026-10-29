@@ -25,7 +25,7 @@ public sealed class CliFontScopeAndVisibilityTests : IDisposable
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter(), new DocRedock.Api.DocumentService(null, null, discoverPdfRasterizer: false));
         var markdown = Path.Combine(root, Path.GetFileNameWithoutExtension(fixture) + options.Length + ".md");
-        var exit = await app.RunAsync(["export", PdfFormXObjectFixtureTests.FixturePath(fixture), "--output", markdown, "--ocr", "off", .. options]);
+        var exit = await app.RunAsync(["export", "--verbose", PdfFormXObjectFixtureTests.FixturePath(fixture), "--output", markdown, "--ocr", "off", .. options]);
         return (exit, stdout.ToString(), await File.ReadAllTextAsync(markdown));
     }
 

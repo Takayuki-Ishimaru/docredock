@@ -292,7 +292,7 @@ public sealed class PdfFormXObjectContentTests
 
         Assert.False(result.Pages[0].IsImageOnly);
         Assert.Equal("ONLY_IN_FORM", result.Text);
-        Assert.DoesNotContain(result.Diagnostics!, d => d.StartsWith("PdfRasterizerUnavailable", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Diagnostics!, d => d.StartsWith("PdfNativeTextUnavailable", StringComparison.Ordinal));
     }
 
     [Fact]

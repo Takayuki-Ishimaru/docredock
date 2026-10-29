@@ -16,7 +16,7 @@ reader does not know) instead of being read in part.
 
 Usage:
     python3 docs/examples/ai_package_reader.py PACKAGE [--verify] [--part PART_ID | --search TEXT]
-                                               [--fail-on-review] [--json]
+                                               [--allow-review] [--fail-on-review] [--json]
 
 Checks run before anything is printed. --verify prints "files ok" when every
 listed file matches its size and SHA-256, the package holds no other file and
@@ -34,7 +34,8 @@ Exit codes: 0 success; 1 --verify found a file missing, changed, refused or not
 listed; 2 the package cannot be read (not a package directory or ZIP, an
 ambiguous ZIP, unsupported schema, malformed JSON, manifest, source index or
 report, a manifest path that would leave the package, unknown part id); 3
---fail-on-review and report.json says the conversion needs review; 141 the
+--fail-on-review and report.json says the conversion needs review; 11 body output
+requires review (read review.md, then use --allow-review); 141 the
 output pipe was closed early (as by head).
 """
 
@@ -1088,8 +1089,15 @@ def search_parts(package, manifest, text, contents=None):
     for part in manifest["parts"]:
         data = contents.get(part["path"])
         markdown = _decode(package.read_bytes(part["path"]) if data is None else data, part["path"])
-        lines = [(number, line) for number, line in enumerate(_lines(markdown), 1)
-                 if query in _searchable(line) or query in _plain(line)]
+        source_lines = _lines(markdown)
+        metadata_end = 0
+        if len(source_lines) > 1 and source_lines[0].startswith("# ") and source_lines[1].startswith("ソース: "):
+            metadata_end = 1
+            while metadata_end < len(source_lines) and source_lines[metadata_end]:
+                metadata_end += 1
+        lines = [(number, line) for number, line in enumerate(source_lines, 1)
+                 if not 1 < number <= metadata_end and
+                 (query in _searchable(line) or query in _plain(line))]
         if lines:
             matches.append((part, lines))
     return matches
@@ -1209,6 +1217,7 @@ def _silence_stdout():
 
 def _run(package, args):
     manifest = load_manifest(package)
+    body_review_guard = (args.part is not None or args.search is not None) and not args.allow_review
     part = None
     if args.part is not None:
         part = next((item for item in manifest["parts"] if item["id"] == args.part), None)
@@ -1219,7 +1228,7 @@ def _run(package, args):
     paths = [part["path"]] if part else []
     if args.search is not None:
         paths += [item["path"] for item in manifest["parts"]]
-    if args.verify or args.json or args.fail_on_review or args.require_hidden_review:
+    if args.verify or args.json or args.fail_on_review or args.require_hidden_review or body_review_guard:
         paths.append(manifest["report"])
     if manifest["source_index"] and (args.verify or (args.json and part)):
         paths.append(manifest["source_index"])
@@ -1242,7 +1251,7 @@ def _run(package, args):
         index, review = _check_contents(package, manifest, contents)
         if part is None and args.search is None and not args.json:
             _say("files ok")
-    elif args.json or args.fail_on_review or args.require_hidden_review:
+    elif args.json or args.fail_on_review or args.require_hidden_review or body_review_guard:
         review = read_review(package, manifest, contents.get(manifest["report"]))
     # None without --require-hidden-review, so the JSON keeps the report's own state alone; with it,
     # whether the hidden-content policy stops this package, which the JSON must agree with.
@@ -1250,11 +1259,11 @@ def _run(package, args):
     if args.require_hidden_review:
         hidden_required = (review["hidden_content_included"] is True or
                            (review["hidden_content_included"] is None and manifest["content_policy"] == "complete"))
-    if ((args.fail_on_review or args.require_hidden_review) and review["required"]) or hidden_required:
+    if ((args.fail_on_review or args.require_hidden_review or body_review_guard) and review["required"]) or hidden_required:
         if args.json:
             _print_json(_document_json(manifest, args.verify, review, hidden_required))
         print("review required: read %s before giving this package to a model" % manifest["review"], file=sys.stderr)
-        return 3
+        return 3 if args.fail_on_review or args.require_hidden_review else 11
     if part is not None:
         data = contents.get(part["path"])
         if data is None:
@@ -1304,6 +1313,7 @@ def main(argv=None):
         prog="ai_package_reader.py", description="Inspect a DocRedock AI package.",
         epilog="exit codes: 0 ok, 1 --verify found a file missing, changed, refused or not listed, "
                "2 the package cannot be read, 3 review required (--fail-on-review), "
+               "11 review blocks body output (use --allow-review after review), "
                "141 the output pipe was closed early")
     parser.add_argument("package", help="package directory or .zip file")
     parser.add_argument("--verify", action="store_true",
@@ -1316,6 +1326,8 @@ def main(argv=None):
                             "escapes and underline, strikethrough and bold marks) with their matching lines")
     parser.add_argument("--fail-on-review", action="store_true",
                         help="exit 3 instead of printing when report.json says the conversion needs review")
+    parser.add_argument("--allow-review", action="store_true",
+                        help="print part/search results after reviewing review.md (otherwise review blocks body output with exit 11)")
     parser.add_argument("--require-hidden-review", action="store_true",
                         help="verify the package and exit 3 before body output for stored review items or included hidden content (also for older complete packages without the flag)")
     parser.add_argument("--json", action="store_true",

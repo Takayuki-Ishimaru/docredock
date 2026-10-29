@@ -26,7 +26,7 @@ public sealed class CliAiPackageTests : IDisposable
             var source = AiPackageExportTests.WriteSource(root, "xlsx");
             var target = Path.Combine(root, "selected" + (form == "zip" ? ".zip" : ""));
             var output = new StringWriter(); var error = new StringWriter();
-            var exit = await App(output, error).RunAsync(["export", source, "--ai-package", form, "--output", target,
+            var exit = await App(output, error).RunAsync(["export", "--verbose", source, "--ai-package", form, "--output", target,
                 "--sheets", "Visible", "--content-policy", "sanitized", "--chunk-chars", "128", "--ocr", "off"]);
             Assert.True(exit is 0 or 1, error.ToString());
             Assert.Contains("AI package:", output.ToString());
@@ -56,7 +56,7 @@ public sealed class CliAiPackageTests : IDisposable
     {
         var source = AiPackageExportTests.WriteSource(root, "docx");
         var target = Path.Combine(root, "out");
-        var exit = await App(new(), new()).RunAsync(["export", source, "--output", target, .. options]);
+        var exit = await App(new(), new()).RunAsync(["export", "--verbose", source, "--output", target, .. options]);
         Assert.True(exit is 2 or 4);
         Assert.False(File.Exists(target)); Assert.False(Directory.Exists(target));
         Assert.Empty(Directory.GetFileSystemEntries(root, ".docredock-*"));
@@ -70,7 +70,7 @@ public sealed class CliAiPackageTests : IDisposable
         {
             var target = Path.Combine(root, rowBlocks ? "blocks" : "whole");
             var output = new StringWriter();
-            string[] options = ["export", source, "--ai-package", "dir", "--output", target, "--chunk-chars", "3000", "--ocr", "off"];
+            string[] options = ["export", "--verbose", source, "--ai-package", "dir", "--output", target, "--chunk-chars", "3000", "--ocr", "off"];
             var exit = await App(output, new StringWriter()).RunAsync(rowBlocks ? [.. options, "--table-row-blocks"] : options);
             Assert.Equal(0, exit);
             using var manifest = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(target, "manifest.json")));
@@ -101,20 +101,20 @@ public sealed class CliAiPackageTests : IDisposable
         await new MarkdownRenderer().RenderAsync("# Before\n\nOriginal body", RenderFormat.Docx, source);
         var target = Path.Combine(root, "out" + (form == "zip" ? ".zip" : ""));
         var app = App(new(), new());
-        Assert.Equal(0, await app.RunAsync(["export", source, "--ai-package", form, "--output", target, "--ocr", "off"]));
-        Assert.Equal(2, await app.RunAsync(["export", source, "--ai-package", form, "--output", target, "--ocr", "off"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", source, "--ai-package", form, "--output", target, "--ocr", "off"]));
+        Assert.Equal(2, await app.RunAsync(["export", "--verbose", source, "--ai-package", form, "--output", target, "--ocr", "off"]));
         var packageForm = form == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory;
         var original = AiPackageExportTests.ReadPackage(target, packageForm);
         var bad = Path.Combine(root, "bad.docx"); await File.WriteAllTextAsync(bad, "invalid archive");
-        var failed = await app.RunAsync(["export", bad, "--ai-package", form, "--output", target, "--force", "--ocr", "off"]);
+        var failed = await app.RunAsync(["export", "--verbose", bad, "--ai-package", form, "--output", target, "--force", "--ocr", "off"]);
         Assert.True(failed > 1);
         Assert.Equal(original["manifest.json"], AiPackageExportTests.ReadPackage(target, packageForm)["manifest.json"]);
         File.Delete(source);
         await new MarkdownRenderer().RenderAsync("# After\n\nUpdated body", RenderFormat.Docx, source);
-        Assert.Equal(0, await app.RunAsync(["export", source, "--ai-package", form, "--output", target, "--force", "--ocr", "off"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", source, "--ai-package", form, "--output", target, "--force", "--ocr", "off"]));
         Assert.Contains("Updated body", System.Text.Encoding.UTF8.GetString(AiPackageExportTests.ReadPackage(target, packageForm)["document.md"]));
         var before = await File.ReadAllBytesAsync(source);
-        Assert.Equal(2, await app.RunAsync(["export", source, "--ai-package", form, "--output", root, "--force", "--ocr", "off"]));
+        Assert.Equal(2, await app.RunAsync(["export", "--verbose", source, "--ai-package", form, "--output", root, "--force", "--ocr", "off"]));
         Assert.Equal(before, await File.ReadAllBytesAsync(source));
         Assert.Empty(Directory.GetFileSystemEntries(root, ".docredock-*"));
     }
@@ -125,9 +125,9 @@ public sealed class CliAiPackageTests : IDisposable
         var source = Path.Combine(root, "guide.docx");
         await new MarkdownRenderer().RenderAsync("Guide body", RenderFormat.Docx, source);
         var output = new StringWriter(); var app = App(output, new());
-        Assert.Equal(0, await app.RunAsync(["export", source, "--ai-package", "dir", "--ocr", "off"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", source, "--ai-package", "dir", "--ocr", "off"]));
         Assert.True(File.Exists(Path.Combine(root, "guide.ai-package", "document.md")));
-        Assert.Equal(0, await app.RunAsync(["export", "--help"]));
+        Assert.Equal(0, await app.RunAsync(["export", "--verbose", "--help"]));
         Assert.Contains("--ai-package dir|zip", output.ToString());
     }
 
@@ -149,7 +149,7 @@ public sealed class CliAiPackageTests : IDisposable
         try
         {
             var error = new StringWriter();
-            var exit = await App(new(), error).RunAsync(["export", Path.Combine(link, "source.docx"),
+            var exit = await App(new(), error).RunAsync(["export", "--verbose", Path.Combine(link, "source.docx"),
                 "--ai-package", form, "--output", real, "--force", "--ocr", "off"]);
             Assert.Equal(2, exit);
             Assert.Contains("refusing to overwrite the source", error.ToString());
@@ -175,7 +175,7 @@ public sealed class CliAiPackageTests : IDisposable
                 var output = new StringWriter();
                 var error = new StringWriter();
                 string[] options = [.. form is null ? [] : new[] { "--ai-package", form }, .. flag ? new[] { "--fail-on-review" } : []];
-                var exit = await App(output, error).RunAsync(["export", V031EvaluationRegressionTests.Fixture(name), "--output", target,
+                var exit = await App(output, error).RunAsync(["export", "--verbose", V031EvaluationRegressionTests.Fixture(name), "--output", target,
                     "--ocr", "off", .. options]);
                 Assert.True(exit == (flag && reviewed ? 11 : 0), $"{name} {form} {flag}: {exit} {output} {error}");
                 Assert.Equal(flag && reviewed, output.ToString().Contains("Review required:", StringComparison.Ordinal));
@@ -186,7 +186,7 @@ public sealed class CliAiPackageTests : IDisposable
                 Assert.Equal(reviewed, await AiPackageManifestReader.ReadReviewRequiredAsync(target, manifest));
             }
         var help = new StringWriter();
-        Assert.Equal(0, await App(help, new()).RunAsync(["export", "--help"]));
+        Assert.Equal(0, await App(help, new()).RunAsync(["export", "--verbose", "--help"]));
         Assert.Contains("[--fail-on-review]", help.ToString(), StringComparison.Ordinal);
     }
 }

@@ -428,7 +428,7 @@ public sealed class CliUndecodableTextTests : IDisposable
         await File.WriteAllBytesAsync(source, pdf);
         var stdout = new StringWriter();
         var app = new CliApplication(stdout, new StringWriter(), new DocumentService(null, null, discoverPdfRasterizer: false));
-        var exit = await app.RunAsync(["export", source, "--output", Path.Combine(root, "out.md"), "--ocr", "off", "--force", .. options]);
+        var exit = await app.RunAsync(["export", source, "--output", Path.Combine(root, "out.md"), "--ocr", "off", "--force", "--verbose", .. options]);
         return (exit, stdout.ToString());
     }
 
