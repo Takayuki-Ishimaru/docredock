@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DocRedock.Api;
@@ -13,7 +12,7 @@ public sealed class PdfRasterizerParallelRegressionTests
     [Fact]
     public async Task Six_pages_overlap_within_the_process_bound_and_finish_without_hanging()
     {
-        using var fixture = new FakeRasterizer("valid");
+        using var fixture = new FakeRasterizer("overlap");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
         var pages = await fixture.Provider.RasterizeAsync(fixture.Input, [6, 5, 4, 3, 2, 1], new(), deadline.Token);
 
@@ -111,15 +110,7 @@ public sealed class PdfRasterizerParallelRegressionTests
         var pages = await fixture.Provider.RasterizeAsync(fixture.Input, [1, 2, 3, 4, 5, 6], new());
         Assert.Equal(6, pages.Count);
         Assert.InRange(fixture.PeakConcurrency, 2, 3);
-        // Compare measured child lifetimes instead of an absolute wall-clock limit:
-        // unrelated tests may occupy the machine during this test.
-        var spans = fixture.Calls().GroupBy(call => call.GetProperty("page").GetInt32())
-            .Select(group => (Start: group.Min(call => call.GetProperty("t").GetDouble()),
-                End: group.Max(call => call.GetProperty("t").GetDouble()))).ToArray();
-        var sequentialWork = spans.Sum(span => span.End - span.Start);
-        var overlappingWork = spans.Max(span => span.End) - spans.Min(span => span.Start);
-        Assert.True(sequentialWork > overlappingWork * 1.2,
-            $"process lifetimes did not overlap enough: sum={sequentialWork.ToString(CultureInfo.InvariantCulture)}, span={overlappingWork.ToString(CultureInfo.InvariantCulture)}");
+        Assert.True(fixture.ObservedOverlap);
     }
 
     private static bool IsRunning(int pid)
@@ -149,6 +140,7 @@ public sealed class PdfRasterizerParallelRegressionTests
 
         public string Input { get; }
         public PdftoppmPdfRasterizer Provider { get; }
+        public bool ObservedOverlap => File.Exists(Path.ChangeExtension(log, ".overlap"));
 
         /// <summary>Highest number of fake processes that were running at the same time.</summary>
         public int PeakConcurrency => Peak(Complete(log).Select(line => JsonSerializer.Deserialize<Line>(line)!));
@@ -183,12 +175,16 @@ public sealed class PdfRasterizerParallelRegressionTests
 
         private static IEnumerable<string> Complete(string path)
         {
-            if (!File.Exists(path)) return [];
+            // Children append to per-pid files because on Windows two processes appending to one
+            // file can overwrite each other's records; read the base file and every per-pid file.
             // A child may still hold its append handle; share with the writer and keep only
             // newline-terminated records so a half-written line is never parsed.
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(stream);
-            return reader.ReadToEnd().Split('\n').SkipLast(1).Where(line => !string.IsNullOrWhiteSpace(line)).ToArray();
+            var lines = new List<string>();
+            foreach (var file in Directory.EnumerateFiles(Path.GetDirectoryName(path)!, Path.GetFileName(path) + "*"))
+                using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(stream))
+                    lines.AddRange(reader.ReadToEnd().Split('\n').SkipLast(1).Where(line => !string.IsNullOrWhiteSpace(line)));
+            return lines;
         }
 
         private static int Peak(IEnumerable<Line> lines)
@@ -222,7 +218,7 @@ public sealed class PdfRasterizerParallelRegressionTests
         {
             [JsonPropertyName("event")] public string Event { get; set; } = "";
             [JsonPropertyName("page")] public int Page { get; set; }
-            [JsonPropertyName("t")] public double T { get; set; }
+            [JsonPropertyName("t")] public long T { get; set; }
             [JsonPropertyName("pid")] public int Pid { get; set; }
             [JsonPropertyName("output_directory")] public string? OutputDirectory { get; set; }
         }
@@ -236,9 +232,29 @@ public sealed class PdfRasterizerParallelRegressionTests
             image = output + ".png"
 
             def record(path, event):
-                with open(path, "a", encoding="utf-8") as stream:
-                    stream.write(json.dumps({"event": event, "page": page, "pid": os.getpid(), "t": time.monotonic(),
-                                             "output_directory": str(pathlib.Path(output).parent)}) + "\n")
+                entry = {"event": event, "page": page, "pid": os.getpid(), "t": time.perf_counter_ns(),
+                         "output_directory": str(pathlib.Path(output).parent)}
+                # Concurrent children append to per-pid files: on Windows two processes appending
+                # to one file can overwrite each other's records.
+                with open(path + "." + str(os.getpid()), "a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(entry) + "\n")
+
+            def wait_for_other_page():
+                # A serial rasterizer can never see the other page's marker before
+                # this page removes its own. A shared latch releases both pages.
+                overlap = pathlib.Path(log).with_suffix(".overlap")
+                marker = overlap.with_suffix(f".ready-{page}")
+                peer = overlap.with_suffix(f".ready-{3 - page}")
+                marker.touch()
+                try:
+                    deadline = time.monotonic() + 8
+                    while not overlap.exists() and time.monotonic() < deadline:
+                        if peer.exists():
+                            overlap.touch()
+                            break
+                        time.sleep(0.02)
+                finally:
+                    marker.unlink()
 
             def chunk(kind, data):
                 return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
@@ -251,12 +267,13 @@ public sealed class PdfRasterizerParallelRegressionTests
             record(log, "start")
             written = False
             try:
+                if mode in ("overlap", "slow") and page in (1, 2):
+                    wait_for_other_page()
                 if mode == "wait":
                     time.sleep(60)
                 elif mode == "mixed" and page == 4:
                     sys.exit(9)
                 elif mode == "slow":
-                    time.sleep(0.4)
                     write_png(2, 3)
                 elif mode == "oversized":
                     write_png(100000, 100000)

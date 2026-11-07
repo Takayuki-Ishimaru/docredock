@@ -57,9 +57,9 @@ public sealed partial class DocxReadabilityTests
             Assert.Contains("added row", finalText);
             var visible = await adapter.ExtractAsync(source, new(ShowTrackedRevisions: true));
             var markdown = new ReadableMarkdownSerializer().Serialize(visible.Graph);
-            Assert.Contains("~~removed row~~", markdown);
+            Assert.Contains("<del>removed row</del>", markdown);
             Assert.Contains("<ins>added row</ins>", markdown);
-            Assert.Contains("~~removed cell~~", markdown);
+            Assert.Contains("<del>removed cell</del>", markdown);
             Assert.Contains("<ins>added cell</ins>", markdown);
             Assert.Contains("行を削除", markdown); Assert.Contains("セルを追加", markdown);
             Assert.Contains("セル結合: cont → rest", markdown);

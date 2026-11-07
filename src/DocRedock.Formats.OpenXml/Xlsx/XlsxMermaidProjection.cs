@@ -1384,7 +1384,13 @@ internal static class XlsxMermaidProjection
     private static Direction ArrowDirection(string value) => value.Contains('←') || value.Contains('◀') ? Direction.Left :
         value.Contains('→') || value.Contains('▶') ? Direction.Right : value.Contains('↑') ? Direction.Up : Direction.Down;
     private static bool ContainsColumn(Region lane, double column) => column >= lane.MinColumn && column <= lane.MaxColumn;
-    private static bool ContainsAny(string value, params string[] candidates) => candidates.Any(candidate => value.Contains(candidate, StringComparison.OrdinalIgnoreCase));
+    // Asked of every cell of a sheet: a loop, not a closure for each call.
+    private static bool ContainsAny(string value, params string[] candidates)
+    {
+        foreach (var candidate in candidates)
+            if (value.Contains(candidate, StringComparison.OrdinalIgnoreCase)) return true;
+        return false;
+    }
     private static string Label(string value) => value.Replace("\r\n", "\n", StringComparison.Ordinal).Replace('\r', '\n').Replace("\n", "<br/>", StringComparison.Ordinal)
         .Replace("<<", "«", StringComparison.Ordinal).Replace(">>", "»", StringComparison.Ordinal)
         .Replace("  ", " ", StringComparison.Ordinal).Replace("\"", "'", StringComparison.Ordinal).Trim().Replace(" <br/> ", "<br/>", StringComparison.Ordinal);

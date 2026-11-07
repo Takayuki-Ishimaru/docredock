@@ -242,7 +242,15 @@ public static partial class PdfTextExtractor
     /// <see cref="Codes"/> says what its codes stand for without a ToUnicode map, and
     /// <see cref="Encoding"/> what a simple font's <c>/Encoding</c> makes of them (null without one).</summary>
     private sealed record PdfFontResource(string Identity, int? ToUnicodeObject, bool Vertical, PdfGlyphWidths? Widths = null,
-        PdfFontCodes Codes = PdfFontCodes.Latin1, PdfFontEncoding? Encoding = null, bool Japan1Identity = false, string Dictionary = "");
+        PdfFontCodes Codes = PdfFontCodes.Latin1, PdfFontEncoding? Encoding = null, bool Japan1Identity = false, string Dictionary = "")
+    {
+        /// <summary>The font's family, its name without the subset tag and the style ("YuGothic" of
+        /// "ABCDEF+YuGothic-Bold"); null when it has no name.</summary>
+        public string? Family { get; init; }
+
+        /// <summary>Whether the font is a bold one: its name says so, or its descriptor's weight or ForceBold flag.</summary>
+        public bool Bold { get; init; }
+    }
 
     /// <summary>Reads each font a resource dictionary names once, and remembers under which names
     /// the document's resource dictionaries offer it - the evidence a name that cannot be resolved
@@ -302,8 +310,38 @@ public static partial class PdfTextExtractor
                   Regex.IsMatch(cmapBody, @"/WMode\s+1\b", RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
             // Only a simple font's codes are read through an /Encoding; a composite font's /Encoding is a CMap.
             var simple = ReadName(EntryValue(entries, "Subtype")) is "Type1" or "MMType1" or "TrueType" or "Type3";
+            var (family, bold) = ReadStyle(entries);
             return new PdfFontResource(identity, toUnicode, vertical, vertical ? null : ReadGlyphWidths(entries, objects), ReadCodes(entries, encoding),
-                simple ? ReadFontEncoding(encoding, objects) : null, IsJapan1Identity(entries, encoding), dictionary);
+                simple ? ReadFontEncoding(encoding, objects) : null, IsJapan1Identity(entries, encoding), dictionary) { Family = family, Bold = bold };
+        }
+
+        // The family and the weight of a font, from its name (a composite font's is its descendant's too) and its
+        // descriptor: a heading set at the size of the body is told from it by these.
+        private (string? Family, bool Bold) ReadStyle(IReadOnlyList<(string Key, string Value)> entries)
+        {
+            var name = ReadName(EntryValue(entries, "BaseFont")) ?? string.Empty;
+            if (name.Length > 7 && name[6] == '+') name = name[7..];
+            // "ABCDEF+YuGothic-Light", "Arial-BoldMT", "Century,Bold": a style after a comma or a hyphen is no part of the family;
+            // "MS-Gothic" and "MS-Mincho" are two families.
+            var family = System.Text.RegularExpressions.Regex.Replace(name.Split(',', 2)[0],
+                @"-(?:(?:Extra|Ultra|Semi|Demi)?(?:Bold|Light|Black|Heavy|Thin|Medium|Book|Regular|Roman|Italic|Oblique|W\d)+(?:MT)?|MT|PSMT)$", "",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            var bold = System.Text.RegularExpressions.Regex.IsMatch(name, @"Bold|Black|Heavy|Semibold|SemiBold|Demi|[-_,]W[6-9]\b|-B$",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            var descriptorEntries = ResolveDictionary(EntryValue(entries, "FontDescriptor"), objects) is { } descriptor ? ReadDictionaryEntries(descriptor) : null;
+            if (descriptorEntries is null && ResolveValue(EntryValue(entries, "DescendantFonts"), objects) is { } descendants &&
+                System.Text.RegularExpressions.Regex.Match(descendants, @"(\d+)\s+0\s+R", System.Text.RegularExpressions.RegexOptions.CultureInvariant) is { Success: true } reference &&
+                objects.TryGetValue(int.Parse(reference.Groups[1].Value, CultureInfo.InvariantCulture), out var descendant))
+            {
+                var descendantEntries = ReadDictionaryEntries(descendant);
+                descriptorEntries = ResolveDictionary(EntryValue(descendantEntries, "FontDescriptor"), objects) is { } inner ? ReadDictionaryEntries(inner) : null;
+            }
+            if (descriptorEntries is not null)
+            {
+                if (ReadNumber(ResolveValue(EntryValue(descriptorEntries, "FontWeight"), objects)) is >= 600) bold = true;
+                if (ReadNumber(ResolveValue(EntryValue(descriptorEntries, "Flags"), objects)) is { } flags && ((long)flags & (1L << 18)) != 0) bold = true;
+            }
+            return (family.Length == 0 ? null : family, bold);
         }
 
         private bool IsJapan1Identity(IReadOnlyList<(string Key, string Value)> font, string? encoding)
@@ -383,7 +421,7 @@ public static partial class PdfTextExtractor
     /// codes that no map, CMap or encoding in the file turns into characters.
     /// <see cref="Widths"/> are known only for a font resolved where it is used.</summary>
     private sealed record PdfFontBinding(string ResourceName, PdfToUnicodeMap? Map, bool Vertical, bool Ambiguous, PdfGlyphWidths? Widths = null,
-        bool Undecodable = false);
+        bool Undecodable = false, string? Family = null, bool Bold = false);
 
     /// <summary>Gives every font a page or form really uses its own name in the expanded content.
     /// Inlining forms merges several resource scopes into one stream; after the rewrite, a
@@ -414,7 +452,7 @@ public static partial class PdfTextExtractor
                 if (font.Encoding is { } encoding) map = PdfToUnicodeMap.WithEncoding(map, encoding);
                 else if (map is not null && font.Codes == PdfFontCodes.Glyphs) map = map.ReportingMissingCodes();
                 binding = new PdfFontBinding(name, map ?? (font.Codes == PdfFontCodes.Utf16 ? PdfToUnicodeMap.Utf16 : null),
-                    font.Vertical, false, font.Widths, Undecodable: map is null && font.Codes == PdfFontCodes.Glyphs);
+                    font.Vertical, false, font.Widths, Undecodable: map is null && font.Codes == PdfFontCodes.Glyphs, Family: font.Family, Bold: font.Bold);
             }
             else
             {

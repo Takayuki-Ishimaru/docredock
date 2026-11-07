@@ -24,7 +24,7 @@ public sealed class V039ReviewRegressionTests : IDisposable
             "--allow-pdf", "--ocr", "off", "--fail-on-review", "--json"]);
         Assert.Equal(11, code);
         using var json = System.Text.Json.JsonDocument.Parse(output.ToString());
-        Assert.True(json.RootElement.GetProperty("review_required").GetBoolean());
+        Assert.True(json.RootElement.GetProperty("results")[0].GetProperty("review_required").GetBoolean());
     }
 
     [Fact]

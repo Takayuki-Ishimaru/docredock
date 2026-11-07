@@ -6,15 +6,28 @@ namespace DocRedock.Formats.OpenXml.Xlsx;
 public sealed partial class XlsxAdapter
 {
     private sealed record ConditionalName(string Name, string? Sheet, string Formula);
-    private sealed record ConditionalWorkbook(IReadOnlyDictionary<string, IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord>> Sheets,
+    private sealed record ConditionalWorkbook(IReadOnlyDictionary<string, List<XlsxCellRecord>> SheetCells,
         IReadOnlyList<ConditionalName> Names, bool Date1904)
     {
         private int remaining = 10_000_000;
+        private readonly Dictionary<string, IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord>> sheets = new(StringComparer.OrdinalIgnoreCase);
+
+        public bool HasSheet(string name) => SheetCells.ContainsKey(name);
+
+        // A sheet's cells by place, made the first time a formula refers to the sheet: most workbooks have no conditional
+        // format that refers to a cell, and their sheets are never looked up.
+        public bool TryGetSheet(string name, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord>? cells)
+        {
+            if (sheets.TryGetValue(name, out cells)) return true;
+            if (!SheetCells.TryGetValue(name, out var list)) return false;
+            cells = sheets[name] = list.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex));
+            return true;
+        }
         public DateTime Clock { get; } = DateTime.Now;
         public bool Spend(int work) { remaining -= work; return remaining >= 0; }
     }
 
-    private static List<ConditionalName> ReadConditionalNames(Dictionary<string, byte[]> package, WorkbookInfo workbook)
+    private static List<ConditionalName> ReadConditionalNames(IReadOnlyDictionary<string, byte[]> package, WorkbookInfo workbook)
     {
         if (!package.TryGetValue("xl/workbook.xml", out var bytes)) return [];
         var names = new List<ConditionalName>();
@@ -75,9 +88,9 @@ public sealed partial class XlsxAdapter
                     if (!targetSheet.EndsWith('\'') || targetSheet.Length < 2) return null;
                     targetSheet = targetSheet[1..^1].Replace("''", "'", StringComparison.Ordinal);
                 }
-                if (targetSheet.Contains(':') || !workbook.Sheets.ContainsKey(targetSheet)) return null;
+                if (targetSheet.Contains(':') || !workbook.HasSheet(targetSheet)) return null;
             }
-            if (!workbook.Sheets.TryGetValue(targetSheet, out var cells)) return null;
+            if (!workbook.TryGetSheet(targetSheet, out var cells)) return null;
             var ends = text.Split(':');
             if (coordinateKind is not null)
                 return ends.Length == 1 && Reference(text) is { } coordinate

@@ -299,7 +299,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         if (options.IncludeFootnotes && archive.GetEntry("word/endnotes.xml") is { } endnotes)
             AddEndnotes(await ReadEntryAsync(endnotes, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
         if (options.IncludeFootnotes && archive.GetEntry("word/comments.xml") is { } comments)
-            AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles);
+            AddComments(await ReadEntryAsync(comments, cancellationToken).ConfigureAwait(false), nodes, ref ordinal, hiddenStyles, doc);
 
         hiddenStyles.Decorations.AddDiagnostics(diagnostics);
         foreach (var node in nodes.Where(node => node.Extensions?.ContainsKey(ReviewExtensionKeys.FinalTableGridUnresolved) == true))
@@ -579,6 +579,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             WithStyleDecorationReview(extensions, paragraph, hiddenStyles);
         }
         AddRevisionExtensions(extensions, paragraph, hiddenStyles);
+        AddCommentIds(extensions, paragraph);
         if (extensions.ContainsKey("revision_changes")) projectionLayer = layer;
         if (headingLevel > 0) extensions["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
         if (isDocumentTitle) extensions["document_title"] = JsonSerializer.SerializeToElement(true);
@@ -1819,6 +1820,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         var struckCells = new List<object[]>();
         var underlinedCells = new List<object[]>();
         var insertedCells = new List<object[]>();
+        var deletedCells = new List<object[]>();
         // Tracks, per logical grid column, which (row, cell) in `grid` is the still-open vMerge
         // origin so a later continuation cell can add itself to that origin's RowSpan count.
         var openVerticalMerges = new Dictionary<int, (int RowIndex, int CellIndex)>();
@@ -1849,6 +1851,8 @@ public sealed partial class DocxAdapter : IFormatProbe
                         underlinedCells.Add([grid.Count, rowCells.Count, marked.Underlined.Select(range => new[] { range.Start, range.End }).ToArray()]);
                     if (marked.Inserted.Count > 0)
                         insertedCells.Add([grid.Count, rowCells.Count, marked.Inserted.Select(range => new[] { range.Start, range.End }).ToArray()]);
+                    if (marked.Deleted.Count > 0)
+                        deletedCells.Add([grid.Count, rowCells.Count, marked.Deleted.Select(range => new[] { range.Start, range.End }).ToArray()]);
                 }
                 if (isContinuation)
                 {
@@ -1894,12 +1898,14 @@ public sealed partial class DocxAdapter : IFormatProbe
             extensions["nested_table_line_offset"] = JsonSerializer.SerializeToElement(nested.LineOffset);
         }
         AddRevisionExtensions(extensions, table, hiddenStyles);
+        AddCommentIds(extensions, table);
         WithStyleDecorationReview(extensions, table, hiddenStyles);
         if (CountMathRoots(table) > 0) extensions["math_linear"] = JsonSerializer.SerializeToElement(true);
         // Table cells are plain text; the readable projection marks these ranges as struck through and underlined.
         if (struckCells.Count > 0) extensions["strike_cells"] = JsonSerializer.SerializeToElement(struckCells);
         if (underlinedCells.Count > 0) extensions["underline_cells"] = JsonSerializer.SerializeToElement(underlinedCells);
         if (insertedCells.Count > 0) extensions["insert_cells"] = JsonSerializer.SerializeToElement(insertedCells);
+        if (deletedCells.Count > 0) extensions["delete_cells"] = JsonSerializer.SerializeToElement(deletedCells);
         // A paragraph of a cell that a drawn line strikes in part: which characters it strikes could not be determined.
         if (drawn is not null && table.Elements(W + "tr").SelectMany(row => row.Elements(W + "tc")).SelectMany(CellBlocks)
                 .Any(block => block.Name == W + "p" && drawn.Paragraphs.TryGetValue(block, out var decoration) && decoration.StrikeUnplaced))
@@ -2700,8 +2706,7 @@ public sealed partial class DocxAdapter : IFormatProbe
     // after a nested table, and they would otherwise show up as stray blank lines.
     // CellText with the characters its struck-through and underlined runs hold, as [start, end) offsets
     // into it.
-    private static (string Text, IReadOnlyList<(int Start, int End)> Struck, IReadOnlyList<(int Start, int End)> Underlined,
-        IReadOnlyList<(int Start, int End)> Inserted) MarkedCellText(
+    private static DocxMarkedText MarkedCellText(
         XElement cell, DocxHiddenStyles hiddenStyles, DocxDrawnLines? drawn = null)
     {
         var paragraphs = CellBlocks(cell).Where(block => block.Name == W + "p").Select(block => MarkedParagraphText(block, hiddenStyles,
@@ -2712,6 +2717,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         var struck = new List<(int Start, int End)>();
         var underlined = new List<(int Start, int End)>();
         var inserted = new List<(int Start, int End)>();
+        var deleted = new List<(int Start, int End)>();
         for (var index = 0; index < paragraphs.Count; index++)
         {
             if (index > 0) text.Append('\n');
@@ -2719,22 +2725,23 @@ public sealed partial class DocxAdapter : IFormatProbe
             struck.AddRange(paragraphs[index].Struck.Select(range => (range.Start + offset, range.End + offset)));
             underlined.AddRange(paragraphs[index].Underlined.Select(range => (range.Start + offset, range.End + offset)));
             inserted.AddRange(paragraphs[index].Inserted.Select(range => (range.Start + offset, range.End + offset)));
+            deleted.AddRange(paragraphs[index].Deleted.Select(range => (range.Start + offset, range.End + offset)));
             text.Append(paragraphs[index].Text);
         }
-        return (text.ToString(), struck, underlined, inserted);
+        return new(text.ToString(), struck, underlined, inserted, deleted);
     }
 
     // ParagraphText with the characters of struck-through runs (w:strike, w:dstrike) and of underlined
     // runs (w:u other than none): the same walk, so the offsets fall on its text. The underline of a
     // hyperlink's runs is how a link looks, not emphasis, and is left out.
-    private static (string Text, List<(int Start, int End)> Struck, List<(int Start, int End)> Underlined,
-        List<(int Start, int End)> Inserted) MarkedParagraphText(
+    private static DocxMarkedText MarkedParagraphText(
         XContainer container, DocxHiddenStyles hiddenStyles, DocxDrawnDecoration? drawn = null)
     {
         var output = new StringBuilder();
         var struck = new List<(int Start, int End)>();
         var underlined = new List<(int Start, int End)>();
         var inserted = new List<(int Start, int End)>();
+        var deleted = new List<(int Start, int End)>();
         static void Mark(List<(int Start, int End)> ranges, int start, int end)
         {
             if (ranges.Count > 0 && ranges[^1].End == start) ranges[^1] = (ranges[^1].Start, end);
@@ -2751,7 +2758,9 @@ public sealed partial class DocxAdapter : IFormatProbe
                 if (output.Length > start && element.Parent is { } run && run.Name == W + "r")
                 {
                     var properties = hiddenStyles.Decorations.Resolve(run);
-                    if (properties.Strike || hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element)) Mark(struck, start, output.Length);
+                    // A deletion is marked as one, apart from text that is formatted struck through.
+                    if (properties.Strike) Mark(struck, start, output.Length);
+                    if (hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element)) Mark(deleted, start, output.Length);
                     if (properties.Underline && !run.Ancestors(W + "hyperlink").Any()) Mark(underlined, start, output.Length);
                     if (hiddenStyles.ShowTrackedRevisions && IsInsertedRevision(element)) Mark(inserted, start, output.Length);
                 }
@@ -2766,7 +2775,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         // A line drawn over the whole paragraph strikes or underlines all of it (DocxAdapter.DrawnLines.cs).
         if (drawn?.Strike == true && output.Length > 0) { struck.Clear(); struck.Add((0, output.Length)); }
         if (drawn?.Underline == true && output.Length > 0) { underlined.Clear(); underlined.Add((0, output.Length)); }
-        return (output.ToString(), struck, underlined, inserted);
+        return new(output.ToString(), struck, underlined, inserted, deleted);
     }
 
     private static string CellText(XElement cell, DocxHiddenStyles hiddenStyles)
@@ -2918,19 +2927,56 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     // D17: word/comments.xml was never read, so a reviewer comment's text disappeared entirely.
     // w:author is captured as a comment_author extension so readable can label who wrote it.
-    private static void AddComments(byte[] bytes, List<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles)
+    // The ids of the comments whose reference mark (where Word shows the comment) lies in a paragraph or a table: the readable
+    // projection writes each comment right after the block it is about.
+    private static void AddCommentIds(Dictionary<string, JsonElement> extensions, XElement block)
+    {
+        var ids = block.Descendants(W + "commentReference").Select(reference => (string?)reference.Attribute(W + "id"))
+            .OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
+        if (ids.Length > 0) extensions["comment_ids"] = JsonSerializer.SerializeToElement(ids);
+    }
+
+    // The text each comment is about: what lies between its range start and end in the body, at most MaxCommentTargetLength.
+    private const int MaxCommentTargetLength = 80;
+
+    private static Dictionary<string, string> CommentTargets(XDocument? body)
+    {
+        var targets = new Dictionary<string, StringBuilder>(StringComparer.Ordinal);
+        var open = new HashSet<string>(StringComparer.Ordinal);
+        if (body?.Root is null) return [];
+        foreach (var element in body.Root.Descendants())
+        {
+            if (element.Name == W + "commentRangeStart" && (string?)element.Attribute(W + "id") is { } start)
+            {
+                open.Add(start);
+                targets.TryAdd(start, new StringBuilder());
+            }
+            else if (element.Name == W + "commentRangeEnd" && (string?)element.Attribute(W + "id") is { } end) open.Remove(end);
+            else if (element.Name == W + "t" && open.Count > 0)
+                foreach (var id in open)
+                    if (targets[id].Length < MaxCommentTargetLength + 1) targets[id].Append(element.Value);
+        }
+        return targets.Where(item => item.Value.ToString().Trim().Length > 0).ToDictionary(item => item.Key, item =>
+        {
+            var text = item.Value.ToString().Trim();
+            return text.Length > MaxCommentTargetLength ? text[..MaxCommentTargetLength] + "…" : text;
+        }, StringComparer.Ordinal);
+    }
+
+    private static void AddComments(byte[] bytes, List<DocumentNode> nodes, ref int ordinal, DocxHiddenStyles hiddenStyles, XDocument? body = null)
     {
         var xml = SafeXml.LoadDocument(bytes);
         if (hiddenStyles.FinalRevisionView) ApplyFinalRevisionView(xml);
+        var targets = CommentTargets(body);
         foreach (var comment in xml.Descendants(W + "comment"))
         {
             var commentId = (string?)comment.Attribute(W + "id") ?? ordinal.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var anchor = new SourceAnchor("docx", "/word/comments.xml", [new("comment_id", commentId)], ordinal);
             var id = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, anchor);
             var author = (string?)comment.Attribute(W + "author");
-            var extensions = string.IsNullOrWhiteSpace(author)
-                ? null
-                : new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["comment_author"] = JsonSerializer.SerializeToElement(author) };
+            var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["comment_id"] = JsonSerializer.SerializeToElement(commentId) };
+            if (!string.IsNullOrWhiteSpace(author)) extensions["comment_author"] = JsonSerializer.SerializeToElement(author);
+            if (targets.TryGetValue(commentId, out var target)) extensions["comment_target"] = JsonSerializer.SerializeToElement(target);
             nodes.Add(new(id, NodeKind.Comment, null, ordinal++, ContentLayer.Metadata, new TextNodeContent(ParagraphText(comment, hiddenStyles)), anchor,
                 Editability: NodeEditability.Protected, Provenance: [new(EvidenceKind.Native)], Extensions: extensions));
         }
@@ -3235,7 +3281,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 // The linearized equation is one inline unit, marked Code so the readable
                 // projection renders ^, _ and / verbatim instead of as Markdown syntax.
                 runs.Add(new TextRun(LinearizeMath(element), Code: true,
-                    Strike: hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element),
+                    Deleted: hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element),
                     Inserted: hiddenStyles.ShowTrackedRevisions && IsInsertedRevision(element)));
                 continue;
             }
@@ -3244,22 +3290,23 @@ public sealed partial class DocxAdapter : IFormatProbe
             if (IsHiddenRun(run, hiddenStyles)) continue;
             var properties = ReadRunProperties(run);
             var linkTarget = ResolveEnclosingHyperlinkTarget(run, relationships);
-            var strike = properties.Strike || hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(run);
+            var strike = properties.Strike;
             var inserted = hiddenStyles.ShowTrackedRevisions && IsInsertedRevision(run);
+            var deleted = hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(run);
             foreach (var child in run.Elements())
             {
                 if (child.Name == W + "t" || hiddenStyles.ShowTrackedRevisions && child.Name == W + "delText")
                     runs.Add(new TextRun(child.Value, properties.StyleId, properties.Bold, properties.Italic, properties.Underline, strike, properties.Code,
-                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted));
+                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted, Deleted: deleted));
                 else if (child.Name is var name && (name == W + "br" || name == W + "cr"))
                 {
                     if (IsPageBreakElement(child)) continue; // D18: represented solely by its own PageBreak marker node.
                     runs.Add(new TextRun("\n", properties.StyleId, properties.Bold, properties.Italic, properties.Underline, strike, properties.Code, TextRunKind.LineBreak,
-                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted));
+                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted, Deleted: deleted));
                 }
                 else if (child.Name == W + "tab")
                     runs.Add(new TextRun("\t", properties.StyleId, properties.Bold, properties.Italic, properties.Underline, strike, properties.Code, TextRunKind.Tab,
-                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted));
+                        LinkTarget: linkTarget, Color: properties.Color, HighlightColor: properties.HighlightColor, Inserted: inserted, Deleted: deleted));
             }
         }
         return runs;

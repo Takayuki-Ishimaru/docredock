@@ -16,9 +16,9 @@ DocRedockは、Word・Excel・PowerPoint・PDFの内容を、お手元のPCでAI
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.3.10 Public Betaの対応状況
+## v0.3.11 Public Betaの対応状況
 
-v0.3.10では、PDFの読み順と原本確認、Officeの表・グラフの出力、CLIの複数文書変換を改善しました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
+v0.3.11では、PDFとOfficeの変換、AI向けパッケージの分割と検索を改善し、MCPクライアントから利用できるようにしました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
 
 | 機能 | 扱い |
 | --- | --- |
@@ -28,15 +28,15 @@ v0.3.10では、PDFの読み順と原本確認、Officeの表・グラフの出�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.10リリースノート](release-docs/RELEASE_NOTES_v0.3.10.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.11リリースノート](release-docs/RELEASE_NOTES_v0.3.11.md)へ集約します。
 
 ## 30秒で使う
 
 1. [Releases](https://github.com/Takayuki-Ishimaru/docredock/releases)からOSとCPUアーキテクチャに合うパッケージを取得します。
 2. DocRedockを起動します。
 3. DOCX、XLSX、PPTX、PDFのいずれかをドロップします。
-4. **閲覧用Markdown**と**表示中の内容のみ（推奨）**を選びます。
-5. 変換後のMarkdown、診断、生成されたassetを確認してからAIツールで利用します。
+4. **閲覧用Markdown**と**表示中の内容（推奨）**を選びます。
+5. 書き出したMarkdownを確認し、**コピー**でAIのチャット欄に貼り付けます。
 
 画像を含む文書では通常、次のように出力されます。
 
@@ -47,11 +47,28 @@ input.md
 input.assets/
 ```
 
-CLIの既定profileも閲覧用のため、`--profile readable`は省略できます。
+## よくある3つの使い方
+
+**1. 1つのファイルをAIに渡す**: 画面に見えている内容だけを、画像の説明付きのテキストにします。
 
 ```sh
-docredock export input.xlsx --content-policy visible --output input.md
+docredock export 報告書.docx -o -
 ```
+
+**2. フォルダーを一括変換する**: 同じ名前の.docxと.pdfがあるときは`--keep-source-extension`で`報告書.docx.md`・`報告書.pdf.md`に分けます。PDFは`--allow-pdf`を付けたときだけ変換します。
+
+```sh
+docredock export 資料フォルダー --output-dir 変換結果 --allow-pdf --keep-source-extension
+```
+
+**3. 大きな文書をAI向けパッケージにする**: 章や表の行ごとに分割し、どの部分をAIに渡すか選べます。
+
+```sh
+docredock export 予算.xlsx --ai-package dir --table-row-blocks
+docredock package search 予算.ai-package 人件費
+```
+
+オプションの説明は`docredock help export`、確認が必要になったときの対処は[目的別ガイド](docs/ja/quick-tasks.md)を参照してください。
 
 ## 図の意味保持とfallback
 
@@ -77,7 +94,7 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.3.10はPublic Betaであり、本番向けの安定版ではありません。
+- v0.3.11はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - CLIのPDF変換は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にできます。往復／audit操作、復元、レンダリング／新規文書生成には引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -89,9 +106,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.3.10の対応状況](docs/ja/supported-features.md)
+- [v0.3.11の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.3.10リリースノート](release-docs/RELEASE_NOTES_v0.3.10.md)
+- [v0.3.11リリースノート](release-docs/RELEASE_NOTES_v0.3.11.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

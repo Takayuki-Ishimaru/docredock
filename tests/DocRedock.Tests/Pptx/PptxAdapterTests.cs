@@ -223,7 +223,7 @@ public sealed class PptxAdapterTests
         // P06: a native chart's c:title + c:ser category/value pairs survive as a bold title and a GFM table.
         Assert.Contains("**Adoption by quarter**（棒グラフ）", markdown, StringComparison.Ordinal);
         Assert.Contains("要約: 1 系列のグラフです。", markdown, StringComparison.Ordinal);
-        Assert.Contains("Q1 の 12 から Q2 の 30 へ 増加", markdown, StringComparison.Ordinal);
+        Assert.Contains("Q1の12からQ2の30へ増加", markdown, StringComparison.Ordinal);
         Assert.Contains("| Q1 | 12 |", markdown, StringComparison.Ordinal);
         Assert.Contains("| Q2 | 30 |", markdown, StringComparison.Ordinal);
 

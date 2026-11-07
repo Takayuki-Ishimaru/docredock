@@ -18,6 +18,8 @@ internal static class PdfTextRuns
     // Between an East Asian character and another script word processors add a gap of their own (a fifth
     // of an em in LibreOffice), which is no space of the text; only a gap well beyond it is.
     private const double AsianGapEm = 0.5;
+    // Between an East Asian character and a number only a gap of a full em is a space (a column, a tab).
+    private const double AsianNumberGapEm = 1.0;
 
     // Superscripts and subscripts are set at 0.58-0.83 of the size of the text they sit on, up to about
     // 0.4 em above its baseline or 0.25 em below it. The windows are wider, but stop short of what is
@@ -129,8 +131,13 @@ internal static class PdfTextRuns
     {
         if (Rune.IsWhiteSpace(last) || Rune.IsWhiteSpace(first)) return false;
         var asian = (IsAsian(last) ? 1 : 0) + (IsAsian(first) ? 1 : 0);
+        // A number in Japanese text ("11月1日", "120名") has no space beside it: the gap a justified line or the
+        // spacing between Asian and Latin text puts there (over half an em in LibreOffice's PDFs) is none either.
+        if (asian == 1 && (IsNumeric(last) || IsNumeric(first))) return gap >= AsianNumberGapEm * size;
         return asian < 2 && gap >= (asian == 0 ? WordGapEm : AsianGapEm) * size;
     }
+
+    private static bool IsNumeric(Rune rune) => Rune.IsDigit(rune) || rune.Value is '%' or '％';
 
     /// <summary>Whether <paramref name="right"/> continues <paramref name="left"/> without a space: both
     /// are measured, on one line (or one is the other's script), no further apart than a line glues

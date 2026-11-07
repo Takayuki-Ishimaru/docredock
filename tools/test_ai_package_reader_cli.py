@@ -76,7 +76,7 @@ class OneCallJson(ReaderTest):
         for selection in (['--part', 'part-0003'], ['--search', 'Cost']):
             with self.subTest(selection=selection):
                 code, out, err = self.run_cli(package, *selection, '--require-hidden-review')
-                self.assertEqual((3, ''), (code, out), err)
+                self.assertEqual((11, ''), (code, out), err)
                 self.assertIn('review required', err)
                 code, out, err = self.run_cli(package, *selection, '--verify')
                 self.assertEqual(0, code, err)
@@ -92,7 +92,7 @@ class OneCallJson(ReaderTest):
         self.relisted(package, 'report.json', json.dumps(report).encode('utf-8'))
         self.edit_manifest(package, lambda manifest: manifest.update(content_policy='complete'))
         code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review')
-        self.assertEqual((3, ''), (code, out), err)
+        self.assertEqual((11, ''), (code, out), err)
         self.edit_manifest(package, lambda manifest: manifest.update(content_policy='visible'))
         code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review')
         self.assertEqual(0, code, err)
@@ -224,7 +224,7 @@ class Search(ReaderTest):
                 code, out, err = self.run_cli(sample, '--search', text)
                 self.assertEqual((0, ''), (code, err))
                 self.assertEqual(['part-0003 parts/0003.md tokens=54 sheet Summary block 2/3 rows A4:F4',
-                                  '  %d: | Cost | 70 | 80 | normal |' % number], out.splitlines())
+                                  '  %d: | Cost | 70 | 80 | normal |  [Summary]' % number], out.splitlines())
         code, out, err = self.run_cli(sample, '--search', 'candidate_one')  # written CANDIDATE\_ONE
         self.assertEqual(['part-0005'], [line.split()[0] for line in out.splitlines() if not line.startswith(' ')])
         code, out, err = self.run_cli(sample, '--search', 'workbook_base', '--json')
@@ -262,9 +262,9 @@ class Search(ReaderTest):
                 code, out, err = self.run_cli(package, '--search', query)
                 self.assertEqual((0, ''), (code, err))
                 self.assertEqual(['part-0003'], [line.split()[0] for line in out.splitlines() if not line.startswith(' ')])
-                self.assertEqual(['  %d: %s' % (number, lines[number - 1])], [line for line in out.splitlines() if line.startswith(' ')])
+                self.assertEqual(['  %d: %s  [Summary]' % (number, lines[number - 1])], [line for line in out.splitlines() if line.startswith(' ')])
         code, out, err = self.run_cli(package, '--search', '重要な点', '--json')
-        self.assertEqual([{'number': underlined, 'text': 'これは<u>重要</u>な点です。'}], json.loads(out)['search']['parts'][0]['lines'])
+        self.assertEqual([{'number': underlined, 'text': 'これは<u>重要</u>な点です。', 'heading': 'Summary'}], json.loads(out)['search']['parts'][0]['lines'])
         # Marks are not the text: nothing reads "重要 な点" or "重要~~な点".
         for query in ('重要 な点', '重要~~な点'):
             code, out, err = self.run_cli(package, '--search', query)
@@ -419,7 +419,7 @@ class HiddenReviewJson(ReaderTest):
         for selection in (['--part', 'part-0003'], ['--search', 'Cost'], []):
             with self.subTest(selection=selection):
                 code, out, err = self.run_cli(package, *selection, '--require-hidden-review', '--json')
-                self.assertEqual(3, code, err)
+                self.assertEqual(11, code, err)
                 self.assertIn('review required', err)
                 document = json.loads(out)
                 self.assertIs(True, document['review']['required'])
@@ -436,7 +436,7 @@ class HiddenReviewJson(ReaderTest):
         package = self.copy_of('schema-2.1')
         self.hidden_report(package, True)
         code, out, err = self.run_cli(self.zipped(package), '--part', 'part-0003', '--require-hidden-review', '--json')
-        self.assertEqual(3, code, err)
+        self.assertEqual(11, code, err)
         document = json.loads(out)
         self.assertIs(True, document['verified'])
         self.assertIs(True, document['review']['required'])
@@ -448,7 +448,7 @@ class HiddenReviewJson(ReaderTest):
         self.hidden_report(package, None)
         self.edit_manifest(package, lambda manifest: manifest.update(content_policy='complete'))
         code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review', '--json')
-        self.assertEqual(3, code, err)
+        self.assertEqual(11, code, err)
         document = json.loads(out)
         self.assertIsNone(document['review']['hidden_content_included'])
         self.assertIs(True, document['review']['required'])
@@ -495,7 +495,7 @@ class HiddenReviewJson(ReaderTest):
         # Stored required alone (no hidden content) reports only the package reason.
         self.hidden_report(package, False)
         code, out, err = self.run_cli(package, '--part', 'part-0003', '--require-hidden-review', '--json')
-        self.assertEqual(3, code, err)
+        self.assertEqual(11, code, err)
         document = json.loads(out)
         review = document['review']
         self.assertIs(True, review['required'])

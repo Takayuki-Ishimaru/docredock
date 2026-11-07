@@ -21,9 +21,27 @@ public static class AdapterWarningDiagnostics
             return new Diagnostic(externalRelationshipCode,
                 warning[(externalRelationshipCode.Length + 1)..].Trim(), DiagnosticSeverity.Information);
 
-        if (!VisualDiagnostic.TryParseWarning(warning, out var code, out var message))
-            return new Diagnostic(fallbackCode, warning, severity);
-        return new Diagnostic(code, message, severity);
+        if (VisualDiagnostic.TryParseWarning(warning, out var code, out var message))
+            return new Diagnostic(code, message, severity);
+        // A workbook warning names its own code ("XlsxFormulaCachedValueMissing: ..."), the code the documentation and
+        // the GUI use; automation filters by it rather than by the generic fallback.
+        if (fallbackCode.StartsWith("Xlsx", StringComparison.Ordinal) && TryParseOwnCode(warning, "Xlsx", out code, out message))
+            return new Diagnostic(code, message, InformationCodes.Contains(code) ? DiagnosticSeverity.Information : severity);
+        return new Diagnostic(fallbackCode, warning, severity);
+    }
+
+    // Adapter notes on what DocRedock did that leave nothing for the reader to check.
+    private static readonly HashSet<string> InformationCodes = new(StringComparer.Ordinal) { "XlsxCalculationChainReset" };
+
+    private static bool TryParseOwnCode(string warning, string prefix, out string code, out string message)
+    {
+        code = string.Empty; message = warning;
+        var separator = warning.IndexOf(':');
+        if (separator <= prefix.Length || !warning.StartsWith(prefix, StringComparison.Ordinal)) return false;
+        var candidate = warning[..separator];
+        if (!candidate.All(char.IsAsciiLetterOrDigit)) return false;
+        code = candidate; message = warning[(separator + 1)..].TrimStart();
+        return true;
     }
 
     /// <summary>Coalesces repeated diagnostics while retaining distinct source locations.</summary>

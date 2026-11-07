@@ -694,31 +694,26 @@ public sealed class MarkdownGraphEditor
             if (addresses.Count == 0) continue;
             var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             var coveredAddresses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var block in group)
+            var blocks = group.ToArray();
+            var (owners, overlapping) = SheetTableOwners(addresses.Keys, blocks);
+            for (var index = 0; index < blocks.Length; index++)
             {
-                if (!block.Attributes.TryGetValue("range", out var actualRange) ||
-                    !TryParseRange(actualRange, out var minColumn, out var minRow, out var maxColumn, out var maxRow))
+                var block = blocks[index];
+                if (!block.Attributes.TryGetValue("range", out var actualRange) || !TryParseRange(actualRange, out _, out _, out _, out _))
                 {
                     diagnostics.Add(new Diagnostic("SpreadsheetRangeMismatch", $"Sheet table range '{actualRange ?? "(missing)"}' is invalid.", DiagnosticSeverity.Error));
                     continue;
                 }
 
-                var sectionAddresses = addresses.Keys.Where(address =>
-                {
-                    _ = TryParseAddress(address, out var column, out var row);
-                    return column >= minColumn && column <= maxColumn && row >= minRow && row <= maxRow;
-                }).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var sectionAddresses = addresses.Keys.Where(address => owners.TryGetValue(address, out var owner) && owner == index)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
                 var expectedRange = sectionAddresses.Count == 0 ? null : SheetRange(sectionAddresses);
                 if (expectedRange is null || !StringComparer.OrdinalIgnoreCase.Equals(actualRange, expectedRange))
                 {
                     diagnostics.Add(new Diagnostic("SpreadsheetRangeMismatch", $"Sheet table range '{actualRange}' does not match its baseline cells{(expectedRange is null ? "." : $" ('{expectedRange}').")}", DiagnosticSeverity.Error));
                     continue;
                 }
-                if (sectionAddresses.Any(address => !coveredAddresses.Add(address)))
-                {
-                    diagnostics.Add(new Diagnostic("SpreadsheetGridOverlap", $"Sheet table range '{actualRange}' overlaps another table in partition '{group.Key}'.", DiagnosticSeverity.Error));
-                    continue;
-                }
+                coveredAddresses.UnionWith(sectionAddresses);
 
                 var expectedPolicy = new Dictionary<string, string>(StringComparer.Ordinal)
                 {
@@ -736,10 +731,40 @@ public sealed class MarkdownGraphEditor
             }
             if (!coveredAddresses.SetEquals(addresses.Keys))
                 diagnostics.Add(new Diagnostic("SpreadsheetGridCoverageMismatch", $"Sheet tables in partition '{group.Key}' do not cover the complete baseline cell inventory.", DiagnosticSeverity.Error));
-            if (diagnostics.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error) == errorCountBefore)
+            var valid = diagnostics.Count(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error) == errorCountBefore;
+            if (valid)
                 result[group.Key] = new SheetGrid(values, addresses.Values.Select(node => node.Id).ToHashSet(StringComparer.Ordinal));
+            else if (overlapping)
+                diagnostics.Add(new Diagnostic("SpreadsheetGridOverlap",
+                    $"Sheet table ranges overlap in partition '{group.Key}' and their cells could not be told apart; export the workbook again with this version to edit it.",
+                    DiagnosticSeverity.Error));
         }
         return result;
+    }
+
+    /// <summary>Which sheet table each baseline cell belongs to: the one whose range holds it. DocRedock writes the
+    /// ranges of a sheet apart from one another; 0.3.10 and earlier could write a table whose range lies inside another's
+    /// (a header row beside a merged group header, D4:F4 inside A1:F9), the outer table keeping blank places for the inner
+    /// one's cells. A cell in two ranges belongs to the smaller; the tables' baseline_nodes and source rows and columns
+    /// then confirm the reading.</summary>
+    private static (Dictionary<string, int> Owners, bool Overlapping) SheetTableOwners(IEnumerable<string> addresses, IReadOnlyList<TypedMarkdownBlock> blocks)
+    {
+        var ranges = blocks.Select(block => block.Attributes.TryGetValue("range", out var range) &&
+                TryParseRange(range, out var minColumn, out var minRow, out var maxColumn, out var maxRow)
+                ? new (int MinColumn, int MinRow, int MaxColumn, int MaxRow)?((minColumn, minRow, maxColumn, maxRow)) : null).ToArray();
+        var owners = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        var overlapping = false;
+        foreach (var address in addresses)
+        {
+            _ = TryParseAddress(address, out var column, out var row);
+            var holders = Enumerable.Range(0, ranges.Length).Where(index => ranges[index] is { } range &&
+                column >= range.MinColumn && column <= range.MaxColumn && row >= range.MinRow && row <= range.MaxRow).ToArray();
+            if (holders.Length == 0) continue;
+            overlapping |= holders.Length > 1;
+            owners[address] = holders.MinBy(index => (long)(ranges[index]!.Value.MaxColumn - ranges[index]!.Value.MinColumn + 1) *
+                (ranges[index]!.Value.MaxRow - ranges[index]!.Value.MinRow + 1));
+        }
+        return (owners, overlapping);
     }
 
     private static Dictionary<string, string>? ParseSheetGrid(

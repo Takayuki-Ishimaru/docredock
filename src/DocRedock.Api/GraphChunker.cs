@@ -81,7 +81,7 @@ public sealed class GraphChunker
         TextNodeContent text => text.Text,
         RichTextNodeContent rich => string.Concat(rich.Runs.Select(run => run.Text)),
         TableNodeContent table => string.Join("\n", table.Rows.Select(row => string.Join("\t", row.Select(cell => cell.Text)))),
-        ReferenceNodeContent reference => reference.AltText ?? reference.Reference,
+        ReferenceNodeContent reference => string.IsNullOrWhiteSpace(reference.AltText) ? reference.Reference : reference.AltText,
         _ => string.Empty,
     };
 }

@@ -28,6 +28,27 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
     /// <summary>A joined line ends with an ambiguous lexical or discretionary ASCII hyphen.</summary>
     public bool HasUncertainHyphenation { get; init; }
 
+    /// <summary>The family of the font the text is set in, when all of it is set in one (see <see cref="IsBold"/>).</summary>
+    public string? FontFamily { get; init; }
+
+    /// <summary>All of the text is set in a bold font (or painted bold, filled and stroked). With
+    /// <see cref="FontFamily"/>, what tells a heading set at the size of the body from the body.</summary>
+    public bool IsBold { get; init; }
+
+    /// <summary>A paragraph whose last line runs full to the end of its column and stops there: it goes on in
+    /// the next column or on the next page, unless it closes a sentence.</summary>
+    public bool ContinuesBelow { get; init; }
+
+    /// <summary>A paragraph whose first line is indented: it starts a paragraph, and continues none.</summary>
+    public bool StartsIndented { get; init; }
+
+    /// <summary>The last paragraph of a page that goes on at the head of the next page.</summary>
+    public bool ContinuesOnNextPage { get; init; }
+
+    /// <summary>The rest of the last paragraph of the page before; what goes between the two (a space between
+    /// words, nothing in East Asian text), or null when the region starts a paragraph of its own.</summary>
+    public string? ContinuesPreviousPage { get; init; }
+
     /// <summary>Struck-through characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Struck { get; init; }
 
@@ -157,6 +178,15 @@ public sealed record PdfPageText(
     /// per strikethrough. Null when none.</summary>
     IReadOnlyList<PdfUncertainText>? UncertainText = null)
 {
+    /// <summary>The lone rules of the page - the line under a running header or a title, a bar beside changed text -
+    /// which divide the page and are no drawing (see <see cref="PdfSeparatorRule"/>). A short line above the rule
+    /// under a header, or under the rule over a footer, is page furniture. Null when none.</summary>
+    public IReadOnlyList<PdfSeparatorRule>? SeparatorRules { get; init; }
+
+    /// <summary>What a tagged PDF says its figures on the page show (their /Alt), in the order of its structure; null
+    /// when it says nothing or the page draws no image.</summary>
+    public IReadOnlyList<string>? ImageDescriptions { get; init; }
+
     // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
     // final order - including any column-major unrolling - so sorting by ReadingOrder here (rather
     // than re-sorting by raw Y/X) is what lets a detected two-column block reach this text as the
@@ -250,6 +280,7 @@ public static partial class PdfTextExtractor
         catch (RegexMatchTimeoutException exception) { throw new PdfExtractionException("PDF content reference matching exceeded its time limit.", exception); }
         var streams = ReadStreams(raw, latin, options, contentObjectIds).ToArray();
         var pageMap = ReadContentObjectPages(structure, options.EffectiveRegexTimeout);
+        var figureDescriptions = ReadFigureDescriptions(structure, options.EffectiveRegexTimeout);
         (IReadOnlyList<(int Id, string Body)> Ordered, IReadOnlyDictionary<int, string> ById) index;
         PdfFontCatalog fontCatalog;
         IReadOnlyDictionary<int, PdfPageAttributes> pageAttributes;
@@ -399,14 +430,30 @@ public static partial class PdfTextExtractor
             // leave the graph before its lines are read as a table or kept as fallback, and each (drawn,
             // or an annotation of the page) marks the text it covers as underlined or struck.
             var decorations = visualGraph is null ? [] : PdfTextDecorations.Find(visualGraph, regions, cancellationToken);
-            if (visualGraph is not null && decorations.Count > 0)
+            var layoutGraph = visualGraph;
+            // Lone rules - under a header or a title, above a footer, beside changed text - divide the page and
+            // join nothing: they are no connectors, and no reason to compare the page with the original.
+            var decorationPaths = decorations.SelectMany(decoration => decoration.PathIds).ToHashSet(StringComparer.Ordinal);
+            var found = visualGraph is null ? [] : PdfSeparatorRules.Find(decorations.Count > 0
+                ? visualGraph with { Paths = (visualGraph.Paths ?? []).Where(path => !decorationPaths.Contains(path.Id)).ToArray() }
+                : visualGraph, regions, cancellationToken);
+            var separators = found.SelectMany(rule => rule.PathIds).ToArray();
+            var separatorRules = found.Count == 0 ? null : found.Select(rule => rule.Rule).ToArray();
+            if (visualGraph is not null && (decorations.Count > 0 || separators.Length > 0))
             {
                 var earlyCodes = (visualGraph.Diagnostics ?? []).Select(diagnostic => diagnostic.Code).ToHashSet(StringComparer.Ordinal);
                 for (var i = diagnostics.Count - 1; i >= pageDiagnosticStart; i--)
                     if (earlyCodes.Any(code => diagnostics[i].StartsWith(code + ":", StringComparison.Ordinal)))
                         diagnostics.RemoveAt(i);
-                visualGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(visualGraph, DecorationIds(visualGraph, decorations),
-                    "text decoration (underline or strikethrough) of the text it crosses");
+                if (decorations.Count > 0)
+                    visualGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(visualGraph,
+                        ConsumedIds(visualGraph, decorations.SelectMany(decoration => decoration.PathIds)),
+                        "text decoration (underline or strikethrough) of the text it crosses");
+                // The layout of boxes on the page still sees the rules: a rule across a box makes it a form.
+                layoutGraph = visualGraph;
+                if (separators.Length > 0)
+                    visualGraph = PdfVisualOutputCompactor.RemoveConsumedOverlayVisuals(visualGraph, ConsumedIds(visualGraph, separators),
+                        "separator rule (a lone horizontal or vertical line that joins nothing)");
                 var survivingNodes = visualGraph.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
                 visualLabelNodeIds = visualLabelNodeIds.Where(entry => survivingNodes.Contains(entry.Value))
                     .ToDictionary(entry => entry.Key, entry => entry.Value);
@@ -523,8 +570,9 @@ public static partial class PdfTextExtractor
                 if (invariantIssues.Count > 0)
                     throw new PdfExtractionException(string.Join(" ", invariantIssues));
             }
-            var boxes = FindBoxLayout(visualGraph, pageTables, VisibleArea(attributes), diagramProjected ? visualLabelNodeIds : null);
+            var boxes = FindBoxLayout(layoutGraph, pageTables, VisibleArea(attributes), diagramProjected ? visualLabelNodeIds : null);
             var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount, boxes, failedGridTextIds);
+            flow = WithFontStyle(flow, regions);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
             var embeddedBounds = embeddedImages.Where(bounds => bounds is not null).Select(bounds => bounds!).ToArray();
@@ -534,7 +582,11 @@ public static partial class PdfTextExtractor
                 attributes?.MediaBox, attributes?.CropBox, attributes?.Rotation ?? 0,
                 imageOnly || unparsedForms.Count == 0 ? null : unparsedForms,
                 hiddenRegions.Length == 0 ? null : hiddenRegions,
-                uncertainText.Length == 0 ? null : uncertainText));
+                uncertainText.Length == 0 ? null : uncertainText)
+            {
+                SeparatorRules = separatorRules,
+                ImageDescriptions = embeddedImages.Count > 0 || imageOnly ? figureDescriptions.GetValueOrDefault(pageNumber) : null,
+            });
         }
         if (pages.Count == 0)
         {
@@ -552,7 +604,9 @@ public static partial class PdfTextExtractor
                 MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
-        MarkRepeatedPageFurniture(pages);
+        MarkPageFurniture(pages, tables);
+        JoinColumnContinuations(pages, tables);
+        MarkPageContinuations(pages, tables);
         return new PdfExtractionResult(pageCount, pages, diagnostics, visualGraphs, tables, visualFallbacks, visualProjections);
     }
 
@@ -605,11 +659,26 @@ public static partial class PdfTextExtractor
         return right > left && top > bottom ? new Geometry("pdf-user-space", left, bottom, right - left, top - bottom) : media;
     }
 
-    /// <summary>What to take out of a graph for its text decorations: each decoration's path, and the
-    /// node or edge built from it (by the source ledger, or an edge drawn along the path's own points).</summary>
-    private static string[] DecorationIds(VisualGraph graph, IReadOnlyList<PdfTextDecorations.Decoration> decorations)
+    /// <summary>Gives each line the family and the weight its fragments share (none when they differ), which the
+    /// projection reads to find headings set at the size of the body.</summary>
+    private static PdfTextRegion[] WithFontStyle(IReadOnlyList<PdfTextRegion> flow, IReadOnlyList<PdfTextRegion> fragments)
     {
-        var pathIds = decorations.SelectMany(decoration => decoration.PathIds).ToHashSet(StringComparer.Ordinal);
+        var byId = new Dictionary<int, PdfTextRegion>();
+        foreach (var fragment in fragments) byId.TryAdd(fragment.SourceTextIds[0], fragment);
+        return flow.Select(line =>
+        {
+            var parts = line.SourceTextIds.Select(id => byId.GetValueOrDefault(id)).Where(part => part is not null && part.Text.Trim().Length > 0).ToArray();
+            if (parts.Length == 0) return line;
+            var families = parts.Select(part => part!.FontFamily).Distinct(StringComparer.Ordinal).ToArray();
+            return line with { FontFamily = families.Length == 1 ? families[0] : null, IsBold = parts.All(part => part!.IsBold) };
+        }).ToArray();
+    }
+
+    /// <summary>What to take out of a graph with some of its paths (text decorations, lone rules): each path,
+    /// and the node or edge built from it (by the source ledger, or an edge drawn along the path's own points).</summary>
+    private static string[] ConsumedIds(VisualGraph graph, IEnumerable<string> consumedPathIds)
+    {
+        var pathIds = consumedPathIds.ToHashSet(StringComparer.Ordinal);
         var ids = new HashSet<string>(pathIds, StringComparer.Ordinal);
         foreach (var item in graph.SourceItems ?? [])
         {
@@ -3490,6 +3559,8 @@ public static partial class PdfTextExtractor
                             new Geometry("pdf-user-space", start.X, start.Y, width, height), regions.Count, [regions.Count])
                             {
                                 FontSize = fontSize,
+                                FontFamily = font?.Family,
+                                IsBold = font?.Bold == true || show?.RenderMode == 2,
                                 MeasuredWidth = measured is not null,
                                 // Characters are placed on upright text, and only when the measured
                                 // characters are the shown ones (not an /ActualText replacement).

@@ -92,6 +92,7 @@ public static class ExportReviewText
         }
         if (review.Ocr.Required) parts.Add($"OCR確認 {review.Ocr.ReviewItems}件");
         if (review.TableBoundaries is { Count: > 0 } boundaries) parts.Add($"表の区切りの確認 {boundaries.Count}件");
+        if (review.UnwrittenImages.Count > 0) parts.Add($"本文に出力されなかった画像 {review.UnwrittenImages.Count}件");
         return string.Join("／", parts);
     }
 

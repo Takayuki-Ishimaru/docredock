@@ -960,7 +960,7 @@ public sealed class ReadableMarkdownTests
 
         Assert.Contains("**売上推移**（折れ線グラフ）", markdown, StringComparison.Ordinal);
         Assert.Contains("要約: 1 系列のグラフです。", markdown, StringComparison.Ordinal);
-        Assert.Contains("4月 の 12 から 6月 の 15 へ 増加", markdown, StringComparison.Ordinal);
+        Assert.Contains("4月の12から6月の15へ増加", markdown, StringComparison.Ordinal);
         Assert.Contains("| 4月 | 12 |", markdown, StringComparison.Ordinal);
     }
 

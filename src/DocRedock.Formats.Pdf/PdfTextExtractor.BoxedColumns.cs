@@ -72,6 +72,8 @@ public static partial class PdfTextExtractor
     // to the text of the bullet it continues, or starts at the paragraph's edge, within half an em.
     private const double SameSize = 0.1;
     private const double ContinuationIndentEm = 0.5;
+    // A paragraph's first line may be indented by up to this much more than the lines after it.
+    private const double FirstLineIndentMaxEm = 2;
     // A line is wrapped when the break after it was forced: the first word of the next line and a space (or
     // its first character, with the marks that cannot start a line) would not have fitted after it within the
     // column. Where a column ends is known when an edge is drawn there: the text of a box ends at its right
@@ -87,6 +89,8 @@ public static partial class PdfTextExtractor
     private const double RightEdgeSlack = 14;
     private const double ForcedSlack = 0.5;
     private const double PartialLastLineEm = 0.5;
+    private const double FullAsianLineEm = 1.1;
+    private const double RunOnMinWidthEm = 12;
     private const int MinRaggedLines = 3;
     private const double SpaceEm = 0.27;
     // East Asian marks that cannot start a line, and those that cannot end one.
@@ -667,7 +671,7 @@ public static partial class PdfTextExtractor
     /// <see cref="MinRaggedLines"/> lines long or end a sentence, and be prose (the lines under a bullet or
     /// a number need only fall short). The text keeps every character: lines are joined without a space
     /// between East Asian characters and before closing punctuation, and with one between words.</summary>
-    private static WrappedColumn JoinWrappedLines(BoxColumn column, IReadOnlyDictionary<int, PdfTextRegion> fragments)
+    private static WrappedColumn JoinWrappedLines(BoxColumn column, IReadOnlyDictionary<int, PdfTextRegion> fragments, bool endsColumn = false)
     {
         var lines = column.Lines;
         var described = lines.Select(line => DescribeLine(line, fragments)).ToArray();
@@ -718,7 +722,12 @@ public static partial class PdfTextExtractor
         {
             if (sequence.Count >= 2 && !doubtful && EndsLikeAParagraph())
             {
-                joined.Add(JoinLines(sequence.Select(index => described[index]!).ToArray()));
+                var first = described[sequence[0]]!;
+                joined.Add(JoinLines(sequence.Select(index => described[index]!).ToArray()) with
+                {
+                    ContinuesBelow = RunsOn(),
+                    StartsIndented = first.Left - described[sequence[1]]!.Left > ContinuationIndentEm * first.Size,
+                });
                 paragraphs.Add((sequence[0], sequence[^1]));
             }
             else
@@ -726,16 +735,28 @@ public static partial class PdfTextExtractor
             sequence.Clear();
             doubtful = false;
         }
+        // The paragraph's last line is the last of a column of the page's flow - no line of a frame - and full: the
+        // paragraph goes on in the next column or on the next page, and has no short last line here. A column is some
+        // RunOnMinWidthEm wide at least; a few short lines that end alike are no column of text.
+        var left = described.Where(line => line is not null).Min(line => line!.Left);
+        bool RunsOn()
+        {
+            var last = described[sequence[^1]]!;
+            if (!endsColumn || longest - left < RunOnMinWidthEm * last.Size) return false;
+            // East Asian text breaks between any two characters: a full line may stop short by up to one of them.
+            var slack = IsAsianCharacter(last.LastCharacter) ? FullAsianLineEm : PartialLastLineEm;
+            return sequence[^1] == described.Length - 1 && last.End > longest - slack * last.Size;
+        }
         bool EndsLikeAParagraph()
         {
             if (column.Limit is not null) return true;
             var last = described[sequence[^1]]!;
-            var shorter = last.End <= longest - PartialLastLineEm * last.Size;
+            var shorter = last.End <= longest - PartialLastLineEm * last.Size || RunsOn();
             // The lines under a bullet or a number are the rest of its item, however many they are.
             if (described[sequence[0]]!.HasMarker) return shorter;
             var prose = sequence.Any(index => described[index]!.Line.Text.Any(ProseMarks.Contains)) ||
                 sequence.Skip(1).Any(index => char.IsLower(described[index]!.FirstCharacter));
-            return shorter && (sequence.Count >= MinRaggedLines || SentenceMarks.Contains(last.LastCharacter)) && prose;
+            return shorter && (sequence.Count >= MinRaggedLines || RunsOn() || SentenceMarks.Contains(last.LastCharacter)) && prose;
         }
         foreach (var run in runs)
         {
@@ -913,7 +934,14 @@ public static partial class PdfTextExtractor
         var hangs = paragraph.First.HasMarker && paragraph.ContinuationLeft - paragraph.First.Left > 0.3 * size &&
             Math.Abs(next.Left - paragraph.ContinuationLeft) <= tolerance;
         // Otherwise the line starts at the paragraph's edge (under the bullet or the number, if it has one).
-        return hangs || Math.Abs(next.Left - (paragraph.Lines >= 2 ? paragraph.ContinuationLeft : paragraph.First.Left)) <= tolerance;
+        if (hangs || Math.Abs(next.Left - (paragraph.Lines >= 2 ? paragraph.ContinuationLeft : paragraph.First.Left)) <= tolerance)
+            return true;
+        // A first line indented by a character or two - how a Japanese paragraph starts, and a first-line indent
+        // anywhere: the second line starts that much to the left, and it is the edge of the lines after it. The
+        // break after the indented line still has to be forced for the two to be joined (see ClassifyBreak).
+        var indent = paragraph.First.Left - next.Left;
+        return paragraph.Lines == 1 && !paragraph.First.HasMarker &&
+            indent > tolerance && indent <= FirstLineIndentMaxEm * size;
     }
 
     /// <summary>Whether the blocks that white space divides a frame into are rows of labels and values

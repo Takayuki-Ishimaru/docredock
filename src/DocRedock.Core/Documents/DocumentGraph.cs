@@ -104,38 +104,49 @@ public sealed record DocumentGraph
     private static DocumentPartition[] NormalizeNodeIds(IReadOnlyList<DocumentPartition>? partitions)
     {
         partitions ??= Array.Empty<DocumentPartition>();
-        var used = new HashSet<string>(StringComparer.Ordinal);
+        var total = 0;
+        foreach (var partition in partitions) total += partition.Nodes.Count;
+        // A graph is normalized again each time its partitions are replaced, and a workbook has hundreds of thousands of
+        // nodes: only the IDs this renames are remembered, since an ID kept as it is binds its children as it is.
+        var used = new HashSet<string>(total, StringComparer.Ordinal);
+        var generated = new HashSet<string>(StringComparer.Ordinal);
         var firstIdByOriginal = new Dictionary<string, string>(StringComparer.Ordinal);
-        var result = new List<DocumentPartition>(partitions.Count);
+        var result = new DocumentPartition[partitions.Count];
         for (var partitionIndex = 0; partitionIndex < partitions.Count; partitionIndex++)
         {
             var partition = partitions[partitionIndex];
-            var nodes = new List<DocumentNode>(partition.Nodes.Count);
-            for (var nodeIndex = 0; nodeIndex < partition.Nodes.Count; nodeIndex++)
+            var nodes = new DocumentNode[partition.Nodes.Count];
+            for (var nodeIndex = 0; nodeIndex < nodes.Length; nodeIndex++)
             {
                 var node = partition.Nodes[nodeIndex];
                 var original = node.Id;
+                // An earlier node kept this ID as it is (an ID made up here is never also kept).
+                var keptBefore = original is not null && used.Contains(original) && !generated.Contains(original);
                 var basis = string.IsNullOrWhiteSpace(original) ? $"node_{partitionIndex + 1}_{nodeIndex + 1}" : original;
                 var candidate = basis; var duplicate = 1;
                 while (!used.Add(candidate)) candidate = basis + "__" + (++duplicate).ToString(System.Globalization.CultureInfo.InvariantCulture);
-                if (!firstIdByOriginal.ContainsKey(original ?? string.Empty)) firstIdByOriginal[original ?? string.Empty] = candidate;
                 if (!StringComparer.Ordinal.Equals(candidate, original))
                 {
+                    generated.Add(candidate);
+                    if (!keptBefore) firstIdByOriginal.TryAdd(original ?? string.Empty, candidate);
                     node = node with { Id = candidate };
                 }
-                nodes.Add(node);
+                nodes[nodeIndex] = node;
             }
-            result.Add(partition with { Nodes = nodes });
+            result[partitionIndex] = partition with { Nodes = nodes };
         }
         // A duplicate parent ID is intrinsically ambiguous. Bind child references to the first
         // source-order occurrence, matching FindNode's historical first-match behavior and
         // ensuring normalization never leaves a dangling ParentId (including an empty ID).
-        return result.Select(partition => partition with
-        {
-            Nodes = partition.Nodes.Select(node => node.ParentId is not null && firstIdByOriginal.TryGetValue(node.ParentId, out var parentId)
-                ? node with { ParentId = parentId }
-                : node).ToArray()
-        }).ToArray();
+        if (firstIdByOriginal.Count > 0)
+            foreach (var partition in result)
+            {
+                var nodes = (DocumentNode[])partition.Nodes;
+                for (var index = 0; index < nodes.Length; index++)
+                    if (nodes[index].ParentId is { } parent && firstIdByOriginal.TryGetValue(parent, out var parentId))
+                        nodes[index] = nodes[index] with { ParentId = parentId };
+            }
+        return result;
     }
 }
 
@@ -214,7 +225,8 @@ public sealed record TextRun(
     string? LinkTarget = null,
     string? Color = null,
     string? HighlightColor = null,
-    bool Inserted = false);
+    bool Inserted = false,
+    bool Deleted = false);
 
 public sealed record StyleDescriptor(string Id, string? Name = null, IReadOnlyDictionary<string, string>? Properties = null);
 public sealed record AssetDescriptor(string Id, string Sha256, string MediaType, string? FileName = null);

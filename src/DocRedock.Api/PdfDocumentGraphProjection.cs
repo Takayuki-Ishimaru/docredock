@@ -62,10 +62,17 @@ internal static class PdfDocumentGraphProjection
                 if (PdfPageProjection.UnderlineRanges(region) is { } underlined)
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["underline_ranges"] = underlined;
                 if (region.IsPageFurniture)
+                {
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
+                    // A running header lies in the upper half of the page, a footer in the lower.
+                    if ((page.CropBox ?? page.MediaBox) is { Height: > 0 } box)
+                        extensions["pdf_furniture_position"] = JsonSerializer.SerializeToElement(
+                            region.BoundingBox.Y > box.Y + box.Height / 2 ? "header" : "footer");
+                }
                 var headingLevel = PdfPageProjection.HeadingLevel(page, region);
                 if (headingLevel > 0)
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
+                PdfPageProjection.AddContinuation(region, ref extensions);
                 return new DocumentNode(
                 $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, region.ReadingOrder,
                 region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text),
@@ -109,6 +116,7 @@ internal static class PdfDocumentGraphProjection
                     Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                     {
                         ["pdf_embedded_image_placeholder"] = JsonSerializer.SerializeToElement(true),
+                        ["pdf_image_descriptions"] = JsonSerializer.SerializeToElement(page.ImageDescriptions ?? []),
                         ["pdf_embedded_image_count"] = JsonSerializer.SerializeToElement(page.EmbeddedImageCount)
                     });
                 nodes = InsertAtReadingPosition(nodes, placeholder, bounds);

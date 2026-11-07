@@ -2,7 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
-## [Unreleased]
+## [0.3.11]
+
+- Improved PDF paragraph joining, heading and figure description extraction, and handling of repeated headers, footers, and standalone rules.
+- Improved Word revision and comment output, Excel sheet and chart conversion, and PowerPoint connector labels. Reported images missing from the Markdown for source review.
+- Repeated vertically merged cell values by default in Readable Markdown, with `--no-expand-merged-cells` to opt out.
+- Improved AI package splitting and search, and added `docredock mcp` for local conversion and package review, search, and reading.
+- Updated the CLI export JSON envelope and attention fields. Added options for image output and output names that retain the input extension.
+- Improved experimental round-trip verification and Excel recalculation guidance.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.11.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.11.md)
 
 ## [0.3.10]
 

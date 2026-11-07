@@ -64,7 +64,8 @@ public sealed class PdfTextExtractorTests
     [Fact]
     public void No_paint_with_a_trailing_move_does_not_carry_pending_paths_into_the_next_stroke()
     {
-        var graph = ExtractReviewContent("0 0 m 100 0 l 200 0 m n 300 0 m 400 0 l S").VisualGraphs![1];
+        // The stroke is diagonal: a lone horizontal one would be a rule dividing the page, and leave the graph.
+        var graph = ExtractReviewContent("0 0 m 100 0 l 200 0 m n 300 0 m 400 60 l S").VisualGraphs![1];
 
         Assert.Equal(2, graph.Paths!.Count);
         var edge = Assert.Single(graph.Edges);
@@ -756,10 +757,11 @@ public sealed class PdfTextExtractorTests
     [InlineData("0 0 100 100 re 200 0 m")]
     public void Clipping_only_closed_curved_and_move_only_subpaths_do_not_leak_into_a_later_stroke(string path)
     {
-        var graph = ExtractReviewContent($"{path} W n 300 0 m 400 0 l S").VisualGraphs![1];
+        // The stroke is diagonal: a lone horizontal one would be a rule dividing the page, and leave the graph.
+        var graph = ExtractReviewContent($"{path} W n 300 0 m 400 60 l S").VisualGraphs![1];
 
         var painted = Assert.Single(graph.Paths!);
-        Assert.Equal(new[] { new VisualPathPoint(300, 0), new VisualPathPoint(400, 0) }, painted.Points);
+        Assert.Equal(new[] { new VisualPathPoint(300, 0), new VisualPathPoint(400, 60) }, painted.Points);
         Assert.Single(graph.Edges);
         Assert.Empty(graph.Nodes);
         Assert.DoesNotContain(graph.Diagnostics!, diagnostic => diagnostic.Code == "VisualPathPartial");
