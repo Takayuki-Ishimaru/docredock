@@ -49,6 +49,8 @@ public sealed record PptxShapeRecord(
 {
     /// <summary>A table's struck-through cell text: the row and cell of <see cref="TableRows"/> and the
     /// [start, end) character ranges of that cell's text.</summary>
+    /// <summary>The text a connector holds in its own text body: the label of the relation it draws (はい, いいえ).</summary>
+    internal string? ConnectorOwnText { get; init; }
     internal IReadOnlyList<(int Row, int Column, IReadOnlyList<(int Start, int End)> Ranges)>? StruckCells { get; init; }
 
     /// <summary>A table's underlined cell text, found the same way. A run that is a hyperlink is left
@@ -584,7 +586,7 @@ public sealed partial class PptxAdapter
             var parentTransform = groupStack.Reverse().Aggregate(AffineTransform.Identity, (current, frame) => current * frame.Transform);
             var groupHidden = groupStack.Any(frame => frame.Hidden);
             var shapeType = reader.LocalName switch { "cxnSp" => "connector", "graphicFrame" => "graphic-frame", "pic" => "picture", _ => "shape" };
-            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null; string? shapePreset = null;
+            using var subtree = reader.ReadSubtree(); var shapeId = ""; string? name = null; string? description = null; var text = new StringBuilder(); var imageRels = new List<string>(); var chartRels = new List<string>(); var diagramRels = new List<string>(); var isTable = false; var shapeHidden = false; Geometry? geometry = null; double? pendingRotation = null; var flipH = false; var flipV = false; string? placeholderType = null; string? placeholderIdx = null; string? connectorStartId = null; string? connectorEndId = null; string? shapePreset = null; var adjustments = new Dictionary<string, double>(StringComparer.Ordinal);
             string? connectorHeadArrow = null; string? connectorTailArrow = null;
             // Only the shape's own outline (p:spPr/a:ln) carries its dash style; a:ln elsewhere
             // (text outlines, table borders) must not change how the shape itself is drawn.
@@ -633,6 +635,10 @@ public sealed partial class PptxAdapter
                     else lineStyle = VisualLineStyles.FromOfficeDash(subtree.GetAttribute("val"), custom: subtree.LocalName == "custDash");
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "prstGeom") shapePreset = subtree.GetAttribute("prst");
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "gd" && subtree.GetAttribute("name") is { } guide &&
+                         subtree.GetAttribute("fmla") is { } formula && formula.StartsWith("val ", StringComparison.Ordinal) &&
+                         double.TryParse(formula[4..], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var adjustment))
+                    adjustments[guide] = adjustment;
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "gridCol") tableColumnWidths.Add(ParseDouble(subtree.GetAttribute("w")));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
@@ -779,13 +785,13 @@ public sealed partial class PptxAdapter
                 var shapeTransform = parentTransform * ShapeOrientation(geometry, flipH, flipV);
                 if (StringComparer.Ordinal.Equals(shapeType, "connector"))
                 {
-                    var startPoint = shapeTransform.Apply(geometry.X, geometry.Y);
-                    var endPoint = shapeTransform.Apply(geometry.X + geometry.Width, geometry.Y + geometry.Height);
-                    connectorPathPoints =
-                    [
-                        new VisualPoint(startPoint.X, startPoint.Y),
-                        new VisualPoint(endPoint.X, endPoint.Y),
-                    ];
+                    // The route the connector draws, in its own frame (0..1 of its box) and then on the slide: an elbow
+                    // connector bends where its adjustments say (half way by default); a straight one runs corner to corner.
+                    connectorPathPoints = ConnectorRoute(shapePreset, adjustments).Select(point =>
+                    {
+                        var placed = shapeTransform.Apply(geometry.X + point.X * geometry.Width, geometry.Y + point.Y * geometry.Height);
+                        return new VisualPoint(placed.X, placed.Y);
+                    }).ToArray();
                 }
                 geometry = TransformGeometry(geometry, shapeTransform);
             }
@@ -859,7 +865,13 @@ public sealed partial class PptxAdapter
             if (!StringComparer.Ordinal.Equals(shape.ShapeType, "connector") || shape.ConnectorStartId is null || shape.ConnectorEndId is null) continue;
             if (!labels.TryGetValue(shape.ConnectorStartId, out var start) || !labels.TryGetValue(shape.ConnectorEndId, out var end)) continue;
             if (start.Length == 0 || end.Length == 0) continue;
-            shapes[index] = shape with { Text = $"{start} → {end}" };
+            // The connector's own text labels the relation; it stays with it instead of being lost.
+            var own = FirstLine(shape.Text);
+            shapes[index] = shape with
+            {
+                Text = own.Length > 0 ? $"{start} → {end}（{own}）" : $"{start} → {end}",
+                ConnectorOwnText = own.Length > 0 ? own : shape.ConnectorOwnText,
+            };
         }
     }
 
@@ -2289,7 +2301,7 @@ public sealed partial class PptxAdapter
                     [new AnchorLocator("shape_id", association.Head.ShapeId)])));
         }
         var graph = new VisualGraph("pptx_" + SafeVisualId(slide.SlideId), nodes, edges, diagnostics,
-            InferDirection(nodes, byShapeId), Paths: paths, SourceItems: sourceItems);
+            InferDirection(nodes, byShapeId, edges), Paths: paths, SourceItems: sourceItems);
         return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
 
         static IReadOnlyDictionary<string, (PptxShapeRecord Head, ConnectionDirection Direction)> AssociateDetachedArrowheads(
@@ -2497,6 +2509,39 @@ public sealed partial class PptxAdapter
         }
     }
 
+    /// <summary>The route of a connector in its own box, 0..1 on each axis from its start corner to its end corner:
+    /// bentConnector2 bends once at the far corner; bentConnector3 runs across to adj1 (half way by default), down, and
+    /// across; bentConnector4 also turns at adj2 of the height. Other connectors run straight.</summary>
+    private static IReadOnlyList<VisualPoint> ConnectorRoute(string? preset, IReadOnlyDictionary<string, double> adjustments)
+    {
+        double Adjust(string name) => adjustments.TryGetValue(name, out var value) ? value / 100_000 : .5;
+        return preset?.ToLowerInvariant() switch
+        {
+            "bentconnector2" => [new(0, 0), new(1, 0), new(1, 1)],
+            "bentconnector3" => [new(0, 0), new(Adjust("adj1"), 0), new(Adjust("adj1"), 1), new(1, 1)],
+            "bentconnector4" => [new(0, 0), new(Adjust("adj1"), 0), new(Adjust("adj1"), Adjust("adj2")), new(1, Adjust("adj2")), new(1, 1)],
+            _ => [new(0, 0), new(1, 1)],
+        };
+    }
+
+    /// <summary>How far a rectangle lies from a connector's route, and where along the route (0..1 of its length) the
+    /// nearest point is.</summary>
+    private static (double Distance, double Position, double Length) RouteDistance(IReadOnlyList<VisualPoint> route, VisualRect rect)
+    {
+        var lengths = route.Zip(route.Skip(1), (from, to) => (to - from).Length).ToArray();
+        var total = lengths.Sum();
+        var (best, position, walked) = (double.PositiveInfinity, .5, 0d);
+        for (var index = 0; index < lengths.Length; index++)
+        {
+            var distance = GeometryMath.DistanceToSegmentRect(route[index], route[index + 1], rect);
+            GeometryMath.DistanceToSegment(rect.Center, route[index], route[index + 1], out var projection);
+            if (distance < best)
+                (best, position) = (distance, total <= 0 ? .5 : (walked + projection * lengths[index]) / total);
+            walked += lengths[index];
+        }
+        return (best, position, total);
+    }
+
     private static IReadOnlyList<VisualPoint> ConnectorPoints(PptxShapeRecord connector)
     {
         if (connector.ConnectorPathPoints is { Count: >= 2 } points)
@@ -2589,14 +2634,13 @@ public sealed partial class PptxAdapter
             foreach (var connector in connectors)
             {
                 if (!projectedConnectors.ContainsKey(connector.ShapeId)) continue;
-                var shaft = ConnectorPoints(connector);
-                if (shaft.Count != 2) continue;
+                // The whole route: a label sits beside the middle leg of an elbow, away from the straight line between its ends.
+                var shaft = connector.ConnectorPathPoints is { Count: >= 2 } route ? route : ConnectorPoints(connector);
+                if (shaft.Count < 2) continue;
                 var rect = new VisualRect(candidate.Geometry.X, candidate.Geometry.Y,
                     candidate.Geometry.Width, candidate.Geometry.Height);
-                GeometryMath.DistanceToSegment(rect.Center, shaft[0], shaft[1], out var projection);
+                var (distance, projection, shaftLength) = RouteDistance(shaft, rect);
                 if (projection is <= .05 or >= .95) continue;
-                var distance = GeometryMath.DistanceToSegmentRect(shaft[0], shaft[1], rect);
-                var shaftLength = (shaft[1] - shaft[0]).Length;
                 var labelMinorDimension = Math.Min(candidate.Geometry.Width, candidate.Geometry.Height);
                 var tolerance = Math.Max(1, Math.Max(labelMinorDimension * 1.5, shaftLength * .08));
                 if (distance > tolerance) continue;
@@ -2622,6 +2666,13 @@ public sealed partial class PptxAdapter
             else
                 unresolved.UnionWith(connectorIds);
         }
+        // A connector's own text is its label, whatever lies near it.
+        foreach (var connector in connectors)
+            if (projectedConnectors.ContainsKey(connector.ShapeId) && connector.ConnectorOwnText is { Length: > 0 } own)
+            {
+                assignments[connector.ShapeId] = new AssignedEdgeLabel(own, connector.ShapeId);
+                unresolved.Remove(connector.ShapeId);
+            }
         unresolvedConnectorIds = unresolved;
         return assignments;
     }
@@ -2642,8 +2693,23 @@ public sealed partial class PptxAdapter
         "ellipse" => VisualNodeKind.Terminator,
         _ => VisualNodeKind.Generic,
     };
-    private static string InferDirection(IReadOnlyList<VisualNode> nodes, Dictionary<string, PptxShapeRecord> byShapeId)
+    // The way the flow runs: the way most of its connections run, from the centre of one box to the centre of the next
+    // (a flow stacked top to bottom is TD, whatever the width of its branches); without connections, the way its boxes
+    // spread.
+    private static string InferDirection(IReadOnlyList<VisualNode> nodes, Dictionary<string, PptxShapeRecord> byShapeId,
+        IReadOnlyList<VisualEdge>? edges = null)
     {
+        Geometry? GeometryOf(string? nodeId) => nodes.FirstOrDefault(node => node.Id == nodeId) is { } node &&
+            byShapeId.TryGetValue(node.SourceNodeId ?? "", out var shape) ? shape.Geometry : null;
+        var (vertical, horizontal) = (0, 0);
+        foreach (var edge in edges ?? [])
+        {
+            if (GeometryOf(edge.SourceId) is not { } from || GeometryOf(edge.TargetId) is not { } to) continue;
+            var dx = Math.Abs(to.X + to.Width / 2 - (from.X + from.Width / 2));
+            var dy = Math.Abs(to.Y + to.Height / 2 - (from.Y + from.Height / 2));
+            if (dy > dx) vertical++; else if (dx > dy) horizontal++;
+        }
+        if (vertical != horizontal) return vertical > horizontal ? "TD" : "LR";
         var geometries = nodes.Select(node => byShapeId.TryGetValue(node.SourceNodeId ?? "", out var shape) ? shape.Geometry : null).Where(geometry => geometry is not null).Cast<Geometry>().ToArray();
         if (geometries.Length < 2) return "LR";
         var x = geometries.Max(item => item.X) - geometries.Min(item => item.X);

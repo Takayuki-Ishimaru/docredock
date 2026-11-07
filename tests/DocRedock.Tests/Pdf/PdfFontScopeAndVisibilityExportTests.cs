@@ -128,7 +128,7 @@ public sealed class PdfFontScopeAndVisibilityExportTests
         var directory = Directory.CreateDirectory(Path.Combine(root, Path.GetFileNameWithoutExtension(fixture))).FullName;
         var markdown = Path.Combine(directory, "out.md");
         var result = await new DocumentService(null, null, discoverPdfRasterizer: false)
-            .ExportReadableAsync(new ReadableDocumentExportOptions(PdfFormXObjectFixtureTests.FixturePath(fixture), markdown, ContentPolicy: policy));
+            .ExportReadableAsync(new ReadableDocumentExportOptions(PdfFormXObjectFixtureTests.FixturePath(fixture), markdown, ContentPolicy: policy, Title: "fixture"));
         return (result, await File.ReadAllTextAsync(markdown));
     }
 }

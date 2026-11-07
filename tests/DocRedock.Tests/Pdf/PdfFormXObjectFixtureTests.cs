@@ -174,7 +174,7 @@ public sealed class PdfFormXObjectFixtureTests
         var markdown = Path.Combine(directory, "out.md");
         var result = await new DocumentService(ocr, rasterizer, discoverPdfRasterizer: false)
             .ExportReadableAsync(new ReadableDocumentExportOptions(FixturePath(fixture), markdown, EnableOcr: ocr is not null,
-                IncludePdfFallbackImages: reviewImages));
+                IncludePdfFallbackImages: reviewImages, Title: "fixture"));
         return (result, await File.ReadAllTextAsync(markdown));
     }
 

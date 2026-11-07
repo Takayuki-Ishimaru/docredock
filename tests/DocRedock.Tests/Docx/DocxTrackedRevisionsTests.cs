@@ -31,16 +31,16 @@ public sealed partial class DocxReadabilityTests
             var visible = await adapter.ExtractAsync(source, new(ShowTrackedRevisions: true));
             var text = Assert.Single(visible.Graph.Nodes, node => node.Content is RichTextNodeContent);
             var runs = ((RichTextNodeContent)text.Content!).Runs;
-            Assert.Contains(runs, run => run.Text == "old" && run.Strike);
+            Assert.Contains(runs, run => run.Text == "old" && run.Deleted && !run.Strike);
             Assert.Contains(runs, run => run.Text == "new" && run.Inserted && run.Bold);
             var service = new DocumentService(null, null, discoverPdfRasterizer: false);
             var result = await service.ExportReadableAsync(new(source, Path.Combine(Path.GetDirectoryName(source)!, "readable.md")));
             var markdown = await File.ReadAllTextAsync(result.MarkdownPath);
-            Assert.Contains("~~old~~", markdown);
+            Assert.Contains("<del>old</del>", markdown);
             Assert.Contains("<ins>**new**</ins>", markdown);
-            Assert.Contains("~~removed~~<ins>added</ins>", markdown);
+            Assert.Contains("<del>removed</del><ins>added</ins>", markdown);
             var package = await service.ExportAiPackageAsync(new(new(source, "unused.md"), Path.Combine(Path.GetDirectoryName(source)!, "package")));
-            Assert.Contains("~~old~~", string.Join("\n", package.Parts.Select(part => part.Markdown)));
+            Assert.Contains("<del>old</del>", string.Join("\n", package.Parts.Select(part => part.Markdown)));
             Assert.Contains("<ins>**new**</ins>", string.Join("\n", package.Parts.Select(part => part.Markdown)));
             Assert.Equal(original, await File.ReadAllBytesAsync(source));
         }
@@ -89,8 +89,8 @@ public sealed partial class DocxReadabilityTests
             Assert.True(result.SourceIndex.HasTrackedRevisions);
             Assert.Contains(result.Diagnostics, item => item.Code == "TrackedRevisionsPresent");
             var markdown = new ReadableMarkdownSerializer().Serialize(result.Graph);
-            Assert.Contains("~~old header~~<ins>new header</ins>", markdown);
-            Assert.Contains("~~old note~~<ins>new note</ins>", markdown);
+            Assert.Contains("<del>old header</del><ins>new header</ins>", markdown);
+            Assert.Contains("<del>old note</del><ins>new note</ins>", markdown);
         }
         finally { Cleanup(source); }
     }

@@ -121,7 +121,7 @@ public sealed class LocalPdfRasterizerTests
                 args = sys.argv[3:]
                 output = args[-1]
                 first, last = args[args.index("-f")+1], args[args.index("-l")+1]
-                with open(log, "a", encoding="utf-8") as stream:
+                with open(log + "." + str(os.getpid()), "a", encoding="utf-8") as stream:
                     stream.write(json.dumps({"pid":os.getpid(),"first":first,"last":last,"output_directory":str(pathlib.Path(output).parent)})+"\n")
                 if mode == "wait":
                     time.sleep(60)
@@ -142,15 +142,23 @@ public sealed class LocalPdfRasterizerTests
             Provider = new PythonRasterizer(FindPython(), script, log, mode);
         }
 
-        public JsonElement[] Calls()
+        public JsonElement[] Calls() => CompleteRecords().Select(line => JsonDocument.Parse(line).RootElement.Clone()).ToArray();
+
+        /// <summary>Newline-terminated records from the shared log and every per-child log.</summary>
+        private IEnumerable<string> CompleteRecords()
         {
-            if (!File.Exists(log)) return [];
-            // The child may still hold its append handle on Windows or be midway through a
-            // record. Share with the writer and wait for a newline before parsing that record.
-            using var stream = new FileStream(log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(stream);
-            return reader.ReadToEnd().Split('\n').SkipLast(1).Where(line => !string.IsNullOrWhiteSpace(line))
-                .Select(line => JsonDocument.Parse(line).RootElement.Clone()).ToArray();
+            // Children append to per-pid files because on Windows two processes appending to one
+            // file can overwrite each other's records. The shared base file is included so a
+            // writer opened elsewhere is still observed. A child may still hold its append handle
+            // or be midway through a record: share with the writer and keep only
+            // newline-terminated records.
+            var lines = new List<string>();
+            if (!Directory.Exists(root)) return lines;
+            foreach (var file in Directory.EnumerateFiles(root, Path.GetFileName(log) + "*"))
+                using (var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(stream))
+                    lines.AddRange(reader.ReadToEnd().Split('\n').SkipLast(1).Where(line => !string.IsNullOrWhiteSpace(line)));
+            return lines;
         }
 
         public async Task WaitForCall()

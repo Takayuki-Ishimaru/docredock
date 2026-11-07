@@ -99,18 +99,25 @@ public static class AiTokenEstimate
             throw new ArgumentOutOfRangeException(nameof(multiplier), multiplier,
                 $"Token estimate multiplier must be between {MinimumMultiplier:0.#} and {MaximumMultiplier:0.#}.");
         ArgumentNullException.ThrowIfNull(text);
-        long ascii = 0, digitRun = 0, numberTokens = 0, delimiters = 0, other = 0;
+        // Calibrated against o200k_base (2026-10-29): a table cell's delimiter and the separator inside a number
+        // ("52,000", "99.8") are tokens of their own, which counting them with the ASCII text under-counted a table of
+        // figures by about a quarter; a Japanese character is a little less than a token (7/8), which counting one each
+        // over-counted Japanese prose by about a seventh.
+        long ascii = 0, digitRun = 0, numberTokens = 0, delimiters = 0, separators = 0, other = 0;
+        var afterDigit = false;
         foreach (var rune in text.EnumerateRunes())
         {
-            if (rune.Value is >= '0' and <= '9') { digitRun++; continue; }
+            if (rune.Value is >= '0' and <= '9') { digitRun++; afterDigit = true; continue; }
             numberTokens += (digitRun + 2) / 3;
             digitRun = 0;
             if (rune.Value == '|') delimiters++;
+            else if (afterDigit && rune.Value is ',' or '.') separators++;
             else if (rune.IsAscii) ascii++;
             else other++;
+            afterDigit = false;
         }
         numberTokens += (digitRun + 2) / 3;
-        var estimate = (ascii + 3) / 4 + numberTokens + (delimiters + 1) / 2 + other;
+        var estimate = (ascii + 3) / 4 + numberTokens + delimiters + separators + (other * 7 + 7) / 8;
         if (multiplier == 1) return (int)Math.Min(estimate, int.MaxValue);
         var widened = Math.Ceiling(estimate * multiplier);
         return widened >= int.MaxValue ? int.MaxValue : (int)widened;
@@ -139,8 +146,14 @@ public sealed record AiPackageSizeSummary(int PartCount, int DocumentCharacters,
         return new(parts.Count, document.Length, parts.Sum(part => part.Markdown.Length),
             parts.Count == 0 ? 0 : parts.Max(part => part.Markdown.Length), parts.Count(part => part.ExceedsTarget), target);
     }
+    /// <summary>The format of the document the parts were made from: the advice for one part depends on it.</summary>
+    public DocRedock.Core.Documents.DocumentFormatKind? Format { get; init; }
+
     public string DescribeJapanese(bool estimated = false) =>
         $"{(estimated ? "予想" : "実績")}: {PartCount}分割／最大 {MaximumPartCharacters:N0}文字／目安 {TargetCharacters:N0}文字／目安超過 {ExceedingParts}分割。" +
         $"全文 {DocumentCharacters:N0}文字、分割本文の合計 {TotalPartCharacters:N0}文字。" +
-        (PartCount <= 1 ? "1分割では必要な本文だけに絞る効果が限られます。Excelの行分割を検討してください。" : "必要な分割だけをAIへ渡してください。全分割の合計は注記の反復で全文より増える場合があります。");
+        (PartCount > 1 ? "必要な分割だけをAIへ渡してください。全分割の合計は注記の反復で全文より増える場合があります。"
+            : Format == DocRedock.Core.Documents.DocumentFormatKind.Xlsx
+                ? "1分割では必要な本文だけに絞る効果が限られます。大きな表は「大きなExcelの表を行ブロックに分割」を検討してください。"
+                : "全文が1分割に収まりました。そのままAIへ渡せます。必要な部分だけを渡すには、分割の目安の文字数を小さくしてください。");
 }

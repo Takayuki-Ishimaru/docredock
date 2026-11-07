@@ -46,12 +46,16 @@ public static class OpenXmlChartReader
             var resolvedName = ResolveFormula(nameElement, referenceResolver);
             name = resolvedName.Count > 0 ? resolvedName[0] ?? string.Empty : string.Empty;
         }
-        IReadOnlyList<string> categories = PointValues(categoryElement);
-        if (categories.Count == 0) categories = ResolveFormula(categoryElement, referenceResolver);
-        IReadOnlyList<string> values = PointValues(valueElement);
-        if (values.Count == 0) values = ResolveFormula(valueElement, referenceResolver);
+        // The cells a series refers to are written as the workbook shows them (52,000, 99.8%, 2026-04-01), like the table
+        // of the sheet; the chart's own cache holds the raw numbers (52000, 0.998). The cache stands when the cells cannot
+        // be read or do not match it point for point.
+        IReadOnlyList<string> categories = PreferResolved(PointValues(categoryElement), ResolveFormula(categoryElement, referenceResolver));
+        IReadOnlyList<string> values = PreferResolved(PointValues(valueElement), ResolveFormula(valueElement, referenceResolver));
         return new OpenXmlChartSeries(string.IsNullOrWhiteSpace(name) ? null : name, categories, values);
     }
+
+    private static IReadOnlyList<string> PreferResolved(IReadOnlyList<string> cached, IReadOnlyList<string> resolved) =>
+        cached.Count == 0 || resolved.Count == cached.Count && resolved.All(value => !string.IsNullOrWhiteSpace(value)) ? resolved : cached;
 
     private static IReadOnlyList<string> ResolveFormula(XmlElement? element, Func<string, IReadOnlyList<string>>? referenceResolver)
     {

@@ -4,6 +4,7 @@ using Avalonia;
 using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
+using Avalonia.Input.Platform;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
@@ -341,6 +342,7 @@ public partial class MainWindow : Window
         SidecarOptionsPanel.IsVisible = !readable;
         RoundTripWarningText.IsVisible = !readable;
         AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
+        UpdateFormatSpecificOptions();
         EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         SchedulePackagePreview();
@@ -770,6 +772,47 @@ public partial class MainWindow : Window
         ExportActionSummaryText.Text = _sourceFiles.Count == 0
             ? "文書を選択してください"
             : $"{_sourceFiles.Count}件 · {FormatBytes(totalBytes)}";
+        UpdateFormatSpecificOptions();
+    }
+
+    // What the action bar says and which options apply follow the output and the selected files: the row blocks
+    // option is for Excel tables only.
+    private void UpdateFormatSpecificOptions()
+    {
+        var aiPackage = AiPackageExportRadio.IsChecked == true;
+        ExportActionDescriptionText.Text = aiPackage
+            ? "選択した文書を現在の設定でAI向けパッケージへ書き出します"
+            : "選択した文書を現在の設定で閲覧用Markdownへ書き出します";
+        TableRowBlocksCheckBox.IsVisible = _sourceFiles.Any(file => Path.GetExtension(file.Name).Equals(".xlsx", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private void OnResultDetailsToggled(object? sender, RoutedEventArgs e)
+    {
+        var shown = ResultDetailsToggle.IsChecked == true;
+        ResultDetailsScroller.IsVisible = shown;
+        ResultDetailsToggle.Content = shown ? "説明を折りたたむ" : "説明を表示";
+    }
+
+    // Copies the readable Markdown just written, for pasting into a chat with an AI.
+    private async void OnCopyMarkdown(object? sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(_latestMarkdownPath) || !File.Exists(_latestMarkdownPath) || TopLevel.GetTopLevel(this)?.Clipboard is not { } clipboard) return;
+        try
+        {
+            await clipboard.SetTextAsync(await File.ReadAllTextAsync(_latestMarkdownPath));
+            ResultMessageText.Text = "Markdownをクリップボードへコピーしました。";
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            ResultMessageText.Text = "Markdownをコピーできませんでした: " + exception.Message;
+        }
+    }
+
+    // The export again with Word's tracked changes as their final text: nothing deleted is in it.
+    private void OnReexportFinal(object? sender, RoutedEventArgs e)
+    {
+        RevisionsComboBox.SelectedItem = RevisionsComboBox.Items.OfType<ComboBoxItem>().FirstOrDefault(item => item.Tag as string == "final");
+        OnExport(sender, e);
     }
 
     private void UpdateRestoreSelection()
@@ -864,6 +907,9 @@ public partial class MainWindow : Window
         OpenReviewButton.IsVisible = false;
         OpenOutputFolderButton.IsVisible = false;
         OpenMarkdownButton.IsVisible = false;
+        CopyMarkdownButton.IsVisible = false;
+        ReexportFinalButton.IsVisible = false;
+        ResultDetailsToggle.IsVisible = false;
         CancelOperationButton.IsVisible = true;
     }
 
@@ -941,6 +987,9 @@ public partial class MainWindow : Window
         OpenReviewButton.IsVisible = review.Length > 0;
         OpenOutputFolderButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestOutputDirectory);
         OpenMarkdownButton.IsVisible = success && !string.IsNullOrWhiteSpace(_latestMarkdownPath);
+        CopyMarkdownButton.IsVisible = OpenMarkdownButton.IsVisible && Path.GetExtension(_latestMarkdownPath) == ".md";
+        ReexportFinalButton.IsVisible = success && ResultRevisionText.IsVisible && RevisionsComboBox.SelectedItem is ComboBoxItem { Tag: not "final" };
+        ResultDetailsToggle.IsVisible = success;
         CancelOperationButton.IsVisible = false;
     }
 
@@ -1020,7 +1069,7 @@ public partial class MainWindow : Window
         var explained = review.Length > 0;
         var others = diagnostics.Where(diagnostic => diagnostic.Severity != DiagnosticSeverity.Information &&
                 !(explained && IsVisualReviewCode(diagnostic.Code)))
-            .Select(diagnostic => (Location: DiagnosticLocation(diagnostic), DiagnosticGuidance(diagnostic.Code, diagnostic.Message, diagnostic.PartUri).Summary))
+            .Select(diagnostic => (Location: DiagnosticLocation(diagnostic), DiagnosticGuidanceJapanese.Describe(diagnostic.Code, diagnostic.Message, diagnostic.PartUri).Summary))
             .Distinct().ToArray();
         lines.AddRange(others.Take(maxPages).Select(item => item.Location is null ? item.Summary : $"{item.Location}：{item.Summary}"));
         if (others.Length > maxPages) lines.Add($"ほか{others.Length - maxPages}件の注意事項（詳細を参照）");
@@ -1039,9 +1088,6 @@ public partial class MainWindow : Window
         var message = System.Text.RegularExpressions.Regex.Match(diagnostic.Message, @"PDF page (\d+)");
         return message.Success ? message.Groups[1].Value + "ページ目" : null;
     }
-
-    private static bool IsPdfDiagnostic(string? partUri, string message) =>
-        partUri?.StartsWith("pdf:", StringComparison.Ordinal) == true || message.Contains("PDF page", StringComparison.Ordinal);
 
     // Consequences of one unresolved element (the projection is partial, fallback was used) are
     // reported together, so one diagonal line does not read as four separate problems.
@@ -1065,7 +1111,7 @@ public partial class MainWindow : Window
                 var severity = (DiagnosticSeverity)group.Max(diagnostic => (int)diagnostic.Severity);
                 var count = group.Count();
                 var first = group.First();
-                var guidance = DiagnosticGuidance(group.Key, first.Message, first.PartUri);
+                var guidance = DiagnosticGuidanceJapanese.Describe(group.Key, first.Message, first.PartUri);
                 // Records, not elements: one unresolved line can be reported by the extractor, the
                 // Markdown projection, and the validator.
                 var countLabel = count > 1 ? $"（記録{count}件）" : string.Empty;
@@ -1084,43 +1130,6 @@ public partial class MainWindow : Window
         DiagnosticSeverity.Error => "エラー",
         DiagnosticSeverity.Warning => "警告",
         _ => "情報",
-    };
-
-    // PDF has no editable connectors, so its guidance points at the review image or the source
-    // page instead of asking the user to reconnect shapes.
-    private static (string Summary, string Action) DiagnosticGuidance(string code, string originalMessage, string? partUri = null) =>
-        IsPdfDiagnostic(partUri, originalMessage) && PdfDiagnosticGuidance(code) is { } pdf ? pdf : code switch
-    {
-        "VisualConnectorUnresolved" => ("図のコネクタの接続先を一意に判断できませんでした。", "元文書を確認し、必要ならコネクタ端点を図形へ接続してください。"),
-        "VisualEdgeLabelUnresolved" => ("図のラベルを一つの接続線へ一意に対応付けできませんでした。", "ラベルを対象の接続線へ近づけ、周囲の線から離してください。"),
-        "VisualNodeLabelMissing" => ("図形の文字を一つの図形へ一意に対応付けできませんでした。", "元文書で図形と文字の対応を確認してください。"),
-        "VisualSemanticProjectionPartial" => ("図の一部だけを意味構造として変換しました。", "Markdownの図、代替表示、元文書を見比べてください。"),
-        "VisualSemanticProjectionFallback" => ("図を意味構造として変換できず、代替表示にしました。", "Markdownの代替表示と元文書を見比べてください。"),
-        "VisualSemanticProjectionUnavailable" => ("図の一部を意味構造として変換できませんでした。", "元文書の該当箇所を確認してください。"),
-        "VisualFallbackUsed" => ("図の一部を代替表示として保持しました。", "Markdownの代替表示と元文書を見比べてください。"),
-        "VisualEdgeDirectionUnknown" => ("接続線の向きを確定できないため、無向線として保持しました。", "元文書の矢印方向を確認してください。"),
-        "XlsxFormulaCachedValueMissing" => ("保存済みの計算結果がない数式セルがあります。", "Excel等で再計算して保存してから、もう一度変換してください。"),
-        "XlsxLegacyCommentsUnsupported" => ("旧形式のXLSXコメントは本文へ展開されません。", "必要なコメントは元ブックで確認してください。"),
-        "PdfRasterizerUnavailable" => ("画像PDFの読み取りに必要なrasterizerを利用できません。", "ネイティブテキストを使うか、対応rasterizerを構成してください。"),
-        "PdfRasterizationFailed" => ("PDF rasterizerの実行に失敗しました。", "pdftoppmまたはmutoolの実行ファイルと入力PDFを確認してください。"),
-        "PdfReviewImageUnavailable" => ("原本照合用のページ画像を作成できませんでした。", "原本PDFの該当ページを開いて確認してください。画像を添付するにはpdftoppmまたはmutoolを構成してください。"),
-        "PdfFormXObjectUnparsed" => ("PDFの描画部品（Form XObject）の中身を解析できず、その文字・図はMarkdownに含まれていません。", "「該当ページを確認」または照合画像で、原本の該当箇所を確認してください。"),
-        "PdfFontResourceAmbiguous" => ("PDFの文字が使うフォントを特定できず、文字が正しく変換されていない可能性があります（Markdownには含めています）。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
-        "PdfTextUndecodable" => ("PDFの文字が使うフォントに、文字コードを文字へ変換する情報（ToUnicode）がなく、文字を確定できませんでした。Markdownには文字化けした文字が含まれている可能性があります。", "「該当ページを確認」または原本PDFで、該当する文字を確認してください。"),
-        "PdfLayerVisibilityUnknown" => ("PDFのレイヤー（Optional Content）の表示状態を判定できなかった文字を、Markdownに含めました。", "原本PDFで、その文字が画面に表示されているかを確認してください。"),
-        "PdfStrikethroughUnplaced" => ("PDFの行の一部に取り消し線があり、どの文字が取り消されているかを判定できなかったため、取り消し線の印を付けずに出力しました。", "原本PDFの該当ページで、取り消された文字を確認してください。"),
-        "OcrProviderUnavailable" => ("OCRエンジンを利用できません。", "OCRを無効にするか、利用可能なOCRエンジンを構成してください。"),
-        "EmptyProjection" => ("変換できる内容が見つかりませんでした。", "元文書が対応形式で、内容が非表示または画像のみでないか確認してください。"),
-        _ => ("変換時の注意事項があります。", $"原文: {originalMessage}{Environment.NewLine}元文書と生成結果を確認し、必要なら診断コードを添えて報告してください。"),
-    };
-
-    private static (string Summary, string Action)? PdfDiagnosticGuidance(string code) => code switch
-    {
-        "VisualConnectorUnresolved" => ("PDFの線や矢印の接続先・意味を自動で確定できませんでした。", "「該当ページを確認」または照合画像で、線の意味を原本と照合してください。"),
-        "VisualEdgeLabelUnresolved" => ("PDFの文字を、どの線の説明か確定できませんでした。", "照合画像または原本PDFで、文字と線の対応を確認してください。"),
-        "VisualNodeLabelMissing" => ("PDFの図形の文字を一つの図形へ対応付けできませんでした。", "照合画像または原本PDFで、図形と文字の対応を確認してください。"),
-        "VisualEdgeDirectionUnknown" => ("PDFの線の向きを確定できないため、向きのない線として保持しました。", "照合画像または原本PDFで矢印の向きを確認してください。"),
-        _ => null,
     };
 
     private void OnOpenOutputFolder(object? sender, RoutedEventArgs e)
@@ -1404,7 +1413,7 @@ public partial class MainWindow : Window
             TableRowBlocksCheckBox.IsChecked = settings.TableRowBlocks == true;
             PackageTargetCharacters.Value = settings.TargetCharacters is >= 128 and <= 1000000 ? settings.TargetCharacters : 12000;
             RevisionsComboBox.SelectedIndex = settings.Revisions switch { "final" => 1, "markup" => 2, "reject" => 3, _ => 0 };
-            ExpandMergedCellsCheckBox.IsChecked = settings.ExpandMergedCells == true;
+            ExpandMergedCellsCheckBox.IsChecked = settings.ExpandVerticalMerges != false;
             if (settings.OcrEnabled is not null) OcrToggle.IsChecked = settings.OcrEnabled;
             if (!string.IsNullOrWhiteSpace(settings.OcrLanguages)) OcrLanguagesTextBox.Text = settings.OcrLanguages;
             if (settings.PdfFallback is not null) PdfFallbackToggle.IsChecked = settings.PdfFallback;
@@ -1424,6 +1433,7 @@ public partial class MainWindow : Window
             ReadableOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked != true;
             SidecarOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked == true;
             AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
+            UpdateFormatSpecificOptions();
             EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
             ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         }
@@ -1474,7 +1484,9 @@ public partial class MainWindow : Window
         string? OcrReview = null,
         bool? AiPackage = null,
         bool? ZipAiPackage = null,
-        bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null, bool? ExpandMergedCells = null);
+        bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null, // Saved under a new name since v0.3.11, where the setting is on by default: an "off" saved
+        // while off was the default is no choice of the user's.
+        bool? ExpandVerticalMerges = null);
 
     private static void ShowError(TextBlock control, string message)
     {

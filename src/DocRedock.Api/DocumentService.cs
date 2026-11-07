@@ -51,9 +51,12 @@ public sealed record ReadableDocumentExportOptions(
     OcrReviewMode OcrReview = OcrReviewMode.LowConfidence,
     string? Revisions = null,
     bool AllowRevisionSharing = false,
-    bool ExpandMergedCells = false,
+    // A vertically merged cell's value is repeated in each row it covers, so that every row reads whole: a blank
+    // cell under a merged one made a reader (a model) guess which value it shares.
+    bool ExpandMergedCells = true,
     bool OcrAuto = false,
-    string? Language = null);
+    string? Language = null,
+    bool OmitImages = false);
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
@@ -298,7 +301,11 @@ public sealed partial class DocumentService
                 includedImageAssetIds.Contains(asset.Id)).ToArray();
             if (imageAssets.Length > 0)
             {
-                if (options.EmbedImages)
+                if (options.OmitImages)
+                    // Text only (standard output to a model): each image is named by its description instead of
+                    // carried as a file or as base64 that costs several times the tokens of the text around it.
+                    graph = MarkReadableImagesOmitted(graph);
+                else if (options.EmbedImages)
                 {
                     var references = new Dictionary<string, string>(StringComparer.Ordinal);
                     var totalEmbeddedBytes = 0;
@@ -352,7 +359,7 @@ public sealed partial class DocumentService
                 options.Sheets,
                 ReadableTitle(graph, source, options.Title),
                 options.ContentPolicy,
-                options.OcrReview, options.ExpandMergedCells, options.Language));
+                options.OcrReview, options.ExpandMergedCells, options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source)));
             var markdown = serializer.Serialize(graph);
             foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
                          existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
@@ -475,6 +482,22 @@ public sealed partial class DocumentService
 
     private static string? ReadableTitle(DocumentGraph graph, string source, string? requested) =>
         requested ?? (graph.Format == DocumentFormatKind.Xlsx ? Path.GetFileNameWithoutExtension(source) : null);
+
+    private static DocumentGraph MarkReadableImagesOmitted(DocumentGraph graph) => graph with
+    {
+        Partitions = graph.Partitions.Select(partition => partition with
+        {
+            Nodes = partition.Nodes.Select(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent
+                ? node with
+                {
+                    Extensions = new Dictionary<string, JsonElement>(node.Extensions ?? new Dictionary<string, JsonElement>(), StringComparer.Ordinal)
+                    {
+                        [ReadableMarkdownSerializer.ImageOmittedExtension] = JsonSerializer.SerializeToElement(true)
+                    }
+                }
+                : node).ToArray()
+        }).ToArray()
+    };
 
     private static DocumentGraph RebindReadableImageReferences(
         DocumentGraph graph,
@@ -644,6 +667,7 @@ public sealed partial class DocumentService
     }
 
     private static string? ExtensionText(DocumentNode node, string key) =>
+        node.Extensions is IStringNodeExtensions strings && strings.TryGetString(key, out var text) ? text :
         node.Extensions is not null && node.Extensions.TryGetValue(key, out var value)
             ? value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString()
             : null;
@@ -838,6 +862,8 @@ public sealed partial class DocumentService
         bool includeTextlessPlaceholderNodes, CancellationToken cancellationToken)
     {
         PdfExtractionResult extraction;
+        // An encrypted PDF's streams cannot be read without its key: say so instead of reading garbled bytes.
+        if (DocumentSourceException.IsEncryptedPdf(path)) throw DocumentSourceException.EncryptedPdf(Path.GetFileName(path));
         try { extraction = PdfTextExtractor.Extract(path, cancellationToken: cancellationToken); }
         catch (PdfExtractionException exception)
         {
@@ -965,10 +991,14 @@ public sealed partial class DocumentService
         bool includeVisualFallback = true,
         string? language = null)
     {
-        var sample = string.Concat(graph.Nodes.Where(node => node.Kind is NodeKind.Paragraph or NodeKind.Heading)
+        // As the readable serializer decides (ReadableMarkdownSerializer.SetOutputLanguage): the note on a page without
+        // text is no text of the document, and a scan with none is described in the language of the system.
+        var sample = string.Concat(graph.Nodes.Where(node => node.Kind is NodeKind.Paragraph or NodeKind.Heading &&
+                !HasTrueExtension(node, "pdf_textless_placeholder"))
             .Take(200).Select(node => node.Content is TextNodeContent text ? text.Text : string.Empty));
-        var english = language == "en" || language is null && sample.Any(char.IsAsciiLetter) &&
-            !sample.Any(character => character is >= '\u3040' and <= '\u30ff' or >= '\u3400' and <= '\u9fff');
+        var english = language == "en" || language is null && (sample.Any(char.IsAsciiLetter) &&
+            !sample.Any(character => character is >= '\u3040' and <= '\u30ff' or >= '\u3400' and <= '\u9fff') ||
+            !sample.Any(char.IsLetter) && System.Globalization.CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "en");
         if (!enableOcr)
             foreach (var page in pdfPages.Where(page => page.IsImageOnly))
                 diagnostics.Add(new Diagnostic("OcrDisabled", $"PDF page {page.PageNumber}: OCR was disabled; image text was not read.",
@@ -1311,13 +1341,18 @@ public sealed partial class DocumentService
         return graph with { Partitions = partitions };
     }
 
+    private static string? ImageDescription(DocumentNode placeholder, int imageIndex) =>
+        placeholder.Extensions?.TryGetValue("pdf_image_descriptions", out var value) == true && value.ValueKind == JsonValueKind.Array &&
+        imageIndex - 1 < value.GetArrayLength() && value[imageIndex - 1].GetString() is { Length: > 0 } description ? description : null;
+
     /// <summary>The image node for one cut-out embedded image, at the placeholder's reading
     /// position and carrying the rectangle the PDF draws it at.</summary>
     private static DocumentNode CreatePdfEmbeddedImageNode(
         DocumentNode placeholder, PdfCroppedImage crop, int imageIndex, int pageNumber) =>
         new($"{placeholder.Id}_{imageIndex}", NodeKind.Image, placeholder.ParentId,
             placeholder.Order + imageIndex - 1, placeholder.Layer,
-            new ReferenceNodeContent(crop.Asset.Id, $"PDF page {pageNumber} image {imageIndex}"),
+            // A tagged PDF's description of the figure (its /Alt) when it gives one for each image cut out.
+            new ReferenceNodeContent(crop.Asset.Id, ImageDescription(placeholder, imageIndex) ?? $"PDF page {pageNumber} image {imageIndex}"),
             placeholder.Source, Geometry: crop.Bounds, Editability: NodeEditability.RenderOnly,
             Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: pageNumber, Bbox: crop.Bounds)],
             Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -1945,8 +1980,7 @@ public sealed partial class DocumentService
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
     private static string Hash(string value) => Hash(System.Text.Encoding.UTF8.GetBytes(value));
-    private static NotSupportedException UnsupportedSourceFormat(string source) => new(
-        $"Document source '{Path.GetFileName(source)}' is not a supported or readable DOCX, XLSX, PPTX, or PDF file.");
+    private static NotSupportedException UnsupportedSourceFormat(string source) => DocumentSourceException.ForUnreadable(source);
     private static void TryDeleteDirectory(string path)
     {
         try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }

@@ -69,7 +69,8 @@ public sealed class CliUsabilityRegressionTests : IDisposable
         var code = await App(output, new()).RunAsync(["export", root, "--output-dir", Path.Combine(root, "out"), "--json", "--ocr", "off"]);
         Assert.Equal((int)ExitCode.Unsupported, code);
         using var json = JsonDocument.Parse(output.ToString()); var entries = json.RootElement.GetProperty("results").EnumerateArray().ToArray();
-        Assert.Equal(2, entries.Length); Assert.Contains(entries, e => e.GetProperty("error").GetString()!.Contains("LibreOffice"));
+        Assert.Equal(2, entries.Length); Assert.Contains(entries, e => e.GetProperty("error").ValueKind == JsonValueKind.Object &&
+            e.GetProperty("error").GetProperty("message").GetString()!.Contains("LibreOffice"));
         Assert.True(File.Exists(Path.Combine(root, "out", "document.md")));
     }
 

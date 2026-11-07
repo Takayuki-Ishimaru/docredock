@@ -83,7 +83,7 @@
       <Grid Margin="20,0" ColumnDefinitions="*,Auto" ColumnSpacing="16">
         <StackPanel VerticalAlignment="Center" Spacing="2">
           <TextBlock x:Name="ExportActionSummaryText" Text="文書を選択してください" FontWeight="SemiBold" />
-          <TextBlock Text="選択した文書を現在の設定でMarkdownへ書き出します" Classes="muted caption" />
+          <TextBlock x:Name="ExportActionDescriptionText" Text="選択した文書を現在の設定で閲覧用Markdownへ書き出します" Classes="muted caption" />
         </StackPanel>
         <Button x:Name="ExportButton" Grid.Column="1" Classes="accent primary-action" Click="OnExport" IsEnabled="False"
                 AutomationProperties.Name="選択した文書を書き出す">
@@ -119,6 +119,12 @@
           <TextBlock x:Name="ResultTitleText" Text="処理が完了しました" FontSize="14" FontWeight="SemiBold" />
           <TextBlock x:Name="ResultCountsText" Classes="caption" FontWeight="SemiBold" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="確認が必要な件数" />
+          <!-- The explanations stay short of the settings above: a few lines, scrolled, and folded away on request. -->
+          <ToggleButton x:Name="ResultDetailsToggle" Classes="flat compact" IsChecked="True" IsVisible="False"
+                        Content="説明を折りたたむ" IsCheckedChanged="OnResultDetailsToggled"
+                        AutomationProperties.Name="結果の説明の表示と折りたたみ" />
+          <ScrollViewer x:Name="ResultDetailsScroller" MaxHeight="150" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+          <StackPanel Spacing="3">
           <TextBlock x:Name="ResultReviewText" Classes="caption" TextWrapping="Wrap" IsVisible="False" MaxLines="8"
                      AutomationProperties.Name="原本照合が必要な内容" />
           <TextBlock x:Name="ResultOcrText" Classes="caption" TextWrapping="Wrap" IsVisible="False"
@@ -131,6 +137,8 @@
                      AutomationProperties.Name="除外した非表示の内容" />
           <TextBlock x:Name="ResultRevisionText" Classes="muted caption" TextWrapping="Wrap" IsVisible="False"
                      AutomationProperties.Name="変更履歴の共有確認" />
+          </StackPanel>
+          </ScrollViewer>
           <TextBlock x:Name="ResultMessageText" Classes="muted caption" TextWrapping="Wrap" MaxLines="2" />
           <ProgressBar x:Name="OperationProgressBar" IsIndeterminate="True" IsVisible="False" MinHeight="5"
                        AutomationProperties.Name="処理の進捗" />
@@ -148,6 +156,12 @@
                   AutomationProperties.Name="該当ページを確認">該当ページを確認</Button>
           <Button x:Name="OpenOutputFolderButton" Classes="secondary compact" Click="OnOpenOutputFolder" IsVisible="False"
                   AutomationProperties.Name="出力フォルダーを開く">フォルダーを開く</Button>
+          <Button x:Name="ReexportFinalButton" Classes="secondary compact" Click="OnReexportFinal" IsVisible="False"
+                  ToolTip.Tip="Wordの変更履歴を最終版（削除した文字を含まない）にして、同じ設定でもう一度書き出します"
+                  AutomationProperties.Name="最終版で書き出し直す">最終版で書き出し直す</Button>
+          <Button x:Name="CopyMarkdownButton" Classes="secondary compact" Click="OnCopyMarkdown" IsVisible="False"
+                  ToolTip.Tip="書き出したMarkdownをクリップボードへコピーします（AIのチャット欄に貼り付けられます）"
+                  AutomationProperties.Name="Markdownをコピー">コピー</Button>
           <Button x:Name="OpenMarkdownButton" Classes="secondary compact" Click="OnOpenMarkdown" IsVisible="False"
                   AutomationProperties.Name="Markdownを開く">Markdownを開く</Button>
           <Button x:Name="CancelOperationButton" Classes="flat compact" Click="OnCancelOperation" IsVisible="False"
@@ -254,7 +268,8 @@
                 <TextBlock Text="Markdownに含める内容" Classes="section-label" />
                 <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
                           AutomationProperties.Name="内容の公開範囲">
-                  <ComboBoxItem Content="表示中の内容のみ（推奨）" Tag="visible" />
+                  <ComboBoxItem Content="表示中の内容（推奨・変更履歴は印付き）" Tag="visible"
+                                ToolTip.Tip="画面に表示される内容だけを書き出します。Wordの変更履歴は、削除した文字も含めて &lt;del&gt; と &lt;ins&gt; の印付きで出力します。削除した文字を含めないときは、詳細設定の変更履歴で「最終版のみ」を選ぶか、結果の「最終版で書き出し直す」を使ってください。" />
                   <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
                   <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
                 </ComboBox>
@@ -334,7 +349,7 @@
                     <ComboBoxItem Content="履歴付き（挿入・削除・変更を含む）" Tag="markup" />
                     <ComboBoxItem Content="変更履歴がある文書を拒否" Tag="reject" />
                   </ComboBox>
-                  <CheckBox x:Name="ExpandMergedCellsCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
+                  <CheckBox x:Name="ExpandMergedCellsCheckBox" IsChecked="True" IsCheckedChanged="OnSettingsChanged"
                             AutomationProperties.Name="結合セルの値を繰り返して表示">
                     <TextBlock Text="閲覧用Markdownで結合セルの値を各行に表示する" TextWrapping="Wrap" />
                   </CheckBox>

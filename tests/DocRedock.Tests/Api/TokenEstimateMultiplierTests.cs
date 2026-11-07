@@ -32,7 +32,7 @@ public sealed class TokenEstimateMultiplierTests : IDisposable
         const string table = "| 123456 | 789012 |\n| 345678 | 901234 |";
         Assert.True(AiTokenEstimate.Estimate(table) > (table.Length + 3) / 4);
         Assert.Equal(8, AiTokenEstimate.Estimate("123456789012345678901234"));
-        Assert.Equal(2, AiTokenEstimate.Estimate("||||"));
+        Assert.Equal(4, AiTokenEstimate.Estimate("||||"));
         Assert.Equal(4, AiTokenEstimate.Estimate("1 2 3"));
     }
 
@@ -61,7 +61,7 @@ public sealed class TokenEstimateMultiplierTests : IDisposable
     [Fact]
     public void Large_estimates_saturate_and_original_record_deconstruction_still_compiles()
     {
-        Assert.Equal(int.MaxValue, AiTokenEstimate.Estimate(new string('日', int.MaxValue / 100 + 1), 100));
+        Assert.Equal(int.MaxValue, AiTokenEstimate.Estimate(new string('日', int.MaxValue / 80 + 1), 100));
         Assert.Throws<ArgumentNullException>(() => AiTokenEstimate.Estimate(null!));
         var document = new ReadableDocumentExportOptions("source.docx", "unused.md");
         var (originalDocument, path, form, target, blocks) = new AiPackageExportOptions(document, "output");

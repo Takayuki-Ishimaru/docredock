@@ -175,6 +175,11 @@ Report schema `1.1` adds the fields below. Two `1.0` fields also count different
 - `summary.reading_order` and `summary.table_structure`: how each was obtained — `source` (taken from the file: Word body order; Word/PowerPoint/chart table markup; tagged PDF tables), `inferred` (reconstructed from positions or cell layout, not compared with the source), `needs_comparison` (at least one place could not be decided), `not_applicable` (no tables) or `not_evaluated` (no readable projection was made).
 - `summary.table_boundary_review_items` and `review.table_boundaries`: worksheet blank columns at which two tables were output separately although their rows sit side by side with nothing in the layout to tell whether they belong together. Each entry has `sheet_name` and `gap_range`, `left_range` and `right_range` to compare; the Markdown carries an `<!-- inferred: … -->` note at the same place.
 
+Later versions add, without changing the schema version (consumers that ignore unknown fields are unaffected):
+
+- `summary.images_not_written` and `review.unwritten_images`: images the content policy kept that the Markdown does not reference, with no rule that left them out (as a slide's repeated logo or a diagram member is). They make `review.required` and `summary.review_items_detected` true, `all_visual_elements_converted` false, and come with an `ImageNotWritten` warning.
+- An `AiPackageSplitUnavailable` information diagnostic in `diagnostics`, with one line in `review.md`, when a Word section had to stay one part larger than the target because its structure cannot be divided safely.
+
 Visual conversion counters, `review_items_detected: false` and an `inferred` basis do not certify text reading order or semantic correctness.
 
 ## Safety margin for the token estimate (`--token-estimate-multiplier`)

@@ -118,10 +118,10 @@
     },
     {
       "id": "D07-2",
-      "desc": "vMerge継続セル(CANCELLED行)の終端列が空セルになる",
+      "desc": "vMerge継続セル(CANCELLED行)にも開始セルの○を表示する",
       "severity": "guard",
       "type": "contains",
-      "value": "| CANCELLED | 取消 |  | 参照 |"
+      "value": "| CANCELLED | 取消 | ○ | 参照 |"
     },
     {
       "id": "D07-3",
@@ -317,10 +317,10 @@
     },
     {
       "id": "D17-1",
-      "desc": "閲覧用出力の削除(w:del)テキストは取り消し線付きで残る",
+      "desc": "閲覧用出力の削除(w:del)テキストは<del>で囲まれる",
       "severity": "guard",
       "type": "contains",
-      "value": "~~承認者は課長のみとする方針であったが、~~"
+      "value": "<del>承認者は課長のみとする方針であったが、</del>"
     },
     {
       "id": "D17-2",
