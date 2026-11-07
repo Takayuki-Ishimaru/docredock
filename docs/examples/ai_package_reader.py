@@ -79,9 +79,13 @@ SYSTEM_FILES = (".DS_Store", "Thumbs.db", "desktop.ini")
 # A Markdown backslash escape (DocRedock escapes literal text this way), undone before searching.
 MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 # A backslash escape, or else the inline markup readable Markdown writes around text: underline
-# (<u>...</u>), strikethrough (~~...~~) and bold (**...**, ***...*** with italics). Matching escapes first
-# keeps \~ and \* the characters they are; a character reference (&lt;u&gt;) holds none of these.
-INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?(?:u|ins)>|~~|\*\*\*|\*\*")
+# (<u>...</u>, <ins>...</ins>), deletion (<del>...</del>), strikethrough (~~...~~), sub- and superscript
+# (<sub>, <sup>) and bold (**...**, ***...*** with italics). Matching escapes first keeps \~ and \* the
+# characters they are; a character reference (&lt;u&gt;) holds none of these.
+INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?(?:u|ins|del|sub|sup)>|~~|\*\*\*|\*\*")
+# White space and the line breaks of a table cell, which a query without a space in it may run across.
+BREAKS_RE = re.compile(r"<br\s*/?>|\s+", re.IGNORECASE)
+HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 
 
 class PackageError(ValueError):
@@ -1078,12 +1082,32 @@ def _lines(text):
     return [line[:-1] if line.endswith("\r") else line for line in lines]
 
 
+def _compact(text):
+    return BREAKS_RE.sub("", text)
+
+
+def line_headings(markdown):
+    """{line number: the heading the line lies under} for the lines of a part, the part's own title (its
+    first line) left out; a line before any heading is not in it."""
+    headings, heading = {}, None
+    for number, line in enumerate(_lines(markdown), 1):
+        if heading is not None:
+            headings[number] = heading
+        match = HEADING_RE.match(line)
+        if match and number > 1:
+            heading = MARKDOWN_ESCAPE_RE.sub(r"\1", match.group(1))
+    return headings
+
+
 def search_parts(package, manifest, text, contents=None):
     """The parts whose Markdown contains text, as the line reads (_searchable) or as it is written
-    (_plain); case, width, Markdown escapes and, in the first, inline markup do not matter:
+    (_plain); case, width, Markdown escapes and, in the first, inline markup do not matter. A query with
+    no space in it is also found where white space or a line break cuts it: within a line ("11 月"), and
+    across the end of one line and the start of the next, reported at the first of the two.
     [(part, [(line number, line), ...]), ...] in manifest order. contents maps package paths to bytes
     already read (and verified)."""
     query = _plain(text)
+    compact_query = "" if any(character.isspace() for character in query) else query
     contents = contents or {}
     matches = []
     for part in manifest["parts"]:
@@ -1095,12 +1119,29 @@ def search_parts(package, manifest, text, contents=None):
             metadata_end = 1
             while metadata_end < len(source_lines) and source_lines[metadata_end]:
                 metadata_end += 1
-        lines = [(number, line) for number, line in enumerate(source_lines, 1)
-                 if not 1 < number <= metadata_end and
-                 (query in _searchable(line) or query in _plain(line))]
+        lines, previous, previous_matched = [], None, False
+        for number, line in enumerate(source_lines, 1):
+            if 1 < number <= metadata_end:
+                previous = None
+                continue
+            searchable = _searchable(line)
+            matched = query in searchable or query in _plain(line) or bool(compact_query) and compact_query in _compact(searchable)
+            if matched:
+                lines.append((number, line))
+            elif not previous_matched and previous and searchable and compact_query and compact_query in _compact(previous + searchable):
+                lines.append((number - 1, source_lines[number - 2]))
+            previous, previous_matched = searchable, matched
         if lines:
             matches.append((part, lines))
     return matches
+
+
+def _with_headings(package, matches, contents):
+    """The matches of search_parts with {line number: heading} of their parts."""
+    for part, lines in matches:
+        data = contents.get(part["path"])
+        markdown = _decode(package.read_bytes(part["path"]) if data is None else data, part["path"])
+        yield part, lines, line_headings(markdown)
 
 
 def _part_line(part):
@@ -1263,7 +1304,7 @@ def _run(package, args):
         if args.json:
             _print_json(_document_json(manifest, args.verify, review, hidden_required))
         print("review required: read %s before giving this package to a model" % manifest["review"], file=sys.stderr)
-        return 3 if args.fail_on_review or args.require_hidden_review else 11
+        return 3 if args.fail_on_review else 11
     if part is not None:
         data = contents.get(part["path"])
         if data is None:
@@ -1283,16 +1324,18 @@ def _run(package, args):
         if args.json:
             document = _document_json(manifest, args.verify, review, hidden_required)
             document["search"] = {"text": args.search, "parts": [
-                dict(_part_json(item), lines=[{"number": number, "text": line} for number, line in lines])
-                for item, lines in matches]}
+                dict(_part_json(item), lines=[{"number": number, "text": line, "heading": headings.get(number)}
+                                              for number, line in lines])
+                for item, lines, headings in _with_headings(package, matches, contents)]}
             _print_json(document)
             return 0
         if not matches:
             print(_shown("no part contains %r" % args.search), file=sys.stderr)
-        for item, lines in matches:
+        for item, lines, headings in _with_headings(package, matches, contents):
             _say(_part_line(item))
             for number, line in lines[:3]:
-                _say(_shown("  %d: %s" % (number, _excerpt(line, args.search))))
+                heading = headings.get(number)
+                _say(_shown("  %d: %s%s" % (number, _excerpt(line, args.search), "  [%s]" % heading if heading else "")))
             if len(lines) > 3:
                 _say("  ... %d more matching lines" % (len(lines) - 3))
         return 0
@@ -1313,6 +1356,7 @@ def main(argv=None):
         prog="ai_package_reader.py", description="Inspect a DocRedock AI package.",
         epilog="exit codes: 0 ok, 1 --verify found a file missing, changed, refused or not listed, "
                "2 the package cannot be read, 3 review required (--fail-on-review), "
+               "11 review blocks body output or hidden content is included (--require-hidden-review; as docredock package), "
                "11 review blocks body output (use --allow-review after review), "
                "141 the output pipe was closed early")
     parser.add_argument("package", help="package directory or .zip file")
@@ -1329,7 +1373,7 @@ def main(argv=None):
     parser.add_argument("--allow-review", action="store_true",
                         help="print part/search results after reviewing review.md (otherwise review blocks body output with exit 11)")
     parser.add_argument("--require-hidden-review", action="store_true",
-                        help="verify the package and exit 3 before body output for stored review items or included hidden content (also for older complete packages without the flag)")
+                        help="verify the package and exit 11, as docredock package does, before body output for stored review items or included hidden content (also for older complete packages without the flag)")
     parser.add_argument("--json", action="store_true",
                         help="print one JSON object: source, verification, review state, and the part "
                              "(Markdown, locations, table block, source-index entries), every part or the matches")

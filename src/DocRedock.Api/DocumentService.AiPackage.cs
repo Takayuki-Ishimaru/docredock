@@ -28,11 +28,11 @@ public sealed partial class DocumentService
         var graph = AiPackageGraph(extracted, previewOptions);
         var markdownOptions = new ReadableMarkdownOptions(options.ShowFormulas, options.IncludeSvgPreviews,
             options.IncludeDiagrams, options.Sheets, ReadableTitle(graph, options.SourcePath, options.Title), options.ContentPolicy, options.OcrReview,
-            ExpandMergedCells: true, Language: options.Language);
+            ExpandMergedCells: true, Language: options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(options.SourcePath));
         var markdown = new ReadableMarkdownSerializer(markdownOptions).Serialize(graph);
         var parts = AiPackageContentBuilder.Build(AiMapImageReferences(graph, "../assets/"), markdownOptions,
             Path.GetFileName(options.SourcePath), partOptions, cancellationToken);
-        return AiPackageSizeSummary.Build(markdown, parts, partOptions.TargetCharacters);
+        return AiPackageSizeSummary.Build(markdown, parts, partOptions.TargetCharacters) with { Format = graph.Format };
     }
     private static readonly JsonSerializerOptions AiJson = new()
     {
@@ -86,16 +86,20 @@ public sealed partial class DocumentService
             var markdownOptions = new ReadableMarkdownOptions(documentOptions.ShowFormulas,
                 documentOptions.IncludeSvgPreviews, documentOptions.IncludeDiagrams, documentOptions.Sheets,
                 ReadableTitle(graph, source, documentOptions.Title), documentOptions.ContentPolicy, documentOptions.OcrReview,
-                ExpandMergedCells: true, Language: documentOptions.Language);
+                ExpandMergedCells: true, Language: documentOptions.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source));
             // Re-render from graph references; string replacement could corrupt literal text or code.
             var documentSerializer = new ReadableMarkdownSerializer(markdownOptions);
             var documentMarkdown = documentSerializer.Serialize(graph);
             await File.WriteAllTextAsync(documentPath, documentMarkdown,
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             var partGraph = AiMapImageReferences(graph, "../assets/");
+            // Sections the builder could not divide safely are reported; the conversion's own diagnostics stay as they were.
+            var splitDiagnostics = new List<DocRedock.Core.Reporting.Diagnostic>();
             var parts = AiPackageContentBuilder.Build(partGraph, markdownOptions, Path.GetFileName(source),
                 new AiPackagePartOptions(options.TargetCharacters, options.TableRowBlocks)
-                    { TokenEstimateMultiplier = options.TokenEstimateMultiplier }, cancellationToken);
+                    { TokenEstimateMultiplier = options.TokenEstimateMultiplier }, splitDiagnostics, cancellationToken);
+            IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> diagnostics = splitDiagnostics.Count == 0
+                ? exported.Diagnostics : [.. exported.Diagnostics, .. splitDiagnostics];
             Directory.CreateDirectory(Path.Combine(package, "parts"));
             foreach (var part in parts)
             {
@@ -107,7 +111,7 @@ public sealed partial class DocumentService
             }
             var summary = ExportSummaryBuilder.BuildReadable(graph, exported.Diagnostics, documentSerializer.Report);
             var review = ExportReviewBuilder.Build(graph, exported.Diagnostics, documentSerializer.Report);
-            await File.WriteAllTextAsync(Path.Combine(package, "review.md"), AiReviewMarkdown(review, summary, parts),
+            await File.WriteAllTextAsync(Path.Combine(package, "review.md"), AiReviewMarkdown(review, summary, parts, graph.Format, options.TableRowBlocks, splitDiagnostics),
                 new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             // Codes and counts expose conversion limitations without copying diagnostic messages
             // that may contain text or names excluded by the chosen content policy.
@@ -119,7 +123,7 @@ public sealed partial class DocumentService
                 summary,
                 review,
                 sharing_review = review.SharingReview,
-                diagnostics = exported.Diagnostics.GroupBy(d => (d.Code, d.Severity))
+                diagnostics = diagnostics.GroupBy(d => (d.Code, d.Severity))
                     .OrderBy(g => g.Key.Code, StringComparer.Ordinal).ThenBy(g => g.Key.Severity)
                     .Select(g => new { code = g.Key.Code, severity = g.Key.Severity, count = g.Count() }).ToArray()
             };
@@ -128,16 +132,24 @@ public sealed partial class DocumentService
             // in a separately hashed, compact index; repeated sheet/page/heading metadata is shared.
             var locationIds = new Dictionary<string, string>(StringComparer.Ordinal);
             var locations = new List<object>();
+            // A worksheet's parts have a source location for each cell, all but the cell the same: a location is looked up
+            // by its shared fields first, and serialized only when they are new.
+            var idsByFields = new Dictionary<(string, string, int?, int?, string?, IReadOnlyList<string>?), string>();
             string LocationId(AiPackageSourceLocation sourceLocation)
             {
+                var fields = (sourceLocation.PartitionId, sourceLocation.Label, sourceLocation.PageNumber, sourceLocation.SlideNumber,
+                    sourceLocation.SheetName, sourceLocation.HeadingPath);
+                if (idsByFields.TryGetValue(fields, out var known)) return known;
                 var shared = sourceLocation with { NodeId = string.Empty, CellAddress = null };
                 var key = JsonSerializer.Serialize(shared, AiJson);
-                if (locationIds.TryGetValue(key, out var existing)) return existing;
-                var id = "source-" + (locations.Count + 1).ToString("D4", System.Globalization.CultureInfo.InvariantCulture);
-                locationIds.Add(key, id);
-                locations.Add(new { id, shared.PartitionId, shared.Label, shared.PageNumber,
-                    shared.SlideNumber, shared.SheetName, shared.HeadingPath });
-                return id;
+                if (!locationIds.TryGetValue(key, out var id))
+                {
+                    id = "source-" + (locations.Count + 1).ToString("D4", System.Globalization.CultureInfo.InvariantCulture);
+                    locationIds.Add(key, id);
+                    locations.Add(new { id, shared.PartitionId, shared.Label, shared.PageNumber,
+                        shared.SlideNumber, shared.SheetName, shared.HeadingPath });
+                }
+                return idsByFields[fields] = id;
             }
             var indexParts = parts.Select(part => new
             {
@@ -206,8 +218,8 @@ public sealed partial class DocumentService
                 cancellationToken.ThrowIfCancellationRequested();
                 DocRedock.Core.IO.ExclusiveFileSystem.MoveFile(zipPath, target);
             }
-            return new AiPackageExportResult(target, options.Form, graph, exported.Diagnostics, parts, summary, review)
-                { Size = AiPackageSizeSummary.Build(documentMarkdown, parts, options.TargetCharacters) };
+            return new AiPackageExportResult(target, options.Form, graph, diagnostics, parts, summary, review)
+                { Size = AiPackageSizeSummary.Build(documentMarkdown, parts, options.TargetCharacters) with { Format = graph.Format } };
         }
         finally { TryDeleteDirectory(staging); }
     }
@@ -254,7 +266,8 @@ public sealed partial class DocumentService
                 : n).ToArray() }).ToArray()
     };
 
-    private static string AiReviewMarkdown(ExportReview review, ExportSummary summary, IReadOnlyList<AiPackagePart> parts)
+    private static string AiReviewMarkdown(ExportReview review, ExportSummary summary, IReadOnlyList<AiPackagePart> parts,
+        DocumentFormatKind format, bool tableRowBlocks, IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> splitDiagnostics)
     {
         // Sheet names and other source labels are literal text, never Markdown syntax.
         static string Literal(string value) => AiPackageContentBuilder.EscapeLiteral(value);
@@ -295,8 +308,28 @@ public sealed partial class DocumentService
             text.Append('\n');
         }
         if (review.Ocr.Required) text.Append(ExportReviewText.OcrJapanese(review.Ocr)).Append("\n\n");
+        if (review.UnwrittenImages.Count > 0)
+            text.Append("抽出した画像のうち").Append(review.UnwrittenImages.Count)
+                .Append("件が本文から参照されていません。原本の図と照合してください。 / ")
+                .Append(review.UnwrittenImages.Count).Append(" extracted image(s) are not referenced by the Markdown; compare with the source.\n\n");
+        // Why a part is larger than the target depends on what the format splits at; a worksheet table can be cut between
+        // rows on request, which a person would otherwise not find out from here.
+        var oversize = format switch
+        {
+            DocumentFormatKind.Xlsx when !tableRowBlocks =>
+                "表を行の途中で分けないため分割サイズの目安を超えています。--table-row-blocks（GUIでは「大きなExcelの表を行ブロックに分割」）で表を行単位に分割できます。 / A worksheet table is kept whole; --table-row-blocks splits it between rows.",
+            DocumentFormatKind.Xlsx => "1行と見出し・注記だけで分割サイズの目安を超えています。 / One row with its header already exceeds the target.",
+            DocumentFormatKind.Pdf => "1ページを1単位として分割するため、分割サイズの目安を超えています。 / Pages are not split.",
+            DocumentFormatKind.Pptx => "1スライドを1単位として分割するため、分割サイズの目安を超えています。 / Slides are not split.",
+            _ => "見出しの間の表・図・一続きのリストを分けないため、分割サイズの目安を超えています。 / A table, figure or list is kept whole.",
+        };
         foreach (var part in parts.Where(p => p.ExceedsTarget))
-            text.Append("- [").Append(part.Id).Append("](").Append(part.Path).Append("): 表・図等を保つため分割サイズの目安を超えています。\n");
+            text.Append("- [").Append(part.Id).Append("](").Append(part.Path).Append("): ").Append(oversize).Append('\n');
+        // The reason is structural wording only (no document text), so it is safe under every content policy.
+        foreach (var unsplit in splitDiagnostics)
+            text.Append("- 見出しごとに分割できませんでした / Not divided by section: ")
+                .Append(Literal(unsplit.Data?.GetValueOrDefault("reason") ?? unsplit.Message)).Append(" (")
+                .Append(Literal(unsplit.Data?.GetValueOrDefault("part") ?? string.Empty)).Append(")\n");
         if (!review.Required && !summary.HiddenContentIncluded)
             text.Append("照合が必要な箇所は検出されませんでした。読み順・表構造は上記のとおりで、変換の完全性を保証するものではありません。\n");
         return text.ToString();

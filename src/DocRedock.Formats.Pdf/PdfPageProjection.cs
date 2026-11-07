@@ -24,6 +24,17 @@ public static class PdfPageProjection
         return Ranges(region.Underlined);
     }
 
+    /// <summary>The extensions of a paragraph that a page break cuts: "pdf_continues_next_page" on its part on the
+    /// first page, and on the rest "pdf_continues_previous_page", what goes between the two parts.</summary>
+    public static void AddContinuation(PdfTextRegion region, ref Dictionary<string, JsonElement>? extensions)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        if (region.ContinuesOnNextPage)
+            (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["pdf_continues_next_page"] = JsonSerializer.SerializeToElement(true);
+        if (region.ContinuesPreviousPage is { } separator)
+            (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["pdf_continues_previous_page"] = JsonSerializer.SerializeToElement(separator);
+    }
+
     private static JsonElement? Ranges(IReadOnlyList<TextRange>? ranges) => ranges is { Count: > 0 }
         ? JsonSerializer.SerializeToElement(ranges.Select(range => new[] { range.Start, range.End }).ToArray())
         : null;
@@ -37,24 +48,46 @@ public static class PdfPageProjection
             .Select(item => new object[] { item.rowIndex, item.cellIndex, item.Ranges!.Select(range => new[] { range.Start, range.End }).ToArray() })
             .ToArray();
 
-    private sealed record HeadingMetrics(double BodySize);
+    // BodySize, the median size of three or more long lines, sizes headings; TextSize, that of any long line, is the size
+    // a heading in another face or in bold is set at.
+    private sealed record HeadingMetrics(double BodySize, string? BodyFamily, bool BodyBold, double TextSize);
     private static readonly ConditionalWeakTable<PdfPageText, HeadingMetrics> HeadingSizes = new();
 
-    /// <summary>Conservative font-size evidence for a short heading above ordinary body text.</summary>
+    // A heading at the size of the body - Word's Japanese headings are a Gothic face at 10.5-12 points over a
+    // Mincho body of 10.5 - is a short line of its own in another face or in bold, that ends no sentence.
+    private const int MaxStyledHeadingLength = 40;
+
     public static int HeadingLevel(PdfPageText page, PdfTextRegion region)
     {
         ArgumentNullException.ThrowIfNull(page);
         ArgumentNullException.ThrowIfNull(region);
         if (region.IsPageFurniture || region.FontSize is not > 0 || region.Text.Length is 0 or > 120 ||
             region.Text.TrimEnd().EndsWith('.')) return 0;
-        var bodySize = HeadingSizes.GetValue(page, static source =>
+        var metrics = HeadingSizes.GetValue(page, static source =>
         {
-            var sizes = source.Regions.Where(item => item.FontSize > 0 && item.Text.Length >= 20 && !item.IsPageFurniture)
-                .Select(item => item.FontSize!.Value).Order().ToArray();
-            return new HeadingMetrics(sizes.Length >= 3 ? sizes[sizes.Length / 2] : double.PositiveInfinity);
-        }).BodySize;
-        return region.FontSize >= bodySize * 1.6 ? 1 : region.FontSize >= bodySize * 1.2 ? 2 : 0;
+            var body = source.Regions.Where(item => item.FontSize > 0 && item.Text.Length >= 20 && !item.IsPageFurniture).ToArray();
+            var sizes = body.Select(item => item.FontSize!.Value).Order().ToArray();
+            // The face and the weight of most of the body's text; none when no one face sets most of it.
+            var family = body.GroupBy(item => item.FontFamily).OrderByDescending(group => group.Sum(item => item.Text.Length))
+                .FirstOrDefault() is { Key: { } name } top && 2 * top.Sum(item => item.Text.Length) > body.Sum(item => item.Text.Length) ? name : null;
+            var bold = 2 * body.Where(item => item.IsBold).Sum(item => item.Text.Length) > body.Sum(item => item.Text.Length);
+            return new HeadingMetrics(sizes.Length >= 3 ? sizes[sizes.Length / 2] : double.PositiveInfinity, family, bold,
+                sizes.Length >= 1 ? sizes[sizes.Length / 2] : double.PositiveInfinity);
+        });
+        var bodySize = metrics.BodySize;
+        if (region.FontSize >= bodySize * 1.6) return 1;
+        if (region.FontSize >= bodySize * 1.2) return 2;
+        var text = region.Text.Trim();
+        var textSize = metrics.TextSize;
+        if (!double.IsFinite(textSize) || region.FontSize < textSize * 0.95 || text.Length > MaxStyledHeadingLength || text.Contains('\n') ||
+            text[^1] is '。' or '．' or '.' or '、' or ',' or '：' or ':' || IsListItem(text)) return 0;
+        var styled = region.IsBold && !metrics.BodyBold ||
+            region.FontFamily is { } family && metrics.BodyFamily is { } bodyFamily && !StringComparer.OrdinalIgnoreCase.Equals(family, bodyFamily);
+        return !styled ? 0 : region.FontSize >= textSize * 1.1 ? 2 : 3;
     }
+
+    private static bool IsListItem(string text) =>
+        text.Length > 1 && (text[0] is '・' or '•' or '-' or '*' or '●' or '■' || char.IsDigit(text[0]) && text.Length > 2 && text[1] is ')' or '）');
 
     public static IReadOnlyList<DocumentNode> ToDocumentNodes(PdfPageText page,
         IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0)
@@ -106,7 +139,16 @@ public static class PdfPageProjection
                 if (UnderlineRanges(region) is { } underlined) (extensions ??= [])["underline_ranges"] = underlined;
                 var headingLevel = HeadingLevel(page, region);
                 if (headingLevel > 0) (extensions ??= [])["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
-                if (region.IsPageFurniture) (extensions ??= [])["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
+                if (region.IsPageFurniture)
+                {
+                    (extensions ??= [])["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
+                    // A running header lies in the upper half of the page, a footer in the lower (as PdfDocumentGraphProjection
+                    // records it), so the reference listing does not call a header a footer.
+                    if ((page.CropBox ?? page.MediaBox) is { Height: > 0 } box)
+                        extensions["pdf_furniture_position"] = JsonSerializer.SerializeToElement(
+                            region.BoundingBox.Y > box.Y + box.Height / 2 ? "header" : "footer");
+                }
+                AddContinuation(region, ref extensions);
                 nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, order,
                     region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));

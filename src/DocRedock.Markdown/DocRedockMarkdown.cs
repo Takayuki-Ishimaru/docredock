@@ -796,7 +796,7 @@ public sealed class DocRedockMarkdownSerializer
             }
         }
 
-        return sections
+        return MergeSectionsWithIntersectingRanges(sections)
             .OrderBy(section => section.Min(cell => cell.Row))
             .ThenBy(section => section.Min(cell => cell.Column))
             .Select(section => (IReadOnlyList<SpreadsheetCell>)section
@@ -804,6 +804,57 @@ public sealed class DocRedockMarkdownSerializer
                 .ThenBy(cell => cell.Column)
                 .ToArray())
             .ToArray();
+    }
+
+    // A sheet-table is written with its bounding range (SheetRange), and the restore side
+    // (MarkdownGraphEditor.ReadSheetGrids) identifies a table's cells as "every baseline cell inside
+    // that range", then rejects tables whose cell sets overlap. The heuristics above can leave one
+    // section's bounding rectangle covering a cell that belongs to another section -- e.g. a
+    // vertically merged two-row header whose lower-row labels (D4:F4) were split off from the A4:B4
+    // fragment of the same row, while the data rows below joined the first section (A1:F9). The
+    // exported file would then name ranges its own editor refuses, so any single-cell edit failed.
+    // Merging sections whose bounding rectangles intersect (to a fixed point, since a merge widens
+    // the rectangle) makes every exported range disjoint, which makes "cells inside the range" and
+    // "cells of the section" the same set. Sections that do not intersect are left untouched.
+    private static List<List<SpreadsheetCell>> MergeSectionsWithIntersectingRanges(List<List<SpreadsheetCell>> sections)
+    {
+        if (sections.Count < 2) return sections;
+        var boxes = sections.Select(section => new SectionBox(section,
+            section.Min(cell => cell.Column), section.Min(cell => cell.Row),
+            section.Max(cell => cell.Column), section.Max(cell => cell.Row))).ToList();
+        bool merged;
+        do
+        {
+            merged = false;
+            for (var first = 0; first < boxes.Count; first++)
+                for (var second = first + 1; second < boxes.Count; second++)
+                {
+                    if (!boxes[first].Intersects(boxes[second])) continue;
+                    boxes[first] = boxes[first].Union(boxes[second]);
+                    boxes.RemoveAt(second);
+                    second = first; // the widened rectangle must be compared with every later section again
+                    merged = true;
+                }
+        }
+        while (merged);
+        return boxes.Select(box => box.Cells).ToList();
+    }
+
+    private sealed record SectionBox(List<SpreadsheetCell> Cells, int MinColumn, int MinRow, int MaxColumn, int MaxRow)
+    {
+        public bool Intersects(SectionBox other) =>
+            MinColumn <= other.MaxColumn && other.MinColumn <= MaxColumn &&
+            MinRow <= other.MaxRow && other.MinRow <= MaxRow;
+
+        // Moves the other section's cells into this section's list (the lists are private to
+        // SplitSheetSections), so a long chain of merges does not copy the growing list each time.
+        public SectionBox Union(SectionBox other)
+        {
+            Cells.AddRange(other.Cells);
+            return new(Cells,
+                Math.Min(MinColumn, other.MinColumn), Math.Min(MinRow, other.MinRow),
+                Math.Max(MaxColumn, other.MaxColumn), Math.Max(MaxRow, other.MaxRow));
+        }
     }
 
     private static string SheetRange(IReadOnlyList<SpreadsheetCell> cells) =>

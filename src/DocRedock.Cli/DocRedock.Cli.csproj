@@ -26,4 +26,11 @@
     <Description>DocRedock command-line document round-tripping tool.</Description>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- A conversion holds a large document in memory and then several projections of it in turn: the garbage
+         collector compacts the heap rather than let it grow (a 50,000-row workbook peaks at about 400 MB instead of
+         500 MB, and its AI package at about 520 MB instead of 740 MB, for a few percent of time). -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="9" />
+  </ItemGroup>
+
 </Project>

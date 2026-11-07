@@ -286,13 +286,15 @@ public sealed partial class XlsxAdapterTests
     }
 
     [Fact]
-    public void Legacy_cell_comments_are_reported_as_precise_unsupported_content()
+    public void Legacy_cell_comments_are_read_as_notes_of_their_cells()
     {
+        // A note is a reviewer's text about a cell: no warning, a comment node the complete policy includes.
         var result = new XlsxAdapter().Extract(new MemoryStream(CreatePackage(withLegacyComment: true)));
 
-        Assert.Contains(result.Warnings, warning =>
-            warning.StartsWith("XlsxLegacyCommentsUnsupported:", StringComparison.Ordinal) &&
-            warning.Contains("/xl/comments1.xml", StringComparison.Ordinal));
+        Assert.DoesNotContain(result.Warnings, warning => warning.StartsWith("XlsxLegacyCommentsUnsupported:", StringComparison.Ordinal));
+        var note = Assert.Single(result.Graph.Nodes, node => node.Kind == NodeKind.Comment);
+        Assert.Equal(ContentLayer.Metadata, note.Layer);
+        Assert.Equal("Legacy note", ((TextNodeContent)note.Content).Text);
     }
 
     [Fact]
@@ -1771,6 +1773,8 @@ public sealed partial class XlsxAdapterTests
         };
         if (withLegacyComment)
             parts["xl/comments1.xml"] = "<comments xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><commentList><comment ref=\"A1\"><text><t>Legacy note</t></text></comment></commentList></comments>";
+        if (withLegacyComment)
+            parts["xl/worksheets/_rels/sheet1.xml.rels"] = "<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"rIdC\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments\" Target=\"../comments1.xml\" /></Relationships>";
         using var output = new MemoryStream(); using (var zip = new ZipArchive(output, ZipArchiveMode.Create, true)) foreach (var part in parts) { using var writer = new StreamWriter(zip.CreateEntry(part.Key).Open(), Encoding.UTF8); writer.Write(part.Value); }
         return output.ToArray();
     }

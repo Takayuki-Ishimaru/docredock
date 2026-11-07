@@ -286,7 +286,12 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Empty(stderr.ToString());
 
         var body = new StringWriter(); var summary = new StringWriter();
-        var stdoutResult = await new CliApplication(body, summary).RunAsync(["export", fixture.SourcePath, "--output", "-", "--ocr", "off"]);
+        // Standard output is text for a model: an image is its description unless --images embed asks for base64.
+        var omitted = new StringWriter();
+        Assert.Equal((int)ExitCode.Success, await new CliApplication(omitted, new StringWriter()).RunAsync(["export", fixture.SourcePath, "--output", "-", "--ocr", "off"]));
+        Assert.DoesNotContain("data:image", omitted.ToString(), StringComparison.Ordinal);
+        Assert.Contains("画像", omitted.ToString(), StringComparison.Ordinal);
+        var stdoutResult = await new CliApplication(body, summary).RunAsync(["export", fixture.SourcePath, "--output", "-", "--ocr", "off", "--images", "embed"]);
         Assert.Equal((int)ExitCode.Success, stdoutResult);
         Assert.Contains("data:image/png;base64,iVBORw0KGgo=", body.ToString(), StringComparison.Ordinal);
         Assert.DoesNotContain(".assets/", body.ToString(), StringComparison.Ordinal);
@@ -889,7 +894,7 @@ public sealed class CliApplicationTests : IDisposable
         Assert.Equal((int)ExitCode.Success, restore);
         Assert.Equal(await File.ReadAllBytesAsync(fixture.SourcePath), await File.ReadAllBytesAsync(fixture.RestoredPath));
         Assert.Contains("Workspace integrity: OK", stdout.ToString(), StringComparison.Ordinal);
-        Assert.Contains("Restore readiness: F0 eligible.", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains("Restore readiness: the original can be restored exactly (no edits).", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("Fidelity: F0", stdout.ToString());
         Assert.True(Directory.Exists(Path.ChangeExtension(fixture.MarkdownPath, ".drmd")));
         Assert.True(string.IsNullOrEmpty(stderr.ToString()), stderr.ToString());
@@ -914,7 +919,10 @@ public sealed class CliApplicationTests : IDisposable
         var verify = await app.RunAsync(["verify", fixture.MarkdownPath]);
         var restore = await app.RunAsync(["restore", fixture.MarkdownPath, "--output", fixture.RestoredPath]);
 
-        Assert.Equal((int)ExitCode.SuccessWithWarnings, verify);
+        // An edit is what the projection is for: verify reports it and still exits 0 (the 2026-11-07 evaluation saw exit 1).
+        Assert.Equal((int)ExitCode.Success, verify);
+        Assert.Contains("Projection: edited since export", stdout.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("WARNING markdown.hash", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("Edit applicability: NOT CHECKED", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("Restore readiness: NOT CHECKED.", stdout.ToString(), StringComparison.Ordinal);
         Assert.Equal((int)ExitCode.Success, restore);

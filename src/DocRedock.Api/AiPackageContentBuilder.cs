@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using DocRedock.Core.Documents;
+using DocRedock.Core.Reporting;
 using DocRedock.Markdown;
 
 namespace DocRedock.Api;
@@ -34,7 +35,36 @@ public static class AiPackageContentBuilder
         ReadableMarkdownOptions options,
         string sourceFileName,
         AiPackagePartOptions partOptions,
+        CancellationToken cancellationToken = default) =>
+        BuildCore(graph, options, sourceFileName, partOptions, null, cancellationToken);
+
+    /// <summary>
+    /// Same as the overload without <paramref name="diagnostics"/>, and adds an
+    /// <see cref="SplitUnavailableCode"/> information diagnostic for every Word section that had to
+    /// stay one part larger than the target because its structure cannot be divided safely.
+    /// </summary>
+    public static IReadOnlyList<AiPackagePart> Build(
+        DocumentGraph graph,
+        ReadableMarkdownOptions options,
+        string sourceFileName,
+        AiPackagePartOptions partOptions,
+        ICollection<Diagnostic> diagnostics,
         CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(diagnostics);
+        return BuildCore(graph, options, sourceFileName, partOptions, diagnostics, cancellationToken);
+    }
+
+    /// <summary>Information diagnostic: a Word document stayed one part larger than the target.</summary>
+    public const string SplitUnavailableCode = "AiPackageSplitUnavailable";
+
+    private static IReadOnlyList<AiPackagePart> BuildCore(
+        DocumentGraph graph,
+        ReadableMarkdownOptions options,
+        string sourceFileName,
+        AiPackagePartOptions partOptions,
+        ICollection<Diagnostic>? diagnostics,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(graph);
         ArgumentNullException.ThrowIfNull(options);
@@ -95,9 +125,12 @@ public static class AiPackageContentBuilder
                 continue;
             }
 
-            var groups = isPageOriented
-                ? [WholePartition(partition)]
-                : BuildDocxGroups(partition, targetCharacters, cancellationToken) ?? [WholePartition(partition)];
+            var where = LocationOf(partition, graph.Format, partitionIndex + 1);
+            string? unsplittable = null;
+            List<NodeGroup> groups;
+            if (isPageOriented) groups = [WholePartition(partition)];
+            else if (BuildDocxGroups(partition, targetCharacters, cancellationToken, out unsplittable) is { } split) groups = split;
+            else groups = [WholePartition(partition)];
 
             foreach (var group in groups)
             {
@@ -109,19 +142,23 @@ public static class AiPackageContentBuilder
                 var markdown = (isWorkbook || graph.Format == DocumentFormatKind.Docx && !group.Nodes.Any(IsDocumentTitle) ? titled : serializer)
                     .Serialize(BuildGroupGraph(graph, ordered, partitionIndex, partition, group));
                 if (IsHeaderOnly(markdown)) continue;
-                var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format,
-                    partitionIndex + 1, headingPaths)).ToArray();
+                var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format, where, headingPaths)).ToArray();
                 markdown = InsertSourceLine(markdown, sourceFileName, sources);
 
                 partNumber++;
                 var number = partNumber.ToString("D4", CultureInfo.InvariantCulture);
+                var exceedsTarget = markdown.Replace("\r\n", "\n", StringComparison.Ordinal).Trim().Length > targetCharacters;
                 parts.Add(new AiPackagePart(
                     "part-" + number,
                     "parts/" + number + ".md",
                     markdown,
                     groupNodes.Select(node => node.Id).ToArray(),
                     sources,
-                    markdown.Replace("\r\n", "\n", StringComparison.Ordinal).Trim().Length > targetCharacters));
+                    exceedsTarget));
+                // A section that stays whole only because it cannot be divided safely is reported, so that a
+                // part far over the target never reads as if the document simply had no sections.
+                if (unsplittable is not null && exceedsTarget)
+                    diagnostics?.Add(SplitUnavailable(graph.Format, "part-" + number, unsplittable, targetCharacters));
             }
         }
 
@@ -281,6 +318,11 @@ public static class AiPackageContentBuilder
         var prefix = markdown[..sheet.ContentStart];
         var assigned = pieces.SelectMany(piece => piece.NodeIds).ToHashSet(StringComparer.Ordinal);
         var noHeadings = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        var where = LocationOf(partition, graph.Format, partitionIndex + 1);
+        // A part's nodes are found by their IDs, not by reading all of the sheet's nodes for each part (a sheet of tens of
+        // thousands of rows is cut into hundreds of parts). IDs are unique in a graph.
+        var nodesById = new Dictionary<string, DocumentNode>(partition.Nodes.Count, StringComparer.Ordinal);
+        foreach (var node in partition.Nodes) nodesById.TryAdd(node.Id, node);
         var parts = new List<AiPackagePart>();
         for (var index = 0; index < drafts.Count; index++)
         {
@@ -299,7 +341,7 @@ public static class AiPackageContentBuilder
             // Nodes no segment wrote out on its own (a title cell, a covered overlay) stay with the
             // sheet's first part, so every node of the sheet is still in some part.
             if (index == 0) ids.UnionWith(partition.Nodes.Select(node => node.Id).Where(id => !assigned.Contains(id)));
-            var groupNodes = partition.Nodes.Where(node => ids.Contains(node.Id))
+            var groupNodes = ids.Select(id => nodesById.GetValueOrDefault(id)).OfType<DocumentNode>()
                 .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
             AiPackageTableBlock? block = null;
             if (draft.Table >= 0 && tableIds[draft.Table] is { } tableId)
@@ -314,7 +356,7 @@ public static class AiPackageContentBuilder
                     blockIndex + 1 < blocks[draft.Table].Length ? PartId(blocks[draft.Table][blockIndex + 1]) : null)
                 { ContextRange = contexts[draft.Table]?.Range };
             }
-            var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format, partitionIndex + 1, noHeadings)).ToArray();
+            var sources = groupNodes.Select(node => DescribeLocation(node, partition, graph.Format, where, noHeadings)).ToArray();
             var text = InsertSourceLine(body.ToString(), sourceFileName, sources, block);
             var number = (firstPart + index).ToString("D4", CultureInfo.InvariantCulture);
             parts.Add(new AiPackagePart("part-" + number, "parts/" + number + ".md", text, groupNodes.Select(node => node.Id).ToArray(),
@@ -379,14 +421,37 @@ public static class AiPackageContentBuilder
         [.. partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal)],
         WholePartition: true);
 
+    // Why a Word partition has to stay whole; each is also the "reason" of the SplitUnavailable diagnostic.
+    private const string AmbiguousShapeIds = "two nodes carry the same drawing shape id, so which shape a diagram member belongs to is ambiguous";
+    private const string ParentCycle = "the parent/child relationships of its nodes form a cycle";
+    private const string OpenGroup = "a section would separate nodes that belong together";
+
+    private static Diagnostic SplitUnavailable(DocumentFormatKind format, string partId, string reason, int targetCharacters) => new(
+        SplitUnavailableCode,
+        $"{(format == DocumentFormatKind.Docx ? "Word document" : "Document")} could not be divided into parts at its headings: {reason}. " +
+        $"{partId} keeps the whole content in one part that is larger than the target of {targetCharacters.ToString(CultureInfo.InvariantCulture)} characters.",
+        DiagnosticSeverity.Information)
+    {
+        Data = new Dictionary<string, string>(StringComparer.Ordinal) { ["reason"] = reason, ["part"] = partId },
+    };
+
+    // The node a node hangs from within this partition, or null for a root. The content policy removes
+    // a node as a whole, so a paragraph that holds only a picture or a page break loses its empty
+    // parent (no shareable text) while the picture or break itself stays. Such a node is a root here,
+    // exactly as document.md writes it; a parent that is no longer in the partition ties it to nothing.
+    private static string? ParentWithin(DocumentNode node, Dictionary<string, DocumentNode> byId) =>
+        node.ParentId is { Length: > 0 } parentId && byId.ContainsKey(parentId) ? parentId : null;
+
     /// <summary>
     /// Splits a Word partition at heading starts and at the soft target, only between intact
     /// semantic groups (parent/child trees, diagram+member groups, list sequences stay whole).
-    /// Null means relationships are unsafe and the caller must keep the whole partition.
+    /// Null means relationships are unsafe (<paramref name="failure"/> says why) and the caller
+    /// must keep the whole partition.
     /// </summary>
     private static List<NodeGroup>? BuildDocxGroups(DocumentPartition partition,
-        int targetCharacters, CancellationToken token)
+        int targetCharacters, CancellationToken token, out string? failure)
     {
+        failure = null;
         var nodes = partition.Nodes.OrderBy(n => n.Order).ThenBy(n => n.Id, StringComparer.Ordinal).ToArray();
         var byId = nodes.ToDictionary(n => n.Id, StringComparer.Ordinal);
         var indexById = nodes.Select((n, i) => (n.Id, i)).ToDictionary(x => x.Id, x => x.i, StringComparer.Ordinal);
@@ -397,16 +462,21 @@ public static class AiPackageContentBuilder
             token.ThrowIfCancellationRequested();
             if (node.Extensions?.TryGetValue("shape_id", out var shape) == true &&
                 shape.ValueKind == System.Text.Json.JsonValueKind.String && shape.GetString() is { Length: > 0 } shapeId &&
-                !byShapeId.TryAdd(shapeId, node.Id)) return null; // Ambiguous visual identity.
-            if (node.ParentId is not { Length: > 0 } parentId) continue;
-            if (!byId.ContainsKey(parentId)) return null;
+                !byShapeId.TryAdd(shapeId, node.Id))
+            {
+                failure = AmbiguousShapeIds; // Ambiguous visual identity.
+                return null;
+            }
+            if (ParentWithin(node, byId) is not { } parentId) continue;
             if (!children.TryGetValue(parentId, out var list)) children[parentId] = list = [];
             list.Add(node);
             var visited = new HashSet<string>(StringComparer.Ordinal) { node.Id };
-            for (var ancestor = parentId; ancestor is not null; ancestor = byId[ancestor].ParentId)
+            for (string? ancestor = parentId; ancestor is not null; ancestor = ParentWithin(byId[ancestor], byId))
             {
                 token.ThrowIfCancellationRequested();
-                if (!byId.ContainsKey(ancestor) || !visited.Add(ancestor)) return null;
+                if (visited.Add(ancestor)) continue;
+                failure = ParentCycle;
+                return null;
             }
         }
         var union = new UnionFind(nodes.Length);
@@ -414,7 +484,7 @@ public static class AiPackageContentBuilder
         {
             token.ThrowIfCancellationRequested();
             var node = nodes[i];
-            if (node.ParentId is { Length: > 0 } parentId) union.Union(i, indexById[parentId]);
+            if (ParentWithin(node, byId) is { } parentId) union.Union(i, indexById[parentId]);
             foreach (var id in LinkedVisualMemberIds(node, byShapeId))
                 if (indexById.TryGetValue(id, out var linked)) union.Union(i, linked);
             if (i > 0 && node.Kind == NodeKind.ListItem && nodes[i - 1].Kind == NodeKind.ListItem &&
@@ -446,7 +516,11 @@ public static class AiPackageContentBuilder
         if (start < nodes.Length) groups.Add(new NodeGroup(nodes[start..], false));
         foreach (var group in groups)
             if (!IsSliceClosed(group.Nodes, group.Nodes.Select(n => n.Id).ToHashSet(StringComparer.Ordinal),
-                    byId, children, byShapeId)) return null;
+                    byId, children, byShapeId))
+            {
+                failure = OpenGroup;
+                return null;
+            }
         return groups;
     }
 
@@ -464,8 +538,7 @@ public static class AiPackageContentBuilder
     {
         foreach (var node in slice)
         {
-            if (node.ParentId is { Length: > 0 } parentId &&
-                (!byId.TryGetValue(parentId, out var parent) || !sliceIds.Contains(parent.Id)))
+            if (ParentWithin(node, byId) is { } parentId && !sliceIds.Contains(parentId))
                 return false;
             foreach (var linkedId in LinkedVisualMemberIds(node, byShapeId))
                 if (byId.ContainsKey(linkedId) && !sliceIds.Contains(linkedId))
@@ -531,13 +604,20 @@ public static class AiPackageContentBuilder
         return body.Trim().Length == 0;
     }
 
+    private const int MaxSectionPaths = 3;
+
     private static string InsertSourceLine(string markdown, string sourceFileName,
         IReadOnlyList<AiPackageSourceLocation> sources, AiPackageTableBlock? tableBlock = null)
     {
         var line = "ソース: " + EscapeLiteral(sourceFileName.Trim());
+        // Each heading is escaped on its own, so the separator reads as one (A > B, not A \> B). A path that only leads
+        // to a longer one is left out, and a part that spans many sections names the first MaxSectionPaths of them.
         var paths = sources.Where(source => source.HeadingPath is { Count: > 0 })
-            .Select(source => string.Join(" > ", source.HeadingPath!)).Distinct(StringComparer.Ordinal);
-        foreach (var path in paths) line += "\nsection_path: " + EscapeLiteral(path);
+            .Select(source => source.HeadingPath!.Select(heading => EscapeLiteral(heading)).ToArray())
+            .Select(path => string.Join(" > ", path)).Distinct(StringComparer.Ordinal).ToList();
+        paths = paths.Where(path => !paths.Any(other => other.Length > path.Length && other.StartsWith(path + " > ", StringComparison.Ordinal))).ToList();
+        foreach (var path in paths.Take(MaxSectionPaths)) line += "\nsection_path: " + path;
+        if (paths.Count > MaxSectionPaths) line += $"\nsection_path: … (+{paths.Count - MaxSectionPaths})";
         // A block read alone still says which table it continues, which rows it holds, and that
         // its first lines repeat the header rather than add rows.
         if (tableBlock is { } block)
@@ -573,10 +653,12 @@ public static class AiPackageContentBuilder
         if (!group.WholePartition)
         {
             var groupIds = group.IdSet ?? group.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
+            // A parent the content policy removed is not a reason to leave its child out (see ParentWithin).
+            var present = partition.Nodes.Select(node => node.Id).ToHashSet(StringComparer.Ordinal);
             kept = partition with
             {
                 Nodes = [.. partition.Nodes.Where(node => groupIds.Contains(node.Id) &&
-                    (node.ParentId is not { Length: > 0 } parentId || groupIds.Contains(parentId)))],
+                    (node.ParentId is not { Length: > 0 } parentId || !present.Contains(parentId) || groupIds.Contains(parentId)))],
             };
         }
         if (graph.Format is not (DocumentFormatKind.Pdf or DocumentFormatKind.Pptx))
@@ -593,26 +675,35 @@ public static class AiPackageContentBuilder
         };
     }
 
+    // What every source location in a partition says of the partition: its label (but a Word document's, which is the
+    // headings of each node), number and sheet name, made once for the partition rather than for each of its nodes (a
+    // worksheet's parts have a location for each cell, kept until the package is written).
+    private sealed record PartitionLocation(int Number, string? Label, string? SheetName);
+
+    private static PartitionLocation LocationOf(DocumentPartition partition, DocumentFormatKind format, int originalNumber) => format switch
+    {
+        DocumentFormatKind.Pdf => new(originalNumber, "page " + originalNumber.ToString(CultureInfo.InvariantCulture), null),
+        DocumentFormatKind.Pptx => new(originalNumber, "slide " + originalNumber.ToString(CultureInfo.InvariantCulture), null),
+        DocumentFormatKind.Xlsx => new(originalNumber, "sheet " + SheetName(partition.Id), SheetName(partition.Id)),
+        _ => new(originalNumber, null, null),
+    };
+
     private static AiPackageSourceLocation DescribeLocation(DocumentNode node, DocumentPartition partition,
-        DocumentFormatKind format, int originalNumber, Dictionary<string, IReadOnlyList<string>> headingPaths)
+        DocumentFormatKind format, PartitionLocation where, Dictionary<string, IReadOnlyList<string>> headingPaths)
     {
         var headings = format == DocumentFormatKind.Docx
             ? (headingPaths.TryGetValue(node.Id, out var path) ? path : [])
             : [];
-        var label = format switch
-        {
-            DocumentFormatKind.Pdf => "page " + originalNumber.ToString(CultureInfo.InvariantCulture),
-            DocumentFormatKind.Pptx => "slide " + originalNumber.ToString(CultureInfo.InvariantCulture),
-            DocumentFormatKind.Xlsx => "sheet " + SheetName(partition.Id),
-            _ => headings.Count > 0 ? "headings: " + string.Join(" > ", headings) : "document",
-        };
+        var label = format is DocumentFormatKind.Pdf or DocumentFormatKind.Pptx or DocumentFormatKind.Xlsx
+            ? where.Label!
+            : headings.Count > 0 ? "headings: " + string.Join(" > ", headings) : "document";
         return new AiPackageSourceLocation(
             node.Id,
             partition.Id,
             label,
-            PageNumber: format == DocumentFormatKind.Pdf ? originalNumber : null,
-            SlideNumber: format == DocumentFormatKind.Pptx ? originalNumber : null,
-            SheetName: format == DocumentFormatKind.Xlsx ? SheetName(partition.Id) : null,
+            PageNumber: format == DocumentFormatKind.Pdf ? where.Number : null,
+            SlideNumber: format == DocumentFormatKind.Pptx ? where.Number : null,
+            SheetName: where.SheetName,
             HeadingPath: headings.Count > 0 ? headings : null,
             CellAddress: format == DocumentFormatKind.Xlsx && node.Kind == NodeKind.Cell
                 ? node.Source?.Locators.FirstOrDefault(locator => locator.Kind == "cell_address")?.Value

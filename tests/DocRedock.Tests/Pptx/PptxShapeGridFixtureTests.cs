@@ -112,8 +112,8 @@ public sealed class PptxShapeGridFixtureTests
             var service = new DocumentService();
             var generatedPath = Path.Combine(root, "generated.md");
             var savedPath = Path.Combine(root, "powerpoint-saved.md");
-            _ = await service.ExportReadableAsync(new ReadableDocumentExportOptions(generated, generatedPath));
-            var saved = await service.ExportReadableAsync(new ReadableDocumentExportOptions(powerPointSaved, savedPath));
+            _ = await service.ExportReadableAsync(new ReadableDocumentExportOptions(generated, generatedPath, Title: "fixture"));
+            var saved = await service.ExportReadableAsync(new ReadableDocumentExportOptions(powerPointSaved, savedPath, Title: "fixture"));
             var generatedMarkdown = await File.ReadAllTextAsync(generatedPath);
             var savedMarkdown = await File.ReadAllTextAsync(savedPath);
 

@@ -19,17 +19,16 @@ public sealed partial class XlsxAdapter
     private static readonly Regex ConditionalReference = new(@"^(\$?)([A-Za-z]{1,3})(\$?)([1-9][0-9]{0,6})$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
-    private static List<XlsxCellRecord> ApplyConditionalStrike(byte[] xml, string sheet, List<XlsxCellRecord> cells,
+    // formats: the worksheet's conditionalFormatting elements (in its namespace), which the scan of its XML kept.
+    private static List<XlsxCellRecord> ApplyConditionalStrike(IReadOnlyList<XmlElement> formats, string sheet, List<XlsxCellRecord> cells,
         IReadOnlyDictionary<int, bool> strikeStyles, List<string> warnings, CancellationToken token, ConditionalWorkbook workbook)
     {
         if (strikeStyles.Count == 0) return cells;
-        var document = new XmlDocument();
-        using (var reader = XmlReader.Create(new MemoryStream(xml), SafeXml)) document.Load(reader);
-        var ns = document.DocumentElement?.NamespaceURI ?? "";
         var rules = new List<ConditionalRule>();
         var badRange = false;
-        foreach (var formatting in document.GetElementsByTagName("conditionalFormatting", ns).OfType<XmlElement>())
+        foreach (var formatting in formats)
         {
+            var ns = formatting.NamespaceURI;
             var parts = formatting.GetAttribute("sqref").Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
             var parsed = parts.Select(ConditionalCellRange).ToArray();
             var ranges = parsed.OfType<ConditionalRange>().ToArray();

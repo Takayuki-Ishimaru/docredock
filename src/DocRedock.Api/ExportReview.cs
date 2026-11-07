@@ -82,9 +82,13 @@ public sealed record ExportReview(IReadOnlyList<ReviewPage> Pages, OcrReviewSumm
     IReadOnlyList<ReadableTableBoundaryReview>? TableBoundaries = null)
 {
     public RevisionSharingReview? SharingReview { get; init; }
+    /// <summary>Node ids of extracted images the Markdown does not reference (see
+    /// <see cref="ReadableProjectionReport.UnwrittenImageIds"/>): compare the source with the output there.</summary>
+    public IReadOnlyList<string> UnwrittenImages { get; init; } = [];
     public int ReviewImagePages => Pages.Count(page => page.ReviewImageReference is not null);
     public int Elements => Pages.Sum(page => page.Elements.Count);
-    public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 } || SharingReview?.Required == true;
+    public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 } || SharingReview?.Required == true ||
+        UnwrittenImages.Count > 0;
 }
 
 /// <summary>Finds an attached review image on disk: next to the readable Markdown (its .assets
@@ -146,7 +150,7 @@ public static class ExportReviewBuilder
                 partition.Nodes.Any(node => node.Kind == NodeKind.Table)));
         }
         return new ExportReview(pages, BuildOcr(graph), projection?.TableBoundaryReviews ?? [])
-            { SharingReview = RevisionSharingReview.Build(diagnostics) };
+            { SharingReview = RevisionSharingReview.Build(diagnostics), UnwrittenImages = projection?.UnwrittenImageIds ?? [] };
     }
 
     /// <summary>OCR regions whose confidence is below the readable threshold or missing, the same
@@ -234,7 +238,26 @@ public static class ExportReviewBuilder
     /// paints when that is known. Any other node that asks for source review without being a
     /// visual graph stands for one such item, so the review list, the summary counts, and
     /// <see cref="ReadableMarkdownSerializer.RequiresSourceReview"/> can never disagree.</summary>
-    internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping)
+    internal static IEnumerable<ReviewElement> UnanalyzedContent(DocumentNode node, ReviewImageMapping? mapping) =>
+        node.Extensions is { } extensions && HasAnyKey(extensions, UnanalyzedContentKeys) ? UnanalyzedContentOf(node, mapping) : [];
+
+    private static bool HasAnyKey(IReadOnlyDictionary<string, JsonElement> extensions, string[] keys)
+    {
+        foreach (var key in keys)
+            if (extensions.ContainsKey(key)) return true;
+        return false;
+    }
+
+    // The extensions that say a node stands for unanalyzed content: a node with none of them (each cell of a sheet) has
+    // nothing to list.
+    private static readonly string[] UnanalyzedContentKeys =
+    [
+        "pdf_review_reason", "pdf_textless_placeholder", ReviewExtensionKeys.FinalTableGridUnresolved,
+        PdfDocumentGraphProjection.UncertainTextExtension, PdfDocumentGraphProjection.UnparsedFormXObjectsExtension,
+        ReviewExtensionKeys.StrikeUnplaced, ReadableMarkdownSerializer.SourceReviewRequiredExtension,
+    ];
+
+    private static IEnumerable<ReviewElement> UnanalyzedContentOf(DocumentNode node, ReviewImageMapping? mapping)
     {
         if (node.Extensions?.TryGetValue("pdf_review_reason", out var reason) == true && reason.ValueKind == JsonValueKind.String)
         {

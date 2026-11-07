@@ -2,7 +2,7 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.10 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.3.11 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
 
 [目的別クイックガイド](quick-tasks.md)
 
@@ -15,7 +15,7 @@ GitHub ReleasesからOS／CPUに合うパッケージを取得し、公開され
 1. DocRedockを起動します。
 2. DOCX、XLSX、PPTX、PDFのいずれかを選択またはドロップします。
 3. **閲覧用Markdown**を選びます。
-4. 特別な目的がなければ**表示中の内容のみ（推奨）**のままにします。
+4. 特別な目的がなければ**表示中の内容（推奨・変更履歴は印付き）**のままにします。
 5. 図の接続推定は、特別な目的がなければ**Safe（推奨）**のままにします。
 6. 出力先を選んで変換し、Markdown、診断、assetを確認します。
 
@@ -37,7 +37,7 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 ## AI向けパッケージ
 
-v0.3.10では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.3.11では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -134,7 +134,7 @@ OCRテキストは親画像の可視性を引き継ぎます。親partitionを�
 - Markdownから参照されるasset／page preview／placeholderと、元文書の同じページ・slide・sheet
 - 同じtextboxやAlternateContent fallbackが重複していないこと
 
-Warningが出た場合、MarkdownだけをAIへ渡すと意味欠落を見落とす可能性があります。diagnostic/reportとassetを一緒に確認し、必要なら元文書も参照してください。意味欠落・部分投影がWarning以上の場合、CLIは終了コード1を返します。
+Warningが出た場合、MarkdownだけをAIへ渡すと意味欠落を見落とす可能性があります。diagnostic/reportとassetを一緒に確認し、必要なら元文書も参照してください。情報以外の診断がある場合と出力が空の場合、CLIは終了コード1を返します。確認項目だけでは終了コードは変わらず、`--fail-on-review`を付けたときに11になります。`--json`では`needs_attention`と`attention`がこれらをまとめて示します。抽出したのに本文から参照されていない画像は`ImageNotWritten`として報告し、確認が必要な項目に数え、「視覚要素の変換」も一部扱いにします。
 
 閲覧用出力はpixel-perfect再現や元Office図形への完全復元を保証しません。元文書を正本として保持してください。形式別の保証範囲は[対応状況](supported-features.md)を参照してください。
 
@@ -219,6 +219,6 @@ DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md
 DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md --json
 ```
 
-`verify`は整合性、`diff`は編集内容、`preflight`は整合性と編集検出と試験復元を確認します。正常な編集の検出だけでは`preflight`は警告終了になりません。終了コードは0が復元可能、1が警告付きで復元可能、3がサイドカー不整合、6が編集を復元できない状態です。編集済みPDFの再生成を許す場合は`--allow-render-fallback`を明示します。成功は対応範囲での復元可能性を示し、Officeでの外観の一致を保証するものではありません。
+`verify`は整合性、`diff`は編集内容、`preflight`は整合性と編集検出と試験復元を確認します。正常な編集の検出だけでは警告終了になりません。`verify`は編集されたことを「Projection: edited since export」と表示し、終了コード0を返します。Excelでは、編集したセルを数式が参照しうる場合と、編集で数式を書いた場合だけ、`preflight`と`restore`が`XlsxRecalculationRequired`で警告し、該当する数式セルを示します。これらのセルの保存済みの計算結果は、Excelが再計算するまで編集前の値のままです（DocRedockは数式を計算せず、開いたときに再計算するようブックに設定します）。0.3.10で書き出した、表の範囲が重なるMarkdownも編集できます。セルの所属を判別できない場合は`SpreadsheetGridOverlap`で書き出し直しを求めます。終了コードは0が復元可能、1が警告付きで復元可能、3がサイドカー不整合、6が編集を復元できない状態です。編集済みPDFの再生成を許す場合は`--allow-render-fallback`を明示します。成功は対応範囲での復元可能性を示し、Officeでの外観の一致を保証するものではありません。
 
 元のOfficeファイルを復元先に指定しても、通常の`--force`だけでは置換できません。元文書を置き換える場合は`--force --replace-original`を指定します。復元に成功した後、置換直前のファイルを`<出力名>.docredock-original-<ID>.bak`に保存してから置換します。通常は別名の出力先を推奨します。

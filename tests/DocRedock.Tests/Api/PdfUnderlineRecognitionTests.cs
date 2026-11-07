@@ -748,7 +748,9 @@ public sealed class PdfUnderlineRecognitionTests : IDisposable
     private static string Hand(double left, double right, double y) => Rule(left, right, y, 1.2);
 
     // How many drawings the page still has: the lines and shapes no decoration took.
-    private static int Drawings(PdfExtractionResult result) => result.VisualGraphs?.GetValueOrDefault(1)?.Paths?.Count ?? 0;
+    // What stays a drawing: the paths of the page's graph, and the lone rules that divide the page (no decoration either).
+    private static int Drawings(PdfExtractionResult result) =>
+        (result.VisualGraphs?.GetValueOrDefault(1)?.Paths?.Count ?? 0) + (result.Pages[0].SeparatorRules?.Count ?? 0);
 
     [Fact]
     public void Pdf_a_line_drawn_by_hand_through_a_word_runs_on_past_it_and_strikes_it()
@@ -1045,12 +1047,14 @@ public sealed class PdfUnderlineRecognitionTests : IDisposable
         Assert.Contains("~~dropped~~", markdown, StringComparison.Ordinal);
         Assert.Contains("<u>planned</u>", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("~~active~~", markdown, StringComparison.Ordinal);
-        // The line, arrow shaft and arrowhead remain in review evidence, outside the readable body.
+        // The arrow shaft and arrowhead remain in review evidence, outside the readable body. The long line over empty
+        // cells joins nothing and crosses no text: it divides the sheet like a rule, and is neither a decoration nor a drawing.
         Assert.DoesNotContain("- パス:", markdown, StringComparison.Ordinal);
         var visualNode = Assert.Single(result.Graph.Nodes, node => node.Extensions?.ContainsKey("visual_graph") == true);
         var visual = visualNode.Extensions!["visual_graph"].Deserialize<VisualGraph>();
         Assert.NotNull(visual);
-        Assert.Equal(3, visual.Paths!.Count);
+        Assert.Equal(2, visual.Paths!.Count);
+        Assert.Contains(visual.SourceItems!, item => item.Reason?.StartsWith("separator rule", StringComparison.Ordinal) == true);
         Assert.Equal(1, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ReviewPages);
     }
 

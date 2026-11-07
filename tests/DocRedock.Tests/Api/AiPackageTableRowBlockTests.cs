@@ -323,7 +323,7 @@ public sealed class AiPackageTableRowBlockTests
     [InlineData("abcd", 1)]
     [InlineData("abcde", 2)]
     [InlineData("売上表", 3)]
-    [InlineData("| 売上 | 100 |", 6)]
+    [InlineData("| 売上 | 100 |", 7)]
     [InlineData("😀", 1)]
     public void Token_estimate_accounts_for_digits_and_table_delimiters(string text, int expected) =>
         Assert.Equal(expected, AiTokenEstimate.Estimate(text));
