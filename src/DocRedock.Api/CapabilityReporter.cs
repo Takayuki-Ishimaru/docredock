@@ -32,7 +32,7 @@ public sealed class CapabilityReporter
         var tesseract = resolveExecutable("tesseract");
         if (tesseract is null)
         {
-            engine = new("ocr-engine", "unavailable", "tesseract", Action: "Install Tesseract OCR and its language data.", Tier: "optional");
+            engine = new("ocr-engine", "unavailable", "tesseract", Action: "Install Tesseract OCR and its language data" + InstallHints.Tesseract + ".", Tier: "optional");
             capabilities.AddRange(LanguageCapabilities("unavailable", null));
         }
         else
@@ -224,7 +224,7 @@ public sealed class CapabilityReporter
         // A .cmd shim is deliberately never launched through a shell. It is a useful configuration hint, not readiness evidence.
         if (OperatingSystem.IsWindows() && FindPathFile("mmdc.cmd") is not null)
             return new("mermaid-render", "partial", "mmdc", Action: "A Windows .cmd shim was found but is not executed; configure an mmdc.exe path.", Tier: "optional");
-        return new("mermaid-render", "unavailable", "mmdc", Action: "Install @mermaid-js/mermaid-cli or configure --mermaid-cli.", Tier: "optional");
+        return new("mermaid-render", "unavailable", "mmdc", Action: "Install @mermaid-js/mermaid-cli (npm install -g @mermaid-js/mermaid-cli) or configure --mermaid-cli.", Tier: "optional");
     }
 
     private static string? FindPathFile(string name) => (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)

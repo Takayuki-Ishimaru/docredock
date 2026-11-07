@@ -49,7 +49,7 @@ public sealed class RevisionSummaryRegressionTests : IDisposable
         Assert.Equal(11, exit);
         Assert.Contains("revision sharing required", output, StringComparison.Ordinal);
         Assert.DoesNotContain("Detected review items: none", output, StringComparison.Ordinal);
-        Assert.Contains("~~old~~", await File.ReadAllTextAsync(MarkdownPath), StringComparison.Ordinal);
+        Assert.Contains("<del>old</del>", await File.ReadAllTextAsync(MarkdownPath), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -64,7 +64,7 @@ public sealed class RevisionSummaryRegressionTests : IDisposable
         Assert.DoesNotContain("変更履歴", output, StringComparison.Ordinal);
         Assert.Contains("Detected review items: none", output, StringComparison.Ordinal);
         Assert.True(File.Exists(MarkdownPath));
-        Assert.DoesNotContain("~~old~~", await File.ReadAllTextAsync(MarkdownPath), StringComparison.Ordinal);
+        Assert.DoesNotContain("<del>old</del>", await File.ReadAllTextAsync(MarkdownPath), StringComparison.Ordinal);
     }
 
     [Fact]

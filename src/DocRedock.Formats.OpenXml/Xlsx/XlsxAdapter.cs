@@ -369,7 +369,7 @@ public sealed partial class XlsxAdapter
         ArgumentNullException.ThrowIfNull(source);
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = ReadAll(source);
-        var package = Open(bytes);
+        using var package = new XlsxPackage(bytes);
         var richShared = ReadSharedStrings(package);
         var shared = richShared.ToDictionary(item => item.Key, item => item.Value.Text, StringComparer.Ordinal);
         var styleData = ReadStyles(package);
@@ -380,16 +380,12 @@ public sealed partial class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
-        foreach (var part in package.Keys
-                     .Where(part => part.StartsWith("xl/comments", StringComparison.OrdinalIgnoreCase) &&
-                                    part.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
-                     .OrderBy(part => part, StringComparer.Ordinal))
-            warnings.Add($"XlsxLegacyCommentsUnsupported: Legacy cell comments in '/{part}' are preserved in the source package but are not yet emitted in the projection.");
+        // Each worksheet's XML is read once, as a stream (XlsxAdapter.Streaming.cs): its cells and the properties of the
+        // sheet that the projection below reads.
+        var scans = workbook.Sheets.ToDictionary(sheet => sheet.Name, _ => new WorksheetScan(), StringComparer.OrdinalIgnoreCase);
         var sheetVisibility = workbook.Sheets.ToDictionary(
             sheet => sheet.Name,
-            sheet => package.TryGetValue(sheet.PartUri, out var worksheetXml)
-                ? (sheet.IsHidden, Rows: ReadHiddenRows(worksheetXml), Columns: ReadHiddenColumns(worksheetXml))
-                : (sheet.IsHidden, Rows: (IReadOnlySet<int>)new HashSet<int>(), Columns: (IReadOnlySet<int>)new HashSet<int>()),
+            sheet => (sheet.IsHidden, Rows: (IReadOnlySet<int>)scans[sheet.Name].HiddenRows, Columns: (IReadOnlySet<int>)scans[sheet.Name].HiddenColumns),
             StringComparer.OrdinalIgnoreCase);
         IReadOnlyList<CellTextStyle>? textStyles = null;
         // Conditional formulas may refer to a later sheet. Read cached cell values once,
@@ -398,25 +394,28 @@ public sealed partial class XlsxAdapter
         foreach (var sheet in workbook.Sheets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (package.TryGetValue(sheet.PartUri, out var sheetXml))
-                cachedSheets[sheet.Name] = ReadWorksheet(sheetXml, sheet.Name, richShared, styles, formulaDiagnostics, warnings,
-                    workbook.Uses1904DateSystem, sheetVisibility[sheet.Name].Rows, sheetVisibility[sheet.Name].Columns, sheet.State);
+            if (!package.ContainsKey(sheet.PartUri)) continue;
+            var scan = scans[sheet.Name];
+            using (var xml = package.OpenPart(sheet.PartUri))
+                ReadWorksheet(xml, scan, sheet.Name, richShared, styles, formulaDiagnostics, warnings, workbook.Uses1904DateSystem, sheet.State,
+                    readConditionalFormats: styleData.StrikeDifferentialStyles.Count > 0);
+            cachedSheets[sheet.Name] = scan.Cells;
         }
-        var conditionalWorkbook = new ConditionalWorkbook(cachedSheets.ToDictionary(pair => pair.Key,
-            pair => (IReadOnlyDictionary<(int Row, int Column), XlsxCellRecord>)pair.Value.ToDictionary(cell => (cell.RowIndex, cell.ColumnIndex)),
-            StringComparer.OrdinalIgnoreCase), ReadConditionalNames(package, workbook), workbook.Uses1904DateSystem);
+        var conditionalWorkbook = new ConditionalWorkbook(cachedSheets, ReadConditionalNames(package, workbook), workbook.Uses1904DateSystem);
         foreach (var sheet in workbook.Sheets)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!package.TryGetValue(sheet.PartUri, out var xml)) continue;
-            var mergedRanges = ReadMergedRanges(xml);
-            var hiddenRows = ReadHiddenRows(xml);
-            var hiddenColumns = ReadHiddenColumns(xml);
-            var metrics = ReadWorksheetMetrics(xml, sheet.Name, warnings);
-            var tables = ReadTables(package, sheet.PartUri, xml);
+            if (!package.ContainsKey(sheet.PartUri)) continue;
+            var scan = scans[sheet.Name];
+            var mergedRanges = scan.MergedRanges;
+            var hiddenRows = scan.HiddenRows;
+            var hiddenColumns = scan.HiddenColumns;
+            warnings.AddRange(scan.MetricsWarnings);
+            var metrics = scan.Metrics;
+            var tables = ReadTables(package, sheet.PartUri, scan.TableRelationshipIds);
             var cells = ApplyTableRanges(ApplyCenterAcrossRanges(ApplyMergedRanges(cachedSheets[sheet.Name], mergedRanges)), tables);
-            cells = ApplyConditionalStrike(xml, sheet.Name, cells, styleData.StrikeDifferentialStyles, warnings, cancellationToken, conditionalWorkbook);
-            var used = CalculateUsedRange(cells, mergedRanges, ReadDeclaredDimension(xml));
+            cells = ApplyConditionalStrike(scan.ConditionalFormats, sheet.Name, cells, styleData.StrikeDifferentialStyles, warnings, cancellationToken, conditionalWorkbook);
+            var used = CalculateUsedRange(cells, mergedRanges, scan.DeclaredDimension);
             var drawingShapes = ReadDrawingShapes(package, sheet.PartUri, metrics);
             var pictures = ReadPictures(package, sheet.PartUri, sheet.Name, warnings);
             var charts = ReadCharts(package, sheet.PartUri, sheet.Name, cells, sheetVisibility, warnings);
@@ -507,6 +506,10 @@ public sealed partial class XlsxAdapter
                 nodes.Add(ToPictureNode(sheet, picture, nodes.Count));
             foreach (var chart in charts)
                 nodes.Add(ToChartNode(sheet, chart, nodes.Count));
+            // Notes on cells (Excel's comments, threaded or not) are reviewers' text about a cell: the complete content
+            // policy lists them under the sheet; the visible one leaves them out, as it leaves out Word's comments.
+            foreach (var note in ReadCellNotes(package, sheet.PartUri))
+                nodes.Add(ToCellNoteNode(sheet, note, nodes.Count));
             if (sheet.IsHidden)
             {
                 nodes = nodes.Select(node => node with
@@ -518,8 +521,7 @@ public sealed partial class XlsxAdapter
             partitions.Add(new DocumentPartition("sheet-" + sheet.Name, partitions.Count, nodes, sheet.PartUri));
         }
         var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Xlsx, partitions);
-        var hashes = package.ToDictionary(x => x.Key, x => Hash(x.Value), StringComparer.Ordinal);
-        return new(graph, worksheets, shared, formulaDiagnostics, hashes, warnings);
+        return new(graph, worksheets, shared, formulaDiagnostics, package.Hashes, warnings);
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
@@ -602,14 +604,13 @@ public sealed partial class XlsxAdapter
             calcChainNeedsInvalidation |= removedFormula;
         }
         package["xl/workbook.xml"] = MarkWorkbookForRecalculation(package["xl/workbook.xml"]);
-        var warnings = new List<string>
-        {
-            "Cell edits require formula recalculation; DocRedock requested a full calculation on the next workbook open without evaluating formulas."
-        };
+        // Only formulas that may read an edited cell keep a stale result: an edit no formula reads needs no warning.
+        var warnings = new List<string>();
+        if (RecalculationWarning(package, workbook, plan.Edits) is { } recalculation) warnings.Add(recalculation);
         if (calcChainNeedsInvalidation && package.ContainsKey("xl/calcChain.xml"))
         {
             package["xl/calcChain.xml"] = Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?><calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>");
-            warnings.Add("Formula edits invalidated the calculation chain; no formula was evaluated by DocRedock.");
+            warnings.Add("XlsxCalculationChainReset: Formula edits invalidated the calculation chain; Excel rebuilds it when it recalculates the workbook. No formula was evaluated by DocRedock.");
         }
         return new(WritePackage(package), false, plan, warnings);
     }
@@ -649,68 +650,177 @@ public sealed partial class XlsxAdapter
 
     private static DocumentNode ToNode(XlsxCellRecord cell, string partUri, int order)
     {
-        var values = new Dictionary<string, object?>(StringComparer.Ordinal);
-        values["sheet_name"] = cell.SheetName;
-        values["address"] = cell.CellReference;
-        values["row"] = cell.RowIndex;
-        values["column"] = cell.ColumnIndex;
-        values["is_blank"] = cell.IsBlank;
-        values["is_formula"] = cell.Formula is not null;
-        values["is_numeric"] = IsNumericCell(cell);
-        if (cell.CellType is not null) values["cell_type"] = cell.CellType;
-        if (cell.Formula is not null) values["formula"] = cell.Formula;
-        if (cell.StyleId is not null) values["style_id"] = cell.StyleId;
-        if (cell.DisplayValue is not null) values["display_value"] = cell.DisplayValue;
-        if (cell.MergedToRow is not null) values["merged_to_row"] = cell.MergedToRow;
-        if (cell.MergedToColumn is not null) values["merged_to_column"] = cell.MergedToColumn;
-        if (cell.CenterAcrossToColumn is not null) values["center_across_to_column"] = cell.CenterAcrossToColumn;
-        if (cell.TableName is not null) values["excel_table"] = cell.TableName;
-        values["sheet_state"] = cell.SheetState;
-        values["hidden_row"] = cell.IsHiddenRow;
-        values["hidden_column"] = cell.IsHiddenColumn;
-        if (cell.DisplayStyle is not null)
-        {
-            values["is_bold"] = cell.DisplayStyle.IsBold;
-            values["has_fill"] = cell.DisplayStyle.HasFill;
-            values["has_border"] = cell.DisplayStyle.HasBorder;
-            values["is_centered"] = cell.DisplayStyle.IsCentered;
-            if (cell.DisplayStyle.FontSize is not null) values["font_size"] = cell.DisplayStyle.FontSize.Value;
-            if (cell.DisplayStyle.NumberFormat is not null) values["number_format"] = cell.DisplayStyle.NumberFormat;
-        }
-        // One backing JSON document per cell, instead of one allocation per property.
-        var serialized = JsonSerializer.SerializeToElement(values);
+        // A typed record per cell, read as extensions on demand: a sheet of 50,000 rows holds hundreds of thousands of
+        // cells, and a JSON document of its own for each took most of the memory of a conversion.
+        var properties = new CellExtensionDictionary(cell, IsNumericCell(cell));
         IReadOnlyDictionary<string, JsonElement> extension;
         // Struck-through text: "strike" when the whole value is struck (it holds for the displayed
         // value too), else the struck character ranges [start, end) of the value. Underlined text is
         // recorded the same way as "underline" and "underline_ranges".
         if (cell.StruckRanges is { Count: > 0 } || cell.UnderlinedRanges is { Count: > 0 })
         {
-            var marked = serialized.EnumerateObject().ToDictionary(property => property.Name, property => property.Value, StringComparer.Ordinal);
+            var marked = properties.ToDictionary(property => property.Key, property => property.Value, StringComparer.Ordinal);
             AddMarkedRanges(marked, cell, cell.StruckRanges, "strike", "strike_ranges");
             AddMarkedRanges(marked, cell, cell.UnderlinedRanges, "underline", "underline_ranges");
             extension = marked;
         }
-        else extension = new CellExtensionDictionary(serialized, values.Count);
+        else extension = properties;
         var layer = cell.IsHiddenRow || cell.IsHiddenColumn || !string.Equals(cell.SheetState, "visible", StringComparison.OrdinalIgnoreCase)
             ? ContentLayer.Hidden
             : ContentLayer.Body;
-        return new($"n_{Hash(cell.SheetName + "!" + cell.CellReference)[..16]}", NodeKind.Cell, null, order,
+        return new(CellNodeId(cell.SheetName, cell.CellReference), NodeKind.Cell, null, order,
             layer, new TextNodeContent(cell.Value ?? string.Empty),
             new SourceAnchor("xlsx", partUri, [new AnchorLocator("cell_address", cell.CellReference)]), Extensions: extension);
     }
 
-    // Keep ordinary cell metadata in the compact immutable JSON backing store. A
-    // Dictionary entry for every property otherwise dominates large-sheet memory.
-    private sealed class CellExtensionDictionary(JsonElement value, int count) : IReadOnlyDictionary<string, JsonElement>
+    /// <summary>"n_" and the first 16 hexadecimal digits of the SHA-256 of "sheet!reference" (UTF-8): a cell's node ID,
+    /// made without the strings in between, since every cell of a sheet has one.</summary>
+    private static string CellNodeId(string sheet, string reference)
     {
-        public int Count => count;
-        public IEnumerable<string> Keys => value.EnumerateObject().Select(property => property.Name);
-        public IEnumerable<JsonElement> Values => value.EnumerateObject().Select(property => property.Value);
-        public JsonElement this[string key] => value.TryGetProperty(key, out var item) ? item : throw new KeyNotFoundException(key);
-        public bool ContainsKey(string key) => value.TryGetProperty(key, out _);
-        public bool TryGetValue(string key, out JsonElement item) => value.TryGetProperty(key, out item);
-        public IEnumerator<KeyValuePair<string, JsonElement>> GetEnumerator() => value.EnumerateObject()
-            .Select(property => new KeyValuePair<string, JsonElement>(property.Name, property.Value)).GetEnumerator();
+        var length = Encoding.UTF8.GetByteCount(sheet) + 1 + Encoding.UTF8.GetByteCount(reference);
+        var rented = length > 256 ? System.Buffers.ArrayPool<byte>.Shared.Rent(length) : null;
+        Span<byte> text = rented is null ? stackalloc byte[256] : rented;
+        var written = Encoding.UTF8.GetBytes(sheet, text);
+        text[written++] = (byte)'!';
+        written += Encoding.UTF8.GetBytes(reference, text[written..]);
+        Span<byte> hash = stackalloc byte[SHA256.HashSizeInBytes];
+        SHA256.HashData(text[..written], hash);
+        if (rented is not null) System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+        return string.Create(18, System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(hash), static (characters, prefix) =>
+        {
+            characters[0] = 'n';
+            characters[1] = '_';
+            for (var index = 0; index < 16; index++) characters[2 + index] = "0123456789abcdef"[(int)(prefix >> (60 - 4 * index)) & 0xF];
+        });
+    }
+
+    /// <summary>A cell's properties as node extensions: the fields of its record, each turned into a JSON value when it is
+    /// read (a string can be read as it is, see <see cref="IStringNodeExtensions"/>). The keys and their order are those of
+    /// the JSON object each cell used to carry.</summary>
+    private sealed class CellExtensionDictionary(XlsxCellRecord cell, bool numeric) : IReadOnlyDictionary<string, JsonElement>, IStringNodeExtensions
+    {
+        private static readonly JsonElement True = JsonSerializer.SerializeToElement(true);
+        private static readonly JsonElement False = JsonSerializer.SerializeToElement(false);
+
+        private enum ValueKind : byte { None, Text, Integer, Real, Flag }
+
+        // One property's value, unboxed: the readable projection asks each of hundreds of thousands of cells for a dozen.
+        private readonly record struct Value(ValueKind Kind, string? Text = null, double Number = 0)
+        {
+            public static Value Of(string? text) => text is null ? default : new(ValueKind.Text, text);
+            public static Value Of(int? number) => number is { } value ? new(ValueKind.Integer, Number: value) : default;
+            public static Value Of(bool? flag) => flag is { } value ? new(ValueKind.Flag, Number: value ? 1 : 0) : default;
+        }
+
+        private IEnumerable<string> PresentKeys()
+        {
+            yield return "sheet_name";
+            yield return "address";
+            yield return "row";
+            yield return "column";
+            yield return "is_blank";
+            yield return "is_formula";
+            yield return "is_numeric";
+            if (cell.CellType is not null) yield return "cell_type";
+            if (cell.Formula is not null) yield return "formula";
+            if (cell.StyleId is not null) yield return "style_id";
+            if (cell.DisplayValue is not null) yield return "display_value";
+            if (cell.MergedToRow is not null) yield return "merged_to_row";
+            if (cell.MergedToColumn is not null) yield return "merged_to_column";
+            if (cell.CenterAcrossToColumn is not null) yield return "center_across_to_column";
+            if (cell.TableName is not null) yield return "excel_table";
+            yield return "sheet_state";
+            yield return "hidden_row";
+            yield return "hidden_column";
+            if (cell.DisplayStyle is { } style)
+            {
+                yield return "is_bold";
+                yield return "has_fill";
+                yield return "has_border";
+                yield return "is_centered";
+                if (style.FontSize is not null) yield return "font_size";
+                if (style.NumberFormat is not null) yield return "number_format";
+            }
+        }
+
+        private Value Lookup(string key) => key switch
+        {
+            "sheet_name" => Value.Of(cell.SheetName),
+            "address" => Value.Of(cell.CellReference),
+            "row" => Value.Of(cell.RowIndex),
+            "column" => Value.Of(cell.ColumnIndex),
+            "is_blank" => Value.Of(cell.IsBlank),
+            "is_formula" => Value.Of(cell.Formula is not null),
+            "is_numeric" => Value.Of(numeric),
+            "cell_type" => Value.Of(cell.CellType),
+            "formula" => Value.Of(cell.Formula),
+            "style_id" => Value.Of(cell.StyleId),
+            "display_value" => Value.Of(cell.DisplayValue),
+            "merged_to_row" => Value.Of(cell.MergedToRow),
+            "merged_to_column" => Value.Of(cell.MergedToColumn),
+            "center_across_to_column" => Value.Of(cell.CenterAcrossToColumn),
+            "excel_table" => Value.Of(cell.TableName),
+            "sheet_state" => Value.Of(cell.SheetState),
+            "hidden_row" => Value.Of(cell.IsHiddenRow),
+            "hidden_column" => Value.Of(cell.IsHiddenColumn),
+            "is_bold" => Value.Of(cell.DisplayStyle?.IsBold),
+            "has_fill" => Value.Of(cell.DisplayStyle?.HasFill),
+            "has_border" => Value.Of(cell.DisplayStyle?.HasBorder),
+            "is_centered" => Value.Of(cell.DisplayStyle?.IsCentered),
+            "font_size" => cell.DisplayStyle?.FontSize is { } size ? new(ValueKind.Real, Number: size) : default,
+            "number_format" => Value.Of(cell.DisplayStyle?.NumberFormat),
+            _ => default,
+        };
+
+        // Row and column numbers are read for every cell, again and again: their JSON values are made once. A sheet's
+        // name, a cell's type, style and number format, and font sizes are a handful of values across the sheet: each
+        // one's JSON value is made once too (up to a bound), unlike the text of a cell.
+        private static readonly JsonElement?[] Numbers = new JsonElement?[1 << 17];
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonElement> Shared = new(StringComparer.Ordinal);
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<double, JsonElement> Sizes = new();
+
+        private static JsonElement Element(string key, Value value) => value.Kind switch
+        {
+            ValueKind.Flag => value.Number != 0 ? True : False,
+            ValueKind.Integer => value.Number is >= 0 and < 1 << 17
+                ? Numbers[(int)value.Number] ??= JsonSerializer.SerializeToElement((int)value.Number)
+                : JsonSerializer.SerializeToElement((int)value.Number),
+            ValueKind.Real => Cached(Sizes, value.Number, static size => JsonSerializer.SerializeToElement(size)),
+            _ => key is "sheet_name" or "cell_type" or "style_id" or "number_format" or "excel_table" or "sheet_state"
+                ? Cached(Shared, value.Text!, static text => JsonSerializer.SerializeToElement(text))
+                : JsonSerializer.SerializeToElement(value.Text),
+        };
+
+        private static JsonElement Cached<T>(System.Collections.Concurrent.ConcurrentDictionary<T, JsonElement> cache, T value, Func<T, JsonElement> make)
+            where T : notnull
+        {
+            if (cache.TryGetValue(value, out var known)) return known;
+            var element = make(value);
+            if (cache.Count < 4096) cache.TryAdd(value, element);
+            return element;
+        }
+
+        public int Count => PresentKeys().Count();
+        public IEnumerable<string> Keys => PresentKeys();
+        public IEnumerable<JsonElement> Values => PresentKeys().Select(key => Element(key, Lookup(key)));
+        public JsonElement this[string key] => TryGetValue(key, out var item) ? item : throw new KeyNotFoundException(key);
+        public bool ContainsKey(string key) => Lookup(key).Kind != ValueKind.None;
+
+        public bool TryGetValue(string key, out JsonElement item)
+        {
+            var value = Lookup(key);
+            item = value.Kind == ValueKind.None ? default : Element(key, value);
+            return value.Kind != ValueKind.None;
+        }
+
+        public bool TryGetString(string key, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out string? value)
+        {
+            value = Lookup(key) is { Kind: ValueKind.Text } text ? text.Text : null;
+            return value is not null;
+        }
+
+        public IEnumerator<KeyValuePair<string, JsonElement>> GetEnumerator() =>
+            PresentKeys().Select(key => new KeyValuePair<string, JsonElement>(key, Element(key, Lookup(key)))).GetEnumerator();
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
 
@@ -721,6 +831,69 @@ public sealed partial class XlsxAdapter
             extension[wholeKey] = JsonSerializer.SerializeToElement(true);
         else if (marked is { Count: > 0 })
             extension[rangesKey] = JsonSerializer.SerializeToElement(marked.Select(range => new[] { range.Start, range.End }).ToArray());
+    }
+
+    private sealed record XlsxCellNote(string Reference, int Row, int Column, string? Author, string Text);
+
+    /// <summary>The notes of a worksheet, in the order of their cells: its threaded comments (Excel 365) and its legacy
+    /// comments, a threaded one taking the place of the legacy copy Excel writes beside it for older readers.</summary>
+    private static List<XlsxCellNote> ReadCellNotes(IReadOnlyDictionary<string, byte[]> package, string worksheetPartUri)
+    {
+        var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
+        var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
+        var notes = new Dictionary<string, XlsxCellNote>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in relationships.Values.Where(path => path.Contains("/threadedComments/", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.Ordinal))
+        {
+            if (!package.TryGetValue(part, out var bytes)) continue;
+            var document = System.Xml.Linq.XDocument.Load(XmlReader.Create(new MemoryStream(bytes), SafeXml));
+            foreach (var comment in document.Descendants().Where(element => element.Name.LocalName == "threadedComment"))
+                if ((string?)comment.Attribute("ref") is { Length: > 0 } reference &&
+                    comment.Elements().FirstOrDefault(element => element.Name.LocalName == "text")?.Value.Trim() is { Length: > 0 } text)
+                {
+                    var (row, column) = ParseCellReference(reference);
+                    notes[reference] = notes.TryGetValue(reference, out var earlier) && earlier.Author is null
+                        ? earlier with { Text = earlier.Text + "\n" + text }
+                        : new XlsxCellNote(reference, row, column, null, text);
+                }
+        }
+        // Excel names the part xl/comments1.xml; other writers xl/comments/comment1.xml.
+        foreach (var part in relationships.Values.Where(path => Path.GetFileName(path).StartsWith("comment", StringComparison.OrdinalIgnoreCase) &&
+                     !path.Contains("/threadedComments/", StringComparison.OrdinalIgnoreCase) &&
+                     path.EndsWith(".xml", StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.Ordinal))
+        {
+            if (!package.TryGetValue(part, out var bytes)) continue;
+            var document = System.Xml.Linq.XDocument.Load(XmlReader.Create(new MemoryStream(bytes), SafeXml));
+            var authors = document.Descendants().Where(element => element.Name.LocalName == "author").Select(element => element.Value).ToArray();
+            foreach (var comment in document.Descendants().Where(element => element.Name.LocalName == "comment"))
+            {
+                if ((string?)comment.Attribute("ref") is not { Length: > 0 } reference || notes.ContainsKey(reference)) continue;
+                var text = string.Concat(comment.Descendants().Where(element => element.Name.LocalName == "t").Select(element => element.Value)).Trim();
+                if (text.Length == 0) continue;
+                var author = int.TryParse((string?)comment.Attribute("authorId"), out var authorId) && authorId >= 0 && authorId < authors.Length
+                    ? authors[authorId] : null;
+                // Excel starts a legacy note's text with its author's name ("Sato:"); the author is given apart.
+                if (author is { Length: > 0 } && text.StartsWith(author + ":", StringComparison.Ordinal)) text = text[(author.Length + 1)..].TrimStart();
+                var (row, column) = ParseCellReference(reference);
+                notes[reference] = new XlsxCellNote(reference, row, column, string.IsNullOrWhiteSpace(author) ? null : author, text);
+            }
+        }
+        return notes.Values.OrderBy(note => note.Row).ThenBy(note => note.Column).ToList();
+    }
+
+    private static DocumentNode ToCellNoteNode(SheetInfo sheet, XlsxCellNote note, int order)
+    {
+        var extensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+        {
+            ["sheet_name"] = JsonSerializer.SerializeToElement(sheet.Name),
+            ["cell_ref"] = JsonSerializer.SerializeToElement(note.Reference),
+            ["row"] = JsonSerializer.SerializeToElement(note.Row),
+            ["column"] = JsonSerializer.SerializeToElement(note.Column),
+        };
+        if (note.Author is { } author) extensions["comment_author"] = JsonSerializer.SerializeToElement(author);
+        var anchor = new SourceAnchor("xlsx", sheet.PartUri, [new AnchorLocator("cell_note", note.Reference)], order);
+        return new DocumentNode(NodeIdGenerator.CreateForSource("xlsx", DocumentFormatKind.Xlsx, anchor), NodeKind.Comment, null, order,
+            ContentLayer.Metadata, new TextNodeContent(note.Text), anchor, Editability: NodeEditability.Protected,
+            Provenance: [new ProvenanceItem(EvidenceKind.Native)], Extensions: extensions);
     }
 
     private static DocumentNode ToPictureNode(SheetInfo sheet, XlsxPictureRecord picture, int order)
@@ -1252,7 +1425,7 @@ public sealed partial class XlsxAdapter
     private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
     private static string Hash(string text) => Hash(Encoding.UTF8.GetBytes(text));
 
-    private static Dictionary<string, XlsxString> ReadSharedStrings(Dictionary<string, byte[]> package)
+    private static Dictionary<string, XlsxString> ReadSharedStrings(IReadOnlyDictionary<string, byte[]> package)
     {
         var result = new Dictionary<string, XlsxString>(StringComparer.Ordinal);
         if (!package.TryGetValue("xl/sharedStrings.xml", out var bytes)) return result;
@@ -1275,63 +1448,66 @@ public sealed partial class XlsxAdapter
     // (rPh), whitespace-only runs included: a run that is just a space separates the words around it.
     private static XlsxString ReadRichString(XmlReader reader)
     {
+        // Read to the element's end tag, where the reader is left (on the element itself when it is empty): a subtree
+        // reader for each string of a sheet was most of what reading it allocated.
+        if (reader.IsEmptyElement) return new(string.Empty, []);
+        var depth = reader.Depth;
         var text = new StringBuilder();
-        var runs = new List<XlsxRun>();
-        using var sub = reader.ReadSubtree();
+        List<XlsxRun>? runs = null;
         var phoneticDepth = -1;
         var inText = false;
         var inRunProperties = false;
         int? runStart = null;
         bool? runStrike = null;
         bool? runUnderline = null;
-        while (sub.Read())
+        while (reader.Read() && !(reader.NodeType == XmlNodeType.EndElement && reader.Depth == depth))
         {
             if (phoneticDepth >= 0)
             {
-                if (sub.NodeType == XmlNodeType.EndElement && sub.Depth == phoneticDepth) phoneticDepth = -1;
+                if (reader.NodeType == XmlNodeType.EndElement && reader.Depth == phoneticDepth) phoneticDepth = -1;
                 continue;
             }
-            switch (sub.NodeType)
+            switch (reader.NodeType)
             {
-                case XmlNodeType.Element when sub.LocalName == "rPh":
-                    if (!sub.IsEmptyElement) phoneticDepth = sub.Depth;
+                case XmlNodeType.Element when reader.LocalName == "rPh":
+                    if (!reader.IsEmptyElement) phoneticDepth = reader.Depth;
                     break;
-                case XmlNodeType.Element when sub.LocalName == "r":
+                case XmlNodeType.Element when reader.LocalName == "r":
                     runStart = text.Length;
                     runStrike = null;
                     runUnderline = null;
                     break;
-                case XmlNodeType.Element when sub.LocalName == "rPr" && runStart is not null:
+                case XmlNodeType.Element when reader.LocalName == "rPr" && runStart is not null:
                     // A run's own properties replace the cell's font: struck or underlined only if they say so.
                     runStrike = false;
                     runUnderline = false;
-                    inRunProperties = !sub.IsEmptyElement;
+                    inRunProperties = !reader.IsEmptyElement;
                     break;
-                case XmlNodeType.Element when sub.LocalName == "strike" && inRunProperties:
-                    runStrike = IsOn(sub.GetAttribute("val"));
+                case XmlNodeType.Element when reader.LocalName == "strike" && inRunProperties:
+                    runStrike = IsOn(reader.GetAttribute("val"));
                     break;
-                case XmlNodeType.Element when sub.LocalName == "u" && inRunProperties:
-                    runUnderline = IsUnderline(sub.GetAttribute("val"));
+                case XmlNodeType.Element when reader.LocalName == "u" && inRunProperties:
+                    runUnderline = IsUnderline(reader.GetAttribute("val"));
                     break;
-                case XmlNodeType.Element when sub.LocalName == "t":
-                    inText = !sub.IsEmptyElement;
+                case XmlNodeType.Element when reader.LocalName == "t":
+                    inText = !reader.IsEmptyElement;
                     break;
-                case XmlNodeType.EndElement when sub.LocalName == "t":
+                case XmlNodeType.EndElement when reader.LocalName == "t":
                     inText = false;
                     break;
-                case XmlNodeType.EndElement when sub.LocalName == "rPr":
+                case XmlNodeType.EndElement when reader.LocalName == "rPr":
                     inRunProperties = false;
                     break;
-                case XmlNodeType.EndElement when sub.LocalName == "r" && runStart is { } start:
-                    runs.Add(new XlsxRun(start, text.Length, runStrike, runUnderline));
+                case XmlNodeType.EndElement when reader.LocalName == "r" && runStart is { } start:
+                    (runs ??= []).Add(new XlsxRun(start, text.Length, runStrike, runUnderline));
                     runStart = null;
                     break;
                 case XmlNodeType.Text or XmlNodeType.CDATA or XmlNodeType.SignificantWhitespace or XmlNodeType.Whitespace when inText:
-                    text.Append(sub.Value);
+                    text.Append(reader.Value);
                     break;
             }
         }
-        return new(text.ToString(), runs);
+        return new(text.ToString(), (IReadOnlyList<XlsxRun>?)runs ?? []);
     }
 
     // A SpreadsheetML boolean property such as <strike/>: on unless val says 0 or false.
@@ -1362,7 +1538,7 @@ public sealed partial class XlsxAdapter
         public bool IsHidden => !string.Equals(State, "visible", StringComparison.OrdinalIgnoreCase);
     }
     private sealed record WorkbookInfo(IReadOnlyList<SheetInfo> Sheets, bool Uses1904DateSystem);
-    private static WorkbookInfo ReadWorkbook(Dictionary<string, byte[]> package, Dictionary<string, string> relationships)
+    private static WorkbookInfo ReadWorkbook(IReadOnlyDictionary<string, byte[]> package, Dictionary<string, string> relationships)
     {
         var result = new List<SheetInfo>();
         if (!package.TryGetValue("xl/workbook.xml", out var bytes)) throw new InvalidDataException("Workbook part missing.");
@@ -1386,7 +1562,7 @@ public sealed partial class XlsxAdapter
         }
         return new(result, uses1904DateSystem);
     }
-    private static Dictionary<string, string> ReadRelationships(Dictionary<string, byte[]> package, string relsPath)
+    private static Dictionary<string, string> ReadRelationships(IReadOnlyDictionary<string, byte[]> package, string relsPath)
     {
         var result = new Dictionary<string, string>(StringComparer.Ordinal);
         if (!package.TryGetValue(relsPath, out var bytes)) return result;
@@ -1414,61 +1590,7 @@ public sealed partial class XlsxAdapter
         }
         return string.Join('/', stack);
     }
-    private static HashSet<int> ReadHiddenRows(byte[] bytes)
-    {
-        var result = new HashSet<int>();
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "row" && IsHiddenFlag(reader.GetAttribute("hidden")) &&
-                int.TryParse(reader.GetAttribute("r"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var row) &&
-                row is >= 1 and <= MaxExcelRows)
-                result.Add(row);
-        return result;
-    }
-
-    private static HashSet<int> ReadHiddenColumns(byte[] bytes)
-    {
-        var result = new HashSet<int>();
-        var examinedColumns = 0;
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-        {
-            if (reader.NodeType != XmlNodeType.Element || reader.LocalName != "col" || !IsHiddenFlag(reader.GetAttribute("hidden"))) continue;
-            if (!int.TryParse(reader.GetAttribute("min"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var min) ||
-                !int.TryParse(reader.GetAttribute("max"), NumberStyles.Integer, CultureInfo.InvariantCulture, out var max) ||
-                min < 1 || max < min || max > MaxExcelColumns) continue;
-            var span = max - min + 1;
-            if (span > MaxExcelColumns - examinedColumns) break;
-            examinedColumns += span;
-            for (var column = min; ; column++)
-            {
-                result.Add(column);
-                if (column == max) break;
-            }
-        }
-        return result;
-    }
-
     private static bool IsHiddenFlag(string? value) => value is "1" || bool.TryParse(value, out var parsed) && parsed;
-
-    // The cells a worksheet's <hyperlinks> entries cover (a ref is one cell or a range). Their underline
-    // is how a link looks, not emphasis.
-    private static Func<int, int, bool> ReadHyperlinkCells(byte[] bytes)
-    {
-        // Most sheets have none: do not read the XML again to find that out.
-        if (bytes.AsSpan().IndexOf("hyperlink"u8) < 0) return (_, _) => false;
-        var cells = new HashSet<(int Row, int Column)>();
-        var areas = new List<(int MinRow, int MaxRow, int MinColumn, int MaxColumn)>();
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "hyperlink" && ParseRange(reader.GetAttribute("ref")) is { } area)
-            {
-                if (area.MinRow == area.MaxRow && area.MinColumn == area.MaxColumn) cells.Add((area.MinRow, area.MinColumn));
-                else areas.Add(area);
-            }
-        var index = areas.Count > 0 ? new LinkAreaIndex(areas) : null;
-        return (row, column) => cells.Contains((row, column)) || index?.Covers(row, column) == true;
-    }
 
     // The ranges of a sheet's links, so that whether one covers a cell is found without looking at every range (a sheet can link a range in
     // each of its ten thousands of rows, and asks for every cell it has). The rows are cut where a range begins and after where it ends; a range
@@ -1543,115 +1665,7 @@ public sealed partial class XlsxAdapter
     private static readonly Regex HyperlinkFormula = new(@"(?<![\w.])HYPERLINK\s*\(",
         RegexOptions.Compiled | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
-    private static List<XlsxCellRecord> ReadWorksheet(byte[] bytes, string sheet, Dictionary<string, XlsxString> shared, IReadOnlyList<XlsxCellStyle> styles, List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, IReadOnlySet<int> hiddenRows, IReadOnlySet<int> hiddenColumns, string sheetState)
-    {
-        var retainedCells = new List<ParsedWorksheetCell>();
-        var indexByCoordinate = new Dictionary<(int Row, int Column), int>();
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        var isHyperlinkCell = ReadHyperlinkCells(bytes);
-        var sourceOrder = 0;
-        while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "c")
-        {
-            var reference = reader.GetAttribute("r") ?? ""; var type = reader.GetAttribute("t"); var style = reader.GetAttribute("s"); string? formula = null; string? value = null;
-            string? sharedFormula = null;
-            IReadOnlyList<XlsxRun>? runs = null;
-            using var sub = reader.ReadSubtree();
-            sub.Read();
-            while (!sub.EOF)
-            {
-                if (sub.NodeType == XmlNodeType.Element && sub.LocalName == "is")
-                {
-                    // An inline string is read like a shared one: every run, never only the last t,
-                    // and never the phonetic guide in place of the text.
-                    var inline = ReadRichString(sub);
-                    (value, runs) = (inline.Text, inline.Runs);
-                }
-                else if (sub.NodeType == XmlNodeType.Element && sub.LocalName is "f" or "v" or "t")
-                {
-                    var local = sub.LocalName;
-                    if (local == "f" && sub.GetAttribute("t") == "shared") sharedFormula = sub.GetAttribute("si");
-                    var content = sub.ReadElementContentAsString();
-                    if (local == "f") formula = content;
-                    else if (local == "v") value = content;
-                    else if (local == "t") value = content;
-                    continue;
-                }
-                sub.Read();
-            }
-            var (row, column) = ParseCellReference(reference);
-            if (row == 0 || column == 0) continue;
-            if (formula is not null)
-            {
-                diagnostics.Add(ClassifyFormula(reference, formula) with { SheetName = sheet });
-                var cachedValue = value;
-                if (type == "s" && cachedValue is not null && shared.TryGetValue(cachedValue, out var cachedSharedValue))
-                    cachedValue = cachedSharedValue.Text;
-                if (string.IsNullOrWhiteSpace(cachedValue))
-                    warnings.Add($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!{reference} has no cached value; DocRedock did not evaluate it.");
-            }
-
-            var coordinate = (row, column);
-            var parsed = new ParsedWorksheetCell(reference, type, style, formula, value, sharedFormula, runs,
-                row, column, sourceOrder);
-            sourceOrder++;
-            if (indexByCoordinate.TryGetValue(coordinate, out var existing))
-            {
-                warnings.Add($"XlsxDuplicateCellReference: {sheet}!{reference} occurred more than once; the last cell was retained.");
-                retainedCells[existing] = parsed;
-            }
-            else
-            {
-                indexByCoordinate.Add(coordinate, retainedCells.Count);
-                retainedCells.Add(parsed);
-            }
-        }
-
-        // Resolve shared-formula link flags only from the winning record at each coordinate. A
-        // discarded duplicate master must not mark a surviving shared-formula member as a link.
-        // Build the map before creating any cells so XML order (including a winning master that
-        // appears after its member) cannot change the result.
-        var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
-        foreach (var cell in retainedCells.OrderBy(cell => cell.SourceOrder))
-            if (cell.SharedFormula is not null && !string.IsNullOrWhiteSpace(cell.Formula))
-                sharedLinks[cell.SharedFormula] = HyperlinkFormula.IsMatch(cell.Formula);
-
-        var result = new List<XlsxCellRecord>(retainedCells.Count);
-        foreach (var sourceCell in retainedCells)
-        {
-            var reference = sourceCell.Reference;
-            var type = sourceCell.Type;
-            var style = sourceCell.Style;
-            var formula = sourceCell.Formula;
-            var sharedFormula = sourceCell.SharedFormula;
-            var row = sourceCell.Row;
-            var column = sourceCell.Column;
-            var value = sourceCell.Value;
-            var runs = sourceCell.Runs;
-            if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) (value, runs) = (sharedValue.Text, sharedValue.Runs);
-            var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
-                ? styles[styleIndex]
-                : null;
-            var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
-            var richRuns = type is "s" or "inlineStr" ? runs : null;
-            var formulaLinks = false;
-            if (sharedFormula is not null && string.IsNullOrWhiteSpace(formula)) formulaLinks = sharedLinks.GetValueOrDefault(sharedFormula);
-            else if (formula is not null)
-            {
-                formulaLinks = HyperlinkFormula.IsMatch(formula);
-            }
-            var isLink = formulaLinks || isHyperlinkCell(row, column);
-            var cell = new XlsxCellRecord(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
-                IsHiddenRow: hiddenRows.Contains(row), IsHiddenColumn: hiddenColumns.Contains(column), SheetState: sheetState)
-            {
-                StruckRanges = MarkedRanges(value, richRuns, run => run.Strike, displayStyle?.IsStrike == true),
-                UnderlinedRanges = isLink ? null : MarkedRanges(value, richRuns, run => run.Underline, displayStyle?.IsUnderline == true),
-            };
-            result.Add(cell);
-        }
-        return result;
-    }
-
-    private static XlsxStyleData ReadStyles(Dictionary<string, byte[]> package)
+    private static XlsxStyleData ReadStyles(IReadOnlyDictionary<string, byte[]> package)
     {
         if (!package.TryGetValue("xl/styles.xml", out var bytes)) return new([], new Dictionary<int, bool>());
         var document = new XmlDocument();
@@ -2525,20 +2539,7 @@ public sealed partial class XlsxAdapter
         return new($"{ColumnName(minColumn)}{minRow}:{ColumnName(maxColumn)}{maxRow}", minRow, maxRow, minColumn, maxColumn);
     }
 
-    private static List<string> ReadMergedRanges(byte[] bytes)
-    {
-        var result = new List<string>();
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "mergeCell")
-            {
-                var range = reader.GetAttribute("ref");
-                if (!string.IsNullOrWhiteSpace(range)) result.Add(range);
-            }
-        return result;
-    }
-
-    private static List<XlsxChartRecord> ReadCharts(Dictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells, IReadOnlyDictionary<string, (bool Hidden, IReadOnlySet<int> Rows, IReadOnlySet<int> Columns)> sheetVisibility, List<string> warnings)
+    private static List<XlsxChartRecord> ReadCharts(IReadOnlyDictionary<string, byte[]> package, string worksheetPartUri, string sheetName, IReadOnlyList<XlsxCellRecord> cells, IReadOnlyDictionary<string, (bool Hidden, IReadOnlySet<int> Rows, IReadOnlySet<int> Columns)> sheetVisibility, List<string> warnings)
     {
         var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
@@ -2655,7 +2656,7 @@ public sealed partial class XlsxAdapter
     private sealed record PictureRelationship(string Target, bool IsExternal);
 
     private static List<XlsxPictureRecord> ReadPictures(
-        Dictionary<string, byte[]> package,
+        IReadOnlyDictionary<string, byte[]> package,
         string worksheetPartUri,
         string sheetName,
         List<string> warnings)
@@ -2746,7 +2747,7 @@ public sealed partial class XlsxAdapter
     }
 
     private static Dictionary<string, PictureRelationship> ReadPictureRelationships(
-        Dictionary<string, byte[]> package,
+        IReadOnlyDictionary<string, byte[]> package,
         string relsPath)
     {
         var result = new Dictionary<string, PictureRelationship>(StringComparer.Ordinal);
@@ -2770,6 +2771,7 @@ public sealed partial class XlsxAdapter
 
     private static List<XlsxCellRecord> ApplyCenterAcrossRanges(List<XlsxCellRecord> cells)
     {
+        if (!cells.Exists(static cell => cell.DisplayStyle?.IsCenterAcross == true)) return cells;
         var positions = cells.GroupBy(cell => (cell.RowIndex, cell.ColumnIndex)).ToDictionary(group => group.Key, group => group.First());
         return cells.Select(cell =>
         {
@@ -2784,14 +2786,8 @@ public sealed partial class XlsxAdapter
     /// <summary>Reads the Excel tables (ListObjects) a worksheet declares with tablePart elements.
     /// Only relationships the worksheet itself references are followed; a part without a readable
     /// <c>table/@ref</c> is ignored, so a damaged table never invents a boundary.</summary>
-    private static List<XlsxTableRecord> ReadTables(Dictionary<string, byte[]> package, string worksheetPartUri, byte[] worksheetXml)
+    private static List<XlsxTableRecord> ReadTables(IReadOnlyDictionary<string, byte[]> package, string worksheetPartUri, IReadOnlyList<string> ids)
     {
-        var ids = new List<string>();
-        using (var reader = XmlReader.Create(new MemoryStream(worksheetXml), SafeXml))
-            while (reader.Read())
-                if (reader is { NodeType: XmlNodeType.Element, LocalName: "tablePart" } &&
-                    reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") is { Length: > 0 } id)
-                    ids.Add(id);
         if (ids.Count == 0) return [];
         var directory = worksheetPartUri[..worksheetPartUri.LastIndexOf('/')];
         var relationships = ReadRelationships(package, directory + "/_rels/" + Path.GetFileName(worksheetPartUri) + ".rels");
@@ -2829,6 +2825,9 @@ public sealed partial class XlsxAdapter
         List<XlsxCellRecord> cells,
         IReadOnlyList<string> mergedRanges)
     {
+        if (mergedRanges.Count == 0) return cells;
+        // A copy: the cells as read stay as they were, for the conditional formats of other sheets that refer to them.
+        cells = new List<XlsxCellRecord>(cells);
         // Where each cell is in the list: searching the list for the origin of every merge would cost as many steps as there
         // are cells for each merge, which a sheet drawn in thousands of merged cells cannot afford.
         var indexByCoordinate = new Dictionary<(int Row, int Column), int>(cells.Count);
@@ -2903,7 +2902,7 @@ public sealed partial class XlsxAdapter
     }
 
     private static List<XlsxDrawingShapeRecord> ReadDrawingShapes(
-        Dictionary<string, byte[]> package,
+        IReadOnlyDictionary<string, byte[]> package,
         string worksheetPartUri,
         XlsxWorksheetMetrics metrics)
     {
@@ -3097,53 +3096,6 @@ public sealed partial class XlsxAdapter
 
     private static bool IsWithinSheet(double emu) => emu is >= -MaxSheetEmu and <= MaxSheetEmu;
 
-    private static string? ReadDeclaredDimension(byte[] bytes)
-    {
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-            if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "dimension")
-                return reader.GetAttribute("ref");
-        return null;
-    }
-
-    private static XlsxWorksheetMetrics ReadWorksheetMetrics(byte[] bytes, string sheet, List<string> warnings)
-    {
-        var defaultColumnWidth = 8.43d;
-        var defaultRowHeight = 15d;
-        var columns = new Dictionary<int, double>();
-        var rows = new Dictionary<int, double>();
-        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
-        while (reader.Read())
-        {
-            if (reader.NodeType != XmlNodeType.Element) continue;
-            if (reader.LocalName == "sheetFormatPr")
-            {
-                defaultColumnWidth = ReadDimension(reader, "defaultColWidth", defaultColumnWidth, 255d, sheet, warnings);
-                defaultRowHeight = ReadDimension(reader, "defaultRowHeight", defaultRowHeight, 409.5d, sheet, warnings);
-            }
-            else if (reader.LocalName == "col")
-            {
-                var min = AttributeInt(reader, "min", 1);
-                var max = Math.Min(MaxExcelColumns, AttributeInt(reader, "max", min));
-                // X7: a hidden column contributes zero width to DrawingML anchor math (Excel
-                // visually collapses it), and an explicit width="0" column -- not necessarily
-                // marked hidden -- means the same thing. Both were previously ignored by a
-                // `width > 0` guard below, which fell back to the DEFAULT column width instead and
-                // skewed every absoluteAnchor arrow that crossed a hidden/zero-width column.
-                var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "width", defaultColumnWidth, 255d, sheet, warnings);
-                if (min <= max)
-                    for (var column = Math.Max(1, min); column <= max; column++) columns[column] = width;
-            }
-            else if (reader.LocalName == "row")
-            {
-                var row = AttributeInt(reader, "r", 0);
-                var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "ht", defaultRowHeight, 409.5d, sheet, warnings);
-                if (row > 0) rows[row] = height;
-            }
-        }
-        return new(defaultColumnWidth, defaultRowHeight, columns, rows);
-    }
-
     private static double ReadDimension(XmlReader reader, string attribute, double fallback, double maximum, string sheet, List<string> warnings)
     {
         var raw = reader.GetAttribute(attribute);
@@ -3163,14 +3115,16 @@ public sealed partial class XlsxAdapter
 
     private static (int Row, int Column) ParseCellReference(string reference)
     {
+        var text = reference.AsSpan();
         var split = 0;
-        while (split < reference.Length && char.IsLetter(reference[split])) split++;
-        if (split is 0 or > 3 || split == reference.Length ||
-            !int.TryParse(reference[split..], NumberStyles.None, CultureInfo.InvariantCulture, out var row) ||
+        while (split < text.Length && char.IsLetter(text[split])) split++;
+        if (split is 0 or > 3 || split == text.Length ||
+            !int.TryParse(text[split..], NumberStyles.None, CultureInfo.InvariantCulture, out var row) ||
             row is < 1 or > MaxExcelRows) return (0, 0);
         var column = 0;
-        foreach (var character in reference[..split].ToUpperInvariant())
+        foreach (var letter in text[..split])
         {
+            var character = char.ToUpperInvariant(letter);
             if (character is < 'A' or > 'Z') return (0, 0);
             column = checked(column * 26 + character - 'A' + 1);
             if (column > MaxExcelColumns) return (0, 0);
@@ -3254,7 +3208,12 @@ public sealed partial class XlsxAdapter
         if (calc is null)
         {
             calc = document.CreateElement("calcPr", ns.LookupNamespace("x"));
-            workbook.AppendChild(calc);
+            // The schema orders the workbook's children: calcPr goes before these (an extLst at the end, as Excel writes
+            // one, would otherwise precede it and Excel would offer to repair the file).
+            var after = workbook.ChildNodes.OfType<XmlElement>().FirstOrDefault(element => element.NamespaceURI == ns.LookupNamespace("x") &&
+                element.LocalName is "oleSize" or "customWorkbookViews" or "pivotCaches" or "smartTagPr" or "smartTagTypes" or
+                    "webPublishing" or "fileRecoveryPr" or "webPublishObjects" or "extLst");
+            if (after is null) workbook.AppendChild(calc); else workbook.InsertBefore(calc, after);
         }
         calc.SetAttribute("calcMode", "auto");
         calc.SetAttribute("fullCalcOnLoad", "1");

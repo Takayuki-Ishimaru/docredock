@@ -68,18 +68,25 @@ public sealed record ExportSummary(
     /// the conversion-fidelity items above, and never a claim that the conversion is wrong.</summary>
     public bool RevisionSharingRequired { get; init; }
 
+    /// <summary>Images that were extracted but that the Markdown does not reference, with no rule that left them
+    /// out (<see cref="ReadableProjectionReport.UnwrittenImageIds"/>). Zero when no readable projection was rendered.</summary>
+    public int ImagesNotWritten { get; init; }
+
     /// <summary>True when the export detected source-comparison items: figures, unanalyzed content,
-    /// OCR text, or uncertain worksheet table boundaries. Revision sharing is reported separately
-    /// by <see cref="RevisionSharingRequired"/> so package consumers can distinguish the two decisions.
-    /// False means none was detected, not that reading order and tables were verified;
-    /// <see cref="ReadingOrder"/> and <see cref="TableStructure"/> say how those were obtained.</summary>
-    public bool ReviewItemsDetected => VisualReviewPages > 0 || UnanalyzedContentPages > 0 || OcrReviewRequired || TableBoundaryReviewItems > 0;
+    /// OCR text, uncertain worksheet table boundaries, or images missing from the Markdown. Revision
+    /// sharing is reported separately by <see cref="RevisionSharingRequired"/> so package consumers
+    /// can distinguish the two decisions. False means none was detected, not that reading order and
+    /// tables were verified; <see cref="ReadingOrder"/> and <see cref="TableStructure"/> say how those
+    /// were obtained.</summary>
+    public bool ReviewItemsDetected => VisualReviewPages > 0 || UnanalyzedContentPages > 0 || OcrReviewRequired ||
+        TableBoundaryReviewItems > 0 || ImagesNotWritten > 0;
 
     /// <summary>False when a recognized visual element was kept only as fallback, a diagnostic, or
-    /// an unresolved relation instead of being expressed in the Markdown. It says nothing about
-    /// attributes DocRedock does not model (for example colors), nor about content that was never
-    /// analyzed at all - <see cref="UnanalyzedContent"/> reports that separately.</summary>
-    public bool AllVisualElementsConverted => VisualReviewPages == 0 && UnresolvedElements == 0;
+    /// an unresolved relation instead of being expressed in the Markdown, or when an extracted image
+    /// is not referenced by it. It says nothing about attributes DocRedock does not model (for example
+    /// colors), nor about content that was never analyzed at all - <see cref="UnanalyzedContent"/>
+    /// reports that separately.</summary>
+    public bool AllVisualElementsConverted => VisualReviewPages == 0 && UnresolvedElements == 0 && ImagesNotWritten == 0;
 
     // "Written", "every visual element converted", and "needs a person" are different facts; each gets
     // its own line so a successful export with review items is never read as either a failure
@@ -87,7 +94,7 @@ public sealed record ExportSummary(
     public override string ToString() =>
         $"Export completed\nOutput: Markdown\n" +
         $"Output written: yes\n" +
-        $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {VisualReviewPages} page(s))")}\n" +
+        $"Visual elements converted: {(AllVisualElementsConverted ? "all" : $"partial ({UnresolvedElements} unresolved on {VisualReviewPages} page(s){(ImagesNotWritten > 0 ? $"; {ImagesNotWritten} image(s) not in the Markdown" : string.Empty)})")}\n" +
         $"Unanalyzed content: {(UnanalyzedContent == 0 ? "none" : $"{UnanalyzedContent} item(s) on {UnanalyzedContentPages} page(s)")}\n" +
         $"Detected review items: {DetectedReviewItemsText()}\n" +
         $"Reading order: {ExportSummaryText.ReadingOrderEnglish(ReadingOrder)}\n" +
@@ -104,6 +111,7 @@ public sealed record ExportSummary(
         if (UnanalyzedContentPages > 0) reasons.Add($"unanalyzed content {UnanalyzedContentPages} page(s)");
         if (OcrReviewRequired) reasons.Add($"OCR {OcrReviewItems} item(s)");
         if (TableBoundaryReviewItems > 0) reasons.Add($"table boundaries {TableBoundaryReviewItems}");
+        if (ImagesNotWritten > 0) reasons.Add($"images not in the Markdown {ImagesNotWritten}");
         // Revision sharing is a sharing decision, so it is named separately from the fidelity items.
         if (RevisionSharingRequired) reasons.Add("revision sharing required");
         // Sharing hidden content is a different decision from comparing with the source.
@@ -235,6 +243,7 @@ public static class ExportSummaryBuilder
             TableStructure: TableStructureBasis(graph, projection))
         {
             RevisionSharingRequired = RevisionSharingReview.Build(diagnostics).Required,
+            ImagesNotWritten = projection?.UnwrittenImageIds.Count ?? 0,
         };
     }
 

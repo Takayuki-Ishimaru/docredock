@@ -80,7 +80,7 @@ public sealed class PdfClippingPathExportTests
         var markdown = Path.Combine(root, name + ".md");
         await File.WriteAllBytesAsync(source, pdf);
         var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, markdown,
-            ContentPolicy: policy, IncludePdfFallbackImages: true));
+            ContentPolicy: policy, IncludePdfFallbackImages: true, Title: "fixture"));
         return (result, await File.ReadAllTextAsync(markdown));
     }
 

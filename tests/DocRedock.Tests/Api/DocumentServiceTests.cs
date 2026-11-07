@@ -398,7 +398,7 @@ public sealed class DocumentServiceTests
         var source = Path.Combine(root, "broken.pptx");
         await File.WriteAllTextAsync(source, "not an Office package");
 
-        var exception = await Assert.ThrowsAsync<NotSupportedException>(() =>
+        var exception = await Assert.ThrowsAnyAsync<NotSupportedException>(() =>
             new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, Path.Combine(root, "broken.md"))));
 
         Assert.Contains("broken.pptx", exception.Message, StringComparison.Ordinal);

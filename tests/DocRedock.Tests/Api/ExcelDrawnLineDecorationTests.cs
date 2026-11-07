@@ -359,7 +359,7 @@ public sealed class ExcelDrawnLineDecorationTests : IDisposable
             ExportReviewText.DescribeJapanese(page));
         Assert.Equal("sheet 'Items': 1 text item(s) with a strikethrough over part of them whose struck characters could not be determined; kept in the Markdown without the mark",
             ExportReviewText.DescribeEnglish(page));
-        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Message.StartsWith("XlsxStrikethroughUnplaced", StringComparison.Ordinal));
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Code == "XlsxStrikethroughUnplaced");
     }
 
     [Fact]

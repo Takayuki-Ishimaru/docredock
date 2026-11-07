@@ -55,7 +55,7 @@ public static class PdfRasterizerFactory
             return new("pdf-rasterizer", "unavailable", Action: disable
                 ? "Enable local rasterizer discovery or configure a path."
                 : string.IsNullOrWhiteSpace(explicitPath)
-                    ? "Install pdftoppm or mutool, or configure an executable path."
+                    ? "Install pdftoppm or mutool" + InstallHints.Poppler + ", or configure an executable path."
                     : "The configured PDF rasterizer is missing or not executable; correct its path or permissions.",
                 Tier: "optional");
         return new("pdf-rasterizer", "ready", Path.GetFileNameWithoutExtension(path), path, Tier: "optional");

@@ -3,12 +3,14 @@ using DocRedock.Core.Documents;
 
 namespace DocRedock.Markdown;
 
-/// <summary>Combines conservative page-boundary table continuations only in the readable view.</summary>
+/// <summary>Combines conservative page-boundary table continuations only in the readable view, and the parts of a
+/// paragraph that a page break cuts (marked by the PDF extractor).</summary>
 internal static class PdfTableContinuationProjection
 {
     internal static DocumentGraph Project(DocumentGraph graph)
     {
         if (graph.Format != DocumentFormatKind.Pdf || graph.Partitions.Count < 2) return graph;
+        graph = JoinParagraphs(graph);
         var source = graph.Partitions.OrderBy(partition => partition.Order).ToArray();
         var projected = source.ToArray();
         var targets = new Dictionary<string, (int Partition, string NodeId)>(StringComparer.Ordinal);
@@ -42,6 +44,74 @@ internal static class PdfTableContinuationProjection
             targets[right.Id] = target;
         }
         return graph with { Partitions = projected };
+    }
+
+    /// <summary>Puts the rest of a paragraph from the head of a page ("pdf_continues_previous_page") back after its
+    /// start on the page before ("pdf_continues_next_page"), so that the paragraph reads whole and what the page
+    /// before ends with - a note to compare it with the original, its image - follows the paragraph, not the middle
+    /// of a sentence. A paragraph may run over several pages.</summary>
+    private static DocumentGraph JoinParagraphs(DocumentGraph graph)
+    {
+        var partitions = graph.Partitions.OrderBy(partition => partition.Order).ToArray();
+        (int Partition, string NodeId)? open = null;
+        var changed = false;
+        for (var index = 1; index < partitions.Length; index++)
+        {
+            var carried = open;
+            open = null;
+            var right = partitions[index].Nodes.FirstOrDefault(node => node.Kind == NodeKind.Paragraph && node.Content is TextNodeContent &&
+                Extension(node, "pdf_continues_previous_page") is { ValueKind: JsonValueKind.String });
+            if (right is null || partitions[index].Order != partitions[index - 1].Order + 1) continue;
+            var target = carried ?? partitions[index - 1].Nodes.Where(node => node.Kind == NodeKind.Paragraph && node.Content is TextNodeContent &&
+                Extension(node, "pdf_continues_next_page") is { ValueKind: JsonValueKind.True }).Select(node => ((int, string)?)(index - 1, node.Id)).FirstOrDefault();
+            if (target is not { } host) continue;
+            var left = partitions[host.Partition].Nodes.First(node => node.Id == host.NodeId);
+            var separator = Extension(right, "pdf_continues_previous_page")!.Value.GetString() ?? string.Empty;
+            var before = ((TextNodeContent)left.Content).Text.TrimEnd();
+            var rightText = ((TextNodeContent)right.Content).Text;
+            var after = rightText.TrimStart();
+            var offset = before.Length + separator.Length - (rightText.Length - after.Length);
+            var extensions = new Dictionary<string, JsonElement>(left.Extensions ?? new Dictionary<string, JsonElement>(), StringComparer.Ordinal);
+            foreach (var key in new[] { "strike_ranges", "underline_ranges" })
+            {
+                var ranges = Ranges(left, key).Where(range => range.Start < before.Length)
+                    .Select(range => (range.Start, Math.Min(range.End, before.Length)))
+                    .Concat(Ranges(right, key).Select(range => (Math.Max(range.Start + offset, before.Length + separator.Length), range.End + offset))
+                        .Where(range => range.Item2 > range.Item1))
+                    .Select(range => new[] { range.Item1, range.Item2 }).ToArray();
+                if (ranges.Length > 0) extensions[key] = JsonSerializer.SerializeToElement(ranges);
+                else extensions.Remove(key);
+            }
+            var goesOn = Extension(right, "pdf_continues_next_page") is { ValueKind: JsonValueKind.True };
+            if (goesOn) extensions["pdf_continues_next_page"] = JsonSerializer.SerializeToElement(true);
+            else extensions.Remove("pdf_continues_next_page");
+            var combined = left with
+            {
+                Content = new TextNodeContent(before + separator + after),
+                Extensions = extensions,
+                Provenance = (left.Provenance ?? []).Concat(right.Provenance ?? []).ToArray(),
+            };
+            partitions[host.Partition] = partitions[host.Partition] with
+            {
+                Nodes = partitions[host.Partition].Nodes.Select(node => node.Id == left.Id ? combined : node).ToArray()
+            };
+            partitions[index] = partitions[index] with { Nodes = partitions[index].Nodes.Where(node => node.Id != right.Id).ToArray() };
+            changed = true;
+            if (goesOn) open = host;
+        }
+        return changed ? graph with { Partitions = partitions } : graph;
+
+        static JsonElement? Extension(DocumentNode node, string key) =>
+            node.Extensions?.TryGetValue(key, out var value) == true ? value : null;
+
+        static IEnumerable<(int Start, int End)> Ranges(DocumentNode node, string key)
+        {
+            if (Extension(node, key) is not { ValueKind: JsonValueKind.Array } array) yield break;
+            foreach (var range in array.EnumerateArray())
+                if (range.ValueKind == JsonValueKind.Array && range.GetArrayLength() == 2 &&
+                    range[0].TryGetInt32(out var start) && range[1].TryGetInt32(out var end))
+                    yield return (start, end);
+        }
     }
 
     private static IEnumerable<DocumentNode> Flow(DocumentPartition partition) => partition.Nodes

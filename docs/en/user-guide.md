@@ -2,7 +2,7 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.10 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers the v0.3.11 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
 
 [Quick guides by task](quick-tasks.md)
 
@@ -37,7 +37,7 @@ Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
 ## AI packages
 
-**AI packages** are available in v0.3.10. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.3.11. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -134,7 +134,7 @@ For documents with visuals, check these in addition to normal text and table con
 - every referenced asset/page preview/placeholder against the corresponding source page, slide, or sheet;
 - that text boxes and AlternateContent fallbacks are not duplicated.
 
-When a Warning is present, giving an AI only the Markdown may conceal missing meaning. Review the diagnostics/report and assets together, and consult the source document when necessary. A semantic omission or partial projection at Warning severity makes the CLI return exit code 1.
+When a Warning is present, giving an AI only the Markdown may conceal missing meaning. Review the diagnostics/report and assets together, and consult the source document when necessary. Any diagnostic that is not informational, and an empty output, make the CLI return exit code 1; review items alone do not change the exit code unless `--fail-on-review` is given (exit 11). With `--json`, `needs_attention` and `attention` summarize the three signals. An image that was extracted but is not referenced by the Markdown is reported as `ImageNotWritten`, needs review, and makes "visual elements converted" partial.
 
 Readable output is not pixel-perfect reconstruction and does not guarantee restoration to original Office drawing objects. Keep the source document as the authoritative copy. See [Supported features](supported-features.md) for format-specific boundaries.
 
@@ -212,6 +212,6 @@ OCR results with confidence below 80% or no confidence are counted separately fr
 
 The GUI result panel leads with counts such as "要確認 1ページ／照合画像 1ページ添付／未解決の線・図形 1件" and a short explanation such as "1ページ目：表の上の斜めの線1件を表の記号に変換できませんでした。表の文字は書き出されています。照合画像で線の意味を確認してください。". Diagnostic codes, internal IDs, and confidences are in the collapsed "詳細（診断コードと対処）" section, where diagnostics that follow from the same unresolved element are grouped into one entry. "該当ページを確認" opens a review window with the source page image (unresolved lines and shapes marked in red; a drawing component that could not be analyzed is outlined in dashed red over the area it may paint, and text whose characters or visibility could not be determined over where it sits) next to that page's Markdown. "要確認箇所へ拡大" zooms to each marked element in turn and centers it; "＋" and "－" (or Ctrl + mouse wheel) change the zoom, and "全体" returns to the whole page. The red marks keep their on-screen width at any zoom, and clearing "強調表示" hides them so the original detail can be inspected once its position is known (the setting holds across pages). The Markdown pane switches between "表示", which shows tables as ruled tables and each Mermaid diagram as its list of connections such as "START → END（label）", and "ソース", the Markdown itself (a Mermaid diagram the preview cannot read is shown as source). When no review image exists (no rasterizer, attachment turned off, or an Office source), the window tells you which page of the source to open. When the content policy left hidden content out of the Markdown (hidden Word text, PDF text outside the visible area, and so on), the result panel names each kind and its count.
 
-`DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
+`DOCREDOCK_ENABLE_EXPERIMENTAL=1 docredock preflight edited.md [--json]` checks integrity, detects edits, and actually tries restoration in a disposable sidecar copy without modifying inputs or reports. `verify` checks integrity, `diff` describes edits, and `preflight` integrates integrity and restore applicability. Ordinary edits alone do not cause a warning exit: `verify` reports an edited projection ("Projection: edited since export") and exits 0. In Excel, `preflight` and `restore` warn with `XlsxRecalculationRequired` only when a formula may read an edited cell or an edit writes a formula; the warning names those formula cells, whose saved results stay as before until Excel recalculates the workbook (DocRedock marks it to recalculate when opened and evaluates no formula). Projections that 0.3.10 wrote with overlapping sheet-table ranges can be edited; when their cells cannot be told apart, `SpreadsheetGridOverlap` asks you to export again. Exit codes are 0 for readiness, 1 for readiness with warnings, 3 for invalid workspace integrity, and 6 for unsupported/conflicting edits. Use `--allow-render-fallback` to explicitly permit edited-PDF regeneration. Success does not guarantee visual identity in Office.
 
 Restoring over the historical source requires `--force --replace-original`; `--force` alone is insufficient. After a successful restore trial, the destination's previous bytes are retained as `<output>.docredock-original-<ID>.bak` before replacement. Prefer a new output name for normal restoration.

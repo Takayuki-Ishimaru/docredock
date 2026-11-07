@@ -35,7 +35,7 @@ public static partial class PdfTextExtractor
     /// so that shows with one id follow each other along the line.</summary>
     private readonly record struct PdfTextShow(string? Font, PdfTextVisibility Visibility, double? FontSize = null,
         double CharSpacing = 0, double WordSpacing = 0, double HorizontalScale = 1,
-        PdfMatrix LineMatrix = default, int LineId = 0);
+        PdfMatrix LineMatrix = default, int LineId = 0, int RenderMode = 0);
 
     private enum PdfContentEventKind { FormBegin, FormEnd }
 
@@ -95,6 +95,8 @@ public static partial class PdfTextExtractor
         public double HorizontalScale = 1;
         public double Leading;
         public double Rise;
+        // Tr: 2 fills and strokes the glyphs, how a producer paints a bold face a font does not have.
+        public int RenderMode;
         public PdfLayerVisibility Layer = PdfLayerVisibility.Visible;
 
         public PdfShowState Copy() => (PdfShowState)MemberwiseClone();
@@ -179,7 +181,7 @@ public static partial class PdfTextExtractor
                 : layer == PdfLayerVisibility.Unknown ? PdfTextVisibility.UnknownLayer
                 : PdfTextVisibility.Visible;
             shows[operand.Start] = new PdfTextShow(state.Font, visibility, state.FontSize, state.CharSpacing, state.WordSpacing, state.HorizontalScale,
-                lineMatrix, lineId);
+                lineMatrix, lineId, state.RenderMode);
             if (run is { } advance)
             {
                 advanceLow += advance.Low;
@@ -259,6 +261,7 @@ public static partial class PdfTextExtractor
                 case "Tz" when operands.Count >= 1: state.HorizontalScale = operands[^1] / 100; break;
                 case "TL" when operands.Count >= 1: state.Leading = operands[^1]; break;
                 case "Ts" when operands.Count >= 1: state.Rise = operands[^1]; break;
+                case "Tr" when operands.Count >= 1: state.RenderMode = (int)operands[^1]; break;
                 case "Td" when operands.Count >= 2: SetLine(lineMatrix.Concat(Translation(operands[^2], operands[^1]))); break;
                 case "TD" when operands.Count >= 2:
                     state.Leading = -operands[^1];

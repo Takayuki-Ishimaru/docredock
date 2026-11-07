@@ -123,7 +123,7 @@ public sealed class ContentPolicyIntegrationTests : IDisposable
         Assert.Contains(result.Diagnostics, item => item.Code == "XlsxFormulaSafe");
         Assert.DoesNotContain(result.Diagnostics, item => item.Code == "XlsxFormulaDangerous");
         Assert.Contains(result.Diagnostics, item =>
-            item.Code == "XlsxProjectionWarning" && item.Message.Contains("Visible!A1", StringComparison.Ordinal));
+            item.Code == "XlsxFormulaCachedValueMissing" && item.Message.Contains("Visible!A1", StringComparison.Ordinal));
         Assert.DoesNotContain(result.Diagnostics, item => item.Message.Contains("Hidden!A1", StringComparison.Ordinal));
     }
 

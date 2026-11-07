@@ -14,6 +14,11 @@ public sealed record ReadableProjectionReport(
     IReadOnlyList<ReadableTableBoundaryReview> TableBoundaryReviews)
 {
     public static ReadableProjectionReport Empty { get; } = new(0, 0, []);
+
+    /// <summary>Images the content policy kept that the Markdown does not reference although no rule left them
+    /// out (as a slide's furniture or a diagram's member is). Their files may still be written next to the
+    /// Markdown; the conversion of visual elements is then incomplete.</summary>
+    public IReadOnlyList<string> UnwrittenImageIds { get; init; } = [];
 }
 
 /// <summary>A blank worksheet column whose two sides were output as separate tables, with the

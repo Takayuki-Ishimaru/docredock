@@ -140,6 +140,36 @@ public sealed class DocumentGraphTests
     }
 
     [Fact]
+    public void Graph_normalization_binds_children_to_the_first_node_of_an_id_that_a_rename_had_taken()
+    {
+        // "a" twice makes "a__2", which the third node holds already: it becomes "a__2__2", and its children follow it.
+        // "x__2" is kept as it is, so its children stay with it however many "x" come after. An empty ID is made up.
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc", DocumentFormatKind.Docx,
+        [
+            new DocumentPartition("part", 0,
+            [
+                Node("a", "first a"), Node("a", "second a"), Node("a__2", "own a__2"),
+                Node("x__2", "own x__2"), Node("x", "first x"), Node("x", "second x"),
+                Node("", "empty"),
+                Node("child-a", "child") with { ParentId = "a__2" },
+                Node("child-x", "child") with { ParentId = "x__2" },
+                Node("child-empty", "child") with { ParentId = "" },
+                Node("child-a-first", "child") with { ParentId = "a" },
+            ]),
+        ]);
+
+        Assert.Equal(["a", "a__2", "a__2__2", "x__2", "x", "x__3", "node_1_7", "child-a", "child-x", "child-empty", "child-a-first"],
+            graph.Nodes.Select(node => node.Id));
+        Assert.Equal("a__2__2", graph.FindNode("child-a")!.ParentId);
+        Assert.Equal("x__2", graph.FindNode("child-x")!.ParentId);
+        Assert.Equal("node_1_7", graph.FindNode("child-empty")!.ParentId);
+        Assert.Equal("a", graph.FindNode("child-a-first")!.ParentId);
+        // Normalizing the normalized graph again changes nothing.
+        Assert.Equal(graph.Nodes.Select(node => (node.Id, node.ParentId)),
+            (graph with { Partitions = graph.Partitions.ToArray() }).Nodes.Select(node => (node.Id, node.ParentId)));
+    }
+
+    [Fact]
     public void Visual_graph_exposes_compatible_metadata_and_consistent_accounting()
     {
         var anchor = new SourceAnchor("pptx", "ppt/slides/slide1.xml", [new("shape_id", "1")]);

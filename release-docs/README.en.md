@@ -6,13 +6,19 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.11 Public Beta
+
+- [v0.3.11 release notes](RELEASE_NOTES_v0.3.11.en.md)
+- Improve PDF and Office conversion, AI package splitting, and search
+- Add local conversion and package review from MCP clients
+
+## Published releases
+
 ### v0.3.10 Public Beta
 
 - [v0.3.10 release notes](RELEASE_NOTES_v0.3.10.en.md)
 - Improve PDF reading order and source review, Office tables and charts
 - Add CLI batch conversion and clarify review before sharing
-
-## Published releases
 
 ### v0.3.9 Public Beta
 
