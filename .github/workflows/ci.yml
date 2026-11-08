@@ -14,8 +14,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  history-secrets:
+    uses: ./.github/workflows/history-secrets.yml
+
   build-test-license:
     name: build-test-license (ubuntu-latest)
+    needs: history-secrets
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -76,6 +80,7 @@ jobs:
   # self-skips off Linux or is mocked, so no extra dependency installation is needed here.
   build-test-cross-platform:
     name: build-test-cross-platform (${{ matrix.os }})
+    needs: history-secrets
     strategy:
       fail-fast: false
       matrix:
