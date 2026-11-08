@@ -31,32 +31,13 @@ D01-D18 element list from
 an appendix, header/footer, a landscape section) built to look like a real
 Word-authored 設計書, not an Excel-grid translation.
 
-- **Provenance**: every ID, value, sentence, and embedded image belongs to a
-  fictional expense-approval scenario authored as synthetic test data for this
-  repository. The private development corpus and its generated outputs are not
-  distributed; this checked-in fixture is the authoritative public test input.
-- **Reproducibility**: the checked-in document is deterministic and is the
-  public regression-test authority. Its development-only generator and source
-  corpus are intentionally excluded from the release because users do not need
-  them to build, test, or use DocRedock.
-- **complex-design-doc.expectations.json** declares machine-checkable
-  `guard` (should currently pass against the `readable` .md) and `goal`
-  (currently fails; tracks a real, verified conversion gap) assertions per
-  the contract in `COMPLEX_DESIGN_DOC_SPEC.md` section 5. The judging logic
-  lives in `tools/conversion-qa/`; this file only declares expectations. Every
-  guard/goal value was calibrated against an actual
-  `docredock export ... --profile readable` run of this fixture, not guessed.
-- **Known limitation (environment-dependent guard)**: the Q12 guard
-  (`not_contains "OCR-JP-20260823-017"`) is written exactly as the spec
-  requires — the fixture's own authored text never contains that string, only
-  IMG-02's pixels do. On a machine where the CLI's default `--ocr auto`
-  resolves to the native macOS Vision engine, however, DOCX readable export
-  still runs OCR on IMG-02 and correctly emits an `OCR抽出テキスト` block
-  containing the marker string, so this specific guard fails under that
-  default invocation even though nothing in the fixture "leaked" it. That is
-  arguably correct OCR behavior, not a fixture defect; a harness that pins
-  `--ocr off` (or runs on a machine without a native/Tesseract OCR engine)
-  will see it pass.
+- The document uses a fictional expense-approval scenario. Its identifiers,
+  values, text, and embedded images are synthetic.
+- `complex-design-doc.expectations.json` defines the assertions for the
+  checked-in regression fixture. The conversion QA runner lives in
+  `tools/conversion-qa/`.
+- When OCR is active, readable export can include text recognized in an
+  embedded image. Use `--ocr off` to exercise the authored text layer alone.
 - No D01-D18 element was omitted; every row of the spec table has at least one
   fixture location and at least one expectations.json item.
 

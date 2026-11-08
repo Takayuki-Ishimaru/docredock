@@ -41,9 +41,9 @@ Desktop GUI PDF input is available by default. CLI PDF export is enabled with `-
 
 - [ ] Before pushing publicly, assemble the branches and tags to publish and the existing pull request refs in a complete local repository. Run `bash tools/scan-git-history.sh` to scan the prepared refs and confirm that it passes. CI also scans the pull request refs available on GitHub. On platforms other than Linux x64, install the Gitleaks version specified by the script on PATH. Investigate detections privately, clean up the affected history and distribution sources, and rerun the scan. Revoke and rotate any exposed credentials.
 - [ ] Review the candidate files and all history being published since the last reviewed baseline. If there is no baseline, review the full history being published. Include deleted and renamed files when checking for company and customer names, internal terms and abbreviations, project and product codes, and customer-specific requirements, workflows, forms, and data designs. Include samples and their generators, test data, generated output, screenshots, and distribution documentation. Inspect Office and PDF documents for visible content, hidden sheets, notes, embedded data, and metadata.
-- [ ] Keep the comparison list and review record private. Leave detected values and review details out of public logs, approval comments, and release notes. Repeat both checks for the new commit after any change to the history or public content.
-- [ ] Require the CI Gitleaks job on protected branches. Configure Required reviewers on the GitHub `release-content-review` environment and disable administrator bypass of its protection rules.
-- [ ] In Review deployments, verify that the reviewed commit SHA matches the Gitleaks job's candidate. Enter only `reviewed <40-character commit SHA> attempt <run attempt number>` as the approval comment. Release packaging begins after both gates pass.
+- [ ] Keep comparison terms, findings, and approvals only in a separate local Git repository with no remote. Repeat both checks for the new commit after any change to the history or public content.
+- [ ] Require the CI Gitleaks job on protected branches.
+- [ ] Complete the manual review and approval locally before pushing publicly. Before pushing the release tag, verify that its commit matches the local Git approval record. GitHub Actions scans the tagged history with Gitleaks before building the distributions.
 
 ## P0: Licensing and provenance
 

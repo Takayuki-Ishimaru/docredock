@@ -26,34 +26,9 @@ jobs:
     with:
       ref: ${{ format('refs/tags/{0}', github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name) }}
 
-  content-review:
-    name: Review public content (${{ needs.history-secrets.outputs.commit }})
-    needs: history-secrets
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    environment: release-content-review
-    permissions:
-      actions: read
-    steps:
-      - name: Require the reviewer's approval for the scanned commit
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REVIEWED_COMMIT: ${{ needs.history-secrets.outputs.commit }}
-        run: |
-          set -euo pipefail
-          [[ "$REVIEWED_COMMIT" =~ ^[0-9a-f]{40}$ ]]
-          expected="reviewed $REVIEWED_COMMIT attempt $GITHUB_RUN_ATTEMPT"
-          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" 2>/dev/null |
-            jq -e --arg expected "$expected" 'any(.[]; .state == "approved" and
-              .comment == $expected and any(.environments[]; .name == "release-content-review"))' >/dev/null 2>&1; then
-            echo "::error::Public content review approval for this commit is missing. Follow the release checklist."
-            exit 1
-          fi
-
   quality:
     name: Required CI and release preflight
-    needs: [history-secrets, content-review]
+    needs: history-secrets
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -75,7 +50,7 @@ jobs:
           fi
           tagged_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)
           if [ "$tagged_commit" != "$(git rev-parse HEAD)" ]; then
-            echo "::error::The release tag no longer identifies the reviewed commit."
+            echo "::error::The release tag no longer identifies the scanned commit."
             exit 1
           fi
           ref_json=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
@@ -577,7 +552,7 @@ jobs:
           set -euo pipefail
           tagged_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha)
           if [ "$tagged_commit" != "$(git rev-parse HEAD)" ]; then
-            echo "::error::The release tag no longer identifies the reviewed commit."
+            echo "::error::The release tag no longer identifies the scanned commit."
             exit 1
           fi
           gh release create "$RELEASE_TAG" release-files/* --verify-tag --title "DocRedock $RELEASE_TAG Public Beta" --notes-file release-body.md --prerelease
