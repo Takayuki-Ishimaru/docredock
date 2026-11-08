@@ -6,13 +6,18 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.3.12 Public Beta
+
+- [v0.3.12 release notes](RELEASE_NOTES_v0.3.12.en.md)
+- Improved CLI and OCR diagnostics, Excel recalculation warnings, search, and MCP sources
+
+## Published releases
+
 ### v0.3.11 Public Beta
 
 - [v0.3.11 release notes](RELEASE_NOTES_v0.3.11.en.md)
 - Improve PDF and Office conversion, AI package splitting, and search
 - Add local conversion and package review from MCP clients
-
-## Published releases
 
 ### v0.3.10 Public Beta
 

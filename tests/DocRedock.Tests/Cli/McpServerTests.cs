@@ -259,6 +259,18 @@ public sealed class McpServerTests : IDisposable
         Assert.False(IsError(read));
         Assert.Contains("zircon", string.Join("\n", Texts(read)), StringComparison.Ordinal);
 
+        var fullSources = await CallAsync("package_read", new { package, part = "part-0001", with_sources = true });
+        using (var fullJson = JsonDocument.Parse(Texts(fullSources)[0]))
+            Assert.True(fullJson.RootElement.GetProperty("sources")[0].TryGetProperty("node_ids", out _));
+
+        var compactSources = await CallAsync("package_read", new { package, part = "part-0001", source_detail = "compact" });
+        using (var compactJson = JsonDocument.Parse(Texts(compactSources)[0]))
+        {
+            var sourceRanges = compactJson.RootElement.GetProperty("source_ranges");
+            Assert.Empty(sourceRanges.EnumerateArray());
+            Assert.False(sourceRanges.ToString().Contains("node_id", StringComparison.Ordinal));
+        }
+
         var review = await CallAsync("package_review", new { package });
         Assert.False(IsError(review));
         using var reviewJson = JsonDocument.Parse(Texts(review)[0]);
@@ -286,6 +298,11 @@ public sealed class McpServerTests : IDisposable
         var withheldText = string.Join("\n", Texts(withheld));
         Assert.Contains("Review required", withheldText, StringComparison.Ordinal);
         Assert.DoesNotContain("marmalade", withheldText, StringComparison.Ordinal);
+        var structured = withheld.GetProperty("structuredContent");
+        Assert.Equal("review_required", structured.GetProperty("status").GetString());
+        Assert.True(structured.GetProperty("review_required").GetBoolean());
+        Assert.NotEmpty(structured.GetProperty("stop_reasons").EnumerateArray());
+        Assert.Contains("allow_review=true", structured.GetProperty("next_action").GetString(), StringComparison.Ordinal);
 
         var allowed = await CallAsync("package_read", new { package, part = "part-0001", allow_review = true });
         Assert.False(IsError(allowed));

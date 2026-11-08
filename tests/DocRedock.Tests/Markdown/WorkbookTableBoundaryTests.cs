@@ -77,6 +77,21 @@ public sealed class WorkbookTableBoundaryTests
     }
 
     [Fact]
+    public void A_plain_note_beside_a_styled_header_is_preserved_outside_the_table()
+    {
+        var (markdown, serializer) = Serialize(
+            C("A4", "Case", bold: true), C("B4", "Passed", bold: true),
+            C("D4", "Synthetic conversion fixture"),
+            C("A5", "Alpha"), N("B5", 25),
+            C("A6", "Beta"), N("B6", 75),
+            C("A7", "Gamma"), N("B7", 12));
+
+        Assert.Contains("| Case | Passed |\n", markdown, StringComparison.Ordinal);
+        Assert.Contains("\nSynthetic conversion fixture\n", markdown, StringComparison.Ordinal);
+        Assert.Equal(1, serializer.RenderedTables);
+    }
+
+    [Fact]
     public void A_remarks_column_after_a_spacer_annotates_its_rows()
     {
         var (markdown, serializer) = Serialize(

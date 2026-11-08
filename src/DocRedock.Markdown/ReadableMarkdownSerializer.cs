@@ -2213,6 +2213,16 @@ public sealed partial class ReadableMarkdownSerializer
             if (!leftTables.Intersect(rightTables).Any()) return Decide(true);
         }
 
+        // A plain, solitary text cell beside a styled header can be a free-form note. The blank
+        // column, mismatched styling, and absence of values below it distinguish it from a header.
+        if (leftExtent.Length >= 3 && rightExtent is [{ Right: [var note] } solitary] &&
+            solitary.Number == leftExtent[0].Number &&
+            leftExtent[0].Left.All(cell => cell.IsHeaderStyled && !IsValueCell(cell)) &&
+            leftExtent.Skip(1).Any(row => row.Left.Any(IsSubstantiveValue)) &&
+            !note.IsHeaderStyled && !note.IsOverlay && !IsValueCell(note) &&
+            !AnnotationHeaderRegex().IsMatch(PlainText(note.Text).Trim()))
+            return Decide(true);
+
         if (leftRows.Length < 2 || rightRows.Length < 2) return Decide(false);
         var leftSide = sides.Select(row => (row.Number, Cells: row.Left)).ToArray();
         var rightSide = sides.Select(row => (row.Number, Cells: row.Right)).ToArray();

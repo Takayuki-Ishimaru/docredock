@@ -159,6 +159,39 @@ public sealed class XlsxRecalculationTests
     }
 
     [Fact]
+    public void A_restored_workbook_carries_the_warning_until_it_is_recalculated()
+    {
+        var adapter = new XlsxAdapter();
+        var workbook = Workbook(DataSheet, null);
+        var unrelatedEdit = adapter.CreatePatchPlan([new XlsxCellEdit("Data", "F6", "checked")]);
+        var unrelatedRestore = adapter.Restore(new MemoryStream(workbook), unrelatedEdit);
+        Assert.Empty(adapter.Extract(new MemoryStream(unrelatedRestore.Bytes)).Warnings);
+
+        var restored = adapter.Restore(new MemoryStream(workbook),
+            adapter.CreatePatchPlan([new XlsxCellEdit("Data", "B6", "10")]));
+        var extracted = adapter.Extract(new MemoryStream(restored.Bytes));
+        Assert.StartsWith("XlsxRecalculationRequired:", Assert.Single(extracted.Warnings), StringComparison.Ordinal);
+        Assert.Contains(extracted.Worksheets[0].Cells, cell => cell.CellReference == "D6" && cell.Value == "12");
+
+        var secondRestore = adapter.Restore(new MemoryStream(restored.Bytes), unrelatedEdit);
+        Assert.StartsWith("XlsxRecalculationRequired:",
+            Assert.Single(adapter.Extract(new MemoryStream(secondRestore.Bytes)).Warnings), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("false", true)]
+    [InlineData("0", true)]
+    [InlineData("true", false)]
+    [InlineData("1", false)]
+    public void Export_reads_the_calculation_state_written_by_spreadsheet_editors(string completed, bool pending)
+    {
+        var workbook = Workbook(DataSheet, null, workbookTail: $"<calcPr fullCalcOnLoad=\"1\" calcCompleted=\"{completed}\"/>");
+        var extracted = new XlsxAdapter().Extract(new MemoryStream(workbook));
+
+        Assert.Equal(pending, extracted.Warnings.Any(warning => warning.StartsWith("XlsxRecalculationRequired:", StringComparison.Ordinal)));
+    }
+
+    [Fact]
     public void The_calculation_setting_is_written_where_the_schema_puts_it_before_an_extension_list()
     {
         var workbook = Workbook(DataSheet, null, workbookTail: "<extLst><ext uri=\"{140A7094-0E35-4892-8432-C4D2E57EDEB5}\"/></extLst>");

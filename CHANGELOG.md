@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.3.12]
+
+- Report failed inputs individually in export JSON and provide a top-level error when arguments prevent input identification.
+- Identify missing Tesseract language data, and offer an opt-in exit code for automation.
+- Warn when an Excel workbook has a pending recalculation, preserve detached worksheet notes separately, and reject edits to protected image destinations.
+- Match spaced phrases across line breaks and provide structured MCP review stops and compact source ranges.
+- Update the desktop Avalonia packages to 12.1.5.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.3.12.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.3.12.md)
+
 ## [0.3.11]
 
 - Improved PDF paragraph joining, heading and figure description extraction, and handling of repeated headers, footers, and standalone rules.

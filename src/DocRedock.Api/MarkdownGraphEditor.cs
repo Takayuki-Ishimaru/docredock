@@ -269,6 +269,16 @@ public sealed class MarkdownGraphEditor
             return attributes.TryGetValue("style", out var style) &&
                 StringComparer.Ordinal.Equals(style, "max-width:49%;height:auto");
         }
+        if (node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent markdownImage)
+        {
+            var text = block.Text.Trim();
+            if (!text.StartsWith("![", StringComparison.Ordinal) || !text.EndsWith(')')) return false;
+            var labelEnd = IndexOfLabelEnd(text, 1);
+            return labelEnd >= 0 &&
+                StringComparer.Ordinal.Equals(markdownImage.AltText ?? "image", UnescapeLinkLabel(text[2..labelEnd])) &&
+                StringComparer.Ordinal.Equals(ExpectedImageReference(baseline, markdown, markdownImage.Reference),
+                    text[(labelEnd + 2)..^1]);
+        }
         var decoded = DecodeBlockText(block);
         if (node.Content is TableNodeContent table)
         {

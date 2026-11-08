@@ -84,7 +84,7 @@ MARKDOWN_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 # characters they are; a character reference (&lt;u&gt;) holds none of these.
 INLINE_MARKUP_RE = re.compile(r"\\([!-/:-@\[-`{-~])|</?(?:u|ins|del|sub|sup)>|~~|\*\*\*|\*\*")
 # White space and the line breaks of a table cell, which a query without a space in it may run across.
-BREAKS_RE = re.compile(r"<br\s*/?>|\s+", re.IGNORECASE)
+BREAKS_RE = re.compile(r"(?:<br\s*/?>|\s)+", re.IGNORECASE)
 HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
 
 
@@ -1086,28 +1086,35 @@ def _compact(text):
     return BREAKS_RE.sub("", text)
 
 
+def _spaced(text):
+    return BREAKS_RE.sub(" ", text)
+
+
 def line_headings(markdown):
-    """{line number: the heading the line lies under} for the lines of a part, the part's own title (its
-    first line) left out; a line before any heading is not in it."""
+    """{line number: the current heading} for the lines of a part; a heading line names itself."""
     headings, heading = {}, None
     for number, line in enumerate(_lines(markdown), 1):
-        if heading is not None:
-            headings[number] = heading
         match = HEADING_RE.match(line)
-        if match and number > 1:
-            heading = MARKDOWN_ESCAPE_RE.sub(r"\1", match.group(1))
+        if match:
+            current = MARKDOWN_ESCAPE_RE.sub(r"\1", match.group(1))
+            headings[number] = current
+            if number > 1:
+                heading = current
+        elif heading is not None:
+            headings[number] = heading
     return headings
 
 
 def search_parts(package, manifest, text, contents=None):
     """The parts whose Markdown contains text, as the line reads (_searchable) or as it is written
     (_plain); case, width, Markdown escapes and, in the first, inline markup do not matter. A query with
-    no space in it is also found where white space or a line break cuts it: within a line ("11 月"), and
-    across the end of one line and the start of the next, reported at the first of the two.
+    no space in it is also found where white space or a line break cuts it. A query with spaces treats a
+    run of white space, line breaks or generated <br> markers as one space.
     [(part, [(line number, line), ...]), ...] in manifest order. contents maps package paths to bytes
     already read (and verified)."""
     query = _plain(text)
-    compact_query = "" if any(character.isspace() for character in query) else query
+    spaced_query = _spaced(query) if any(character.isspace() for character in query) else ""
+    compact_query = "" if spaced_query else query
     contents = contents or {}
     matches = []
     for part in manifest["parts"]:
@@ -1119,18 +1126,25 @@ def search_parts(package, manifest, text, contents=None):
             metadata_end = 1
             while metadata_end < len(source_lines) and source_lines[metadata_end]:
                 metadata_end += 1
-        lines, previous, previous_matched = [], None, False
+        lines, previous, previous_matched, previous_number = [], None, False, None
         for number, line in enumerate(source_lines, 1):
             if 1 < number <= metadata_end:
-                previous = None
+                previous, previous_number = None, None
                 continue
             searchable = _searchable(line)
-            matched = query in searchable or query in _plain(line) or bool(compact_query) and compact_query in _compact(searchable)
+            matched = (query in searchable or query in _plain(line) or
+                       bool(compact_query) and compact_query in _compact(searchable) or
+                       bool(spaced_query) and spaced_query in _spaced(searchable))
             if matched:
                 lines.append((number, line))
-            elif not previous_matched and previous and searchable and compact_query and compact_query in _compact(previous + searchable):
-                lines.append((number - 1, source_lines[number - 2]))
-            previous, previous_matched = searchable, matched
+            elif not previous_matched and previous and searchable.strip() and previous_number is not None and (
+                    compact_query and compact_query in _compact(previous + searchable) or
+                    spaced_query and spaced_query in _spaced(previous + " " + searchable)):
+                lines.append((previous_number, source_lines[previous_number - 1]))
+            if searchable.strip():
+                previous, previous_matched, previous_number = searchable, matched, number
+            elif not spaced_query:
+                previous = None
         if lines:
             matches.append((part, lines))
     return matches

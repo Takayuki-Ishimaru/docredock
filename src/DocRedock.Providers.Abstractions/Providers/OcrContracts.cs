@@ -24,7 +24,12 @@ public sealed record OcrTextRegion(
 public sealed record OcrDiagnostic(
     [property: JsonPropertyName("code")] string Code,
     [property: JsonPropertyName("message")] string Message,
-    [property: JsonPropertyName("severity")] DiagnosticSeverity Severity);
+    [property: JsonPropertyName("severity")] DiagnosticSeverity Severity)
+{
+    [JsonPropertyName("data")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyDictionary<string, string>? Data { get; init; }
+}
 public sealed record OcrAttemptResult(OcrProcessingStatus Status, OcrResult? Result, IReadOnlyList<OcrDiagnostic> Diagnostics)
 {
     public bool HasText => Status == OcrProcessingStatus.Completed && Result is not null;

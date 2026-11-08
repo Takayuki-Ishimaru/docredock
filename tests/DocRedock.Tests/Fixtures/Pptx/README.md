@@ -287,8 +287,8 @@ exits non-zero if anything fails.
 python-pptx's bundled default template already carries a **static**
 `docProps/core.xml` (`created`/`modified` fixed at `2013-01-27T...`, not
 the time of generation — confirmed by generating two presentations several
-seconds apart and diffing their `core.xml`), so no `core_properties`
-override was needed for content determinism. The one non-deterministic
+seconds apart and diffing their `core.xml`). The generator sets the last
+editor to the fixture label. The one non-deterministic
 knob python-pptx does not control is the **zip member timestamp**, which
 defaults to wall-clock time via `zipfile.writestr`; `generate_schedule_pptx.py`
 rewrites every zip entry's `date_time` to a fixed value after `prs.save()`

@@ -85,10 +85,12 @@ public sealed record ExportReview(IReadOnlyList<ReviewPage> Pages, OcrReviewSumm
     /// <summary>Node ids of extracted images the Markdown does not reference (see
     /// <see cref="ReadableProjectionReport.UnwrittenImageIds"/>): compare the source with the output there.</summary>
     public IReadOnlyList<string> UnwrittenImages { get; init; } = [];
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
+    public bool WorkbookCalculationPending { get; init; }
     public int ReviewImagePages => Pages.Count(page => page.ReviewImageReference is not null);
     public int Elements => Pages.Sum(page => page.Elements.Count);
     public bool Required => Pages.Count > 0 || Ocr.Required || TableBoundaries is { Count: > 0 } || SharingReview?.Required == true ||
-        UnwrittenImages.Count > 0;
+        UnwrittenImages.Count > 0 || WorkbookCalculationPending;
 }
 
 /// <summary>Finds an attached review image on disk: next to the readable Markdown (its .assets
@@ -150,7 +152,11 @@ public static class ExportReviewBuilder
                 partition.Nodes.Any(node => node.Kind == NodeKind.Table)));
         }
         return new ExportReview(pages, BuildOcr(graph), projection?.TableBoundaryReviews ?? [])
-            { SharingReview = RevisionSharingReview.Build(diagnostics), UnwrittenImages = projection?.UnwrittenImageIds ?? [] };
+        {
+            SharingReview = RevisionSharingReview.Build(diagnostics),
+            UnwrittenImages = projection?.UnwrittenImageIds ?? [],
+            WorkbookCalculationPending = diagnostics.Any(d => d.Code == "XlsxRecalculationRequired"),
+        };
     }
 
     /// <summary>OCR regions whose confidence is below the readable threshold or missing, the same

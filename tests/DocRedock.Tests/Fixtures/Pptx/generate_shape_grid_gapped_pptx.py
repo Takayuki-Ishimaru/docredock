@@ -667,6 +667,7 @@ def print_checklist():
 # =================================================================== build
 def build(output_path):
     prs = Presentation()
+    prs.core_properties.last_modified_by = "DocRedock fixture"
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 

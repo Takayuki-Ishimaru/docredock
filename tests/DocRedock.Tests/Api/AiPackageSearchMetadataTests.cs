@@ -35,6 +35,20 @@ public sealed class AiPackageSearchMetadataTests : IDisposable
                 Assert.True(line.Number > 2);
             });
         }
+
+        Assert.NotEmpty(AiPackageSearch.Find(package, "real  \n\t body sentinel"));
+        Assert.NotEmpty(AiPackageSearch.Find(package, "real<br><br>body sentinel"));
+        foreach (var separator in new[] { "\n\n", "<br><br>" })
+        {
+            var splitText = package with
+            {
+                Parts = package.Parts.Select(part => part with
+                {
+                    Markdown = part.Markdown.Replace("real body sentinel", "real" + separator + "body sentinel", StringComparison.Ordinal),
+                }).ToArray(),
+            };
+            Assert.NotEmpty(AiPackageSearch.Find(splitText, "real body sentinel"));
+        }
     }
 
     [Fact]
@@ -51,5 +65,20 @@ public sealed class AiPackageSearchMetadataTests : IDisposable
         Assert.Contains(package.Parts, part => part.Markdown.Contains("table_block: ", StringComparison.Ordinal));
         Assert.Empty(AiPackageSearch.Find(package, "table_block:"));
         Assert.NotEmpty(AiPackageSearch.Find(package, "item 100"));
+    }
+
+    [Fact]
+    public async Task Search_heading_hit_reports_its_own_heading_once()
+    {
+        var source = Path.Combine(root, "heading.docx");
+        await new MarkdownRenderer().RenderAsync("# Report\n\n## Marker heading\n\nBody text\n", RenderFormat.Docx, source);
+        var target = Path.Combine(root, "heading-package");
+        await service.ExportAiPackageAsync(new(new(source, "unused.md", EnableOcr: false), target));
+        var package = await AiPackageManifestReader.ReadVerifiedPackageAsync(target);
+
+        var heading = Assert.Single(AiPackageSearch.Find(package, "Marker heading"));
+        var hit = Assert.Single(heading.Lines);
+        Assert.Equal("Marker heading", hit.Heading);
+        Assert.Contains("Marker heading", hit.Text, StringComparison.Ordinal);
     }
 }

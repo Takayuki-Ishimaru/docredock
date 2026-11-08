@@ -948,7 +948,7 @@ public sealed partial class DocumentService
                         : item).ToArray() };
             records.Add(new OcrAssetRecord(asset.Id, attempt.Status, languages, attempt.Result, attempt.Diagnostics));
             foreach (var item in attempt.Diagnostics)
-                diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity, asset.Id));
+                diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity, asset.Id) { Data = item.Data });
         }
 
         if (format == DocumentFormatKind.Pdf)

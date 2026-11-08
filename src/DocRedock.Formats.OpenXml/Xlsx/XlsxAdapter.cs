@@ -380,6 +380,8 @@ public sealed partial class XlsxAdapter
         var partitions = new List<DocumentPartition>();
         var formulaDiagnostics = new List<XlsxFormulaDiagnostic>();
         var warnings = new List<string>();
+        if (workbook.CalculationPending)
+            warnings.Add("XlsxRecalculationRequired: This workbook was saved with calculation incomplete. Formula results may be stale or missing. Recalculate and save it in Excel before using its saved results.");
         // Each worksheet's XML is read once, as a stream (XlsxAdapter.Streaming.cs): its cells and the properties of the
         // sheet that the projection below reads.
         var scans = workbook.Sheets.ToDictionary(sheet => sheet.Name, _ => new WorksheetScan(), StringComparer.OrdinalIgnoreCase);
@@ -603,10 +605,11 @@ public sealed partial class XlsxAdapter
             package[sheet.PartUri] = patched;
             calcChainNeedsInvalidation |= removedFormula;
         }
-        package["xl/workbook.xml"] = MarkWorkbookForRecalculation(package["xl/workbook.xml"]);
         // Only formulas that may read an edited cell keep a stale result: an edit no formula reads needs no warning.
         var warnings = new List<string>();
-        if (RecalculationWarning(package, workbook, plan.Edits) is { } recalculation) warnings.Add(recalculation);
+        var recalculation = RecalculationWarning(package, workbook, plan.Edits);
+        if (recalculation is not null) warnings.Add(recalculation);
+        package["xl/workbook.xml"] = MarkWorkbookForRecalculation(package["xl/workbook.xml"], recalculation is not null);
         if (calcChainNeedsInvalidation && package.ContainsKey("xl/calcChain.xml"))
         {
             package["xl/calcChain.xml"] = Encoding.UTF8.GetBytes("<?xml version=\"1.0\" encoding=\"UTF-8\"?><calcChain xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"/>");
@@ -1537,12 +1540,13 @@ public sealed partial class XlsxAdapter
     {
         public bool IsHidden => !string.Equals(State, "visible", StringComparison.OrdinalIgnoreCase);
     }
-    private sealed record WorkbookInfo(IReadOnlyList<SheetInfo> Sheets, bool Uses1904DateSystem);
+    private sealed record WorkbookInfo(IReadOnlyList<SheetInfo> Sheets, bool Uses1904DateSystem, bool CalculationPending);
     private static WorkbookInfo ReadWorkbook(IReadOnlyDictionary<string, byte[]> package, Dictionary<string, string> relationships)
     {
         var result = new List<SheetInfo>();
         if (!package.TryGetValue("xl/workbook.xml", out var bytes)) throw new InvalidDataException("Workbook part missing.");
         var uses1904DateSystem = false;
+        var calculationPending = false;
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read())
         {
@@ -1559,8 +1563,11 @@ public sealed partial class XlsxAdapter
                 var state = reader.GetAttribute("state") ?? "visible";
                 if (relationships.TryGetValue(rid, out var target)) result.Add(new(name, target, state));
             }
+            else if (reader.Depth == 1 && reader.LocalName == "calcPr" &&
+                     reader.NamespaceURI == "http://schemas.openxmlformats.org/spreadsheetml/2006/main")
+                calculationPending = reader.GetAttribute("calcCompleted")?.Trim() is "0" or "false";
         }
-        return new(result, uses1904DateSystem);
+        return new(result, uses1904DateSystem, calculationPending);
     }
     private static Dictionary<string, string> ReadRelationships(IReadOnlyDictionary<string, byte[]> package, string relsPath)
     {
@@ -3196,7 +3203,7 @@ public sealed partial class XlsxAdapter
         using var output = new MemoryStream(); using (var writer = XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false), OmitXmlDeclaration = false, Indent = false })) document.Save(writer); return (output.ToArray(), removedFormula);
     }
 
-    private static byte[] MarkWorkbookForRecalculation(byte[] bytes)
+    private static byte[] MarkWorkbookForRecalculation(byte[] bytes, bool calculationPending)
     {
         var document = new XmlDocument { PreserveWhitespace = true };
         using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
@@ -3218,6 +3225,7 @@ public sealed partial class XlsxAdapter
         calc.SetAttribute("calcMode", "auto");
         calc.SetAttribute("fullCalcOnLoad", "1");
         calc.SetAttribute("forceFullCalc", "1");
+        if (calculationPending) calc.SetAttribute("calcCompleted", "0");
         using var output = new MemoryStream();
         using (var writer = XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false), OmitXmlDeclaration = false, Indent = false }))
             document.Save(writer);

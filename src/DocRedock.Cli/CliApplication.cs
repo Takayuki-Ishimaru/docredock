@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.IO.Compression;
 using System.Reflection;
 using System.Text;
@@ -23,6 +24,8 @@ public enum ExitCode
 
 public sealed class CliApplication(TextWriter output, TextWriter error, DocumentService? documentService = null)
 {
+    internal bool IncludeCompactPackageSources { get; init; }
+    internal IReadOnlyList<string> PackageReadStopReasons { get; private set; } = [];
     private static readonly JsonSerializerOptions PackageJson = new() { PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower, WriteIndented = true, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All) };
     private static readonly JsonSerializerOptions ReportJson = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, Encoder = System.Text.Encodings.Web.JavaScriptEncoder.Create(System.Text.Unicode.UnicodeRanges.All) };
     // export --json: the same envelope for one input or many, success or failure; enums (a diagnostic's severity) as words.
@@ -35,6 +38,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private bool exportJsonWritten;
     // A short code for the error the run ended with, for the error of an export --json envelope.
     private string? errorCode;
+    private IReadOnlyList<string>? exportInputs;
     // The run inside the one that writes the error envelope of export --json.
     private bool JsonEnvelopeInner { get; init; }
 
@@ -63,6 +67,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         try
         {
             var parsed = Arguments.Parse(args[1..]);
+            if (args[0].Equals("export", StringComparison.OrdinalIgnoreCase)) exportInputs = parsed.Positionals.ToArray();
             return args[0].ToLowerInvariant() switch
             {
                 "export" => await ExportAsync(parsed, cancellationToken),
@@ -113,12 +118,22 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var inner = new CliApplication(output, new TeeWriter(error, captured), Service) { JsonEnvelopeInner = true };
         var code = await inner.RunAsync(args, cancellationToken);
         if (inner.exportJsonWritten) return code;
-        var input = args.Skip(1).FirstOrDefault(argument => !argument.StartsWith('-'));
         var message = captured.ToString().Trim();
+        var failureCode = inner.errorCode ?? ErrorCodeFor(code);
+        if (inner.exportInputs is not { Count: > 0 } inputs)
+        {
+            await output.WriteLineAsync(JsonSerializer.Serialize(new
+            {
+                schema = ExportJsonSchema,
+                results = Array.Empty<object>(),
+                error = new { code = failureCode, message, exit_code = code },
+            }, ExportJson));
+            return code;
+        }
         await output.WriteLineAsync(JsonSerializer.Serialize(new
         {
             schema = ExportJsonSchema,
-            results = new[] { FailedExportResult(input, code, inner.errorCode ?? ErrorCodeFor(code), message) },
+            results = inputs.Select(input => FailedExportResult(input, code, failureCode, message)).ToArray(),
         }, ExportJson));
         return code;
     }
@@ -216,6 +231,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         }
         var requireHiddenReview = args.HasFlag("require-hidden-review");
         var reasons = review.StopReasons(requireHiddenReview, manifest.ContentPolicy);
+        if (action == "read") PackageReadStopReasons = reasons;
         if (action == "review")
         {
             if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
@@ -255,15 +271,75 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             return 0;
         }
         var part = selectedPart!;
-        if (args.HasFlag("json")) await output.WriteLineAsync(JsonSerializer.Serialize(new
+        if (args.HasFlag("json"))
         {
-            part_id = part.Part.Id, markdown = part.Markdown, review_required = reasons.Count > 0,
-            estimated_tokens = part.Part.EstimatedTokens, token_estimate_multiplier = manifest.TokenEstimateMultiplier,
-            sources = args.HasFlag("with-sources") ? part.Sources : null,
-            locations = args.HasFlag("with-sources") ? part.Part.Locations : null,
-        }, jsonOptions));
+            var body = new Dictionary<string, object?>
+            {
+                ["part_id"] = part.Part.Id,
+                ["markdown"] = part.Markdown,
+                ["review_required"] = reasons.Count > 0,
+                ["estimated_tokens"] = part.Part.EstimatedTokens,
+                ["token_estimate_multiplier"] = manifest.TokenEstimateMultiplier,
+                ["sources"] = args.HasFlag("with-sources") ? part.Sources : null,
+                ["locations"] = args.HasFlag("with-sources") ? part.Part.Locations : null,
+            };
+            if (IncludeCompactPackageSources) body["source_ranges"] = CompactSourceRanges(part);
+            await output.WriteLineAsync(JsonSerializer.Serialize(body, jsonOptions));
+        }
         else await output.WriteAsync(part.Markdown);
         return 0;
+    }
+
+    private static object[] CompactSourceRanges(AiPackageVerifiedPart part)
+    {
+        if (part.Part.TableBlock is { } block)
+        {
+            var sheet = part.Part.Locations.Select(location => location.SheetName).FirstOrDefault(name => name is not null);
+            return sheet is null ? [] : [new { sheet_name = sheet, range = block.RowRange, kind = "table_block" }];
+        }
+
+        var grouped = new SortedDictionary<string, (int MinColumn, int MinRow, int MaxColumn, int MaxRow)>(StringComparer.Ordinal);
+        foreach (var group in part.Sources)
+        {
+            var sheet = part.Part.Locations.FirstOrDefault(location => location.Id == group.SourceId)?.SheetName;
+            if (sheet is null) continue;
+            foreach (var address in group.CellAddresses?.Where(address => !string.IsNullOrWhiteSpace(address)) ?? [])
+            {
+                if (!TryCell(address!, out var column, out var row)) continue;
+                if (!grouped.TryGetValue(sheet, out var bounds)) grouped[sheet] = (column, row, column, row);
+                else grouped[sheet] = (Math.Min(bounds.MinColumn, column), Math.Min(bounds.MinRow, row),
+                    Math.Max(bounds.MaxColumn, column), Math.Max(bounds.MaxRow, row));
+            }
+        }
+        return grouped.Select(entry => (object)new
+        {
+            sheet_name = entry.Key,
+            range = FormatCell(entry.Value.MinColumn, entry.Value.MinRow) + ":" + FormatCell(entry.Value.MaxColumn, entry.Value.MaxRow),
+            kind = "coverage",
+        }).ToArray();
+    }
+
+    private static bool TryCell(string address, out int column, out int row)
+    {
+        column = row = 0;
+        var index = 0;
+        while (index < address.Length && index < 3 && address[index] is >= 'A' and <= 'Z')
+            column = column * 26 + address[index++] - 'A' + 1;
+        return column is > 0 and <= 16_384 && index < address.Length &&
+               int.TryParse(address.AsSpan(index), NumberStyles.None, CultureInfo.InvariantCulture, out row) &&
+               row is > 0 and <= 1_048_576;
+    }
+
+    private static string FormatCell(int column, int row)
+    {
+        var letters = new Stack<char>();
+        while (column > 0)
+        {
+            column--;
+            letters.Push((char)('A' + column % 26));
+            column /= 26;
+        }
+        return new string(letters.ToArray()) + row.ToString(CultureInfo.InvariantCulture);
     }
 
     // Search results are terminal annotations; keep controls visible without executing them.
@@ -415,6 +491,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
           --allow-pdf              Convert PDF files (off by default).
           --ocr auto|on|off        Read text in images (needs an OCR engine; see docredock doctor).
           --ocr-lang jpn+eng       OCR languages.
+          --ocr-strict             Exit 8 when a requested Tesseract language could not be loaded; output is still written.
           --ocr-review low-confidence|all|summary
                                    Which OCR results to list for review.
           --pdf-fallback-images auto|off
@@ -539,11 +616,12 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
                     aiPackage == "zip" ? AiPackageForm.Zip : AiPackageForm.Directory, targetCharacters,
                     TableRowBlocks: args.HasFlag("table-row-blocks"))
                     { TokenEstimateMultiplier = tokenEstimateMultiplier }, token);
+                var format = await DocumentService.DetectFormatAsync(source, token);
                 token.ThrowIfCancellationRequested();
                 packageTransaction.Commit();
-                var packageExit = ReviewExit(args, packageResult.Review,
+                var packageExit = ReviewExit(args, packageResult.Review, packageResult.Diagnostics,
                     packageResult.Parts.Count == 0 || packageResult.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
-                await WriteExportResultAsync(args, new ExportOutcome(source, markdown, packageExit, await DocumentService.DetectFormatAsync(source, token), "ai-package", visualInference,
+                await WriteExportResultAsync(args, new ExportOutcome(source, markdown, packageExit, format, "ai-package", visualInference,
                     packageResult.Review, packageResult.Diagnostics) { AiPackage = new { form = aiPackage, parts = packageResult.Parts.Count }, Empty = packageResult.Parts.Count == 0 },
                     packageResult.Summary.ToString(), $"AI package: {markdown} ({aiPackage}; {packageResult.Parts.Count} part(s))\nReview: review.md; report.json; source locations: manifest.json");
                 if (packageResult.Size is { } packageSize && !args.HasFlag("json") && !args.HasFlag("quiet"))
@@ -563,7 +641,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             var visualSummary = ExportSummaryBuilder.BuildReadable(readable.Graph, readable.Diagnostics, readable.Projection);
             var readableReview = ExportReviewBuilder.Build(readable.Graph, readable.Diagnostics, readable.Projection);
             var empty = !readable.Graph.Nodes.Any();
-            var readableExit = ReviewExit(args, readableReview,
+            var readableExit = ReviewExit(args, readableReview, readable.Diagnostics,
                 empty || readable.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
             await WriteExportResultAsync(args, new ExportOutcome(source, markdown, readableExit, readable.Graph.Format, "readable", visualInference, readableReview, readable.Diagnostics) { Empty = empty },
                 VisualInferenceSummary(visualSummary) + Environment.NewLine + visualSummary, $"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}\nMode:     Readable Markdown (one-way; no sidecar)\nVisual inference: {visualInference} (ambiguous relations remain unresolved)");
@@ -587,7 +665,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         stagedRoundTrip.Commit();
         var review = ExportReviewBuilder.Build(result.Graph, result.Diagnostics);
         var roundTripEmpty = !result.Graph.Nodes.Any();
-        var roundTripExit = ReviewExit(args, review,
+        var roundTripExit = ReviewExit(args, review, result.Diagnostics,
             roundTripEmpty || result.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
         await WriteExportResultAsync(args, new ExportOutcome(source, markdown, roundTripExit, result.Graph.Format, profile, visualInference, review, result.Diagnostics) { Sidecar = sidecarPath, Empty = roundTripEmpty },
             ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ToString(), $"Sidecar:  {sidecarPath} ({(sidecarForm == "zip" ? "zip" : "directory")})\nFormat:   {result.Graph.Format.ToString().ToLowerInvariant()}\nFidelity: F0 baseline");
@@ -689,11 +767,18 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     {
         if (args.Option("output") is not null) return Invalid("--output is for one input; use --output-dir for multiple inputs.");
         var inputs = new List<string>();
+        string? firstMissing = null;
         foreach (var input in args.Positionals)
         {
             if (Directory.Exists(input)) inputs.AddRange(Directory.EnumerateFiles(input).Where(p => new[] { ".docx", ".xlsx", ".pptx", ".pdf", ".doc", ".xls", ".ppt" }.Contains(Path.GetExtension(p), StringComparer.OrdinalIgnoreCase)).OrderBy(p => p, StringComparer.Ordinal));
-            else if (File.Exists(input)) inputs.Add(input); else return Invalid($"Input file or directory not found: {input}");
+            else
+            {
+                inputs.Add(input);
+                if (!File.Exists(input)) firstMissing ??= input;
+            }
         }
+        exportInputs = inputs;
+        if (firstMissing is not null) return Invalid($"Input file or directory not found: {firstMissing}");
         if (inputs.Count == 0) return Invalid("No supported input files found.");
         var outputDir = args.Option("output-dir");
         var keepExtension = args.HasFlag("keep-source-extension");
@@ -721,7 +806,17 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
         var results = new List<object>(); var exit = 0;
         for (var i = 0; i < inputs.Count; i++)
         {
-            token.ThrowIfCancellationRequested(); var child = args.Copy(); child.Positionals.Clear(); child.Positionals.Add(inputs[i]); child.RemoveOption("output-dir"); child.SetOption("output", targets[i]);
+            if (token.IsCancellationRequested)
+            {
+                const int cancelled = (int)ExitCode.InvalidInput;
+                const string message = "Operation cancelled.";
+                await error.WriteLineAsync(message);
+                exit = WorseBatchExit(exit, cancelled);
+                if (args.HasFlag("json"))
+                    results.AddRange(inputs.Skip(i).Select(input => FailedExportResult(input, cancelled, "cancelled", message)));
+                break;
+            }
+            var child = args.Copy(); child.Positionals.Clear(); child.Positionals.Add(inputs[i]); child.RemoveOption("output-dir"); child.SetOption("output", targets[i]);
             var resultOutput = new StringWriter(); var resultError = new StringWriter(); var code = await new CliApplication(resultOutput, resultError, Service).RunAsync(child.ToCommandLine(), token); exit = WorseBatchExit(exit, code);
             if (args.HasFlag("json")) results.Add(BatchResult(inputs[i], code, resultOutput.ToString(), resultError.ToString()));
             else
@@ -763,7 +858,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     // review is required (source-review pages, OCR items, worksheet table boundaries) returns
     // ReviewRequired instead of 0 or 1, so an automated pipeline can stop before handing the output
     // to a model. The output is written either way.
-    private static int ReviewExit(Arguments args, ExportReview review, int exitCode) =>
+    private static int ReviewExit(Arguments args, ExportReview review, IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> diagnostics, int exitCode) =>
+        args.HasFlag("ocr-strict") && diagnostics.Any(d => d.Code == "OcrLanguageUnavailable") ? (int)ExitCode.OcrPartialFailure :
         args.HasFlag("fail-on-review") && review.Required ? (int)ExitCode.ReviewRequired : exitCode;
 
     private async Task WriteReviewRequiredAsync(Arguments args, ExportReview review)
@@ -1012,6 +1108,8 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
             foreach (var operation in result.Edit.Diff.PatchSet.Operations)
                 await output.WriteLineAsync($"{operation.Kind}: {operation.NodeId} (mutates_original={operation.MutatesOriginal.ToString().ToLowerInvariant()})");
         }
+        foreach (var diagnostic in result.Edit.Diagnostics.Where(diagnostic => diagnostic.Severity == DocRedock.Core.Reporting.DiagnosticSeverity.Error))
+            await error.WriteLineAsync($"{diagnostic.Code}: {diagnostic.Message}");
         if (lease.Form == SidecarForm.Zip)
             await output.WriteLineAsync("INFORMATION SidecarZipFormReadOnly: サイドカーは zip 形のため、workspace 内のレポートは保存されません。`docredock unpack <base>.drmd --in-place` で展開してください。");
         return result.Edit.IsValid ? 0 : 6;
@@ -1365,7 +1463,7 @@ public sealed class CliApplication(TextWriter output, TextWriter error, Document
     private sealed class Arguments
     {
         private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "lang", "output-dir", "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title", "images" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "expand-merged-cells", "no-expand-merged-cells", "allow-pdf", "strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review", "keep-source-extension" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "expand-merged-cells", "no-expand-merged-cells", "allow-pdf", "strict", "ocr-strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review", "keep-source-extension" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public Arguments Copy() { var copy = new Arguments(); copy.Positionals.AddRange(Positionals); foreach (var item in options) copy.options[item.Key] = item.Value; foreach (var flag in flags) copy.flags.Add(flag); return copy; }

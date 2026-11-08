@@ -230,6 +230,37 @@ public sealed class MarkdownGraphEditorTests
     }
 
     [Fact]
+    public void Markdown_image_destination_is_protected_along_with_its_label()
+    {
+        var image = new DocumentNode("image-1", NodeKind.Image, null, 0, ContentLayer.Body,
+            new ReferenceNodeContent("asset-1", @"Detail [1]\path"), Editability: NodeEditability.Protected);
+        var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_image", DocumentFormatKind.Docx,
+            [new DocumentPartition("part-1", 0, [image])],
+            Assets: new Dictionary<string, AssetDescriptor>(StringComparer.Ordinal)
+            {
+                ["asset-1"] = new("asset-1", "hash", "image/png", "original (1).png"),
+            });
+        var markdown = new DocRedockMarkdownSerializer().Serialize(graph, new MarkdownSerializationOptions
+        {
+            RoundTripStore = "work copy.drmd",
+        }).Markdown;
+        const string original = "work%20copy.drmd/assets/original%20%281%29.png";
+        Assert.Contains(original, markdown, StringComparison.Ordinal);
+        var editor = new MarkdownGraphEditor();
+        var unchanged = editor.Apply(graph, markdown);
+
+        Assert.True(unchanged.IsValid);
+        Assert.Empty(unchanged.Diff.PatchSet.Operations);
+        foreach (var replacement in new[] { "../other.png", "https://example.invalid/image.png", "" })
+        {
+            var edited = editor.Apply(graph, markdown.Replace(original, replacement, StringComparison.Ordinal));
+            Assert.False(edited.IsValid);
+            Assert.Contains(edited.Diagnostics, diagnostic =>
+                diagnostic.Code == "ProtectedNodeEdit" && diagnostic.NodeId == "image-1");
+        }
+    }
+
+    [Fact]
     public void Xlsx_positioned_html_image_is_projection_equivalent_and_layout_is_protected()
     {
         var cell = SpreadsheetCell("cell-1", "A1", "見出し", 0);

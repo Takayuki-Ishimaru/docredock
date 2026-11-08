@@ -6,13 +6,18 @@
 
 ## 最新版
 
+### v0.3.12 Public Beta
+
+- [v0.3.12 リリースノート](RELEASE_NOTES_v0.3.12.md)
+- CLIとOCRの診断、Excelの再計算待ちの通知、検索とMCPの出典表示を改善
+
+## 公開済みリリース
+
 ### v0.3.11 Public Beta
 
 - [v0.3.11 リリースノート](RELEASE_NOTES_v0.3.11.md)
 - PDFとOfficeの変換、AI向けパッケージの分割と検索を改善
 - MCPクライアントからのローカル変換とパッケージの確認に対応
-
-## 公開済みリリース
 
 ### v0.3.10 Public Beta
 

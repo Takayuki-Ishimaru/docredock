@@ -276,6 +276,8 @@ public sealed partial class DocumentService
         text.Append("- OCR確認 / OCR review items: ").Append(summary.OcrReviewItems).Append('\n');
         text.Append("- 表の区切りの確認 / Table boundaries to compare: ").Append(summary.TableBoundaryReviewItems).Append('\n');
         text.Append("- 非表示内容を含む / Hidden content included: ").Append(summary.HiddenContentIncluded ? "yes" : "no").Append('\n');
+        if (review.WorkbookCalculationPending)
+            text.Append("- Excelで再計算して保存してから書き出し直してください。保存済みの数式結果が古い可能性があります。 / Recalculate and save in Excel, then export again. Saved formula results may be stale.\n");
         if (review.SharingReview is { } sharing)
         {
             text.Append("- 変更履歴 / Revision policy: ").Append(sharing.RevisionsPolicy).Append('\n');

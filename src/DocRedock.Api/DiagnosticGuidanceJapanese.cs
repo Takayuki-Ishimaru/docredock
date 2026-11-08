@@ -59,7 +59,7 @@ public static class DiagnosticGuidanceJapanese
             "VisualFallbackUsed" => ("図の一部を代替表示として保持しました。", "Markdownの代替表示と元文書を見比べてください。"),
             "VisualEdgeDirectionUnknown" => ("接続線の向きを確定できないため、無向線として保持しました。", "元文書の矢印方向を確認してください。"),
             "XlsxFormulaCachedValueMissing" => ("保存済みの計算結果がない数式セルがあります。", "Excel等で再計算して保存してから、もう一度変換してください。"),
-            "XlsxRecalculationRequired" => ("編集したセルを参照する数式の計算結果が、再計算されるまで編集前の値のままです。", "Excelで開くと再計算されます。保存済みの計算結果を読むツールに渡す前に、Excel等で開いて保存してください。"),
+            "XlsxRecalculationRequired" => ("数式の保存済みの計算結果が古いか、まだ保存されていない可能性があります。", "Excel等で再計算して保存してから、書き出し直してください。"),
             "XlsxCalculationChainReset" => ("数式を編集したため、ブックの計算順序の情報を初期化しました。", "対応は不要です。Excelが開くときに作り直します。"),
             "XlsxLegacyCommentsUnsupported" => ("旧形式のXLSXコメントは本文へ展開されません。", "必要なコメントは元ブックで確認してください。"),
             "DeletedRevisionContentIncluded" => ("Wordの変更履歴で削除された文字も、<del>の印付きで出力に含まれています。", "削除した文字を共有しないときは「最終版で書き出し直す」を押すか、詳細設定の変更履歴で「最終版のみ」を選んでください。"),

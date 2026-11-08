@@ -24,20 +24,24 @@ public static class AiPackageSearch
 {
     private static readonly Regex Escapes = new(@"\\([!""#$%&'()*+,\-./:;<=>?@\[\]\\^_`{|}~])", RegexOptions.CultureInvariant);
     private static readonly Regex Markup = new(@"(?<!\\)(?:</?(?:u|ins|del|sub|sup)>|\*\*|~~)", RegexOptions.CultureInvariant);
-    private static readonly Regex Breaks = new(@"<br\s*/?>|\s+", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+    private static readonly Regex Breaks = new(@"(?:<br\s*/?>|\s)+", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
     private static readonly Regex HeadingLine = new(@"^#{1,6}\s+(.+?)\s*#*\s*$", RegexOptions.CultureInvariant);
     private static string Normalize(string text) => WebUtility.HtmlDecode(text).Normalize(NormalizationForm.FormKC).ToUpperInvariant();
     // A line as it reads without its white space and line breaks in a table cell: the text a PDF spaced out ("11 月"),
     // or that a line break cut ("見" / "直し"), is still found.
     private static string Compact(string text) => Breaks.Replace(text, "");
+    private static string Spaced(string text) => Breaks.Replace(text, " ");
     public static IReadOnlyList<AiPackageSearchMatch> Find(AiPackageVerifiedPackage package, string query,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(package);
         ArgumentException.ThrowIfNullOrWhiteSpace(query);
         var needle = Normalize(Escapes.Replace(query, "$1"));
-        // A query with a space in it means the space; one without matches text that white space or a line break cuts.
-        var compactNeedle = needle.Any(char.IsWhiteSpace) ? string.Empty : needle;
+        // Queries with spaces keep a word boundary but normalize its amount and kind; unspaced queries also match
+        // text that whitespace or a line break cuts, preserving the earlier compressed behavior.
+        var spaced = needle.Any(char.IsWhiteSpace);
+        var compactNeedle = spaced ? string.Empty : needle;
+        var spacedNeedle = spaced ? Spaced(needle) : string.Empty;
         var matches = new List<AiPackageSearchMatch>();
         foreach (var part in package.Parts)
         {
@@ -54,22 +58,38 @@ public static class AiPackageSearch
             string? heading = null;
             string? previous = null;
             var previousMatched = false;
+            var previousLine = -1;
             for (var index = 0; index < lines.Length; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (index > 0 && index < metadataEnd) { previous = null; continue; }
+                if (index > 0 && index < metadataEnd) { previous = null; previousLine = -1; continue; }
                 var plain = Escapes.Replace(lines[index], "$1");
                 var searchable = Normalize(Escapes.Replace(Markup.Replace(lines[index], ""), "$1"));
                 var matched = Normalize(plain).Contains(needle, StringComparison.Ordinal) || searchable.Contains(needle, StringComparison.Ordinal) ||
-                    compactNeedle.Length > 0 && Compact(searchable).Contains(compactNeedle, StringComparison.Ordinal);
-                if (matched) found.Add(new(index + 1, lines[index]) { Heading = heading });
+                    compactNeedle.Length > 0 && Compact(searchable).Contains(compactNeedle, StringComparison.Ordinal) ||
+                    spacedNeedle.Length > 0 && Spaced(searchable).Contains(spacedNeedle, StringComparison.Ordinal);
+                if (matched)
+                {
+                    var headingHit = HeadingLine.Match(lines[index]);
+                    var matchedHeading = headingHit.Success
+                        ? Escapes.Replace(headingHit.Groups[1].Value, "$1")
+                        : heading;
+                    found.Add(new(index + 1, lines[index]) { Heading = matchedHeading });
+                }
                 // Text a line break cuts: the end of the line above and the start of this one together, reported at the line above.
-                else if (!previousMatched && previous is { Length: > 0 } && searchable.Length > 0 && compactNeedle.Length > 0 &&
-                         Compact(previous + searchable).Contains(compactNeedle, StringComparison.Ordinal))
-                    found.Add(new(index, lines[index - 1]) { Heading = heading });
+                else if (!previousMatched && previous is { Length: > 0 } && !string.IsNullOrWhiteSpace(searchable) && previousLine >= 0 &&
+                         (compactNeedle.Length > 0 || spacedNeedle.Length > 0) &&
+                         (compactNeedle.Length > 0 && Compact(previous + searchable).Contains(compactNeedle, StringComparison.Ordinal) ||
+                          spacedNeedle.Length > 0 && Spaced(previous + " " + searchable).Contains(spacedNeedle, StringComparison.Ordinal)))
+                    found.Add(new(previousLine + 1, lines[previousLine]) { Heading = heading });
                 if (HeadingLine.Match(lines[index]) is { Success: true } title && index > 0) heading = Escapes.Replace(title.Groups[1].Value, "$1");
-                previous = searchable;
-                previousMatched = matched;
+                if (!string.IsNullOrWhiteSpace(searchable))
+                {
+                    previous = searchable;
+                    previousMatched = matched;
+                    previousLine = index;
+                }
+                else if (!spaced) previous = null;
             }
             if (found.Count > 0) matches.Add(new(part.Part.Id, part.Part.Locations, found)
             {

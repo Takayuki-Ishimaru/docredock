@@ -80,6 +80,49 @@ public sealed class CliApplicationTests : IDisposable
     }
 
     [Theory]
+    [InlineData("on", false, 1)]
+    [InlineData("on", true, 8)]
+    [InlineData("off", true, 0)]
+    public async Task Ocr_language_warning_is_structured_and_strict_is_opt_in(string ocr, bool strict, int expected)
+    {
+        using var fixture = new Fixture(); fixture.CreateDocx(withImage: true);
+        using (var archive = ZipFile.Open(fixture.SourcePath, ZipArchiveMode.Update))
+        await using (var media = archive.CreateEntry("word/media/image1.png").Open())
+            await media.WriteAsync(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 });
+        var output = new StringWriter();
+        var app = new CliApplication(output, new StringWriter(), new DocRedock.Api.DocumentService(new MissingLanguageEngine(), null, discoverPdfRasterizer: false));
+        var args = new List<string> { "export", fixture.SourcePath, "--output", fixture.MarkdownPath, "--ocr", ocr, "--json" };
+        if (strict) args.Add("--ocr-strict");
+        var exit = await app.RunAsync(args.ToArray());
+        Assert.Equal(expected, exit);
+        using var json = System.Text.Json.JsonDocument.Parse(output.ToString());
+        var result = json.RootElement.GetProperty("results")[0];
+        Assert.Equal(exit, result.GetProperty("exit_code").GetInt32());
+        var diagnostics = result.GetProperty("diagnostics").EnumerateArray().ToArray();
+        if (ocr == "off") Assert.DoesNotContain(diagnostics, d => d.GetProperty("code").GetString() == "OcrLanguageUnavailable");
+        else
+        {
+            var diagnostic = Assert.Single(diagnostics, d => d.GetProperty("code").GetString() == "OcrLanguageUnavailable");
+            Assert.Equal("jpn", diagnostic.GetProperty("data").GetProperty("missing_languages").GetString());
+        }
+        Assert.True(File.Exists(fixture.MarkdownPath));
+    }
+
+    private sealed class MissingLanguageEngine : DocRedock.Providers.Abstractions.Providers.IOcrEngine
+    {
+        public DocRedock.Providers.Abstractions.Providers.ProviderDescriptor Descriptor { get; } = new(
+            "test.missing-language", new Version(1, 0), 1, new HashSet<string> { "ocr.text" }, "MIT", "test", true);
+        public ValueTask<DocRedock.Providers.Abstractions.Providers.OcrAttemptResult> RecognizeAsync(
+            DocRedock.Providers.Abstractions.Providers.OcrInput input,
+            DocRedock.Providers.Abstractions.Providers.OcrOptions options, CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new DocRedock.Providers.Abstractions.Providers.OcrAttemptResult(
+                DocRedock.Core.Reporting.OcrProcessingStatus.Completed,
+                new DocRedock.Providers.Abstractions.Providers.OcrResult("text", []),
+                [new("OcrLanguageUnavailable", "Install jpn.traineddata.", DocRedock.Core.Reporting.DiagnosticSeverity.Warning)
+                { Data = new Dictionary<string, string> { ["requested_languages"] = "eng+jpn", ["missing_languages"] = "jpn" } }]));
+    }
+
+    [Theory]
     [InlineData(null, 1)]
     [InlineData("low-confidence", 1)]
     [InlineData("all", 2)]

@@ -61,6 +61,68 @@ public sealed class CliUsabilityRegressionTests : IDisposable
     }
 
     [Fact]
+    public async Task Json_failure_identifies_parsed_input_after_option_values()
+    {
+        var missing = Path.Combine(root, "missing.docx"); var output = new StringWriter();
+        var code = await App(output, new()).RunAsync(["export", "--lang", "ja", "--ocr", "off", missing, "--json"]);
+        Assert.NotEqual(0, code);
+        using var json = JsonDocument.Parse(output.ToString());
+        var result = Assert.Single(json.RootElement.GetProperty("results").EnumerateArray());
+        Assert.Equal(missing, result.GetProperty("input").GetString());
+        Assert.Equal(code, result.GetProperty("exit_code").GetInt32());
+    }
+
+    [Fact]
+    public async Task Json_batch_collision_reports_every_input_without_writing()
+    {
+        var first = await Source("same"); var second = Path.Combine(root, "same.pdf");
+        await File.WriteAllTextAsync(second, "placeholder");
+        var target = Path.Combine(root, "out"); var output = new StringWriter();
+        var code = await App(output, new()).RunAsync(["export", first, second, "--output-dir", target, "--json"]);
+        Assert.Equal((int)ExitCode.InvalidInput, code);
+        using var json = JsonDocument.Parse(output.ToString());
+        var results = json.RootElement.GetProperty("results").EnumerateArray().ToArray();
+        Assert.Equal(new[] { first, second }, results.Select(r => r.GetProperty("input").GetString()));
+        Assert.All(results, r => Assert.Equal(code, r.GetProperty("exit_code").GetInt32()));
+        Assert.False(Directory.Exists(target));
+
+        var directoryOutput = new StringWriter();
+        var directoryCode = await App(directoryOutput, new()).RunAsync(["export", root, "--output-dir", target, "--json"]);
+        Assert.Equal(code, directoryCode);
+        using var directoryJson = JsonDocument.Parse(directoryOutput.ToString());
+        Assert.Equal(new[] { first, second }, directoryJson.RootElement.GetProperty("results").EnumerateArray()
+            .Select(r => r.GetProperty("input").GetString()));
+        Assert.False(Directory.Exists(target));
+    }
+
+    [Fact]
+    public async Task Json_parse_error_is_invocation_level()
+    {
+        var output = new StringWriter();
+        var code = await App(output, new()).RunAsync(["export", "--unknown", "value", "--json"]);
+        Assert.NotEqual(0, code);
+        using var json = JsonDocument.Parse(output.ToString());
+        Assert.Empty(json.RootElement.GetProperty("results").EnumerateArray());
+        Assert.Equal(code, json.RootElement.GetProperty("error").GetProperty("exit_code").GetInt32());
+    }
+
+    [Fact]
+    public async Task Json_cancelled_batch_lists_the_inputs_it_did_not_start()
+    {
+        var first = await Source("one"); var second = await Source("two");
+        var target = Path.Combine(root, "out"); var output = new StringWriter();
+        var code = await App(output, new()).RunAsync(
+            ["export", first, second, "--output-dir", target, "--json"], new CancellationToken(canceled: true));
+
+        Assert.Equal((int)ExitCode.InvalidInput, code);
+        using var json = JsonDocument.Parse(output.ToString());
+        var results = json.RootElement.GetProperty("results").EnumerateArray().ToArray();
+        Assert.Equal(new[] { first, second }, results.Select(result => result.GetProperty("input").GetString()));
+        Assert.All(results, result => Assert.Equal("cancelled", result.GetProperty("error").GetProperty("code").GetString()));
+        Assert.False(Directory.Exists(target));
+    }
+
+    [Fact]
     public async Task Directory_batch_json_reports_legacy_files_and_converts_supported_files()
     {
         await Source("document"); await File.WriteAllTextAsync(Path.Combine(root, "old.doc"), "legacy");

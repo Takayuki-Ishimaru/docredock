@@ -8,6 +8,28 @@ namespace DocRedock.Tests.Ocr;
 public sealed class TesseractOcrResourceTests
 {
     [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Tesseract_reports_missing_requested_language(bool missing, bool fails)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        using var executable = new FakeCli(success: true, missingLanguage: missing, fails: fails);
+        using var image = new MemoryStream([1]);
+        var result = await new TesseractOcrEngine(executable.Path).RecognizeAsync(
+            new OcrInput("language", image, "image/png"), new OcrOptions(["jpn", "eng"]), CancellationToken.None);
+        Assert.Equal(fails ? OcrProcessingStatus.Failed : OcrProcessingStatus.Completed, result.Status);
+        if (missing)
+        {
+            var diagnostic = Assert.Single(result.Diagnostics, item => item.Code == "OcrLanguageUnavailable");
+            Assert.Equal("eng+jpn", diagnostic.Data!["requested_languages"]);
+            Assert.Equal("jpn", diagnostic.Data["missing_languages"]);
+            Assert.Equal(fails ? "" : "eng", diagnostic.Data["used_languages"]);
+            Assert.Contains("jpn.traineddata", diagnostic.Message);
+        }
+        else Assert.DoesNotContain(result.Diagnostics, item => item.Code == "OcrLanguageUnavailable");
+    }
+    [Theory]
     [InlineData(-1)]
     [InlineData(0)]
     [InlineData(4)]
@@ -159,12 +181,14 @@ public sealed class TesseractOcrResourceTests
     {
         private readonly string root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "docredock-ocr-resource-test-" + Guid.NewGuid().ToString("N"));
         public string Path { get; }
-        public FakeCli(bool success = false)
+        public FakeCli(bool success = false, bool missingLanguage = false, bool fails = false)
         {
             Directory.CreateDirectory(root);
             Path = System.IO.Path.Combine(root, "tesseract");
             File.WriteAllText(Path, success
-                ? "#!/bin/sh\nprintf '' > \"$2.tsv\"\nprintf '[]'\n"
+                ? "#!/bin/sh\nprintf '' > \"$2.tsv\"\nprintf '[]'\n" +
+                  (missingLanguage ? "echo \"Failed loading language 'jpn'\" >&2\n" : "") +
+                  (fails ? "exit 1\n" : "")
                 : "#!/bin/sh\nsleep 30 &\nprintf '%s' \"$!\" > \"$0.pid\"\nexit 0\n");
             if (!OperatingSystem.IsWindows())
                 File.SetUnixFileMode(Path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);

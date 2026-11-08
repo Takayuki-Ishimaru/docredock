@@ -16,9 +16,9 @@ DocRedockは、Word・Excel・PowerPoint・PDFの内容を、お手元のPCでAI
 
 [English](README.md) · [現在のPublic Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases) · [利用ガイド](docs/ja/user-guide.md) · [対応状況](docs/ja/supported-features.md)
 
-## v0.3.11 Public Betaの対応状況
+## v0.3.12 Public Betaの対応状況
 
-v0.3.11では、PDFとOfficeの変換、AI向けパッケージの分割と検索を改善し、MCPクライアントから利用できるようにしました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
+v0.3.12では、変換時の診断、AI向けパッケージの検索、MCPの出典表示を改善しました。GUIで「AI向けパッケージ」を選ぶか、CLIで`docredock export input.docx --ai-package zip`を実行します。ローカルのフォルダー／ZIPに、全文、意味のまとまりごとの分割、参照画像、確認事項、出典とハッシュをまとめます。[利用ガイド](docs/ja/user-guide.md#ai向けパッケージ)と[形式仕様](docs/reference/ai-package.md)を参照してください。
 
 | 機能 | 扱い |
 | --- | --- |
@@ -28,7 +28,7 @@ v0.3.11では、PDFとOfficeの変換、AI向けパッケージの分割と検�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.11リリースノート](release-docs/RELEASE_NOTES_v0.3.11.md)へ集約します。
+利用者向けの公開サポートと図の保証境界は[対応状況](docs/ja/supported-features.md)が正本です。版固有の変更は[v0.3.12リリースノート](release-docs/RELEASE_NOTES_v0.3.12.md)へ集約します。
 
 ## 30秒で使う
 
@@ -94,7 +94,7 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.3.11はPublic Betaであり、本番向けの安定版ではありません。
+- v0.3.12はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - CLIのPDF変換は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にできます。往復／audit操作、復元、レンダリング／新規文書生成には引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -106,9 +106,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.3.11の対応状況](docs/ja/supported-features.md)
+- [v0.3.12の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.3.11リリースノート](release-docs/RELEASE_NOTES_v0.3.11.md)
+- [v0.3.12リリースノート](release-docs/RELEASE_NOTES_v0.3.12.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

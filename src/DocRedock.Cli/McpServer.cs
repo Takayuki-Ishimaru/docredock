@@ -75,9 +75,10 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             "Searches the text of an AI package and returns JSON with the matching parts (part ids such as part-0001), where they come from in the source and the matching lines. Use the part ids with package_read. A package that needs review answers with a review-required message until allow_review is passed; run package_review first.",
             ["package", "query"], [PackageParameter, new("query", "string", "The text to search for (plain text, not a pattern)."), AllowReviewParameter]),
         new("package_read",
-            "Reads one part of an AI package and returns JSON with part_id, markdown, review_required and estimated_tokens (and sources and locations with with_sources). Part ids come from package_search or from the package's manifest.json. A package that needs review answers with a review-required message instead of the body until allow_review is passed.",
+            "Reads one part of an AI package and returns JSON with part_id, markdown, review_required and estimated_tokens (and sources and locations with with_sources). Part ids come from package_search or from the package's manifest.json. A package that needs review answers with a review-required message instead of the body until allow_review is passed; structuredContent reports status, stop_reasons and next_action. source_detail=compact returns compact sheet/range metadata; with_sources=true keeps the full source records.",
             ["package", "part"], [PackageParameter, new("part", "string", "Id of the part, such as part-0001."),
-                new("with_sources", "boolean", "Also return the source location of each piece of the part. Default: false."), AllowReviewParameter]),
+                new("with_sources", "boolean", "Also return the full source location of each piece of the part. Default: false."),
+                new("source_detail", "string", "Source detail to return: full (same as with_sources) or compact (sheet and range summaries without node identities). Default: with_sources=false gives none; with_sources=true gives full.", ["full", "compact"]), AllowReviewParameter]),
     ];
 
     /// <summary>Reads one message a line until the input ends and answers each request in turn, so replies come in the
@@ -205,7 +206,7 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
                 "export_ai_package" => await ExportAiPackageAsync(arguments, cancellationToken),
                 "package_review" => ToolResult(await RunCliAsync(["package", "review", FullPath(arguments, "package"), "--json"], cancellationToken), []),
                 "package_search" => ToolResult(await RunCliAsync(PackageSearch(arguments), cancellationToken), []),
-                _ => ToolResult(await RunCliAsync(PackageRead(arguments), cancellationToken), []),
+                _ => await PackageReadAsync(arguments, cancellationToken),
             });
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -261,14 +262,22 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
     private sealed record CliRun(int ExitCode, string Output, string Error)
     {
         public bool Failed => ExitCode is not (0 or 1 or 11);
+        public IReadOnlyList<string> StopReasons { get; init; } = [];
     }
 
-    private async Task<CliRun> RunCliAsync(string[] args, CancellationToken cancellationToken)
+    private async Task<CliRun> RunCliAsync(string[] args, CancellationToken cancellationToken, bool compactPackageSources = false)
     {
         var standardOutput = new StringWriter();
         var standardError = new StringWriter();
-        var exitCode = await new CliApplication(standardOutput, standardError, documentService).RunAsync(args, cancellationToken);
-        return new CliRun(exitCode, standardOutput.ToString(), standardError.ToString());
+        var application = new CliApplication(standardOutput, standardError, documentService)
+        {
+            IncludeCompactPackageSources = compactPackageSources,
+        };
+        var exitCode = await application.RunAsync(args, cancellationToken);
+        return new CliRun(exitCode, standardOutput.ToString(), standardError.ToString())
+        {
+            StopReasons = application.PackageReadStopReasons,
+        };
     }
 
     /// <summary>The reply of a tool: the CLI's output, then the tool's own items, then what the CLI wrote to its error stream.</summary>
@@ -333,10 +342,32 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
     private static string[] PackageRead(ToolArguments arguments)
     {
         var cli = new List<string> { "package", "read", FullPath(arguments, "package"), "--part", arguments.Text("part")! };
-        if (arguments.Flag("with_sources")) cli.Add("--with-sources");
+        var detail = arguments.Text("source_detail");
+        if (detail != "compact" && (arguments.Flag("with_sources") || detail == "full")) cli.Add("--with-sources");
         if (arguments.Flag("allow_review")) cli.Add("--allow-review");
         cli.Add("--json");
         return [.. cli];
+    }
+
+    private async Task<JsonObject> PackageReadAsync(ToolArguments arguments, CancellationToken cancellationToken)
+    {
+        var run = await RunCliAsync(PackageRead(arguments), cancellationToken,
+            compactPackageSources: arguments.Text("source_detail") == "compact");
+        var result = ToolResult(run, []);
+        if (run.ExitCode == 11)
+        {
+            // The CLI's review gate owns the decision to withhold the body. Keep its text verbatim and expose
+            // machine-readable guidance separately so clients do not have to parse that text.
+            result["structuredContent"] = new JsonObject
+            {
+                ["status"] = "review_required",
+                ["review_required"] = true,
+                ["stop_reasons"] = JsonSerializer.SerializeToNode(run.StopReasons),
+                ["next_action"] = "Have a person review package_review and confirm conversion and sharing are acceptable; then call package_read with allow_review=true.",
+            };
+            return result;
+        }
+        return result;
     }
 
     private static void AddExportOptions(List<string> cli, ToolArguments arguments)

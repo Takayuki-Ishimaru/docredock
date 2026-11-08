@@ -21,8 +21,8 @@ Usage:
 
 Determinism: python-pptx's bundled default.pptx template already carries a
 static docProps/core.xml (created/modified fixed at 2013-01-27T..., not the
-current time -- confirmed empirically, see below), so no core_properties
-override is needed for *content* determinism. The one non-deterministic
+current time). The generator sets the last editor to the fixture label.
+The one non-deterministic
 knob python-pptx does *not* control is the zip member timestamp (defaults
 to "now" via zipfile.writestr), so this script rewrites every zip entry's
 date_time to a fixed value after saving, making the .pptx byte-identical
@@ -908,6 +908,7 @@ def print_checklist():
 # =================================================================== build
 def build(output_path):
     prs = Presentation()
+    prs.core_properties.last_modified_by = "DocRedock fixture"
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 

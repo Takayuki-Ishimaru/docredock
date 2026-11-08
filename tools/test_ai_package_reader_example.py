@@ -30,6 +30,20 @@ class ReaderContracts(unittest.TestCase):
         self.assertEqual("before added after", reader._searchable("before <ins>**added**</ins> after"))
         self.assertEqual("<ins>literal</ins>", reader._searchable("&lt;ins&gt;literal&lt;/ins&gt;"))
 
+    def test_spaced_queries_collapse_whitespace_breaks_and_heading_hits_name_their_heading(self):
+        with reader.open_package(SAMPLES / "schema-2.1") as package:
+            manifest = reader.load_manifest(package)
+            part = manifest["parts"][0]
+            content = b"# Package\n\n## Marker heading\n\nnew<br><br>phrase\n"
+            results = reader.search_parts(package, manifest, "new  \n\t phrase", {part["path"]: content})
+            hit = next(lines[0] for candidate, lines in results if candidate["id"] == part["id"])
+            self.assertEqual("new<br><br>phrase", hit[1])
+            self.assertEqual("Marker heading", reader.line_headings(content.decode())[3])
+            split_content = b"# Package\n\n## Marker heading\n\nnew\n\nphrase\n"
+            split_results = reader.search_parts(package, manifest, "new phrase", {part["path"]: split_content})
+            self.assertTrue(any(candidate["id"] == part["id"] for candidate, _ in split_results))
+        self.assertEqual("alphabet", reader._compact("alpha \n <br><br>bet"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

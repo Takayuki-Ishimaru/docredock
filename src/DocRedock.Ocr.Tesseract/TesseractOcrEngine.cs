@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DocRedock.Core.Documents;
 using DocRedock.Core.Reporting;
 using DocRedock.Providers.Abstractions.Providers;
@@ -107,8 +108,32 @@ public sealed class TesseractOcrEngine : IOcrEngine
             }
             var output = await stdoutTask.ConfigureAwait(false);
             var error = await stderrTask.ConfigureAwait(false);
+            var missing = Regex.Matches(error, @"Failed loading language '([^']+)'", RegexOptions.CultureInvariant)
+                .Select(match => match.Groups[1].Value).Where(language => languages.Contains(language, StringComparer.OrdinalIgnoreCase))
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            var diagnostics = new List<OcrDiagnostic>();
+            if (missing.Length > 0)
+            {
+                var available = process.ExitCode == 0
+                    ? languages.Except(missing, StringComparer.OrdinalIgnoreCase)
+                    : Enumerable.Empty<string>();
+                diagnostics.Add(new OcrDiagnostic("OcrLanguageUnavailable",
+                    $"Tesseract requested {string.Join('+', languages)} and could not load {string.Join(", ", missing)}. Install the corresponding Tesseract language data (for example, tesseract-ocr-jpn or jpn.traineddata in tessdata), then retry.", DiagnosticSeverity.Warning)
+                {
+                    Data = new Dictionary<string, string>
+                    {
+                        ["requested_languages"] = string.Join('+', languages),
+                        ["missing_languages"] = string.Join('+', missing),
+                        ["used_languages"] = string.Join('+', available),
+                    },
+                });
+            }
             if (process.ExitCode != 0)
-                return Failure(OcrProcessingStatus.Failed, error.Length == 0 ? $"Tesseract exited with code {process.ExitCode}." : error, "ProcessFailed");
+            {
+                diagnostics.Add(new OcrDiagnostic("ProcessFailed",
+                    error.Length == 0 ? $"Tesseract exited with code {process.ExitCode}." : error, DiagnosticSeverity.Warning));
+                return new OcrAttemptResult(OcrProcessingStatus.Failed, null, diagnostics);
+            }
 
             var tsvPath = outputBase + ".tsv";
             if (!File.Exists(tsvPath))
@@ -117,11 +142,11 @@ public sealed class TesseractOcrEngine : IOcrEngine
                 return Failure(OcrProcessingStatus.Failed, "Tesseract TSV output exceeded the configured limit.", "OutputLimit");
             var tsv = await File.ReadAllTextAsync(tsvPath, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
             var result = TsvParser.Parse(tsv);
-            await WriteCacheAsync(cacheKey, result, cancellationToken).ConfigureAwait(false);
-            return new OcrAttemptResult(OcrProcessingStatus.Completed, result,
-                output.Length >= maxOutputBytes || error.Length >= maxOutputBytes
-                    ? [new OcrDiagnostic("OutputTruncated", "Tesseract diagnostic output was capped.", DiagnosticSeverity.Warning)]
-                    : Array.Empty<OcrDiagnostic>());
+            if (output.Length >= maxOutputBytes || error.Length >= maxOutputBytes)
+                diagnostics.Add(new OcrDiagnostic("OutputTruncated", "Tesseract diagnostic output was capped.", DiagnosticSeverity.Warning));
+            // Do not cache partial results: installing language data must make a retry effective.
+            if (missing.Length == 0 && error.Length < maxOutputBytes) await WriteCacheAsync(cacheKey, result, cancellationToken).ConfigureAwait(false);
+            return new OcrAttemptResult(OcrProcessingStatus.Completed, result, diagnostics);
         }
         finally
         {
@@ -182,7 +207,7 @@ public sealed class TesseractOcrEngine : IOcrEngine
     {
         var inputHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
         var providerVersion = typeof(TesseractOcrEngine).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
-        var descriptor = "docredock.ocr.tesseract/" + providerVersion + "\n" + executablePath + "\n" + string.Join('+', languages);
+        var descriptor = "docredock.ocr.tesseract/language-check-v1/" + providerVersion + "\n" + executablePath + "\n" + string.Join('+', languages);
         var configHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(descriptor))).ToLowerInvariant();
         return inputHash + "-" + configHash[..16];
     }
