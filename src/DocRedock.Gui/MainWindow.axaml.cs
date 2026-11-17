@@ -343,16 +343,44 @@ public partial class MainWindow : Window
         RoundTripWarningText.IsVisible = !readable;
         AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
         UpdateFormatSpecificOptions();
-        EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+        ApplyEmbedImagesState();
         ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         SchedulePackagePreview();
         SaveSettings();
         UpdateButtons();
     }
 
+    // HTML always embeds its images, so the checkbox shows "on" and is locked while HTML is selected;
+    // the person's own choice is kept aside and comes back with the other formats.
+    private bool? _embedImagesUserValue;
+    private bool _applyingEmbedState;
+
+    private void ApplyEmbedImagesState()
+    {
+        var html = HtmlExportRadio.IsChecked == true;
+        _applyingEmbedState = true;
+        try
+        {
+            if (html)
+            {
+                _embedImagesUserValue ??= EmbedReadableImagesCheckBox.IsChecked;
+                EmbedReadableImagesCheckBox.IsChecked = true;
+            }
+            else if (_embedImagesUserValue is { } saved)
+            {
+                EmbedReadableImagesCheckBox.IsChecked = saved;
+                _embedImagesUserValue = null;
+            }
+            EmbedReadableImagesCheckBox.IsEnabled = !html && AiPackageExportRadio.IsChecked != true;
+        }
+        finally { _applyingEmbedState = false; }
+    }
+
     private void OnSettingsChanged(object? sender, RoutedEventArgs e)
     {
         if (!_componentsInitialized) return;
+        if (_applyingEmbedState) return;
+        if (_embedImagesUserValue is not null && ReferenceEquals(sender, EmbedReadableImagesCheckBox)) return;
         UpdateInferenceModeWarning();
         SchedulePackagePreview();
         SaveSettings();
@@ -438,9 +466,10 @@ public partial class MainWindow : Window
         }
 
         var readable = RoundTripExportRadio.IsChecked != true;
+        var html = HtmlExportRadio.IsChecked == true;
         _previewCancellation?.Cancel();
         ClearLatestReview();
-        SetExportBusy(true, readable ? "読みやすいMarkdownを作成しています…" : "MarkdownとDocRedockサイドカーを作成しています…");
+        SetExportBusy(true, html ? "閲覧用HTMLを作成しています…" : readable ? "読みやすいMarkdownを作成しています…" : "MarkdownとDocRedockサイドカーを作成しています…");
         _exportCancellation = new CancellationTokenSource();
         try
         {
@@ -460,7 +489,7 @@ public partial class MainWindow : Window
                     showFormulas: ShowFormulasCheckBox.IsChecked == true,
                     includeSvgPreviews: IncludeSvgCheckBox.IsChecked == true,
                     includeDiagrams: IncludeDiagramsCheckBox.IsChecked == true,
-                    embedReadableImages: EmbedReadableImagesCheckBox.IsChecked == true && AiPackageExportRadio.IsChecked != true,
+                    embedReadableImages: (html || EmbedReadableImagesCheckBox.IsChecked == true) && AiPackageExportRadio.IsChecked != true,
                     zipSidecar: ZipSidecarCheckBox.IsChecked == true,
                     contentPolicy: SelectedContentPolicy(),
                     inferenceMode: SelectedInferenceMode(),
@@ -472,7 +501,8 @@ public partial class MainWindow : Window
                     tableRowBlocks: TableRowBlocksCheckBox.IsChecked == true,
                     targetCharacters: (int)(PackageTargetCharacters.Value ?? 12000),
                     expandMergedCells: ExpandMergedCellsCheckBox.IsChecked == true,
-                    revisions: SelectedRevisions(), allowRevisionSharing: RevisionSharingConsent.IsChecked == true));
+                    revisions: SelectedRevisions(), allowRevisionSharing: RevisionSharingConsent.IsChecked == true,
+                    html: html));
             }
 
             _latestOutputDirectory = _exportDirectory;
@@ -480,7 +510,7 @@ public partial class MainWindow : Window
             _latestAiPackagePath = results[^1].AiPackagePath;
             _latestSharingReviews = results.Select(result => result.SharingReview).OfType<RevisionSharingReview>().ToArray();
             if (results[^1].PackageSize is { } size) PackagePreviewText.Text = size.DescribeJapanese();
-            var openLabel = results[^1].AiPackagePath is not null ? "パッケージを読む" : "Markdownを開く";
+            var openLabel = results[^1].AiPackagePath is not null ? "パッケージを読む" : html ? "HTMLを開く" : "Markdownを開く";
             OpenMarkdownButton.Content = openLabel;
             Avalonia.Automation.AutomationProperties.SetName(OpenMarkdownButton, openLabel);
             _latestReviewItems = results.SelectMany(result => result.ReviewItems ?? []).ToArray();
@@ -497,7 +527,7 @@ public partial class MainWindow : Window
                 message: string.Join(Environment.NewLine, results.Select(result => result.AiPackagePath is not null
                     ? result.ExportSummary
                     : result.IsReadable
-                    ? $"Markdown: {result.MarkdownPath}（接続の推定: {InferenceModeJapanese(result.InferenceMode)}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
+                    ? $"{(html ? "HTML" : "Markdown")}: {result.MarkdownPath}（接続の推定: {InferenceModeJapanese(result.InferenceMode)}）{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}"
                     : $"Markdown: {result.MarkdownPath}{Environment.NewLine}復元情報: {result.SidecarPath}（{(result.SidecarForm == DocRedock.RoundTrip.SidecarForm.Zip ? "ZIP" : "フォルダー")}） 接続の推定: {InferenceModeJapanese(result.InferenceMode)}{(string.IsNullOrWhiteSpace(result.VisualSummary) ? string.Empty : Environment.NewLine + result.VisualSummary)}{Environment.NewLine}{result.ExportSummary}")),
                 fidelity: results.Select(result => result.Fidelity).Distinct(StringComparer.Ordinal).Count() == 1 ? FidelityJapanese(results[0].Fidelity) : "複数形式",
                 diagnostics: results.SelectMany(result => result.Diagnostics).ToArray());
@@ -782,6 +812,8 @@ public partial class MainWindow : Window
         var aiPackage = AiPackageExportRadio.IsChecked == true;
         ExportActionDescriptionText.Text = aiPackage
             ? "選択した文書を現在の設定でAI向けパッケージへ書き出します"
+            : HtmlExportRadio.IsChecked == true
+            ? "選択した文書を現在の設定で閲覧用HTMLへ書き出します"
             : "選択した文書を現在の設定で閲覧用Markdownへ書き出します";
         TableRowBlocksCheckBox.IsVisible = _sourceFiles.Any(file => Path.GetExtension(file.Name).Equals(".xlsx", StringComparison.OrdinalIgnoreCase));
     }
@@ -1198,6 +1230,19 @@ public partial class MainWindow : Window
         }
     }
 
+    // Tests inject a temporary home and a fake CLI here; production leaves it null.
+    internal AgentIntegrationSetup? AgentIntegrationSetupOverride { get; set; }
+    internal AgentIntegrationWindow? AgentWindow { get; private set; }
+
+    private void OnOpenAgentIntegration(object? sender, RoutedEventArgs e)
+    {
+        if (AgentWindow is { } open) { open.Activate(); return; }
+        var window = AgentIntegrationSetupOverride is { } setup ? new AgentIntegrationWindow(setup) : new AgentIntegrationWindow();
+        AgentWindow = window;
+        window.Closed += (_, _) => AgentWindow = null;
+        window.Show(this);
+    }
+
     private async void OnCheckForUpdates(object? sender, RoutedEventArgs e)
     {
         await CheckForUpdatesAsync(startup: false);
@@ -1409,6 +1454,7 @@ public partial class MainWindow : Window
             if (settings.Readable is not null) ReadableExportToggle.IsChecked = settings.Readable;
             if (settings.Readable == false && settings.AiPackage != true) RoundTripExportRadio.IsChecked = true;
             if (settings.AiPackage == true) AiPackageExportRadio.IsChecked = true;
+            else if (settings.Html == true && settings.Readable != false) HtmlExportRadio.IsChecked = true;
             AiPackageFormComboBox.SelectedIndex = settings.ZipAiPackage == true ? 1 : 0;
             TableRowBlocksCheckBox.IsChecked = settings.TableRowBlocks == true;
             PackageTargetCharacters.Value = settings.TargetCharacters is >= 128 and <= 1000000 ? settings.TargetCharacters : 12000;
@@ -1421,7 +1467,11 @@ public partial class MainWindow : Window
             if (settings.IncludeSvgPreviews is not null) IncludeSvgCheckBox.IsChecked = settings.IncludeSvgPreviews;
             if (settings.IncludeDiagrams is not null) IncludeDiagramsCheckBox.IsChecked = settings.IncludeDiagrams;
             if (settings.IncludePdfFallbackImages is not null) PdfFallbackImagesCheckBox.IsChecked = settings.IncludePdfFallbackImages;
-            if (settings.EmbedReadableImages is not null) EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
+            if (settings.EmbedReadableImages is not null)
+            {
+                if (_embedImagesUserValue is not null) _embedImagesUserValue = settings.EmbedReadableImages;
+                else EmbedReadableImagesCheckBox.IsChecked = settings.EmbedReadableImages;
+            }
             if (settings.ZipSidecar is not null) ZipSidecarCheckBox.IsChecked = settings.ZipSidecar;
             ContentPolicyComboBox.SelectedIndex = settings.ContentPolicy switch { "complete" => 1, "sanitized" => 2, _ => 0 };
             OcrReviewModeComboBox.SelectedIndex = settings.OcrReview switch { "all" => 1, "summary" => 2, _ => 0 };
@@ -1434,7 +1484,7 @@ public partial class MainWindow : Window
             SidecarOptionsPanel.IsVisible = RoundTripExportRadio.IsChecked == true;
             AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
             UpdateFormatSpecificOptions();
-            EmbedReadableImagesCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+            ApplyEmbedImagesState();
             ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
         }
         catch (JsonException) { }
@@ -1450,11 +1500,11 @@ public partial class MainWindow : Window
             File.WriteAllText(path, JsonSerializer.Serialize(new GuiSettings(_exportDirectory, _restoreDirectory,
                 RoundTripExportRadio.IsChecked != true, OcrToggle.IsChecked, OcrLanguagesTextBox.Text, PdfFallbackToggle.IsChecked,
                 ShowFormulasCheckBox.IsChecked, IncludeSvgCheckBox.IsChecked, IncludeDiagramsCheckBox.IsChecked,
-                EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
+                _embedImagesUserValue ?? EmbedReadableImagesCheckBox.IsChecked, ZipSidecarCheckBox.IsChecked, SelectedContentPolicy(),
                 (VisualInferenceModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "safe", PdfFallbackImagesCheckBox.IsChecked,
                 (OcrReviewModeComboBox.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "low-confidence",
                 AiPackageExportRadio.IsChecked, AiPackageFormComboBox.SelectedIndex == 1, TableRowBlocksCheckBox.IsChecked, (int)(PackageTargetCharacters.Value ?? 12000), SelectedRevisions(),
-                ExpandMergedCellsCheckBox.IsChecked)));
+                ExpandMergedCellsCheckBox.IsChecked, HtmlExportRadio.IsChecked)));
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -1486,7 +1536,8 @@ public partial class MainWindow : Window
         bool? ZipAiPackage = null,
         bool? TableRowBlocks = null, int? TargetCharacters = null, string? Revisions = null, // Saved under a new name since v0.3.11, where the setting is on by default: an "off" saved
         // while off was the default is no choice of the user's.
-        bool? ExpandVerticalMerges = null);
+        bool? ExpandVerticalMerges = null,
+        bool? Html = null);
 
     private static void ShowError(TextBlock control, string message)
     {

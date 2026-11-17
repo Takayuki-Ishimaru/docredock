@@ -165,7 +165,9 @@ internal sealed class BuiltInFormatAdapter : IFormatAdapter
     {
         var sourceHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
         var result = PdfTextExtractor.Extract(path, cancellationToken: cancellationToken);
-        return new AdapterExtraction(PdfDocumentGraphProjection.CreateGraph(result, sourceHash), [], PdfDocumentGraphProjection.Diagnostics(result));
+        var assets = DocumentService.ExtractedPdfImageAssets(result.Pages).Select(asset => new ExtractedAsset(
+            asset.Id, asset.FileName, asset.MediaType, asset.Sha256, asset.Content, asset.SourcePartUri)).ToArray();
+        return new AdapterExtraction(PdfDocumentGraphProjection.CreateGraph(result, sourceHash), assets, PdfDocumentGraphProjection.Diagnostics(result));
     }
 
     private void EnsureFormat(AdapterInput input)

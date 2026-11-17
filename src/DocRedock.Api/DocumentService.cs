@@ -56,10 +56,17 @@ public sealed record ReadableDocumentExportOptions(
     bool ExpandMergedCells = true,
     bool OcrAuto = false,
     string? Language = null,
-    bool OmitImages = false);
+    bool OmitImages = false,
+    // Html writes one self-contained .html file at MarkdownPath (images as data URIs, no .assets directory).
+    ReadableOutputFormat OutputFormat = ReadableOutputFormat.Markdown);
+/// <summary>The file a readable export writes: Readable Markdown (default) or one self-contained HTML document.</summary>
+public enum ReadableOutputFormat { Markdown, Html }
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
+
+    /// <summary>The format of the file at <see cref="MarkdownPath"/> (the path keeps its name for compatibility).</summary>
+    public ReadableOutputFormat OutputFormat { get; init; }
 
     /// <summary>What the readable projection reconstructed from layout; pass it to
     /// <see cref="ExportSummaryBuilder"/> and <see cref="ExportReviewBuilder"/>.</summary>
@@ -187,6 +194,7 @@ public sealed partial class DocumentService
         {
             (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
                 options.EnableOcr, options.IncludePdfFallbackImages, options.Language).ConfigureAwait(false);
+            (assets, graph) = WithExtractedPdfImages(assets, graph, pdfPages, options.OcrAuto);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         var ocrResults = await CollectOcrAsync(format, graph, assets, options.EnableOcr,
@@ -282,6 +290,8 @@ public sealed partial class DocumentService
             Path.GetFileNameWithoutExtension(markdownPath) + ".assets");
         var createdAssetDirectory = false;
         string? stagedAssetDirectoryPath = null;
+        var html = options.OutputFormat == ReadableOutputFormat.Html;
+        Dictionary<string, ReadableHtmlAsset>? htmlAssets = null;
 
         try
         {
@@ -304,7 +314,21 @@ public sealed partial class DocumentService
                 if (options.OmitImages)
                     // Text only (standard output to a model): each image is named by its description instead of
                     // carried as a file or as base64 that costs several times the tokens of the text around it.
-                    graph = MarkReadableImagesOmitted(graph);
+                    graph = MarkReadableImagesOmitted(graph, imageAssets.Select(asset => asset.Id).ToHashSet(StringComparer.Ordinal));
+                else if (html)
+                {
+                    // HTML keeps the images inside the one file: bind them to virtual references, write nothing.
+                    var virtualDirectory = Path.GetFileName(assetDirectoryPath);
+                    var virtualReferences = new Dictionary<string, string>(StringComparer.Ordinal);
+                    htmlAssets = new Dictionary<string, ReadableHtmlAsset>(StringComparer.Ordinal);
+                    foreach (var asset in imageAssets)
+                    {
+                        var reference = virtualDirectory + "/" + Path.GetFileName(asset.FileName);
+                        virtualReferences[asset.Id] = reference;
+                        htmlAssets[reference] = new ReadableHtmlAsset(asset.MediaType, asset.Content);
+                    }
+                    graph = RebindReadableImageReferences(graph, virtualReferences);
+                }
                 else if (options.EmbedImages)
                 {
                     var references = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -354,12 +378,14 @@ public sealed partial class DocumentService
             }
             var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(
                 options.ShowFormulas,
-                options.IncludeSvgPreviews,
+                options.IncludeSvgPreviews && !html,
                 options.IncludeDiagrams,
                 options.Sheets,
                 ReadableTitle(graph, source, options.Title),
                 options.ContentPolicy,
-                options.OcrReview, options.ExpandMergedCells, options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source)));
+                options.OcrReview, options.ExpandMergedCells, options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source),
+                // HTML can say what GFM cannot: the writer turns these hints into rowspan/colspan.
+                EmitTableSpanHints: html));
             var markdown = serializer.Serialize(graph);
             foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
                          existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
@@ -370,9 +396,21 @@ public sealed partial class DocumentService
                     _ => DiagnosticSeverity.Warning,
                 }, NodeId: item.BlockId));
             diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
-            await WriteNewAsync(markdownPath, Encoding.UTF8.GetBytes(markdown), cancellationToken).ConfigureAwait(false);
+            var output = markdown;
+            if (html)
+            {
+                var written = ReadableHtmlWriter.Write(markdown, new ReadableHtmlOptions(
+                    ReadableTitle(graph, source, options.Title), options.Language, htmlAssets,
+                    Generator: "DocRedock " + (typeof(DocumentService).Assembly
+                        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "")));
+                diagnostics.AddRange(written.Diagnostics.Select(item => new Diagnostic(item.Code, item.Message, DiagnosticSeverity.Warning)));
+                diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
+                output = written.Html;
+            }
+            await WriteNewAsync(markdownPath, new UTF8Encoding(false).GetBytes(output), cancellationToken).ConfigureAwait(false);
             return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode)
-                { RenderedTables = serializer.RenderedTables, Projection = serializer.Report };
+                { RenderedTables = serializer.RenderedTables, Projection = serializer.Report, OutputFormat = options.OutputFormat };
         }
         catch
         {
@@ -455,6 +493,7 @@ public sealed partial class DocumentService
         {
             (assets, graph) = await RasterizePdfImagePagesAsync(source, graph, pdfPages, diagnostics, cancellationToken,
                 options.EnableOcr, options.IncludePdfFallbackImages, options.Language).ConfigureAwait(false);
+            (assets, graph) = WithExtractedPdfImages(assets, graph, pdfPages, options.OcrAuto);
         }
         else assets = await ExtractOfficeAssetsAsync(source, cancellationToken).ConfigureAwait(false);
         // Complete output normally keeps unreferenced Office media as metadata. A final DOCX
@@ -483,21 +522,31 @@ public sealed partial class DocumentService
     private static string? ReadableTitle(DocumentGraph graph, string source, string? requested) =>
         requested ?? (graph.Format == DocumentFormatKind.Xlsx ? Path.GetFileNameWithoutExtension(source) : null);
 
-    private static DocumentGraph MarkReadableImagesOmitted(DocumentGraph graph) => graph with
+    private static DocumentGraph MarkReadableImagesOmitted(DocumentGraph graph, IReadOnlySet<string> assetIds) => graph with
     {
         Partitions = graph.Partitions.Select(partition => partition with
         {
             Nodes = partition.Nodes.Select(node => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent
                 ? node with
                 {
-                    Extensions = new Dictionary<string, JsonElement>(node.Extensions ?? new Dictionary<string, JsonElement>(), StringComparer.Ordinal)
-                    {
-                        [ReadableMarkdownSerializer.ImageOmittedExtension] = JsonSerializer.SerializeToElement(true)
-                    }
+                    Extensions = OmittedImageExtensions(node, assetIds)
                 }
                 : node).ToArray()
         }).ToArray()
     };
+
+    /// <summary>The extensions of an image left out of a text-only export: the mark, and the asset id when the node's reference is
+    /// one (an image that is only linked has none, and its placeholder names no id).</summary>
+    private static Dictionary<string, JsonElement> OmittedImageExtensions(DocumentNode node, IReadOnlySet<string> assetIds)
+    {
+        var extensions = new Dictionary<string, JsonElement>(node.Extensions ?? new Dictionary<string, JsonElement>(), StringComparer.Ordinal)
+        {
+            [ReadableMarkdownSerializer.ImageOmittedExtension] = JsonSerializer.SerializeToElement(true)
+        };
+        if (node.Content is ReferenceNodeContent reference && assetIds.Contains(reference.Reference))
+            extensions[ReadableMarkdownSerializer.ImageAssetIdExtension] = JsonSerializer.SerializeToElement(reference.Reference);
+        return extensions;
+    }
 
     private static DocumentGraph RebindReadableImageReferences(
         DocumentGraph graph,
@@ -1761,7 +1810,7 @@ public sealed partial class DocumentService
 
     private static bool IsOfficeFormat(DocumentFormatKind format) => format is DocumentFormatKind.Docx or DocumentFormatKind.Xlsx or DocumentFormatKind.Pptx;
 
-    private static void PreflightOfficePackage(string sourcePath)
+    internal static void PreflightOfficePackage(string sourcePath)
     {
         using var archive = ZipFile.OpenRead(sourcePath);
         ValidateOfficePackage(archive);

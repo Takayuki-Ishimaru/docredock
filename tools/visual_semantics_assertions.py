@@ -26,8 +26,8 @@ def extract_mermaid(markdown: str) -> list[str]:
 
 def parse_flowchart(mermaid: str) -> Graph:
     lines = [line.strip() for line in mermaid.splitlines() if line.strip()]
-    if not lines or not re.match(r"^flowchart\s+(LR|TD)\s*$", lines[0], re.IGNORECASE):
-        raise ValueError("expected a DocRedock flowchart LR or TD header")
+    if not lines or not re.match(r"^flowchart\s+(LR|TD|TB)\s*$", lines[0], re.IGNORECASE):
+        raise ValueError("expected a DocRedock flowchart LR, TD, or TB header")
     nodes: dict[str, str] = {}
     edges: list[Edge] = []
     for line in lines[1:]:

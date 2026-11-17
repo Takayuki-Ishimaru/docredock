@@ -41,7 +41,11 @@ public sealed record MarkdownInlineStrike(string Text) : MarkdownInline
 /// A hyperlink.  <paramref name="Literal"/> is the source text of the whole construct, which the
 /// HTML writer emits as plain text when <paramref name="Destination"/> fails its URL allowlist.
 /// </summary>
-public sealed record MarkdownInlineLink(string Destination, string Text, string Literal) : MarkdownInline;
+public sealed record MarkdownInlineLink(string Destination, string Text, string Literal) : MarkdownInline
+{
+    /// <summary>The link text read as inline Markdown (styled spans, bold, code ...); <c>Text</c> is its plain text.</summary>
+    public IReadOnlyList<MarkdownInline>? Children { get; init; }
+}
 
 /// <summary>An image.  <paramref name="Literal"/> is used exactly as in <see cref="MarkdownInlineLink"/>.</summary>
 public sealed record MarkdownInlineImage(string Destination, string AltText, string Literal) : MarkdownInline;
@@ -75,7 +79,7 @@ public static class MarkdownInlineParser
     private const char PlaceholderLast = '\uFDEF';
 
     private static readonly Regex HtmlInlineToken = new(
-        @"(?<safeTag><br\s*/?>|</?(?:u|ins|del|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?<linkUrl>[^)\s]+)\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
+        @"(?<safeTag><br\s*/?>|</?(?:u|ins|del|mark|summary|details)>|<details\s+class=""(?:speaker-notes|ocr-extraction|visual-diagnostics)"">|<span\s+style=""color:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?"">|</span>)|!\[(?<imageAlt>[^\]]*)\]\((?<imageUrl>[^)\s]+)(?:\s+""[^""]*"")?\)|\[(?<linkText>[^\]]+)\]\((?:<(?<linkUrlAngle>[^<>\r\n]+)>|(?<linkUrl>[^)\s]+))\)|`(?<code>[^`\r\n]+)`|~~(?<strike>(?>`[^`\r\n]+`|(?!~~).)+?)~~|\*\*(?<strong>(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?)\*\*(?!\*)|\*(?<em>(?>`[^`\r\n]+`|\*\*(?>`[^`\r\n]+`|(?!\*\*(?!\*)).)+?\*\*(?!\*)|[^*])+?)\*(?!\*)|_(?<emUnderscore>(?>`[^`\r\n]+`|[^_\r\n])+?)_",
         RegexOptions.Compiled | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
 
     /// <summary>Reads one run of inline Markdown into the shared syntax tree.</summary>
@@ -103,9 +107,12 @@ public static class MarkdownInlineParser
             else if (match.Groups["imageUrl"].Success)
                 nodes.Add(new MarkdownInlineImage(Destination(match.Groups["imageUrl"].Value),
                     DecodeText(match.Groups["imageAlt"].Value), DecodeText(match.Value)));
-            else if (match.Groups["linkUrl"].Success)
-                nodes.Add(new MarkdownInlineLink(Destination(match.Groups["linkUrl"].Value),
-                    DecodeText(match.Groups["linkText"].Value), DecodeText(match.Value)));
+            else if (match.Groups["linkUrl"].Success || match.Groups["linkUrlAngle"].Success)
+            {
+                var children = ParseProtected(match.Groups["linkText"].Value, depth + 1);
+                var url = match.Groups["linkUrlAngle"].Success ? match.Groups["linkUrlAngle"].Value : match.Groups["linkUrl"].Value;
+                nodes.Add(new MarkdownInlineLink(Destination(url), PlainText(children), DecodeText(match.Value)) { Children = children });
+            }
             // A code span is verbatim; only the escape placeholders are restored, because
             // ProtectEscapes copies a span through untouched and never creates any inside one.
             else if (match.Groups["code"].Success) nodes.Add(new MarkdownInlineCode(DecodePlaceholders(match.Groups["code"].Value)));

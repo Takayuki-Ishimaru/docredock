@@ -8,62 +8,87 @@
   </picture>
 </p>
 
-<p align="center">
-  <img alt="DocRedock app icon" src="assets/brand/docredock/app-icons/png/DocRedock-appicon-128x128.png" width="96" height="96">
-</p>
+DocRedock converts Word, Excel, PowerPoint, and PDF files locally on Windows, macOS, and Linux. Use **Readable HTML** to share tables, images, and supported diagrams in one file. Use **Markdown or an AI package** to give an AI assistant the document content it needs.
 
-DocRedock converts Word, Excel, PowerPoint, and PDF documents into AI-friendly Markdown on your own computer. It organizes document text, tables, and images into output you can use for AI summarization and analysis. Round-trip editing—editing Markdown and restoring it to an Office document—is experimental.
+[日本語](README.ja.md) · [Download v0.4.0 Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.4.0) · [User guide](docs/en/user-guide.md)
 
-[日本語](README.ja.md) · [Download the current Public Beta](https://github.com/Takayuki-Ishimaru/docredock/releases) · [User guide](docs/en/user-guide.md) · [Supported features](docs/en/supported-features.md)
+## Flowchart comparison
 
-## v0.3.12 Public Beta support
+[![Expense approval flowchart comparison: the PowerPoint source and DocRedock HTML show arrows from Request to Approve, then Yes to Pay or No to Revise. Pandoc HTML and MarkItDown Markdown retain the words as text without the arrows.](assets/examples/flowchart/comparison.png)](assets/examples/flowchart/comparison.png)
 
-v0.3.12 improves conversion diagnostics, AI package search and MCP source references. Select **AI package** (「AI向けパッケージ」) in the GUI, or run `docredock export input.docx --ai-package zip`. A local folder/ZIP contains full Markdown, semantic parts with source locations, shared images, conversion review, and a hash manifest. See the [AI package guide](docs/en/user-guide.md#ai-packages) and [format contract](docs/reference/ai-package.md).
+DocRedock redraws the flowchart in SVG with its own colors and layout. The arrows preserve the original decisions. **Yes leads to Pay, and No leads to Revise**. In this example, Pandoc’s HTML and MarkItDown’s Markdown show the labels as text.
+
+[Sample PowerPoint](assets/examples/flowchart/expense-approval.pptx) · [How to reproduce the comparison](assets/examples/flowchart/README.md)
+
+### Markdown output from the same slide
+
+DocRedock’s Markdown contains a Mermaid block with the arrows and their **Yes** and **No** labels. GitHub renders the block as a diagram. In both other Markdown exports, the labels appear as text. [DocRedock Markdown](assets/examples/flowchart/docredock.md) · [Pandoc Markdown](assets/examples/flowchart/pandoc.md) · [MarkItDown Markdown](assets/examples/flowchart/markitdown.md)
+
+## Try it with the sample
+
+1. Download the archive for your operating system and CPU. Extract it and launch DocRedock. [Downloads and launch instructions](release-docs/RELEASE_NOTES_v0.4.0.en.md#downloads-and-upgrades)
+2. Download the [sample PowerPoint](assets/examples/flowchart/expense-approval.pptx) and drop it into the app. Choose **Readable HTML** (「閲覧用HTML」), then select **Export** (「書き出す」).
+3. Select **Open HTML** (「HTMLを開く」) and follow the **Yes** and **No** arrows in your browser.
+
+To export the same sample as Markdown, choose **Readable Markdown** (「閲覧用Markdown」) and open the resulting file. When giving your own files to an AI assistant, review the output, warnings, and images before sharing. To exclude deleted text from Word, set Word revisions to **Final** (「最終版のみ」). [Content policies and revision settings](docs/en/user-guide.md#4-choose-a-content-policy)
+
+With the CLI on your PATH, you can export either format.
+
+```sh
+docredock export expense-approval.pptx --format html --ocr off -o expense-approval.html
+docredock export expense-approval.pptx --format markdown --lang en --ocr off -o expense-approval.md
+```
+
+## Conversion speed
+
+On one Windows 11 PC, DocRedock converted a large Excel workbook (three sheets of 20,000 rows each) to Markdown in **8.32 s** and to HTML in **9.04 s**. Other tools were quicker on some inputs, including Pandoc on the large PowerPoint sample.
+
+| Sample and output | DocRedock | MarkItDown | Mammoth | Pandoc | Docling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Large Excel → Markdown | **8.32 s** | 40.63 s | — | 15.33 s | 44.27 s |
+| Large Excel → HTML | **9.04 s** | — | — | 24.18 s | 37.37 s |
+| Large PowerPoint → Markdown | 3.97 s | 3.37 s | — | **2.12 s** | 13.60 s |
+| Small Word files → Markdown | 1.70 s (0.66 s without OCR) | 2.03 s | 0.45 s | **0.13 s** | 8.97 s |
+
+In the browser comparison, DocRedock displayed wide tables with horizontal scrolling on narrow screens. Pandoc wrapped some cells one character at a time in the wide table sample. Mammoth’s Word tables used the browser’s default styling.
+
+The timings include CLI startup and come from a development build based on DocRedock 0.3.10 that included HTML export. We used the v0.4.0 candidate for the flowchart above. A dash marks a combination outside the timing comparison. [Versions, export settings, and timing method](release-docs/CONVERSION_REPORT_v0.4.0.en.md#benchmark-conditions)
+
+## v0.4.0 Public Beta support
+
+v0.4.0 adds Readable HTML, lets AI assistants inspect specific parts of a source document, and improves the conversion of Office diagrams and PDF tables. For large documents, an [AI package](docs/en/user-guide.md#ai-packages) lets you select the parts to share.
 
 | Feature | Status |
 | --- | --- |
-| AI packages (folder/ZIP) | GUI, CLI and API; PDF CLI requires explicit opt-in |
+| AI packages (folder or ZIP) | GUI, CLI, and API. PDF input in the CLI requires explicit opt-in. |
 | DOCX / XLSX / PPTX → Readable Markdown | Supported as Public Beta |
-| PDF → Markdown | Supported in the desktop GUI; CLI requires explicit opt-in |
-| Edited Markdown → Office restoration | Experimental; explicit opt-in required |
-| New PDF / Office document generation | Experimental; explicit opt-in required |
+| PDF → Markdown | Desktop app. PDF input in the CLI requires explicit opt-in. |
+| DOCX / XLSX / PPTX / PDF → Readable HTML | Desktop app, CLI, and MCP. PDF input in the CLI and MCP requires explicit opt-in. |
+| Edited Markdown → Office restoration | Experimental. Requires explicit opt-in. |
+| New PDF / Office document generation | Experimental. Requires explicit opt-in. |
 
-The [supported-features table](docs/en/supported-features.md) is authoritative for public availability and visual-conversion boundaries. Version-specific changes stay in the [v0.3.12 release notes](release-docs/RELEASE_NOTES_v0.3.12.en.md).
+See what each format supports and what changed in this version. [Supported features](docs/en/supported-features.md) · [v0.4.0 release notes](release-docs/RELEASE_NOTES_v0.4.0.en.md)
 
-## Use it in 30 seconds
+## Readable HTML
 
-1. Download the package for your operating system and CPU architecture from [Releases](https://github.com/Takayuki-Ishimaru/docredock/releases).
-2. Start DocRedock.
-3. Drop a DOCX, XLSX, PPTX, or PDF file.
-4. Select **Readable Markdown** and keep **Visible content only (recommended)**.
-5. Convert, then review the Markdown, diagnostics, and any generated assets before using the result with an AI tool.
-
-A document containing images normally produces:
-
-```text
-input.xlsx
-  ↓
-input.md
-input.assets/
-```
-
-The CLI defaults to Readable Markdown, so `--profile readable` is optional:
+Select **Readable HTML** (「閲覧用HTML」) in the app or use `--format html` to export one file you can open offline in a browser. The file includes supported images and diagrams. Expand the section below a diagram to see its Mermaid source. [Readable HTML guide](docs/en/user-guide.md#readable-html)
 
 ```sh
-docredock export input.xlsx --content-policy visible --output input.md
+docredock export report.xlsx --format html --content-policy visible
+docredock export slides.pptx -o slides.html
 ```
 
 ## Visual meaning and fallback
 
-When DocRedock can determine a supported flow unambiguously, it emits Mermaid. Otherwise it keeps available text or an image/page fallback and reports what could not be resolved.
+DocRedock writes a diagram in Mermaid when it can determine how the shapes connect. If it cannot resolve the connections, it reports the issue and retains any available text or preview image.
 
-Visual inference defaults to `safe`. Choose `native-only` to accept only connections explicitly stored by the source format, or `balanced` to consider a wider set of estimated connections. `safe` accepts only unique high-confidence estimates. Ambiguous, contradictory, duplicate, or low-confidence relations remain unresolved and stay visible through fallback or diagnostics; DocRedock does not invent arrows. CLI example: `docredock export input.pptx --visual-inference safe --output input.md`.
+The default mode, `safe`, infers a connection only when it finds one high-confidence match. Choose `native-only` to use only connections stored in the source, or `balanced` to consider a wider range of possible connections. DocRedock reports unresolved relationships, including conflicting or duplicate matches. To select a mode in the CLI, run `docredock export input.pptx --visual-inference safe --output input.md`.
 
-This is not pixel-perfect reconstruction. SmartArt and DOCX/PDF vector topology can remain partial; PDF may use a page preview or placeholder. A warning means the Markdown alone may omit meaning—review the diagnostics/report, generated assets, and source document.
+Refer to the original for exact layout and styling. Conversion can preserve only part of SmartArt, Word drawings, or PDF vector diagrams. A PDF may use a page preview or placeholder. When you see a warning, review the message, any exported images, and the original.
 
 ## Content policy
 
-Readable export has three policies in both the GUI and CLI. They filter the Markdown output; the external `.assets/` directory contains only images referenced by the resulting Markdown.
+Choose from three content policies when exporting in the desktop app or CLI. With Markdown, the `.assets/` folder contains only images referenced in the output.
 
 | Policy | Behavior |
 | --- | --- |
@@ -77,7 +102,7 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 ## Important limitations
 
-- v0.3.12 is a Public Beta, not a production-stable release.
+- v0.4.0 is a Public Beta, not a production-stable release.
 - Readable Markdown is one-way output. Keep the original document as the authoritative source.
 - Always review Markdown, diagnostics, and assets before sharing. Do not treat a partial visual projection as complete.
 - Enable CLI PDF conversion with `--allow-pdf` or `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Round-trip/audit operations, restoration, and rendering/new-document generation still require `DOCREDOCK_ENABLE_EXPERIMENTAL=1`. Read-only `docredock inspect <file.pdf>` remains available without the flag.
@@ -90,9 +115,9 @@ XLSX-only, CLI-only: `--sheets Sheet1,Sheet2` exports only the named worksheets.
 
 - [Japanese user guide](docs/ja/user-guide.md)
 - [English user guide](docs/en/user-guide.md)
-- [v0.3.12 supported features](docs/en/supported-features.md)
+- [v0.4.0 supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [v0.3.12 release notes](release-docs/RELEASE_NOTES_v0.3.12.en.md)
+- [v0.4.0 release notes](release-docs/RELEASE_NOTES_v0.4.0.en.md)
 - [Experimental features](docs/en/experimental-features.md)
 - [Contributing, build, and test](CONTRIBUTING.md)
 

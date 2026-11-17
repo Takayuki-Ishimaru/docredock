@@ -168,10 +168,13 @@ def mode_for_spec(spec: PerturbationSpec) -> str:
 def expected_relations(spec: PerturbationSpec) -> tuple[Relation, ...]:
     if spec.operation in {"textless", "competing-node", "intermediate-node"}:
         return ()
-    # Detached-arrowhead reconstruction is supported when a unique, aligned head is close to
-    # the shaft in PPTX or PDF. DOCX/XLSX retain their unsupported split components without
-    # inventing a relation. A removed arrowhead remains an intentionally undirected edge.
-    if spec.operation == "arrowhead-separated" and spec.format in {"docx", "xlsx"}:
+    # A detached arrowhead may determine direction in PPTX or PDF. In this DOCX
+    # fixture the intact shaft touches both shapes, so keep the relation but
+    # do not infer direction from a separate triangle. The XLSX fixture has
+    # neither an attached connector nor a recognizable shaft.
+    if spec.operation == "arrowhead-separated" and spec.format == "docx":
+        return (("START", "END", "undirected", None),)
+    if spec.operation == "arrowhead-separated" and spec.format == "xlsx":
         return ()
     geometric_undirected = spec.operation == "arrowhead-removed"
     direction = ("undirected" if geometric_undirected and not _has_native_links(spec)

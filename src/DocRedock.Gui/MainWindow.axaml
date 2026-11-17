@@ -49,6 +49,8 @@
           <TextBlock x:Name="CurrentVersionText" Classes="muted caption" VerticalAlignment="Center" />
           <Button x:Name="CheckUpdatesButton" Classes="flat compact" Click="OnCheckForUpdates"
                   AutomationProperties.Name="更新を確認">更新を確認</Button>
+          <Button x:Name="AgentIntegrationButton" Classes="flat compact" Click="OnOpenAgentIntegration"
+                  AutomationProperties.Name="AIツール連携を設定">AI連携</Button>
         </StackPanel>
       </Grid>
     </Border>
@@ -241,6 +243,13 @@
                   <TextBlock Text="閲覧用Markdown（片道変換）" FontWeight="Bold" />
                   <TextBlock Text=".mdだけを書き出します。見出し・段落・表に再構成するため、元の形式へは戻せません。"
                              Classes="muted caption" TextWrapping="Wrap" />
+                </StackPanel>
+              </RadioButton>
+              <RadioButton x:Name="HtmlExportRadio" Classes="radio-card" GroupName="ExportFormat"
+                           IsCheckedChanged="OnReadableChanged" AutomationProperties.Name="閲覧用HTML">
+                <StackPanel Spacing="3">
+                  <TextBlock Text="閲覧用HTML" FontWeight="Bold" />
+                  <TextBlock Text="画像を埋め込んだ1つのHTMLファイル。ブラウザで開いて共有できます（片道変換）" Classes="muted caption" TextWrapping="Wrap" />
                 </StackPanel>
               </RadioButton>
               <RadioButton x:Name="AiPackageExportRadio" Classes="radio-card" GroupName="ExportFormat"

@@ -30,11 +30,12 @@ public sealed partial class DocxAdapter : IFormatProbe
     private static readonly XNamespace W14 = "http://schemas.microsoft.com/office/word/2010/wordml";
     private static readonly XNamespace WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
     private static readonly XNamespace WPG = "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup";
+    private static readonly XNamespace WPC = "http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas";
     private static readonly XNamespace MC = "http://schemas.openxmlformats.org/markup-compatibility/2006";
     private static readonly XNamespace M = "http://schemas.openxmlformats.org/officeDocument/2006/math";
     private static readonly HashSet<string> SupportedMarkupNamespaces = new(StringComparer.Ordinal)
     {
-        W.NamespaceName, A.NamespaceName, WP.NamespaceName, V.NamespaceName, W14.NamespaceName, WPS.NamespaceName, WPG.NamespaceName,
+        W.NamespaceName, A.NamespaceName, WP.NamespaceName, V.NamespaceName, W14.NamespaceName, WPS.NamespaceName, WPG.NamespaceName, WPC.NamespaceName,
     };
 
     // See BuildDocxVisualGraph's orphan-shape label demotion pass: a shape absent from the
@@ -227,6 +228,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 AddParagraph(element, "/word/document.xml", entry.Slice, paragraphOrder, nodes, sliceMap, runMaps, relationships, ContentLayer.Body, numberingInfo, listCounters, hiddenStyles, entry.Control, textBoxSlices: textBoxes, styleTable: styleTable, monospaceCode: monospaceCode.GetValueOrDefault(element));
                 nodes[firstBlockNode] = readability.ApplyHeading(element, nodes[firstBlockNode]);
                 nodes[firstBlockNode] = ApplyDrawnParagraphMarks(nodes[firstBlockNode], element, drawnLines);
+                ordinal = OrderCanvasTextBoxes(element, nodes, firstBlockNode, ordinal);
             }
             else if (element.Name == W + "tbl")
             {
@@ -674,12 +676,16 @@ public sealed partial class DocxAdapter : IFormatProbe
         }
         // Only the outer boxes are addressable, so only they consume a binding; the index the node
         // id is built from still counts every box, keeping ids stable across this change.
-        var outerTextBoxIndex = 0;
-        foreach (var (textBox, textboxIndex) in paragraph.Descendants(W + "txbxContent").Select((item, index) => (item, index)))
+        // The binding of a box and its id follow document order; only the order the boxes are emitted in changes, so the
+        // text of a drawing canvas reads top to bottom instead of in the order its shapes were stored.
+        var outerBindingIndex = new Dictionary<XElement, int>();
+        foreach (var outerBox in paragraph.Descendants(W + "txbxContent").Where(item => !item.Ancestors(W + "txbxContent").Any()))
+            outerBindingIndex[outerBox] = outerBindingIndex.Count;
+        foreach (var (textBox, textboxIndex) in CanvasReadingOrder(paragraph.Descendants(W + "txbxContent").Select((item, index) => (item, index)).ToList()))
         {
             var isOuterTextBox = !textBox.Ancestors(W + "txbxContent").Any();
             var binding = isOuterTextBox
-                ? (textBoxSlices ?? []).ElementAtOrDefault(outerTextBoxIndex++)
+                ? (textBoxSlices ?? []).ElementAtOrDefault(outerBindingIndex[textBox])
                 : null;
             // The ancestor depth is not an identity: sibling textboxes have the same depth.
             // Use the source-order index so repeated visual objects receive stable unique IDs.
@@ -726,6 +732,66 @@ public sealed partial class DocxAdapter : IFormatProbe
             nodes.Add(new(breakId, NodeKind.PageBreak, id, order, layer, new TextNodeContent("page-break"), breakAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
+    }
+
+    /// <summary>The text boxes of a drawing canvas are emitted in reading order, but the readable projection orders
+    /// nodes by their Order and then by id, so boxes sharing their paragraph's Order would come out in id order. Each
+    /// canvas box gets an Order of its own, in the order AddParagraph emitted it.</summary>
+    private static int OrderCanvasTextBoxes(XElement paragraph, List<DocumentNode> nodes, int firstNode, int ordinal)
+    {
+        var canvasBoxes = paragraph.Descendants(W + "txbxContent").Select((box, index) => (box, index))
+            .Where(item => item.box.Ancestors(WPC + "wpc").Any()).Select(item => item.index.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ToHashSet(StringComparer.Ordinal);
+        if (canvasBoxes.Count == 0) return ordinal;
+        for (var index = firstNode; index < nodes.Count; index++)
+        {
+            var node = nodes[index];
+            if (node.Kind != NodeKind.TextBox ||
+                node.Source?.Locators.Any(locator => locator.Kind == "textbox" && canvasBoxes.Contains(locator.Value)) != true) continue;
+            nodes[index] = node with { Order = ordinal++ };
+        }
+        return ordinal;
+    }
+
+    /// <summary>Puts the text boxes of each drawing canvas (wpc:wpc) in reading order -- rows from top to bottom, each row
+    /// from left to right -- keeping every box in a slot the canvas already held; other boxes keep their place.</summary>
+    private static List<(XElement Box, int Index)> CanvasReadingOrder(List<(XElement Box, int Index)> boxes)
+    {
+        var result = boxes.ToList();
+        foreach (var canvasBoxes in boxes.Where(item => item.Box.Ancestors(WPC + "wpc").Any())
+                     .GroupBy(item => item.Box.Ancestors(WPC + "wpc").First()))
+        {
+            var members = canvasBoxes.ToList();
+            if (members.Count < 2) continue;
+            var placed = members.Select(item =>
+            {
+                var owner = item.Box.Ancestors().FirstOrDefault(ancestor => ancestor.Name == WPS + "wsp" || ancestor.Name == A + "sp");
+                return (item, geometry: owner is null ? null : ReadVisualGeometry(owner));
+            }).ToList();
+            var withGeometry = placed.Where(item => item.geometry is not null).ToList();
+            if (withGeometry.Count < 2) continue;
+            var heights = withGeometry.Select(item => item.geometry!.Height).Where(value => value > 0).OrderBy(value => value).ToArray();
+            var tolerance = heights.Length == 0 ? 0 : heights[heights.Length / 2] * 0.5;
+            var rows = new List<List<((XElement Box, int Index) item, Geometry? geometry)>>();
+            double rowCenter = 0;
+            foreach (var entry in withGeometry.OrderBy(item => item.geometry!.Y + item.geometry.Height / 2).ThenBy(item => item.geometry!.X))
+            {
+                var center = entry.geometry!.Y + entry.geometry.Height / 2;
+                if (rows.Count == 0 || center - rowCenter > tolerance)
+                {
+                    rows.Add([]);
+                    rowCenter = center;
+                }
+                rows[^1].Add(entry);
+            }
+            var ordered = rows.SelectMany(row => row.OrderBy(item => item.geometry!.X).ThenBy(item => item.item.Index))
+                .Select(item => item.item).ToList();
+            // Boxes without geometry stay after the placed ones, in document order.
+            ordered.AddRange(placed.Where(item => item.geometry is null).Select(item => item.item));
+            var slots = members.Select(item => result.FindIndex(entry => ReferenceEquals(entry.Box, item.Box))).OrderBy(value => value).ToList();
+            for (var index = 0; index < slots.Count; index++) result[slots[index]] = ordered[index];
+        }
+        return result;
     }
 
     private static IReadOnlyList<XElement> SelectSupportedAlternateContentBlocks(XElement source)
@@ -1034,8 +1100,24 @@ public sealed partial class DocxAdapter : IFormatProbe
         // shape list with overlay shapes already removed.
         var visualRoot = new XElement(W + "p", bodyElements.Select(element =>
             overlayExcludedShapes is { Count: > 0 } ? CloneExcludingOverlayShapes(element, overlayExcludedShapes) : new XElement(element)));
-        var anchor = new SourceAnchor("docx", "/word/document.xml", [new AnchorLocator("visual_graph", "document")], ordinal);
-        if (BuildDocxVisualGraph(visualRoot, anchor, "doc_document", hiddenStyles, inferenceTimeout, cancellationToken) is not { } visualGraph) return;
+        // Every drawing canvas (wpc:wpc) is a diagram of its own, laid out in its own coordinates: two canvases
+        // that both start at the origin of their paragraph must not be read as one picture. Each is built apart
+        // from the rest of the body, which keeps the one whole-document canvas it always had.
+        var canvasDrawings = visualRoot.Descendants(W + "drawing")
+            .Where(drawing => drawing.Descendants(WPC + "wpc").Any() && !drawing.Ancestors(W + "drawing").Any()).ToList();
+        var canvasRoots = canvasDrawings.Select(drawing => new XElement(W + "p", new XElement(drawing))).ToList();
+        foreach (var drawing in canvasDrawings) drawing.Remove();
+        AddOneVisualGraph(visualRoot, "document", "doc_document", nodes, ref ordinal, hiddenStyles, inferenceTimeout, cancellationToken);
+        for (var canvasIndex = 0; canvasIndex < canvasRoots.Count; canvasIndex++)
+            AddOneVisualGraph(canvasRoots[canvasIndex], "canvas-" + canvasIndex.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "doc_canvas_" + canvasIndex.ToString(System.Globalization.CultureInfo.InvariantCulture), nodes, ref ordinal, hiddenStyles, inferenceTimeout, cancellationToken);
+    }
+
+    private static void AddOneVisualGraph(XElement visualRoot, string graphLocator, string sourceNodeId, List<DocumentNode> nodes, ref int ordinal,
+        DocxHiddenStyles hiddenStyles, TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
+    {
+        var anchor = new SourceAnchor("docx", "/word/document.xml", [new AnchorLocator("visual_graph", graphLocator)], ordinal);
+        if (BuildDocxVisualGraph(visualRoot, anchor, sourceNodeId, hiddenStyles, inferenceTimeout, cancellationToken) is not { } visualGraph) return;
 
         if (visualGraph.HasTopology && nodes is List<DocumentNode> nodeList)
         {
@@ -1179,7 +1261,11 @@ public sealed partial class DocxAdapter : IFormatProbe
                     item.Disposition == VisualDisposition.DiagnosticOnly && item.DiagnosticCode is not null && componentDiagnosticCodes.Contains(item.DiagnosticCode) ||
                     item.SourceAnchor?.Locators.Any(locator => componentAnchors.Contains(locator.Kind + "=" + locator.Value)) == true)
                 .ToArray();
+            var componentGroups = (graph.Groups ?? [])
+                .Select(group => group with { NodeIds = (group.NodeIds ?? []).Where(nodeId => ids.Contains(nodeId)).ToArray() })
+                .Where(group => group.NodeIds!.Count > 0).ToArray();
             return graph with { Id = id, Nodes = componentNodes, Edges = componentEdges,
+                Groups = componentGroups.Length == 0 ? null : componentGroups,
                 Paths = componentPaths, Diagnostics = componentDiagnostics, SourceItems = componentItems };
         }).ToArray();
     }
@@ -1196,19 +1282,22 @@ public sealed partial class DocxAdapter : IFormatProbe
 
         var shapeElements = paragraph.Descendants().Where(item =>
             item.Name == A + "sp" ||
-            (item.Name == WPS + "wsp" && !string.Equals(
-                (string?)item.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst"), "line", StringComparison.OrdinalIgnoreCase)) ||
+            (item.Name == WPS + "wsp" && !IsWpsConnector(item)) ||
             (item.Name == V + "shape" && !IsVmlConnector(item)) ||
             (item.Name == V + "rect" || item.Name == V + "roundrect" || item.Name == V + "oval")).ToArray();
         var connectorElements = paragraph.Descendants(A + "cxnSp")
             .Select(item => (Element: item, Vml: false))
             .Concat(paragraph.Descendants(WPS + "wsp")
-                .Where(item => string.Equals((string?)item.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst"), "line", StringComparison.OrdinalIgnoreCase))
+                .Where(IsWpsConnector)
                 .Select(item => (Element: item, Vml: false)))
             .Concat(paragraph.Descendants(V + "shape").Where(IsVmlConnector).Select(item => (Element: item, Vml: true)))
             .Concat(paragraph.Descendants(V + "line").Select(item => (Element: item, Vml: true)))
             .ToArray();
         if (shapeElements.Length == 0 && connectorElements.Length == 0) return null;
+        // A canvas that draws a sequence diagram is read as one; anything else keeps the flowchart path below.
+        if (connectorElements.Length >= 5 && connectorElements.All(item => !item.Vml) &&
+            TryBuildDocxSequenceGraph(shapeElements, connectorElements.Select(item => item.Element).ToArray(), anchor, sourceNodeId, hiddenStyles) is { } sequenceGraph)
+            return sequenceGraph;
         // Textbox content is already projected as ordinary DocumentNodes. Without any
         // connector, a textbox-only canvas adds no visual semantics and would duplicate
         // that same text in the visual-fallback section.
@@ -1218,6 +1307,17 @@ public sealed partial class DocxAdapter : IFormatProbe
         // Build the semantic node set once per unique source shape ID. Duplicate IDs are
         // preserved in the source ledger as suppressed duplicates rather than becoming
         // duplicate VisualNode IDs that would invalidate promotion.
+        // The shape ids connectors name as their endpoints: a shape a connector is bound to is a
+        // node of the diagram, whatever it looks like, and is never read as a loose text label.
+        static string? EndpointRef(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimStart('#');
+        var boundShapeIds = connectorElements
+            .Where(item => !(item.Vml && item.Element.Name == V + "line"))
+            .SelectMany(item => item.Vml
+                ? new[] { (string?)item.Element.Attribute("from") ?? (string?)item.Element.Attribute("start"), (string?)item.Element.Attribute("to") ?? (string?)item.Element.Attribute("end") }
+                : new[] { (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "stCxn")?.Attribute("id"),
+                    (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "endCxn")?.Attribute("id") })
+            .Select(EndpointRef).Where(value => value is not null).Select(value => value!)
+            .ToHashSet(StringComparer.Ordinal);
         var shapeRecords = shapeElements.Select((shape, index) =>
         {
             var shapeId = (string?)shape.Attribute("id") ??
@@ -1226,14 +1326,27 @@ public sealed partial class DocxAdapter : IFormatProbe
             var id = NodeIdGenerator.CreateForSource("docx-visual", DocumentFormatKind.Docx, nodeAnchor);
             var geometry = ReadVisualGeometry(shape);
             var label = TextBoxText(shape, hiddenStyles).Trim();
+            var hasText = label.Length > 0;
             if (label.Length == 0) label = "Shape " + shapeId;
+            var preset = (string?)shape.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst");
+            var isLoose = shape.Name == WPS + "wsp" && hasText && IsWpsTextBox(shape) && !boundShapeIds.Contains(shapeId) && IsInvisibleShape(shape);
             return (shapeId, PrimitiveId: "docx-primitive-" + index.ToString("D6", System.Globalization.CultureInfo.InvariantCulture), Geometry: geometry,
                 IsTextBox: shape.Name == A + "sp" && shape.Descendants(W + "txbxContent").Any(),
-                Node: new VisualNode(id, label, VisualNodeKind.Generic, sourceNodeId,
+                HasText: hasText,
+                // A Word text box with neither fill nor outline that no connector is bound to is loose text -- an edge
+                // label, a title, a note -- and never a candidate endpoint of a connector.
+                IsLoose: isLoose,
+                Node: new VisualNode(id, label, isLoose ? VisualNodeKind.Generic : DocxVisualNodeKind(preset), sourceNodeId,
                     Geometry: geometry, SourceAnchor: nodeAnchor,
                     Group: (string?)shape.Ancestors(A + "grpSp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id") ??
                         (string?)shape.Ancestors(WPG + "wgp").FirstOrDefault()?.Descendants(A + "cNvPr").FirstOrDefault()?.Attribute("id")));
         }).ToArray();
+
+        // Containers and markers: a shape that only frames other shapes (a swimlane, a sequence
+        // fragment frame) or only marks a place on a line (an activation bar) is no node of the
+        // diagram. It is accounted for in the source ledger; its extent becomes a group, and the
+        // text of a lane header stays document text next to the group's label.
+        var structural = ClassifyStructuralShapes(shapeRecords.Select(item => (item.shapeId, item.Geometry, item.HasText, item.IsTextBox || item.IsLoose, item.Node.Label)).ToArray(), boundShapeIds);
         var lookup = shapeRecords.GroupBy(item => item.shapeId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
         var nodes = new List<VisualNode>();
@@ -1251,6 +1364,21 @@ public sealed partial class DocxAdapter : IFormatProbe
                 continue;
             }
             shapeSourceItems[record.shapeId] = sourceItemId;
+            if (structural.TryGetValue(record.shapeId, out var structuralShape))
+            {
+                // Text a structural shape carries is not dropped: it stays document text (TextLabel) and, for a
+                // container, also names its group.
+                sourceItems.Add(new VisualSourceItem(sourceItemId,
+                    record.HasText ? VisualSourceItemKind.TextLabel : VisualSourceItemKind.Shape, VisualDisposition.IgnoredDecorative,
+                    Reason: structuralShape.Role switch
+                    {
+                        "container" => record.HasText ? "container shape; text retained as document text" : "unlabeled container frame; kept as group extent",
+                        "header" => "container header; text retained as document text",
+                        _ => "marker on a line; not a node",
+                    },
+                    SourceAnchor: record.Node.SourceAnchor));
+                continue;
+            }
             nodes.Add(record.Node);
             sourceItems.Add(new VisualSourceItem(sourceItemId,
                 record.IsTextBox ? VisualSourceItemKind.TextLabel : VisualSourceItemKind.Shape,
@@ -1348,7 +1476,10 @@ public sealed partial class DocxAdapter : IFormatProbe
         // Preserve every source shape as a distinct inference primitive even when malformed
         // input repeats cNvPr IDs. The shared shape_id alias lets the engine reject collisions;
         // semantic projection still deduplicates repeated source IDs through `lookup` above.
-        var sharedNodeRecords = shapeRecords.Where(item => item.Geometry is not null && !item.IsTextBox).ToArray();
+        var sharedNodeRecords = shapeRecords.Where(item => item.Geometry is not null && !item.IsTextBox && !item.IsLoose && !structural.ContainsKey(item.shapeId)).ToArray();
+        // Loose text boxes stay out of the inference document -- they are never a connector's endpoint -- but remain
+        // candidates for an edge label in the orphan-label pass below.
+        var looseTextRecords = shapeRecords.Where(item => item.Geometry is not null && item.IsLoose && !structural.ContainsKey(item.shapeId)).ToArray();
         var sharedNodeShapeIds = sharedNodeRecords.ToDictionary(item => item.PrimitiveId, item => item.shapeId, StringComparer.Ordinal);
         var sharedNodes = sharedNodeRecords
             .Select(item => (VisualPrimitive)new VisualNodePrimitive(item.PrimitiveId, sharedCanvasId, item.Node.SourceAnchor ?? anchor,
@@ -1373,6 +1504,9 @@ public sealed partial class DocxAdapter : IFormatProbe
             static string? SharedAlias(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim().TrimStart('#');
             var from = literal ? null : SharedAlias((string?)item.Element.Attribute("from") ?? (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "stCxn")?.Attribute("id"));
             var to = literal ? null : SharedAlias((string?)item.Element.Attribute("to") ?? (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "endCxn")?.Attribute("id"));
+            // An endpoint bound to a container or marker (an activation bar a message touches) names no node.
+            if (from is not null && structural.ContainsKey(from)) from = null;
+            if (to is not null && structural.ContainsKey(to)) to = null;
             var id = item.Vml ? (string?)item.Element.Attribute("id") : (string?)item.Element.Descendants().FirstOrDefault(x => x.Name.LocalName == "cNvPr")?.Attribute("id");
             id ??= index.ToString(System.Globalization.CultureInfo.InvariantCulture);
             var drawingLine = item.Element.Descendants(A + "ln").FirstOrDefault();
@@ -1475,7 +1609,22 @@ public sealed partial class DocxAdapter : IFormatProbe
             var ambiguousStart = startAlias is null && startCandidates.FirstOrDefault()?.Features.CandidateMargin < options.HighMargin;
             var ambiguousEnd = endAlias is null && endCandidates.FirstOrDefault()?.Features.CandidateMargin < options.HighMargin;
             if (pair?.SourceId is null || pair.TargetId is null)
+            {
+                // The shared solver bounds the connectors it settles per cluster; one past that bound is
+                // reported unresolved even when both of its ends are named by the file. A connector bound
+                // at both ends to two distinct shapes needs no inference, so it is resolved here.
+                if (startAlias is not null && endAlias is not null && !StringComparer.Ordinal.Equals(startAlias, endAlias) &&
+                    rejectedCandidateIds?.Contains("VisualClusterLimitExceeded", StringComparer.Ordinal) == true)
+                {
+                    var reversed = startArrowhead is not null && endArrowhead is null;
+                    var nativeEvidence = new VisualConnectionEvidence("native-connection", "Native", 1, SecondBestScore: 0,
+                        CandidateMargin: 1, BoundaryDistanceNormalized: 0, RayIntersects: true, RayFirstHit: true,
+                        AngularDeviationDegrees: 0, PerpendicularOffsetNormalized: 0, IntermediateNodeCount: 0,
+                        ArrowheadEvidence: "none", ClusterId: unresolvedPair?.ClusterId);
+                    return (reversed ? endAlias : startAlias, reversed ? startAlias : endAlias, false, false, nativeEvidence, null);
+                }
                 return (null, null, ambiguousStart, ambiguousEnd, null, rejectedCandidateIds);
+            }
             if (startAlias is null && endAlias is null && path.Length >= 2 &&
                 sharedNodeRecords.Any(item => item.PrimitiveId != pair.SourceId && item.PrimitiveId != pair.TargetId &&
                     SegmentIntersectsInterior(path[0], path[^1], item.Geometry!)))
@@ -1525,6 +1674,8 @@ public sealed partial class DocxAdapter : IFormatProbe
                 : connector.Vml
                 ? NormalizeRef((string?)connector.Element.Attribute("to") ?? (string?)connector.Element.Attribute("end"))
                 : NormalizeRef((string?)connector.Element.Descendants().FirstOrDefault(item => item.Name.LocalName == "endCxn")?.Attribute("id"));
+            if (start is not null && structural.ContainsKey(start)) start = null;
+            if (end is not null && structural.ContainsKey(end)) end = null;
             var geometry = connector.Vml && connector.Element.Name == V + "line"
                 ? ReadVmlLineGeometry(connector.Element)
                 : ReadVisualGeometry(connector.Element);
@@ -1647,7 +1798,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 ? (nodeMinorAxes[midIndex - 1] + nodeMinorAxes[midIndex]) / 2 : nodeMinorAxes[midIndex];
             var labelRadius = Math.Max(minorAxisMedian * OrphanShapeLabelRadiusFactor, 1);
             var orphanLabelChoices = new List<EdgeLabelCandidate>();
-            foreach (var record in sharedNodeRecords)
+            foreach (var record in sharedNodeRecords.Concat(looseTextRecords))
             {
                 if (engineCandidateNodeIds.Contains(record.PrimitiveId)) continue;
                 if (edgeAttachedNodeIds.Contains(record.Node.Id)) continue;
@@ -1655,6 +1806,27 @@ public sealed partial class DocxAdapter : IFormatProbe
                 {
                     if (edges[connectorIndex].SourceId is null || edges[connectorIndex].TargetId is null) continue;
                     if (assignedLabelByEdge.ContainsKey("edge:" + connectorIndex)) continue;
+                    // A loose text box is measured the way a drawn label is read: its box against every segment of the connector's
+                    // route (an elbow's bends included), within a reach tied to the text's own height, and never from inside a node.
+                    if (record.IsLoose && !connector.Vml && DocxConnectorRoute(connector.Element) is { Count: >= 2 } route)
+                    {
+                        var box = new VisualRect(record.Geometry!.X, record.Geometry.Y, record.Geometry.Width, record.Geometry.Height);
+                        // Beside a connector means within about 1.5 text heights; a label a little farther out is still the
+                        // nearest connector's, so the reach stretches to 3 heights before the diagonal rule below is tried.
+                        var reach = Math.Max(record.Geometry.Height, 1) * 3;
+                        var nearest = double.PositiveInfinity;
+                        for (var segment = 1; segment < route.Count; segment++)
+                            nearest = Math.Min(nearest, GeometryMath.DistanceToSegmentRect(route[segment - 1], route[segment], box));
+                        var inNode = sharedNodeRecords.Any(node => node.Geometry is { } nodeBox &&
+                            box.Center.X >= nodeBox.X && box.Center.X <= nodeBox.X + nodeBox.Width &&
+                            box.Center.Y >= nodeBox.Y && box.Center.Y <= nodeBox.Y + nodeBox.Height);
+                        if (inNode) continue;
+                        if (1d - nearest / reach is > 0 and var routeScore)
+                        {
+                            orphanLabelChoices.Add(new EdgeLabelCandidate("label:" + record.shapeId, "edge:" + connectorIndex, routeScore));
+                            continue;
+                        }
+                    }
                     var connectorGeometry = connector.Vml && connector.Element.Name == V + "line"
                         ? ReadVmlLineGeometry(connector.Element)
                         : ReadVisualGeometry(connector.Element);
@@ -1701,9 +1873,166 @@ public sealed partial class DocxAdapter : IFormatProbe
             }
         }
 
+        // A loose text box that stayed a node although no connector could take it, and whose text is the label of a resolved
+        // edge, would make the validator reject every such edge (VisualEdgeLabelReusedAsNode) and so the whole diagram.
+        // It stays text (document text plus a diagnostic) instead of a promoted node.
+        var resolvedEdgeLabels = edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null && !string.IsNullOrWhiteSpace(edge.Label))
+            .Select(edge => edge.Label!.Trim()).ToHashSet(StringComparer.Ordinal);
+        foreach (var stray in looseTextRecords.Where(item => shapeSourceItems.ContainsKey(item.shapeId) &&
+                     nodes.Any(node => node.Id == item.Node.Id) && resolvedEdgeLabels.Contains(item.Node.Label.Trim())).ToArray())
+        {
+            var strayItemId = shapeSourceItems[stray.shapeId];
+            nodes.RemoveAll(node => node.Id == stray.Node.Id);
+            sourceItems.RemoveAll(item => item.Id == strayItemId);
+            sourceItems.Add(new VisualSourceItem(strayItemId, VisualSourceItemKind.TextLabel, VisualDisposition.IgnoredDecorative,
+                Reason: "unresolved edge label; retained as document text", SourceAnchor: stray.Node.SourceAnchor));
+            diagnostics.Add(new VisualDiagnostic("VisualEdgeLabelUnresolved",
+                "DOCX text box repeats an edge label but could not be assigned to a connector.", sourceNodeId,
+                Fallback: "text box retained as document text", Remedy: "place the text box beside its connector",
+                Format: "docx", PartUri: anchor.PartUri, PartitionId: "part-0001", SourceObjectId: stray.shapeId,
+                SourceObjectType: "textbox", Confidence: 0));
+        }
+
+        // Containers become groups: a swimlane or a fragment frame, its extent, the label its header or
+        // own text gives it, and the nodes whose centre lies inside it (the innermost container owns a node).
+        var groups = new List<VisualGroup>();
+        var containers = structural.Values.Where(item => item.Role == "container")
+            .OrderBy(item => item.Geometry.Y).ThenBy(item => item.Geometry.X).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        if (containers.Length > 0)
+        {
+            static bool Inside(Geometry outer, Geometry inner)
+            {
+                var x = inner.X + inner.Width / 2;
+                var y = inner.Y + inner.Height / 2;
+                return x >= outer.X && x <= outer.X + outer.Width && y >= outer.Y && y <= outer.Y + outer.Height;
+            }
+            var ownerByNode = new Dictionary<string, DocxStructuralShape>(StringComparer.Ordinal);
+            foreach (var node in nodes.Where(item => item.Geometry is not null))
+                if (containers.Where(item => Inside(item.Geometry, node.Geometry!))
+                        .OrderBy(item => item.Geometry.Width * item.Geometry.Height).FirstOrDefault() is { } owner)
+                    ownerByNode[node.Id] = owner;
+            foreach (var container in containers)
+            {
+                var memberIds = nodes.Where(node => ownerByNode.TryGetValue(node.Id, out var owner) && owner.Id == container.Id)
+                    .Select(node => node.Id).ToArray();
+                groups.Add(new VisualGroup("group_" + container.Id, container.Label, memberIds, container.Label, container.Geometry));
+            }
+            for (var index = 0; index < nodes.Count; index++)
+                if (ownerByNode.TryGetValue(nodes[index].Id, out var owner) && owner.Label is not null)
+                    nodes[index] = nodes[index] with { Lane = owner.Label };
+        }
         var graph = new VisualGraph("docx_visual_" + sourceNodeId, nodes, edges, diagnostics, "LR",
-            Paths: paths, SourceItems: sourceItems);
+            Groups: groups.Count == 0 ? null : groups, Paths: paths, SourceItems: sourceItems);
         return graph with { Quality = VisualGraphValidator.ComputeQuality(graph) };
+    }
+
+    /// <summary>Whether a wps:wsp is a line or connector rather than a closed shape: Word writes a
+    /// connector drawn in a canvas as a wps:wsp carrying wps:cNvCnPr (the connection-shape properties,
+    /// which also hold a:stCxn/a:endCxn) and a straightConnector1/bentConnectorN/curvedConnectorN
+    /// preset; a plain line is prst="line".</summary>
+    private static bool IsWpsConnector(XElement shape)
+    {
+        if (shape.Element(WPS + "cNvCnPr") is not null) return true;
+        var preset = (string?)shape.Element(WPS + "spPr")?.Element(A + "prstGeom")?.Attribute("prst")
+            ?? (string?)shape.Descendants(A + "prstGeom").FirstOrDefault()?.Attribute("prst");
+        return preset is not null && (preset.Equals("line", StringComparison.OrdinalIgnoreCase) ||
+            preset.StartsWith("straightConnector", StringComparison.OrdinalIgnoreCase) ||
+            preset.StartsWith("bentConnector", StringComparison.OrdinalIgnoreCase) ||
+            preset.StartsWith("curvedConnector", StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Whether a wps:wsp is a Word text box: its non-visual shape properties carry txBox.</summary>
+    private static bool IsWpsTextBox(XElement shape)
+    {
+        var flag = (string?)shape.Element(WPS + "cNvSpPr")?.Attribute("txBox");
+        return string.Equals(flag, "1", StringComparison.Ordinal) || string.Equals(flag, "true", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Whether a wps:wsp draws neither a fill nor an outline (a style that is not overridden draws both).</summary>
+    private static bool IsInvisibleShape(XElement shape)
+    {
+        var properties = shape.Element(WPS + "spPr");
+        var styled = shape.Element(WPS + "style") is not null;
+        static bool IsFill(XElement element) => element.Name == A + "solidFill" || element.Name == A + "gradFill" ||
+            element.Name == A + "blipFill" || element.Name == A + "pattFill";
+        var fillVisible = properties?.Elements().Any(IsFill) == true ||
+            styled && properties?.Element(A + "noFill") is null;
+        var line = properties?.Element(A + "ln");
+        var lineVisible = line?.Elements().Any(IsFill) == true ||
+            styled && line?.Element(A + "noFill") is null;
+        return !fillVisible && !lineVisible;
+    }
+
+    /// <summary>The semantic node kind a preset geometry stands for, the same mapping the PPTX adapter uses.</summary>
+    private static VisualNodeKind DocxVisualNodeKind(string? preset) => preset?.ToLowerInvariant() switch
+    {
+        "rect" or "flowchartprocess" or "flowchartpredefinedprocess" => VisualNodeKind.Process,
+        "roundrect" or "flowchartterminator" or "ellipse" => VisualNodeKind.Terminator,
+        "diamond" or "flowchartdecision" => VisualNodeKind.Decision,
+        "parallelogram" or "flowchartdata" => VisualNodeKind.Data,
+        _ => VisualNodeKind.Generic,
+    };
+
+    /// <summary>A shape the diagram needs for its structure but not as a node: a container (swimlane, fragment frame)
+    /// with the extent it frames, a lane header, or a thin marker on a line (an activation bar).</summary>
+    private sealed record DocxStructuralShape(string Id, string Role, Geometry Geometry, string? HeaderId = null, string? Label = null);
+
+    private static Dictionary<string, DocxStructuralShape> ClassifyStructuralShapes(
+        IReadOnlyList<(string Id, Geometry? Geometry, bool HasText, bool IsTextBox, string Label)> shapes, IReadOnlySet<string> boundShapeIds)
+    {
+        var result = new Dictionary<string, DocxStructuralShape>(StringComparer.Ordinal);
+        var items = shapes.Where(item => item.Geometry is { Width: > 0, Height: > 0 })
+            .GroupBy(item => item.Id, StringComparer.Ordinal).Select(group => group.First()).ToArray();
+        var textNodes = items.Where(item => item.HasText && !item.IsTextBox).ToArray();
+        if (textNodes.Length == 0) return result;
+        var minors = textNodes.Select(item => Math.Min(item.Geometry!.Width, item.Geometry.Height)).OrderBy(value => value).ToArray();
+        var medianMinor = minors[minors.Length / 2];
+        static double Area(Geometry geometry) => geometry.Width * geometry.Height;
+        static bool CenterInside(Geometry outer, Geometry inner)
+        {
+            var x = inner.X + inner.Width / 2;
+            var y = inner.Y + inner.Height / 2;
+            return x >= outer.X && x <= outer.X + outer.Width && y >= outer.Y && y <= outer.Y + outer.Height;
+        }
+
+        foreach (var item in items.Where(item => !item.HasText && !item.IsTextBox &&
+            Math.Min(item.Geometry!.Width, item.Geometry.Height) <= medianMinor * 0.35))
+            result[item.Id] = new DocxStructuralShape(item.Id, "marker", item.Geometry!);
+
+        var containers = new List<(string Id, Geometry Geometry, string? Label)>();
+        foreach (var candidate in items.Where(item => !item.IsTextBox && !boundShapeIds.Contains(item.Id) && !result.ContainsKey(item.Id)))
+        {
+            var geometry = candidate.Geometry!;
+            var inside = items.Where(other => other.Id != candidate.Id && CenterInside(geometry, other.Geometry!) &&
+                Area(geometry) > Area(other.Geometry!) * 1.5).ToArray();
+            var isContainer = candidate.HasText
+                ? inside.Count(other => other.HasText && !other.IsTextBox) >= 2 &&
+                  Area(geometry) >= inside.Max(other => Area(other.Geometry!)) * 3
+                : inside.Length >= 1;
+            if (!isContainer) continue;
+            containers.Add((candidate.Id, geometry, candidate.HasText ? candidate.Label : null));
+        }
+        foreach (var container in containers)
+        {
+            string? headerId = null;
+            if (container.Label is null)
+            {
+                var header = items.Where(other => other.HasText && !other.IsTextBox && other.Id != container.Id &&
+                        !boundShapeIds.Contains(other.Id) && !result.ContainsKey(other.Id) && containers.All(c => c.Id != other.Id) &&
+                        CenterInside(container.Geometry, other.Geometry!) &&
+                        other.Geometry!.Y <= container.Geometry.Y + container.Geometry.Height * 0.25 &&
+                        other.Geometry.Width >= container.Geometry.Width * 0.6 &&
+                        other.Geometry.Height <= container.Geometry.Height * 0.3)
+                    .OrderBy(other => other.Geometry!.Y).ThenBy(other => other.Geometry!.X).FirstOrDefault();
+                if (header.Id is not null) headerId = header.Id;
+            }
+            result[container.Id] = new DocxStructuralShape(container.Id, "container", container.Geometry, headerId,
+                headerId is null ? container.Label : items.First(item => item.Id == headerId).Label);
+        }
+        foreach (var headerId in result.Values.Where(item => item.HeaderId is not null).Select(item => item.HeaderId!).Distinct(StringComparer.Ordinal).ToArray())
+            if (!result.ContainsKey(headerId))
+                result[headerId] = new DocxStructuralShape(headerId, "header", items.First(item => item.Id == headerId).Geometry!);
+        return result;
     }
 
     private static Geometry? ReadVisualGeometry(XElement element)

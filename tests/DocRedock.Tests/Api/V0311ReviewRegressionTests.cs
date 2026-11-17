@@ -241,13 +241,37 @@ public sealed class V0311ReviewRegressionTests : IDisposable
     }
 
     [Fact]
-    public async Task A_tagged_figure_description_reaches_the_markdown()
+    public async Task A_tagged_figure_description_names_the_extracted_image()
     {
+        // The 1x1 grey picture decodes, so it is written as an image whose alt text is the tagged /Alt
+        // (it used to be left as a "not extracted" note that carried the description as a quote).
         const string resources = "<< /Font << /F1 4 0 R >> /XObject << /Im1 7 0 R >> >>";
         var objects = new Dictionary<int, string>
         {
             [4] = SimpleFont,
             [7] = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >> stream\n\u0000\nendstream",
+            [8] = "<< /Type /StructElem /S /Figure /Alt (Sales chart: April 720, September 800) /Pg 1 0 R /K 0 >>",
+        };
+        var pdf = Page(string.Join("\n", Text(72, 720, "Quarterly sales"),
+            "/Figure << /MCID 0 >> BDC q 200 0 0 100 72 560 cm /Im1 Do Q EMC"), resources, objects);
+        var source = Path.Combine(root, "figure-decoded.pdf");
+        await File.WriteAllBytesAsync(source, pdf);
+        var markdownPath = Path.Combine(root, "figure-decoded.md");
+        await new DocumentService(null, null, discoverPdfRasterizer: false).ExportReadableAsync(
+            new ReadableDocumentExportOptions(source, markdownPath, IncludePdfFallbackImages: false));
+        var markdown = await File.ReadAllTextAsync(markdownPath);
+        Assert.Contains("alt=\"Sales chart: April 720, September 800\"", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("not extracted", markdown, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_tagged_figure_description_reaches_the_markdown_for_an_image_that_could_not_be_extracted()
+    {
+        const string resources = "<< /Font << /F1 4 0 R >> /XObject << /Im1 7 0 R >> >>";
+        var objects = new Dictionary<int, string>
+        {
+            [4] = SimpleFont,
+            [7] = "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /JPXDecode /Length 1 >> stream\n\u0000\nendstream",
             [8] = "<< /Type /StructElem /S /Figure /Alt (Sales chart: April 720, September 800) /Pg 1 0 R /K 0 >>",
         };
         var pdf = Page(string.Join("\n", Text(72, 720, "Quarterly sales"),

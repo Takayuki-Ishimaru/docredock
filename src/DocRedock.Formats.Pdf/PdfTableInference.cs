@@ -89,7 +89,9 @@ public static class PdfTableInference
         var horizontal = lines.Where(line => line.Horizontal).ToArray();
         var vertical = lines.Where(line => !line.Horizontal).ToArray();
         if (horizontal.Length < 3 || vertical.Length < 3 || maxCandidates <= 0) return [];
-        if ((long)horizontal.Length * vertical.Length > MaxGridIntersections) return [];
+        // The bound is on the grid's size - its distinct rows and columns - not on how many pieces its rules
+        // were drawn in: a table drawn one cell border at a time has several pieces per level.
+        if ((long)Cluster(horizontal.Select(line => line.Fixed)).Length * Cluster(vertical.Select(line => line.Fixed)).Length > MaxGridIntersections) return [];
 
         // A structural rule covers the component extent, possibly as adjoining cell borders,
         // or terminates at other rules to delimit a merged cell. A floating bar cannot add a boundary.
@@ -127,6 +129,7 @@ public static class PdfTableInference
         }
         var gridCells = PartitionCells(xs, ys, horizontal, vertical);
         if (gridCells is null) return Reject();
+        var bottomRowCut = SplitCutBottomRow(gridCells, xs, ys, regions);
 
         var cells = new List<PdfTableCell>();
         var assigned = new HashSet<int>();
@@ -213,7 +216,49 @@ public static class PdfTableInference
                 Intersects(bounds, geometry) && !IsOverlayCandidateEdge(geometry, bounds, xs, ys)))
             return Reject();
         return [new PdfTable($"pdf-p{pageNumber}-table-1", pageNumber, bounds, ordered,
-            nativeTagged ? PdfTableConfidence.NativeTagged : PdfTableConfidence.HighConfidenceInferred, sourceIds)];
+            nativeTagged ? PdfTableConfidence.NativeTagged : PdfTableConfidence.HighConfidenceInferred, sourceIds) { BottomRowCut = bottomRowCut }];
+    }
+
+    // A last row that a page end cuts short may be drawn without its inner column rules, which PartitionCells reads as one
+    // merged cell. It is several cells when the text in it falls in two or more columns, each fragment entirely within the
+    // column range the rows above give it. A real merged cell holds one block of text, or text running over a column
+    // boundary, and stays merged. Returns whether a row was split; the cells of the row are replaced in place.
+    private static bool SplitCutBottomRow(List<(int Row, int Column, int RowSpan, int ColumnSpan)> gridCells,
+        double[] xs, double[] ys, IReadOnlyList<PdfTextRegion> regions)
+    {
+        if (ys.Length < 4) return false;
+        var split = false;
+        foreach (var merged in gridCells.Where(cell => cell.Row == 0 && cell.RowSpan == 1 && cell.ColumnSpan >= 2).ToArray())
+        {
+            var area = new Geometry("pdf-user-space", xs[merged.Column], ys[0], xs[merged.Column + merged.ColumnSpan] - xs[merged.Column], ys[1] - ys[0]);
+            var fragments = regions.Where(region => !string.IsNullOrWhiteSpace(region.Text) && IsInside(area, region.BoundingBox)).ToArray();
+            if (fragments.Length < 2) continue;
+            var columns = new HashSet<int>();
+            var separate = true;
+            // The parts of one line of text (a run the extractor cut at a column rule) touch or nearly touch; the texts of
+            // separate cells are a cell's padding apart.
+            var ordered = fragments.OrderBy(fragment => fragment.BoundingBox.X).ToArray();
+            for (var index = 1; index < ordered.Length && separate; index++)
+            {
+                var gap = ordered[index].BoundingBox.X - (ordered[index - 1].BoundingBox.X + ordered[index - 1].BoundingBox.Width);
+                if (gap < (ordered[index].FontSize is > 0 and var size ? size : 10) * 0.8) separate = false;
+            }
+            foreach (var fragment in fragments)
+            {
+                var left = fragment.BoundingBox.X; var right = left + fragment.BoundingBox.Width;
+                var column = Enumerable.Range(merged.Column, merged.ColumnSpan)
+                    .Cast<int?>().FirstOrDefault(index => left >= xs[index!.Value] - 1.5 && right <= xs[index.Value + 1] + 1.5);
+                if (column is null) { separate = false; break; }
+                columns.Add(column.Value);
+            }
+            // The rows above must hold a cell of one column where each fragment lies.
+            if (!separate || columns.Count < 2 || !columns.All(column => gridCells.Any(above => above.Row <= 1 && above.Row + above.RowSpan > 1 &&
+                above.Column == column && above.ColumnSpan == 1))) continue;
+            gridCells.Remove(merged);
+            for (var column = merged.Column; column < merged.Column + merged.ColumnSpan; column++) gridCells.Add((0, column, 1, 1));
+            split = true;
+        }
+        return split;
     }
 
     /// <summary>Recognizes a real marked-content table operator while ignoring comments and
@@ -551,7 +596,12 @@ public static class PdfTableInference
     }
     private static bool Crosses(AxisLine left, AxisLine right)
     {
-        if (left.Horizontal == right.Horizontal) return false;
+        // Pieces of one rule that meet end to end - the borders of neighbouring cells - belong together
+        // even where no rule crosses a piece (a row whose inner column rules were not drawn): the
+        // frame of a table is made of such pieces.
+        if (left.Horizontal == right.Horizontal)
+            return Math.Abs(left.Fixed - right.Fixed) <= 1.5 &&
+                right.Minimum <= left.Maximum + 1.5 + left.Reach && left.Minimum <= right.Maximum + 1.5 + right.Reach;
         var horizontal = left.Horizontal ? left : right; var vertical = left.Horizontal ? right : left;
         return vertical.Fixed >= horizontal.Minimum - 1.5 - horizontal.Reach && vertical.Fixed <= horizontal.Maximum + 1.5 + horizontal.Reach &&
             horizontal.Fixed >= vertical.Minimum - 1.5 - vertical.Reach && horizontal.Fixed <= vertical.Maximum + 1.5 + vertical.Reach;
@@ -589,6 +639,11 @@ public static class PdfTableInference
     private static bool CanBeDash(VisualPath path) =>
         path.Points is { Count: 2 } || IsRectangleSourced(path) && path.Geometry is { } bounds && Math.Min(bounds.Width, bounds.Height) <= 1.5;
 
+    // A closed axis-aligned rectangle no thicker than a rule, painted as a fill or a stroke.
+    private static bool IsRuleRectangle(VisualPath path) =>
+        IsRectangleSourced(path) && path.Geometry is { } box && Math.Min(box.Width, box.Height) <= 1.5 &&
+        Math.Max(box.Width, box.Height) > 1.5;
+
     private sealed record AxisLine(string PathId, bool Horizontal, double Fixed, double Minimum, double Maximum)
     {
         /// <summary>The dashes a merged dashed rule was drawn with (see MergeDashedRuns); null for one stroke.</summary>
@@ -608,7 +663,10 @@ public static class PdfTableInference
                 path.Geometry is { Width: > 1.5, Height: > 1.5 }) return [];
             // PdfTextExtractor marks Bezier paths as low-confidence fallback. A curve whose
             // endpoints happen to align horizontally is still not a table rule.
-            if (path.Confidence is { } confidence && confidence < .8) return [];
+            // A thin filled rectangle is a rule whatever label-matching made of it: the visual-graph
+            // pass can score a rule-sized box as an unlabelled node and demote it (wide cells
+            // more often than narrow ones), which says nothing about whether it is a table border.
+            if (path.Confidence is { } confidence && confidence < .8 && !IsRuleRectangle(path)) return [];
             if (points.Count == 2) return CreateSegment(path.Id, points[0], points[1]) is { } line ? [line] : [];
             // `re` is represented as a closed five-point rectangle. Do not split arbitrary
             // polylines: that would turn a bent connector into synthetic table rules.
@@ -616,6 +674,15 @@ public static class PdfTableInference
             var xs = points.Take(4).Select(point => point.X).Distinct().OrderBy(value => value).ToArray();
             var ys = points.Take(4).Select(point => point.Y).Distinct().OrderBy(value => value).ToArray();
             if (xs.Length != 2 || ys.Length != 2) return [];
+            // A filled bar no thicker than a rule is one rule along its long side, not a hollow
+            // box: its four edges would count four times towards the grid-size bound and leave two
+            // slivers a hair long across the rule, which a grid built from per-cell borders (one thin
+            // bar per cell side) multiplies by every cell.
+            var barWidth = xs[1] - xs[0]; var barHeight = ys[1] - ys[0];
+            if (Math.Min(barWidth, barHeight) <= 1.5 && Math.Max(barWidth, barHeight) >= 3 * Math.Min(barWidth, barHeight))
+                return barWidth >= barHeight
+                    ? [new AxisLine(path.Id, true, (ys[0] + ys[1]) / 2, xs[0], xs[1])]
+                    : [new AxisLine(path.Id, false, (xs[0] + xs[1]) / 2, ys[0], ys[1])];
             return points.Take(4).Zip(points.Skip(1).Take(4), (a, b) => CreateSegment(path.Id, a, b))
                 .Where(line => line is not null).Cast<AxisLine>().ToArray();
         }

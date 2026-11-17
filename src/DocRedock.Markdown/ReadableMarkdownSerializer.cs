@@ -22,7 +22,11 @@ public sealed record ReadableMarkdownOptions(
     string? Language = null,
     // The document's name when nothing in it gives a title (its file name): "# 報告書" says which document an AI is reading,
     // where "# ドキュメント" or "# プレゼンテーション" names none of several.
-    string? FallbackTitle = null);
+    string? FallbackTitle = null,
+    // Precedes a Word/PowerPoint/PDF table that has merged cells with a hint comment
+    // (<!-- docredock:table-spans r,c,rs,cs;... -->) that the HTML writer turns into rowspan/colspan.
+    // Off: the Markdown is exactly what it was without this option.
+    bool EmitTableSpanHints = false);
 
 /// <summary>
 /// Produces Markdown intended for reading rather than round-tripping. Unlike the
@@ -1104,6 +1108,10 @@ public sealed partial class ReadableMarkdownSerializer
     /// <summary>Extension of an image left out of a text-only export: its description is written in its place.</summary>
     public const string ImageOmittedExtension = "image_omitted";
 
+    /// <summary>Extension that carries the asset id (such as <c>img-0002</c>) of an image left out of a text-only export, so the
+    /// placeholder can name the picture a reader may ask for with <c>docredock source --image</c>.</summary>
+    public const string ImageAssetIdExtension = "image_asset_id";
+
     private void WriteImageNode(StringBuilder output, DocumentNode imageNode, DocumentPartition partition, bool includeOcr = true)
     {
         if (imageNode.Content is not ReferenceNodeContent image) return;
@@ -1112,9 +1120,15 @@ public sealed partial class ReadableMarkdownSerializer
         if (ExtensionBool(imageNode, ImageOmittedExtension))
         {
             var description = string.IsNullOrWhiteSpace(image.AltText) ? null : EscapeLiteral(image.AltText.Trim());
+            // The asset id names the picture for a reader who needs what it shows (docredock source --image <id>).
+            var assetId = ExtensionString(imageNode, ImageAssetIdExtension);
             WriteQuote(output, EnglishOutput
-                ? description is null ? "Image (not included in this text-only output)" : $"Image: {description} (not included in this text-only output)"
-                : description is null ? "画像（テキストのみの出力のため省略）" : $"画像: {description}（テキストのみの出力のため省略）");
+                ? description is null
+                    ? $"Image ({(assetId is null ? "" : assetId + ", ")}not included in this text-only output)"
+                    : $"Image: {description} ({(assetId is null ? "" : assetId + ", ")}not included in this text-only output)"
+                : description is null
+                    ? $"画像（{(assetId is null ? "" : assetId + "、")}テキストのみの出力のため省略）"
+                    : $"画像: {description}（{(assetId is null ? "" : assetId + "、")}テキストのみの出力のため省略）");
         }
         else if (!ImageDisplayPolicy.IsMarkdownDisplayable(mediaType))
         {
@@ -2672,6 +2686,7 @@ public sealed partial class ReadableMarkdownSerializer
             var width = grid.Max(row => row.Count);
             var headers = grid[0].Count == width ? grid[0] : Enumerable.Range(1, width).Select(index => $"内容{index}").ToArray();
             var data = grid[0].Count == width ? grid.Skip(1) : grid;
+            if (options.EmitTableSpanHints && grid[0].Count == width) WriteTableSpanHint(output, tableRows);
             WriteTable(output, headers, data);
         }
         // Coordinator-adjudicated readability rule: a row whose single cell spans the table's
@@ -2969,6 +2984,19 @@ public sealed partial class ReadableMarkdownSerializer
 
         static bool SameOrigin(TableGridSlot left, TableGridSlot right) =>
             left.OriginRow == right.OriginRow && left.OriginCellIndex == right.OriginCellIndex;
+    }
+
+    // One hint line directly above the header row: "r,c,rs,cs" for each merge origin, r/c being the
+    // 0-based row (0 = header row) and column of the Markdown table as written, rs/cs the spans.
+    private static void WriteTableSpanHint(StringBuilder output, IReadOnlyList<IReadOnlyList<TableCell>> rows)
+    {
+        if (!TableGrid.TryCreate(new TableNodeContent(rows), out var grid, out _)) return;
+        var merges = new List<string>();
+        foreach (var row in grid.Rows)
+        foreach (var slot in row)
+            if (!slot.IsContinuation && (slot.Origin.RowSpan > 1 || slot.Origin.ColSpan > 1))
+                merges.Add(string.Create(CultureInfo.InvariantCulture, $"{slot.Row},{slot.Column},{Math.Max(1, slot.Origin.RowSpan)},{Math.Max(1, slot.Origin.ColSpan)}"));
+        if (merges.Count > 0) output.Append("<!-- docredock:table-spans ").Append(string.Join(';', merges)).AppendLine(" -->");
     }
 
     private static void WriteTable(StringBuilder output, IReadOnlyList<string> headers, IEnumerable<IReadOnlyList<string>> rows)
@@ -3363,7 +3391,7 @@ public sealed partial class ReadableMarkdownSerializer
         }
 
         WriteMermaid(output, mermaid);
-        WriteStyledEdgeNote(output, graph, mermaid);
+        if (!HasExplicitSequence(graph)) WriteStyledEdgeNote(output, graph, mermaid);
         var hasUnresolvedEdges = (graph.Edges ?? []).Any(edge => edge.SourceId is null || edge.TargetId is null);
         if (quality is VisualGraphQuality.Partial or VisualGraphQuality.FallbackOnly || hasUnresolvedEdges)
             WritePartialVisualDetails(output, graph, node);
@@ -3385,6 +3413,12 @@ public sealed partial class ReadableMarkdownSerializer
         if (ExtensionBool(node, "visual_diagnostics_in_report"))
         {
             output.AppendLine(EnglishOutput ? "> Compare this figure with the source document." : "> この図は原本を参照してください。").AppendLine();
+            return;
+        }
+        // A projected diagram with many unresolved parts says so once and keeps the list for the diagnostics.
+        if (partial && VisualFallbackMarkdownWriter.ShouldSummarize(graph))
+        {
+            VisualFallbackMarkdownWriter.WriteSummary(output, graph, EnglishOutput);
             return;
         }
         var result = VisualFallbackMarkdownWriter.Write(output, graph, partial,
@@ -3443,12 +3477,19 @@ public sealed partial class ReadableMarkdownSerializer
         var edges = (graph.Edges ?? []).Where(edge => edge is not null).ToArray();
         if (nodes.Length == 0 || nodes.Any(node => string.IsNullOrWhiteSpace(node.Id) || string.IsNullOrWhiteSpace(node.Label)))
             return null;
+        if (TryProjectExplicitSequence(nodes, edges, out var explicitSequence)) return explicitSequence;
         if (TryProjectSequenceGraph(nodes, edges, out var sequence)) return sequence;
         if (edges.Length == 0) return null;
 
         var output = new StringBuilder("flowchart " + (graph.Direction is "TD" ? "TD" : "LR") + "\n");
-        foreach (var visualNode in nodes.OrderBy(item => item.Geometry?.Y ?? double.MaxValue)
-                     .ThenBy(item => item.Geometry?.X ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal))
+        // A lane (swimlane) is one subgraph; every node belongs to at most one lane.
+        var laneOf = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var group in graph.Groups ?? [])
+            if (group?.NodeIds is not null && (group.Lane ?? group.Label) is { Length: > 0 } groupLane)
+                foreach (var nodeId in group.NodeIds) laneOf.TryAdd(nodeId, groupLane);
+        foreach (var laneNode in nodes)
+            if (!laneOf.ContainsKey(laneNode.Id) && !string.IsNullOrWhiteSpace(laneNode.Lane)) laneOf[laneNode.Id] = laneNode.Lane!;
+        void WriteNode(VisualNode visualNode, string indent)
         {
             var label = MermaidText(visualNode.Label);
             var rendered = visualNode.Kind switch
@@ -3459,7 +3500,19 @@ public sealed partial class ReadableMarkdownSerializer
                 VisualNodeKind.Process => "[" + label + "]",
                 _ => "[" + label + "]",
             };
-            output.Append("    ").Append(visualNode.Id).Append(rendered).AppendLine();
+            output.Append(indent).Append(visualNode.Id).Append(rendered).AppendLine();
+        }
+        var orderedNodes = nodes.OrderBy(item => item.Geometry?.Y ?? double.MaxValue)
+            .ThenBy(item => item.Geometry?.X ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal).ToArray();
+        var laneNames = orderedNodes.Where(item => laneOf.ContainsKey(item.Id)).Select(item => laneOf[item.Id]).Distinct(StringComparer.Ordinal)
+            .OrderBy(name => orderedNodes.Where(item => laneOf.GetValueOrDefault(item.Id) == name).Min(item => item.Geometry?.X ?? double.MaxValue))
+            .ToArray();
+        foreach (var visualNode in orderedNodes.Where(item => !laneOf.ContainsKey(item.Id))) WriteNode(visualNode, "    ");
+        for (var laneIndex = 0; laneIndex < laneNames.Length; laneIndex++)
+        {
+            output.Append("    subgraph L").Append(laneIndex + 1).Append("[\"").Append(MermaidText(laneNames[laneIndex])).AppendLine("\"]");
+            foreach (var visualNode in orderedNodes.Where(item => laneOf.GetValueOrDefault(item.Id) == laneNames[laneIndex])) WriteNode(visualNode, "        ");
+            output.AppendLine("    end");
         }
         foreach (var edge in edges.Where(item => item.SourceId is not null && item.TargetId is not null)
                      .OrderBy(item => item.Geometry?.Y ?? double.MaxValue).ThenBy(item => item.Id, StringComparer.Ordinal))

@@ -63,6 +63,8 @@ public sealed partial class DocumentService
             throw new ArgumentOutOfRangeException(nameof(options), options.TokenEstimateMultiplier,
                 "Token estimate multiplier must be between 1 and 100.");
         _ = DocumentContentPolicyRules.Parse(options.Document.ContentPolicy);
+        if (options.Document.OutputFormat != ReadableOutputFormat.Markdown)
+            throw new ArgumentException("An AI package is Markdown; HTML output is not supported for it.", nameof(options));
         cancellationToken.ThrowIfCancellationRequested();
         var source = Path.GetFullPath(options.Document.SourcePath);
         var target = Path.GetFullPath(options.OutputPath);

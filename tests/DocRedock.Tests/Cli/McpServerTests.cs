@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using DocRedock.Api;
 using DocRedock.Cli;
+using DocRedock.Tests.Api;
 
 namespace DocRedock.Tests.Cli;
 
@@ -16,7 +17,7 @@ public sealed class McpServerTests : IDisposable
 
     public void Dispose() => Directory.Delete(root, true);
 
-    private static readonly string[] ToolNames = ["export_markdown", "export_ai_package", "package_review", "package_search", "package_read"];
+    private static readonly string[] ToolNames = ["export_markdown", "export_html", "export_ai_package", "package_review", "package_search", "package_read", "read_source"];
 
     /// <summary>Runs the server over the given lines and returns every line it wrote, each parsed.</summary>
     private static async Task<IReadOnlyList<JsonElement>> RunAsync(params string[] lines)
@@ -98,7 +99,7 @@ public sealed class McpServerTests : IDisposable
     }
 
     [Fact]
-    public async Task Tools_list_names_the_five_tools_with_closed_object_schemas()
+    public async Task Tools_list_names_the_seven_tools_with_closed_object_schemas()
     {
         var response = Assert.Single(await RunAsync(Request(2, "tools/list")));
         var tools = response.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
@@ -116,10 +117,123 @@ public sealed class McpServerTests : IDisposable
         string[] Required(string name) => tools.Single(tool => tool.GetProperty("name").GetString() == name)
             .GetProperty("inputSchema").GetProperty("required").EnumerateArray().Select(item => item.GetString()!).Order().ToArray();
         Assert.Equal(["path"], Required("export_markdown"));
+        Assert.Equal(["path"], Required("export_html"));
         Assert.Equal(["path"], Required("export_ai_package"));
         Assert.Equal(["package"], Required("package_review"));
         Assert.Equal(["package", "query"], Required("package_search"));
         Assert.Equal(["package", "part"], Required("package_read"));
+        Assert.Equal(["path"], Required("read_source"));
+    }
+
+    [Fact]
+    public async Task Read_source_is_listed_with_its_parameters_and_limits()
+    {
+        var response = Assert.Single(await RunAsync(Request(2, "tools/list")));
+        var tool = response.GetProperty("result").GetProperty("tools").EnumerateArray()
+            .Single(item => item.GetProperty("name").GetString() == "read_source");
+
+        var schema = tool.GetProperty("inputSchema");
+        Assert.False(schema.GetProperty("additionalProperties").GetBoolean());
+        var properties = schema.GetProperty("properties");
+        Assert.Equal(["allow_pdf", "image", "max_chars", "node", "ocr", "offset", "page", "part", "path", "range", "sheet", "slide"],
+            properties.EnumerateObject().Select(property => property.Name).Order());
+        foreach (var name in new[] { "path", "part", "node", "sheet", "range", "image" }) Assert.Equal("string", properties.GetProperty(name).GetProperty("type").GetString());
+        foreach (var name in new[] { "slide", "page", "offset", "max_chars" }) Assert.Equal("integer", properties.GetProperty(name).GetProperty("type").GetString());
+        Assert.Equal("boolean", properties.GetProperty("allow_pdf").GetProperty("type").GetString());
+        Assert.Equal("boolean", properties.GetProperty("ocr").GetProperty("type").GetString());
+        Assert.Equal(1, properties.GetProperty("slide").GetProperty("minimum").GetInt32());
+        Assert.Equal(1, properties.GetProperty("page").GetProperty("minimum").GetInt32());
+        Assert.Equal(0, properties.GetProperty("offset").GetProperty("minimum").GetInt32());
+        Assert.Equal(1, properties.GetProperty("max_chars").GetProperty("minimum").GetInt32());
+        var description = tool.GetProperty("description").GetString()!;
+        Assert.Contains("source_review", description, StringComparison.Ordinal);
+        Assert.Contains("never returns the whole file", description, StringComparison.Ordinal);
+        Assert.Contains("hidden text, comments and deleted tracked changes", description, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task The_instructions_send_the_reader_from_the_export_to_read_source()
+    {
+        var response = Assert.Single(await RunAsync(Request(1, "initialize", new { protocolVersion = "2025-06-18", capabilities = new { } })));
+
+        var instructions = response.GetProperty("result").GetProperty("instructions").GetString()!;
+
+        Assert.Contains("export_markdown first", instructions, StringComparison.Ordinal);
+        Assert.Contains("source_review", instructions, StringComparison.Ordinal);
+        Assert.Contains("no reason to read the original", instructions, StringComparison.Ordinal);
+        Assert.Contains("read_source", instructions, StringComparison.Ordinal);
+        Assert.Contains("allow_review", instructions, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Read_source_returns_the_cells_of_a_sheet_range()
+    {
+        var workbook = SourceTestPackages.Xlsx(root, "book.xlsx");
+
+        var result = await CallAsync("read_source", new { path = workbook, sheet = "Data", range = "A1:C2" });
+
+        Assert.False(IsError(result));
+        var text = Assert.Single(Texts(result));
+        using var json = JsonDocument.Parse(text);
+        Assert.Equal("docredock.source.v1", json.RootElement.GetProperty("schema").GetString());
+        Assert.False(text.Contains('\n'), "the reply is compact JSON");
+        var cells = json.RootElement.GetProperty("cells").EnumerateArray().ToDictionary(cell => cell.GetProperty("address").GetString()!);
+        Assert.Equal("Apple", cells["A2"].GetProperty("value").GetString());
+        Assert.Equal("B2*2", cells["C2"].GetProperty("formula").GetString());
+        Assert.Contains("deleted tracked changes", json.RootElement.GetProperty("raw_notice").GetString());
+    }
+
+    [Fact]
+    public async Task Read_source_with_only_a_path_lists_what_can_be_read_and_pages_a_part()
+    {
+        var document = Document("source.docx", Paragraph("Alpha") + Paragraph("Beta"));
+
+        var overview = JsonDocument.Parse(Assert.Single(Texts(await CallAsync("read_source", new { path = document })))).RootElement;
+        var window = JsonDocument.Parse(Assert.Single(Texts(await CallAsync("read_source",
+            new { path = document, part = "/word/document.xml", offset = 0, max_chars = 30 })))).RootElement;
+
+        Assert.Contains(overview.GetProperty("parts").EnumerateArray(), part => part.GetProperty("name").GetString() == "word/document.xml");
+        Assert.Equal(30, window.GetProperty("content").GetString()!.Length);
+        Assert.Equal(30, window.GetProperty("next_offset").GetInt32());
+    }
+
+    [Theory]
+    [InlineData("""{"path":"X","slide":0}""", "slide")]
+    [InlineData("""{"path":"X","page":0}""", "page")]
+    [InlineData("""{"path":"X","offset":-1}""", "offset")]
+    [InlineData("""{"path":"X","max_chars":0}""", "max_chars")]
+    [InlineData("""{"path":"X","slide":"1"}""", "slide")]
+    [InlineData("""{"path":"X","colour":"red"}""", "colour")]
+    [InlineData("""{"slide":1}""", "path")]
+    public async Task Read_source_with_invalid_arguments_is_a_tool_error_not_a_protocol_error(string arguments, string name)
+    {
+        var line = $$$"""{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_source","arguments":{{{arguments}}}}}""";
+        var response = Assert.Single(await RunAsync(line));
+
+        Assert.False(response.TryGetProperty("error", out _), response.ToString());
+        var result = response.GetProperty("result");
+        Assert.True(IsError(result));
+        Assert.Contains(name, string.Join("\n", Texts(result)), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Read_source_failures_are_tool_errors_that_say_what_to_correct()
+    {
+        var workbook = SourceTestPackages.Xlsx(root, "book.xlsx");
+
+        var unknownSheet = await CallAsync("read_source", new { path = workbook, sheet = "Nope" });
+        var conflicting = await CallAsync("read_source", new { path = workbook, sheet = "Data", slide = 1 });
+        var pdf = await CallAsync("read_source", new { path = HtmlFixtures.Path_("Pdf", "two-column-paper-en.pdf"), page = 1 });
+
+        Assert.True(IsError(unknownSheet));
+        Assert.Contains("\"Data\"", string.Join("\n", Texts(unknownSheet)), StringComparison.Ordinal);
+        Assert.True(IsError(conflicting));
+        Assert.Contains("only one locator", string.Join("\n", Texts(conflicting)), StringComparison.Ordinal);
+        Assert.True(IsError(pdf));
+        Assert.Contains("allow-pdf", string.Join("\n", Texts(pdf)), StringComparison.Ordinal);
+        var allowed = await CallAsync("read_source", new { path = HtmlFixtures.Path_("Pdf", "two-column-paper-en.pdf"), page = 1, allow_pdf = true });
+        Assert.False(IsError(allowed));
+        Assert.Contains("Anomaly Detection", string.Join("\n", Texts(allowed)), StringComparison.Ordinal);
     }
 
     [Fact]

@@ -41,6 +41,10 @@ internal sealed class CliText(bool japanese)
             : ". Add --table-row-blocks to split large worksheet tables between rows.");
     }
 
+    public string HtmlImagesFiles => Japanese
+        ? "HTMLでは画像をファイルの中に保持します。--images embed（既定）を使うか、--images を省略してください。"
+        : "HTML keeps images inside the file; use --images embed (default) or omit.";
+
     public string EmptyProjection => Japanese ? "WARNING EmptyProjection: 抽出できる内容がありませんでした。" : "WARNING EmptyProjection: no extractable content was found.";
 
     public string PdfDisabled(string file) => Japanese

@@ -157,6 +157,9 @@ public sealed class SoftConnectionEngine
             var scale = ScaleOf(canvas, nodes, connectors);
             var spatialIndex = new NodeSpatialIndex(nodes, scale);
             var rows = new List<IReadOnlyList<ConnectionPairCandidate>>();
+            // An explicit, valid binding to two existing shapes is not a guess, so it never competes
+            // with inferred candidates and is not subject to the solver's per-cluster connector cap.
+            var nativeKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var connector in connectors)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -177,9 +180,12 @@ public sealed class SoftConnectionEngine
                     var nativeDirection = DirectionOf(connector);
                     var sourceId = nativeDirection == ConnectionDirection.Reverse ? nativeTarget.Id : nativeSource.Id;
                     var targetId = nativeDirection == ConnectionDirection.Reverse ? nativeSource.Id : nativeTarget.Id;
-                    rows.Add([new(connector.Id, sourceId, targetId, 1,
-                        ConnectionConfidence.Native, cluster.Id, IsNative: true,
-                        Direction: nativeDirection), none]);
+                    var nativePair = new ConnectionPairCandidate(connector.Id, sourceId, targetId, 1,
+                        ConnectionConfidence.Native, cluster.Id, IsNative: true, Direction: nativeDirection);
+                    var nativeKey = DiagramConnectionSolver.RelationKey(nativePair);
+                    // The same relation drawn twice stays a single edge: the repeat is reported unresolved.
+                    if (nativeKey is not null && nativeKeys.Add(nativeKey)) resolved.Add(nativePair);
+                    else unresolved.Add(none);
                     continue;
                 }
 
@@ -218,7 +224,7 @@ public sealed class SoftConnectionEngine
             }
 
             if (rows.Count == 0) continue;
-            var assignment = DiagramConnectionSolver.Solve(rows, options.MaxConnectors, options.BeamWidth);
+            var assignment = DiagramConnectionSolver.Solve(rows, options.MaxConnectors, options.BeamWidth, nativeKeys);
             graphMargins.Add(assignment.Margin);
             var secondByConnector = (assignment.SecondSelected ?? [])
                 .ToDictionary(pair => pair.ConnectorId, StringComparer.Ordinal);
@@ -335,6 +341,11 @@ public sealed class SoftConnectionEngine
         var tangent = start ? new VisualVector(-connector.Path.StartDirection.X, -connector.Path.StartDirection.Y) : connector.Path.EndDirection;
         var radius = options.Mode == VisualInferenceMode.Balanced ? adaptive.BalancedEndpointRadius : adaptive.SafeEndpointRadius;
         var candidateNodes = spatialIndex.QueryEndpoint(endpoint, tangent, radius, adaptive.RayExtension);
+        // A lane, frame or panel that encloses other shapes is a container, not a competing endpoint:
+        // an endpoint lying inside it but away from its border belongs to the shape it touches.
+        var withoutContainers = candidateNodes.Where(node => !spatialIndex.IsContainer(node) ||
+            !node.Bounds!.Contains(endpoint) || node.Bounds.BoundaryDistanceTo(endpoint) <= radius).ToArray();
+        if (withoutContainers.Length > 0) candidateNodes = withoutContainers;
         // Once an endpoint lies inside a node, geometry has stronger evidence than a
         // ray hit beyond that node. Keep every containing node so true overlaps stay
         // ambiguous, but never jump through them to a farther candidate.
@@ -433,9 +444,30 @@ public sealed class SoftConnectionEngine
         private readonly double _maxNodeExtent;
         private int _queryStamp;
 
+        private readonly HashSet<string> _containers = new(StringComparer.Ordinal);
+
+        public bool IsContainer(VisualNodePrimitive node) => _containers.Contains(node.Id);
+
         public NodeSpatialIndex(IReadOnlyList<VisualNodePrimitive> nodes, AdaptiveScale scale)
         {
             _nodes = nodes.ToArray();
+            // Quadratic, so bounded: very large pages simply keep no container hints.
+            if (_nodes.Length <= 1500)
+                foreach (var outer in _nodes)
+                {
+                    var bounds = outer.Bounds!;
+                    var area = bounds.Width * bounds.Height;
+                    var inside = 0;
+                    foreach (var inner in _nodes)
+                    {
+                        if (ReferenceEquals(inner, outer)) continue;
+                        var innerBounds = inner.Bounds!;
+                        if (innerBounds.X >= bounds.X && innerBounds.Right <= bounds.Right &&
+                            innerBounds.Y >= bounds.Y && innerBounds.Bottom <= bounds.Bottom &&
+                            innerBounds.Width * innerBounds.Height * 4 <= area && ++inside >= 2) break;
+                    }
+                    if (inside >= 2) _containers.Add(outer.Id);
+                }
             _seen = new int[_nodes.Length];
             _cellSize = Math.Max(1, Math.Max(scale.RayExtension,
                 Math.Max(scale.SafeEndpointRadius, scale.CorridorHalfWidth)));

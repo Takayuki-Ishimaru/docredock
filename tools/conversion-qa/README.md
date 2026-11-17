@@ -36,6 +36,17 @@ python3 tools/conversion-qa/run.py --all --render
 4. **レンダリング (`--render` 指定時のみ)** — 原本を `soffice --headless --convert-to pdf` で PDF 化し、`pdftoppm -png -r 150` で全ページ PNG 化して `<out>/render/original-page-NN.png` に保存する。ページ数に応じて桁数は自動調整 (最小 2 桁)。道具が見つからない場合は **失敗にせず警告してスキップ** する。soffice はあるが pdftoppm が無い場合や、soffice 自体が無い場合は `qlmanage`(QuickLook のサムネイル生成)で 1 ページ目だけのサムネイルにフォールバックする(全ページにはならない旨を warning に明記)。
 5. **レポート出力** — `report.json`(機械可読)と `report.md`(スコア表・fail 項目表・生成物パス一覧)を書く。
 
+## AIパッケージの部分読み取り
+
+このコマンド例では、2026-11-08の評価用ZIPにある240行の試験一覧を使います。全文と検索で選んだ部分の両方から、`REQ-0173` の上限時間「1730ミリ秒」を取得できるか確認します。出典付きの応答では「試験一覧」の `F177` も確認します。
+
+```sh
+python tools/conversion-qa/compare_ai_package.py docredock_v0.3.11_evidence_2026-11-08.zip -- \
+  dotnet src/DocRedock.Cli/bin/Release/net10.0/DocRedock.Cli.dll mcp
+```
+
+`tiktoken` がある場合は、全文、部分本文、検索応答、読み取り応答、詳細出典のトークン数を `o200k_base` で個別に数えます。取得した内容が期待値と一致するかをローカルで検証し、結果をJSONで標準出力に書き出します。短い形式の出典も比較するには、対応するCLIを使い、ZIPの指定と `--` の間に `--compact-sources` を追加します。
+
 ## 出力レイアウト
 
 ```

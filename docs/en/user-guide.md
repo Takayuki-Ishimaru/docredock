@@ -2,13 +2,13 @@
 
 [日本語](../ja/user-guide.md) | English
 
-This guide covers the v0.3.12 Public Beta supported workflow: desktop-GUI conversion of local DOCX, XLSX, PPTX, and PDF files to **Readable Markdown** or an **AI package**.
+This guide covers local conversion of DOCX, XLSX, PPTX, and PDF files to **Readable Markdown**, **Readable HTML**, or an **AI package** in the v0.4.0 Public Beta desktop app.
 
 [Quick guides by task](quick-tasks.md)
 
 ## 1. Get DocRedock
 
-Download the package for your OS/CPU from GitHub Releases and verify the published SHA-256. Self-contained packages do not require a separate .NET SDK.
+Choose the archive for your operating system and CPU and verify the published SHA-256. Extract it to run the app without a separate .NET SDK. [Downloads and launch instructions](../../release-docs/RELEASE_NOTES_v0.4.0.en.md#downloads-and-upgrades)
 
 ## 2. Convert a file
 
@@ -35,9 +35,29 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 Use `--profile roundtrip` explicitly only for the experimental sidecar workflow.
 
+## Readable HTML
+
+Select **Readable HTML** (「閲覧用HTML」) in the app to export a single `.html` file for offline viewing in a browser. The app always enables image embedding for this format.
+
+```sh
+docredock export report.xlsx --format html --content-policy visible
+docredock export slides.pptx -o slides.html
+```
+
+- The HTML embeds supported images as data URIs. It draws supported Mermaid flowcharts and sequence diagrams as SVG and puts the Mermaid source in a collapsible section below each diagram. If a diagram cannot be drawn, the HTML shows its source code.
+- The HTML adds a table of contents when there are enough headings. Table headers use `th` elements with `scope` attributes. The page supports light, dark, and print styles.
+- Merged cells in Word, PowerPoint and PDF tables are written as one cell with `rowspan`/`colspan` in HTML (Markdown cannot express them, so the Markdown keeps writing the value at the merge origin, or repeats a vertical merge in each row). Merged cells in Excel tables currently look the same as in the Markdown.
+- Columns that hold only numbers are right-aligned, a contents list with more than 12 entries starts collapsed, and a table with many columns scrolls sideways on a narrow screen. Source text colors are kept, except that a color that is hard to read on the page background (such as dark gray Word text in dark mode) is shown in the body color in that theme.
+- The file needs no external resources or JavaScript to display. Its Content Security Policy restricts external resource loading and script execution.
+- Content policy, revisions, sheets, OCR, visual inference, language and title options work as for Markdown.
+- Images a browser cannot show (EMF/WMF/TIFF) or that exceed the size limits (25 MiB per image, 200 MiB in total) are replaced by their description and reported as warnings (`HtmlImageNotEmbeddable`, `HtmlImageEmbedSkipped`, `HtmlImageMissing`).
+- Use Readable HTML for viewing and sharing. Keep the original Office document if you need to edit it later. To share specific parts of a document with an AI assistant, choose an AI package.
+
+CLI: `--format markdown|html` (`md` is accepted); `docredock export input.docx --format html` writes `input.html`, and when `--format` is omitted and `--output` ends in `.html`, HTML is chosen. `--images embed` (default for HTML) or `omit`; `--images files` is rejected for HTML. HTML cannot be combined with `--ai-package` or `--profile roundtrip`/`audit` (exit code 2). It works with `--output-dir` batches (one `.html` per input) and with `--output -` (HTML to standard output). `--json` results carry `"output_format": "markdown" | "html" | "ai-package"`. The MCP server's `export_html` tool does the same (see [Quick guides](quick-tasks.md#use-docredock-from-an-mcp-client)).
+
 ## AI packages
 
-**AI packages** are available in v0.3.12. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
+**AI packages** are available in v0.4.0. In the GUI, select **AI package** (「AI向けパッケージ」) and choose a folder or ZIP. Choose the content policy, OCR, and diagram settings as for Readable Markdown, then export. Review `review.md` and the converted content before handing the package to an AI tool. Conversion runs locally; exporting a package does not upload anything.
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -103,6 +123,7 @@ Images remain in `assets/`, so `--embed-images` cannot be combined with `--ai-pa
 | --- | --- | --- |
 | `.md` | Body text, headings, lists, tables, visual semantic projections, notes, and placeholders | Use |
 | `.assets/` | Images and previews referenced by Markdown as visual fallback | Use when generated |
+| `.html` | Readable HTML: one self-contained file with embedded images and inline SVG diagrams (no `.assets/`) | Use; one-way, not restorable |
 | Report/diagnostics | Unresolved connectors, partial projection, fallback, and omission reasons | Always review when warnings exist |
 | `.drmd` | Source/restoration sidecar | Experimental; treat like the source document |
 | `.drmdpkg` | Markdown and restoration data package | Experimental; treat like the source document |

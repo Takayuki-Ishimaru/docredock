@@ -190,6 +190,9 @@ internal static class MermaidSvgPreviewRenderer
             if (note.Success)
                 events.Add(new SequenceEvent("note", note.Groups["from"].Value,
                     note.Groups["to"].Success ? note.Groups["to"].Value : note.Groups["from"].Value, note.Groups["label"].Value, false));
+            // This preview draws only participants, solid and dotted messages and notes. A diagram with anything else
+            // (frames, asynchronous arrows) is left to the general renderer instead of being drawn without it.
+            else if (trimmed.Length > 0 && !message.Success) return null;
         }
         if (participants.Count < 2 || events.Count == 0) return null;
         const double spacing = 185;
@@ -342,13 +345,20 @@ internal static class MermaidSvgPreviewRenderer
         {
             var line = rawLine.Trim();
             if (line.Length == 0) { result.Add(string.Empty); continue; }
-            while (DisplayLength(line) > maxCharacters)
+            // Linear in the label length: walk an offset instead of re-slicing, and only measure the
+            // remainder exactly when it is short enough to be near the limit (every character is at
+            // least 0.6 wide, so a longer remainder certainly exceeds it).
+            var start = 0;
+            while (true)
             {
-                var take = Math.Min(line.Length, maxCharacters);
-                result.Add(line[..take]);
-                line = line[take..];
+                var remaining = line.Length - start;
+                var exceeds = remaining * 0.6 > maxCharacters + 1 || DisplayLength(line.Substring(start)) > maxCharacters;
+                if (!exceeds) break;
+                var take = Math.Min(remaining, maxCharacters);
+                result.Add(line.Substring(start, take));
+                start += take;
             }
-            result.Add(line);
+            result.Add(line.Substring(start));
         }
         return result.Count == 0 ? [string.Empty] : result;
     }

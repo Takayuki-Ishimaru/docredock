@@ -6,12 +6,18 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.4.0 Public Beta
+
+- [v0.4.0 release notes](RELEASE_NOTES_v0.4.0.en.md)
+- [Conversion comparison and HTML research](CONVERSION_REPORT_v0.4.0.en.md)
+- Added Readable HTML and let AI assistants inspect specific parts of an original document. Improved Office diagram and PDF conversion.
+
+## Published releases
+
 ### v0.3.12 Public Beta
 
 - [v0.3.12 release notes](RELEASE_NOTES_v0.3.12.en.md)
 - Improved CLI and OCR diagnostics, Excel recalculation warnings, search, and MCP sources
-
-## Published releases
 
 ### v0.3.11 Public Beta
 

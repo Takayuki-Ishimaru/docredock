@@ -41,8 +41,14 @@ internal static class PdfDocumentGraphProjection
             var consumedLabelBounds = graphNodeIds is null
                 ? null
                 : page.Regions.Where(IsConsumedNodeLabel).Select(region => (region.Text, region.BoundingBox)).ToHashSet();
-            var nodes = page.Regions.Where(_ => includeTextlessPlaceholderNodes || !page.IsImageOnly).Select(region =>
+            // Small shapes drawn left of a line are its bullet when the producer draws bullets rather than types them.
+            var pageTables = extraction.Tables?.GetValueOrDefault(page.PageNumber);
+            var markerShapes = extraction.VisualGraphs?.GetValueOrDefault(page.PageNumber)?.Paths;
+            var blocks = PdfListDetection.Group(page, page.Regions.Where(_ => includeTextlessPlaceholderNodes || !page.IsImageOnly).ToArray(),
+                markerShapes, IsConsumedNodeLabel, pageTables);
+            var nodes = blocks.Select(block =>
             {
+                var region = block.Region;
                 var isVisualMember = IsConsumedNodeLabel(region);
                 var extensions = isVisualMember
                     ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -69,20 +75,25 @@ internal static class PdfDocumentGraphProjection
                         extensions["pdf_furniture_position"] = JsonSerializer.SerializeToElement(
                             region.BoundingBox.Y > box.Y + box.Height / 2 ? "header" : "footer");
                 }
-                var headingLevel = PdfPageProjection.HeadingLevel(page, region);
+                var headingLevel = block.List is null ? PdfPageProjection.HeadingLevel(page, region, pageTables) : 0;
                 if (headingLevel > 0)
                     (extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal))["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
+                if (block.List is not null) PdfPageProjection.AddListExtensions(block.List, ref extensions);
                 PdfPageProjection.AddContinuation(region, ref extensions);
                 return new DocumentNode(
-                $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, region.ReadingOrder,
+                $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}",
+                block.List is not null ? NodeKind.ListItem : headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, region.ReadingOrder,
                 region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text),
                 new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                 Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
                 Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)], Extensions: extensions);
             }).ToList();
-            if (extraction.Tables?.GetValueOrDefault(page.PageNumber) is { Count: > 0 } tables)
+            // Items that wrap into one leave gaps in the numbering; keep it a total order that markers appended below can follow.
+            if (blocks.Any(block => block.Count > 1))
+                nodes = nodes.OrderBy(node => node.Order).Select((node, order) => node with { Order = order }).ToList();
+            if (pageTables is { Count: > 0 } tables)
             {
-                nodes = PdfPageProjection.ToDocumentNodes(page, tables).Select(projected =>
+                nodes = PdfPageProjection.ToDocumentNodes(page, tables, 0, markerShapes, IsConsumedNodeLabel).Select(projected =>
                 {
                     var extensions = projected.Extensions is null
                         ? new Dictionary<string, JsonElement>(StringComparer.Ordinal)
@@ -99,10 +110,55 @@ internal static class PdfDocumentGraphProjection
                     };
                 }).ToList();
             }
+            // The images the extractor decoded are image nodes with assets, as Word's pictures are, each at the
+            // reading position of the rectangle the page draws it in. A tagged PDF's figure descriptions (/Alt) name
+            // them when there is one for every image of the page (in the reading order they are read in).
+            var descriptions = page.ImageDescriptions;
+            var imageTotal = (page.ExtractedImages?.Count ?? 0) + page.EmbeddedImageCount;
+            IReadOnlyList<string>? remainingDescriptions = page.ImageDescriptions;
+            if (!page.IsImageOnly && page.ExtractedImages is { Count: > 0 } extractedImages)
+            {
+                var reading = extractedImages.Select(image => (Bounds: image.Bounds, Extracted: true))
+                    .Concat((page.EmbeddedImages ?? []).Select(bounds => (Bounds: bounds, Extracted: false)))
+                    .OrderByDescending(item => item.Bounds.Y + item.Bounds.Height).ThenBy(item => item.Bounds.X).ToArray();
+                var matched = descriptions is { Count: > 0 } && descriptions.Count == imageTotal && reading.Length == imageTotal;
+                if (matched)
+                    remainingDescriptions = descriptions!.Where((_, position) => !reading[position].Extracted).ToArray();
+                for (var position = 0; position < extractedImages.Count; position++)
+                {
+                    var image = extractedImages[position];
+                    var number = position + 1;
+                    var described = matched
+                        ? descriptions![Array.FindIndex(reading, item => item.Extracted && ReferenceEquals(item.Bounds, image.Bounds))]
+                        : null;
+                    var imageExtensions = new Dictionary<string, JsonElement>(StringComparer.Ordinal)
+                    {
+                        ["pdf_embedded_image"] = JsonSerializer.SerializeToElement(true),
+                        ["pdf_extracted_image"] = JsonSerializer.SerializeToElement(true),
+                        ["pdf_image_index"] = JsonSerializer.SerializeToElement(number),
+                        ["pdf_embedded_image_rect"] = JsonSerializer.SerializeToElement(
+                            new[] { image.Bounds.X, image.Bounds.Y, image.Bounds.Width, image.Bounds.Height }),
+                        ["image_media_type"] = JsonSerializer.SerializeToElement(image.MediaType),
+                        // The size the page draws the picture at, in CSS pixels (96 per inch; a point is 1/72 inch).
+                        ["display_width_px"] = JsonSerializer.SerializeToElement(Math.Round(image.DrawnWidth * 96 / 72, 2)),
+                        ["display_height_px"] = JsonSerializer.SerializeToElement(Math.Round(image.DrawnHeight * 96 / 72, 2)),
+                        ["image_pixel_width"] = JsonSerializer.SerializeToElement(image.PixelWidth),
+                        ["image_pixel_height"] = JsonSerializer.SerializeToElement(image.PixelHeight),
+                    };
+                    var imageNode = new DocumentNode(
+                        $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_image_{number}", NodeKind.Image, null, nodes.Count,
+                        ContentLayer.Body, new ReferenceNodeContent(image.AssetKey, described ?? $"Image {number} on page {page.PageNumber}"),
+                        new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("embedded_image", number.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
+                        Geometry: image.Bounds, Editability: NodeEditability.RenderOnly,
+                        Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: image.Bounds)],
+                        Extensions: imageExtensions);
+                    nodes = InsertAtReadingPosition(nodes, imageNode, image.Bounds);
+                }
+            }
             // A page that mixes native text with an embedded image used to drop the image without
             // leaving anything behind - no link, no asset, no diagnostic - because only textless
-            // pages were ever treated as image-bearing. Record what is missing at the image's own
-            // reading position; the OCR path replaces this node with the rasterized page.
+            // pages were ever treated as image-bearing. What could not be decoded is recorded at
+            // its own reading position; the OCR path replaces this node with the rasterized page.
             if (!page.IsImageOnly && page.EmbeddedImageCount > 0)
             {
                 var bounds = MergeBounds(page.EmbeddedImages);
@@ -116,7 +172,7 @@ internal static class PdfDocumentGraphProjection
                     Extensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal)
                     {
                         ["pdf_embedded_image_placeholder"] = JsonSerializer.SerializeToElement(true),
-                        ["pdf_image_descriptions"] = JsonSerializer.SerializeToElement(page.ImageDescriptions ?? []),
+                        ["pdf_image_descriptions"] = JsonSerializer.SerializeToElement(remainingDescriptions ?? []),
                         ["pdf_embedded_image_count"] = JsonSerializer.SerializeToElement(page.EmbeddedImageCount)
                     });
                 nodes = InsertAtReadingPosition(nodes, placeholder, bounds);

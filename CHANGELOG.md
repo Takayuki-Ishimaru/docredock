@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.4.0]
+
+- Added Readable HTML for offline viewing, with embedded images, SVG diagrams, print styles, and a table of contents when the document has enough headings.
+- Added setup for Claude Code, GitHub Copilot, and Codex, plus commands to read specific worksheet ranges, slides, PDF pages, and images from the original.
+- Improved PDF column reading order, lists, tables that span pages, and embedded image extraction.
+- Improved Office flowchart conversion and added support for some sequence diagrams. Available shape text is preserved when a diagram cannot be converted.
+- Added the `output_format` field to CLI export JSON. AI package schemas are unchanged.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.4.0.en.md) · [Conversion comparison and HTML report](release-docs/CONVERSION_REPORT_v0.4.0.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.4.0.md) · [変換比較・HTML出力レポート](release-docs/CONVERSION_REPORT_v0.4.0.md)
+
 ## [0.3.12]
 
 - Report failed inputs individually in export JSON and provide a top-level error when arguments prevent input identification.

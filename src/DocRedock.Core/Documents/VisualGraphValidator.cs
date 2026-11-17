@@ -44,9 +44,12 @@ public static class VisualGraphValidator
             if (!string.IsNullOrWhiteSpace(edge.Id) && !edgeIds.Add(edge.Id)) Error("VisualEdgeIdDuplicate", $"Visual edge ID '{edge.Id}' is duplicated.", edge.SourceNodeId);
             var resolved = edge.SourceId is not null || edge.TargetId is not null;
             if (!resolved) continue;
+            // A sequence diagram repeats messages and sends them to itself; its labels are the participants' own words.
+            var sequenceMessage = SequenceVisualConventions.IsMessage(edge);
             if (string.IsNullOrWhiteSpace(edge.SourceId) || string.IsNullOrWhiteSpace(edge.TargetId) ||
                 !nodeIds.Contains(edge.SourceId) || !nodeIds.Contains(edge.TargetId))
                 Error("VisualEdgeReferenceInvalid", $"Visual edge '{edge.Id}' references a missing endpoint.", edge.SourceNodeId);
+            else if (sequenceMessage) { }
             else if (StringComparer.Ordinal.Equals(edge.SourceId, edge.TargetId))
                 Error("VisualSelfEdge", $"Visual edge '{edge.Id}' is a self edge.", edge.SourceNodeId);
             else
@@ -60,7 +63,7 @@ public static class VisualGraphValidator
                 if (!semanticEdges.Add(semanticKey))
                     Error("VisualEdgeDuplicate", $"Visual edge '{edge.Id}' duplicates an existing semantic relation.", edge.SourceNodeId);
             }
-            if (!string.IsNullOrWhiteSpace(edge.Label) && nodeLabels.Contains(edge.Label.Trim()))
+            if (!sequenceMessage && !string.IsNullOrWhiteSpace(edge.Label) && nodeLabels.Contains(edge.Label.Trim()))
                 Error("VisualEdgeLabelReusedAsNode", $"Visual edge '{edge.Id}' reuses a promoted node label as its edge label.", edge.SourceNodeId);
             if (edge.Resolution is VisualEdgeResolution.GeometryInferred or VisualEdgeResolution.LayoutInferred &&
                 edge.Confidence is < MinimumInferredEdgeConfidence)

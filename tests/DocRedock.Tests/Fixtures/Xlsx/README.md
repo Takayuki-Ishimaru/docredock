@@ -106,3 +106,14 @@ normalized (zip member timestamps fixed to 1980-01-01, `cp:lastModifiedBy`/
 NOT produced by the generator — see the repo's session notes for whether
 this variant was successfully captured on the machine that ran the
 generator, and what Excel-added XML (if any) it revealed.
+
+## diagram-sequence-oidc.xlsx and diagram-flowchart-approval.xlsx (drawn diagrams)
+
+These synthetic fixtures were created for the 2026-11-13 diagram benchmark.
+`diagram-sequence-oidc.xlsx` represents a sequence diagram with 123
+DrawingML shapes (participant boxes, dashed lifelines, message connectors with
+text box labels, activation bars, and `alt`, `opt`, and `loop` frames).
+`diagram-flowchart-approval.xlsx` contains a four-lane flowchart. The branch
+labels (はい / いいえ / 再申請) are text boxes beside the connectors.
+`XlsxDrawnDiagramTests` checks that Mermaid output contains a
+`sequenceDiagram` and a swimlane flowchart with labeled arrows, respectively.
