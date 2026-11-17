@@ -92,22 +92,22 @@ public sealed class ReadableHtmlWriterReviewTests
     [Fact]
     public void Mermaid_preview_output_is_unchanged_by_the_linear_label_wrapping()
     {
-        // Hashes captured from the previous (quadratic) WrapLabel implementation.
+        // Baseline captured from the previous (quadratic) WrapLabel implementation, with LF line endings.
         var cases = new (string Source, string Hash)[]
         {
             ("flowchart LR\n    N_A1[\"Short\"]\n    N_B2[\"A rather long label that needs wrapping across several lines indeed\"]\n    N_A1 -->|edge label that is also long enough to wrap| N_B2",
-                "DD9B4CA991D319EA9CF91E869524CF15FAA359C2CCBF9F4F5D0EC9814536FCFE"),
+                "AA14060637C32761C40810F907F17EA08781DD7D5348EE2C2B520D691BD5D0C6"),
             ("flowchart LR\n    N_A1[\"日本語のとても長いラベルがここに入ります。折り返しが必要になるはずです。\"]\n    N_B2[\"line1<br/>line two is longer than twenty-three chars<br>x\"]\n    N_A1 --> N_B2",
-                "3F3C65B7094B3E1C4CDD907D9D858B3D3270B3643B4ABD8C53EF3115ED0AF4B0"),
+                "4B9982E2E8ABDE1428C94E48398B8A5B680DF9C44D261F3724123C37BBE65D7C"),
             ("sequenceDiagram\n    participant P1 as Alice the very long participant name\n    participant P2 as B\n    P1->>P2: a message with a quite long label to wrap over lines\n    Note over P1,P2: note text that is long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long",
-                "183109AA8D3C1E703823E61E2DB381834B94D53E6B3A8C76BE43DCF457AC4792"),
+                "F5305C41BEFDA30EAA8C458BE7E7368BB9A4C1FAF4F798E42194DB00427F67DD"),
             ("stateDiagram-v2\n    state \"A state with a long description here\" as S_1\n    [*] --> S_1\n    S_1 --> [*]",
-                "2C5135F1ED75F4F8B62B2900FEA1EA769CBFA191CADD109CC381ACD095D42EA9"),
+                "3ED3FA7DAAC36C0F9543E6F72B6C39CCDB3FC6664B583393DCC2E336AD9B1785"),
             ("flowchart LR\n    N_A1[\"" + new string('x', 23) + "\"]\n    N_B2[\"" + new string('y', 38) + "\"]\n    N_C3[\"" + new string('z', 39) + "\"]\n    N_A1 --> N_B2\n    N_B2 --> N_C3",
-                "9F68394882F14A83756F096D47C1E2083CFF5CED2AE4991207A7162D06C80137"),
+                "95D8CB9A9B7FE862B01D9747F23443F94A7ABC75B74248A3E5C6DC277100130C"),
         };
         foreach (var (source, hash) in cases)
-            Assert.Equal(hash, Sha(PreviewSvg(source) ?? "null"));
+            Assert.Equal(hash, Sha(PreviewSvg(source)?.ReplaceLineEndings("\n") ?? "null"));
     }
 
     [Fact]
