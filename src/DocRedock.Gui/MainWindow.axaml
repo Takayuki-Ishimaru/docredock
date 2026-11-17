@@ -272,21 +272,6 @@
               </RadioButton>
             </StackPanel>
 
-            <Border x:Name="ContentPolicyPanel" Classes="workspace-card">
-              <StackPanel Spacing="6">
-                <TextBlock Text="Markdownに含める内容" Classes="section-label" />
-                <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
-                          AutomationProperties.Name="内容の公開範囲">
-                  <ComboBoxItem Content="表示中の内容（推奨・変更履歴は印付き）" Tag="visible"
-                                ToolTip.Tip="画面に表示される内容だけを書き出します。Wordの変更履歴は、削除した文字も含めて &lt;del&gt; と &lt;ins&gt; の印付きで出力します。削除した文字を含めないときは、詳細設定の変更履歴で「最終版のみ」を選ぶか、結果の「最終版で書き出し直す」を使ってください。" />
-                  <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
-                  <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
-                </ComboBox>
-                <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
-                           Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
-              </StackPanel>
-            </Border>
-
             <StackPanel x:Name="AiPackageOptionsPanel" Spacing="8" IsVisible="False">
               <TextBlock Text="分割を確認" Classes="section-label" />
               <CheckBox x:Name="TableRowBlocksCheckBox" IsChecked="False" IsCheckedChanged="OnSettingsChanged"
@@ -310,6 +295,21 @@
                 </ComboBox>
               </Grid>
             </StackPanel>
+
+            <Border x:Name="ContentPolicyPanel" Classes="workspace-card">
+              <StackPanel Spacing="6">
+                <TextBlock Text="Markdownに含める内容" Classes="section-label" />
+                <ComboBox x:Name="ContentPolicyComboBox" SelectedIndex="0" SelectionChanged="OnContentPolicyChanged"
+                          AutomationProperties.Name="内容の公開範囲">
+                  <ComboBoxItem Content="表示中の内容（推奨・変更履歴は印付き）" Tag="visible"
+                                ToolTip.Tip="画面に表示される内容だけを書き出します。Wordの変更履歴は、削除した文字も含めて &lt;del&gt; と &lt;ins&gt; の印付きで出力します。削除した文字を含めないときは、詳細設定の変更履歴で「最終版のみ」を選ぶか、結果の「最終版で書き出し直す」を使ってください。" />
+                  <ComboBoxItem Content="非表示内容も含める" Tag="complete" />
+                  <ComboBoxItem Content="プライバシー優先" Tag="sanitized" />
+                </ComboBox>
+                <TextBlock x:Name="CompletePolicyWarning" IsVisible="False" Classes="error caption" TextWrapping="Wrap"
+                           Text="注意: Officeアプリで非表示の文字、シート、行・列、スライド、ノート、コメント等や、PDFの表示範囲外・非表示レイヤーの文字もMarkdownへ含まれます。共有前に必ず内容を確認してください。" />
+              </StackPanel>
+            </Border>
 
             <Border Classes="workspace-card">
               <StackPanel Spacing="8">

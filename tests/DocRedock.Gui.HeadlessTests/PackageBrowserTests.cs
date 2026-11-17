@@ -257,10 +257,13 @@ public sealed class PackageBrowserTests
             await WaitForPreview("予想: 1分割");
             rowBlocks.IsChecked = true;
             await WaitForPreview("予想: 12分割");
+            window.UpdateLayout();
             AvaloniaHeadlessPlatform.ForceRenderTimerTick();
             var previewBottom = preview.TranslatePoint(new Point(0, preview.Bounds.Height), window)!.Value.Y;
             var actionTop = window.FindControl<Border>("ExportActionBar")!.TranslatePoint(default, window)!.Value.Y;
-            Assert.True(previewBottom < actionTop, "The split estimate must be visible above the action bar at the default window size.");
+            Assert.True(previewBottom < actionTop,
+                $"The split estimate must be visible above the action bar at the default window size ({window.Bounds.Size}). " +
+                $"Estimate bottom: {previewBottom}, action bar top: {actionTop}.");
             SaveFrame(window, "package-options.png");
             Assert.NotNull(window.FindControl<Button>("ReadPackageButton"));
             for (var parent = options.Parent; parent is not null; parent = parent.Parent)
