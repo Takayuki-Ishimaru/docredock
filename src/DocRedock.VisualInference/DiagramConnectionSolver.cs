@@ -10,7 +10,7 @@ public sealed record ConnectionAssignment(
 public static class DiagramConnectionSolver
 {
     public static ConnectionAssignment Solve(IReadOnlyList<IReadOnlyList<ConnectionPairCandidate>> alternatives,
-        int maxConnectors = 40, int beamWidth = 128)
+        int maxConnectors = 40, int beamWidth = 128, IReadOnlySet<string>? reservedRelationKeys = null)
     {
         var rows = alternatives.Take(maxConnectors)
             .Select(row => row.OrderByDescending(x => x.IsNative).ThenByDescending(x => x.Score)
@@ -29,7 +29,7 @@ public static class DiagramConnectionSolver
             .ToArray();
         var states = new List<(double Score, List<ConnectionPairCandidate> Items, HashSet<string> Used, string Signature)>
         {
-            (0, [], new(StringComparer.Ordinal), string.Empty)
+            (0, [], new(reservedRelationKeys ?? new HashSet<string>(), StringComparer.Ordinal), string.Empty)
         };
         foreach (var row in rows)
         {
@@ -60,7 +60,8 @@ public static class DiagramConnectionSolver
             second.Items is null ? null : [.. second.Items, .. overflow]);
     }
 
-    private static string? RelationKey(ConnectionPairCandidate candidate)
+    /// <summary>The identity of a resolved relation; two connectors with the same key describe the same edge.</summary>
+    internal static string? RelationKey(ConnectionPairCandidate candidate)
     {
         if (candidate.SourceId is null || candidate.TargetId is null) return null;
         if (candidate.Direction is ConnectionDirection.Unknown or ConnectionDirection.Bidirectional)

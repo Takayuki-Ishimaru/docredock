@@ -2,13 +2,13 @@
 
 日本語 | [English](../en/user-guide.md)
 
-このガイドは、v0.3.12 Public Betaでサポートする、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**へのローカル変換を説明します。
+このガイドは、v0.4.0 Public BetaのデスクトップGUIで、DOCX／XLSX／PPTX／PDFを**閲覧用Markdown**、**閲覧用HTML**、**AI向けパッケージ**にローカルで変換する方法を説明します。
 
 [目的別クイックガイド](quick-tasks.md)
 
 ## 1. 入手する
 
-GitHub ReleasesからOS／CPUに合うパッケージを取得し、公開されたSHA-256を確認します。自己完結型パッケージには別途.NET SDKは不要です。
+OSとCPUに合う配布物を選び、公開されたSHA-256を確認します。展開したアプリは別途.NET SDKを入れずに起動できます。[ダウンロードと起動の案内](../../release-docs/RELEASE_NOTES_v0.4.0.md#ダウンロードと更新)
 
 ## 2. 変換する
 
@@ -35,9 +35,29 @@ docredock export input.docx --content-policy visible --visual-inference safe --o
 
 実験的なサイドカー往復処理を使う場合だけ`--profile roundtrip`を明示します。
 
+## 閲覧用HTML
+
+アプリで「閲覧用HTML」を選ぶと、ブラウザーでオフラインでも開ける `.html` ファイルを1つ書き出します。アプリでは、閲覧用HTMLを選ぶと画像の埋め込みが常に有効になります。
+
+```sh
+docredock export report.xlsx --format html --content-policy visible
+docredock export slides.pptx -o slides.html
+```
+
+- 対応する画像はデータURIとしてHTMLに埋め込みます。Mermaidのフローチャートやシーケンス図はSVGで描画し、その下の折りたたみ欄にMermaidのソースを収めます。描画できない図はソースコードだけを表示します。
+- 見出しが一定数あれば目次が付きます。表の見出しには `th` 要素と `scope` 属性を使います。ライト／ダーク表示と印刷用の書式に対応します。
+- Word・PowerPoint・PDFの表の結合セルは、HTMLでは`rowspan`／`colspan`の1つのセルとして書きます（Markdownでは表せないため、Markdownでは従来どおり結合元にだけ値を書くか、縦の結合を各行に繰り返します）。Excelの表の結合セルは、現在はMarkdownと同じ形です。
+- 数値だけの列は右寄せになり、13項目以上の目次は折りたたんだ状態で表示します。列の多い表は、狭い画面では横にスクロールします。元の文字色はそのまま使いますが、背景に対して読みにくい色（ダークモードでのWordの暗い灰色の文字など）は、そのテーマでは本文の色で表示します。
+- 閲覧に外部リソースやJavaScriptは不要です。HTMLのContent Security Policyは、外部リソースの読み込みとスクリプトの実行を制限します。
+- 内容ポリシー、変更履歴、シート、OCR、図の接続推定、言語、タイトルの設定は、Markdownと共通です。
+- ブラウザーで表示できない画像（EMF／WMF／TIFF）や、サイズ上限（1枚25 MiB、合計200 MiB）を超える画像は、説明文に置き換えて警告（`HtmlImageNotEmbeddable`、`HtmlImageEmbedSkipped`、`HtmlImageMissing`）で報告します。
+- 閲覧や共有にはHTMLを使い、Office文書を後から編集する場合は原本を保管してください。AIに文書の一部を渡す場合は、AI向けパッケージを選べます。
+
+CLIでは`--format markdown|html`を指定します（`md`も使えます）。`docredock export input.docx --format html`は`input.html`を書き出し、`--format`を省略して`--output`が`.html`で終わるときもHTMLになります。`--images embed`（HTMLの既定）または`omit`を選べ、HTMLで`--images files`は指定できません。`--ai-package`、`--profile roundtrip`／`audit`とは併用できません（終了コード2）。`--output-dir`による一括変換（入力ごとに1つの`.html`）と、`--output -`（標準出力へHTML）にも対応します。`--json`の結果には`"output_format": "markdown" | "html" | "ai-package"`が付きます。MCPサーバーの`export_html`ツールも同じ変換を行います（[目的別ガイド](quick-tasks.md#mcpクライアントから使う)を参照）。
+
 ## AI向けパッケージ
 
-v0.3.12では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
+v0.4.0では、**AI向けパッケージ**を利用できます。GUIで「AI向けパッケージ」を選び、出力形式をフォルダーまたはZIPに設定します。対象内容、OCR、図の設定は閲覧用Markdownと共通です。書き出した内容と`review.md`を確認してからAIに渡してください。変換はローカルで完結し、パッケージの生成でファイルがアップロードされることはありません。
 
 ```sh
 docredock export input.docx --ai-package dir --content-policy visible --ocr off
@@ -103,6 +123,7 @@ AIへの依頼ごとに`document.md`と`source-index.json`の両方を渡す必�
 | --- | --- | --- |
 | `.md` | 本文、見出し、リスト、表、図のsemantic projection／注記／placeholder | 使用する |
 | `.assets/` | Markdownから参照する画像、preview等のvisual fallback | 生成された場合に使用する |
+| `.html` | 閲覧用HTML。画像とインラインSVGの図を埋め込んだ単一ファイル（`.assets/`なし） | 使用可。一方向で復元不可 |
 | report／diagnostic | 未解決connector、partial projection、fallback、欠落理由等 | Warning時は必ず確認する |
 | `.drmd` | 元文書／復元用サイドカー | 実験用。元文書と同じ機密区分で扱う |
 | `.drmdpkg` | Markdownと復元情報のパッケージ | 実験用。元文書と同じ機密区分で扱う |

@@ -133,7 +133,10 @@ public sealed record VisualSourceItem(
     string? DuplicateOfSourceItemId = null,
     string? Reason = null,
     SourceAnchor? SourceAnchor = null);
-public sealed record VisualGroup(string Id, string? Label = null, IReadOnlyList<string>? NodeIds = null, string? Lane = null);
+/// <param name="Geometry">The extent the group frames (a swimlane, a sequence-diagram fragment frame), in the
+/// coordinate space of its nodes, when the source draws one.</param>
+public sealed record VisualGroup(string Id, string? Label = null, IReadOnlyList<string>? NodeIds = null, string? Lane = null,
+    Geometry? Geometry = null);
 public sealed record VisualGraphAccounting(int RecognizedNodes, int RecognizedEdges, int ResolvedEdges, int UnresolvedEdges, int Diagnostics,
     int RecognizedPaths = 0, int ProjectedPaths = 0, int FallbackPaths = 0)
 {

@@ -57,15 +57,21 @@ public static class PdfPageProjection
     // Mincho body of 10.5 - is a short line of its own in another face or in bold, that ends no sentence.
     private const int MaxStyledHeadingLength = 40;
 
-    public static int HeadingLevel(PdfPageText page, PdfTextRegion region)
+    public static int HeadingLevel(PdfPageText page, PdfTextRegion region, IReadOnlyList<PdfTable>? tables = null)
     {
         ArgumentNullException.ThrowIfNull(page);
         ArgumentNullException.ThrowIfNull(region);
         if (region.IsPageFurniture || region.FontSize is not > 0 || region.Text.Length is 0 or > 120 ||
             region.Text.TrimEnd().EndsWith('.')) return 0;
-        var metrics = HeadingSizes.GetValue(page, static source =>
+        var metrics = HeadingSizes.GetValue(page, source =>
         {
-            var body = source.Regions.Where(item => item.FontSize > 0 && item.Text.Length >= 20 && !item.IsPageFurniture).ToArray();
+            // Text of a recognised table (set smaller than the body) is no measure of the body - unless the page has too
+            // few lines outside its tables to tell the body by (a page that is mostly a table): it is then measured as
+            // before, tables and all, rather than left without a body size its headings could be judged against.
+            var tableIds = PdfTextAccounting.TableSourceIds(tables);
+            var lines = source.Regions.Where(item => item.FontSize > 0 && item.Text.Length >= 20 && !item.IsPageFurniture).ToArray();
+            var outside = lines.Where(item => !PdfTextAccounting.IsTableOwned(item, tableIds)).ToArray();
+            var body = outside.Length >= 3 ? outside : lines;
             var sizes = body.Select(item => item.FontSize!.Value).Order().ToArray();
             // The face and the weight of most of the body's text; none when no one face sets most of it.
             var family = body.GroupBy(item => item.FontFamily).OrderByDescending(group => group.Sum(item => item.Text.Length))
@@ -83,14 +89,60 @@ public static class PdfPageProjection
             text[^1] is '。' or '．' or '.' or '、' or ',' or '：' or ':' || IsListItem(text)) return 0;
         var styled = region.IsBold && !metrics.BodyBold ||
             region.FontFamily is { } family && metrics.BodyFamily is { } bodyFamily && !StringComparer.OrdinalIgnoreCase.Equals(family, bodyFamily);
+        // A bold or differently set cell of a row of cells is no heading, however short: a heading has its line to itself.
+        if (styled && SharesRow(page, region)) return 0;
         return !styled ? 0 : region.FontSize >= textSize * 1.1 ? 2 : 3;
+    }
+
+    private const int MaxRowMateLength = 80;
+
+    /// <summary>Whether most of the lines in the column <paramref name="region"/> stands in are short, as the lines of the cells of a
+    /// table are and the paragraphs of a column of prose are not.</summary>
+    private static bool IsCellColumn(PdfPageText page, PdfTextRegion region)
+    {
+        var mates = page.Regions.Where(other => !other.IsPageFurniture && other.ReadingColumn == region.ReadingColumn).ToArray();
+        return mates.Length >= 3 && 4 * mates.Count(other => other.Text.Length <= MaxRowMateLength) >= 3 * mates.Length;
+    }
+
+    /// <summary>Whether a short line stands on the baseline of another short line of the page, in the same column of text:
+    /// two cells of a row of a table the page draws without rulings, or the label and the value of a form.</summary>
+    private static bool SharesRow(PdfPageText page, PdfTextRegion region)
+    {
+        var size = region.FontSize!.Value;
+        foreach (var other in page.Regions)
+        {
+            if (ReferenceEquals(other, region) || other.IsPageFurniture || other.FontSize is not > 0 ||
+                other.Text.Length == 0 || other.Text.Length > MaxRowMateLength) continue;
+            if (Math.Abs(other.BoundingBox.Y - region.BoundingBox.Y) > size * 0.35) continue;
+            // Side-by-side columns of prose are not cells; columns of nothing but short lines are, if a table has not been made of them.
+            if (region.ReadingColumn is { } column && other.ReadingColumn is { } otherColumn && column != otherColumn &&
+                !(IsCellColumn(page, region) && IsCellColumn(page, other))) continue;
+            var gapRight = other.BoundingBox.X - (region.BoundingBox.X + region.BoundingBox.Width);
+            var gapLeft = region.BoundingBox.X - (other.BoundingBox.X + other.BoundingBox.Width);
+            // The two do not overlap (text across one another is one line, not two cells).
+            if (Math.Max(gapRight, gapLeft) >= 0) return true;
+        }
+        return false;
     }
 
     private static bool IsListItem(string text) =>
         text.Length > 1 && (text[0] is '・' or '•' or '-' or '*' or '●' or '■' || char.IsDigit(text[0]) && text.Length > 2 && text[1] is ')' or '）');
 
+    /// <summary>The extensions of a list item as Word's list items name them: "list_level" and, for a numbered one,
+    /// "list_format" and "list_number".</summary>
+    public static void AddListExtensions(PdfListInfo list, ref Dictionary<string, JsonElement>? extensions)
+    {
+        ArgumentNullException.ThrowIfNull(list);
+        extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        extensions["list_level"] = JsonSerializer.SerializeToElement(list.Level);
+        if (!list.Ordered) return;
+        extensions["list_format"] = JsonSerializer.SerializeToElement("ordered");
+        extensions["list_number"] = JsonSerializer.SerializeToElement(list.Number);
+    }
+
     public static IReadOnlyList<DocumentNode> ToDocumentNodes(PdfPageText page,
-        IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0)
+        IReadOnlyList<PdfTable>? tables = null, int startingOrder = 0, IReadOnlyList<VisualPath>? shapes = null,
+        Func<PdfTextRegion, bool>? notListItem = null)
     {
         ArgumentNullException.ThrowIfNull(page);
         tables ??= [];
@@ -127,18 +179,21 @@ public static class PdfPageProjection
         }).OrderBy(placement => placement.Position).ThenByDescending(placement => placement.Table.Bounds.Y).ToArray();
 
         var nodes = new List<DocumentNode>();
-        var flowIndex = 0;
+        var blocks = PdfListDetection.Group(page, flow, shapes, notListItem, tables);
+        var blockIndex = 0;
         void EmitFlowUpTo(int exclusiveEnd)
         {
-            while (flowIndex < exclusiveEnd)
+            while (blockIndex < blocks.Count && blocks[blockIndex].FirstIndex < exclusiveEnd)
             {
-                var region = flow[flowIndex++];
+                var block = blocks[blockIndex++];
+                var region = block.Region;
                 var order = startingOrder + nodes.Count;
                 Dictionary<string, JsonElement>? extensions = null;
                 if (StrikeRanges(region) is { } struck) (extensions ??= [])["strike_ranges"] = struck;
                 if (UnderlineRanges(region) is { } underlined) (extensions ??= [])["underline_ranges"] = underlined;
-                var headingLevel = HeadingLevel(page, region);
+                var headingLevel = block.List is null ? HeadingLevel(page, region, tables) : 0;
                 if (headingLevel > 0) (extensions ??= [])["heading_level"] = JsonSerializer.SerializeToElement(headingLevel);
+                if (block.List is not null) AddListExtensions(block.List, ref extensions);
                 if (region.IsPageFurniture)
                 {
                     (extensions ??= [])["pdf_page_furniture"] = JsonSerializer.SerializeToElement(true);
@@ -149,7 +204,7 @@ public static class PdfPageProjection
                             region.BoundingBox.Y > box.Y + box.Height / 2 ? "header" : "footer");
                 }
                 AddContinuation(region, ref extensions);
-                nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, order,
+                nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", block.List is not null ? NodeKind.ListItem : headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, order,
                     region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));
             }
@@ -168,6 +223,7 @@ public static class PdfPageProjection
                 ["pdf_table_columns"] = JsonSerializer.SerializeToElement(table.Rows.SelectMany(row => row.Cells)
                     .SelectMany(cell => new[] { cell.Bounds.X, cell.Bounds.X + cell.Bounds.Width }).Distinct().Order().ToArray())
             };
+            if (table.BottomRowCut) extensions["pdf_table_bottom_cut"] = JsonSerializer.SerializeToElement(true);
             if ((page.CropBox ?? page.MediaBox) is { } pageBox)
                 extensions["pdf_page_box"] = JsonSerializer.SerializeToElement(pageBox);
             // P-Overlay: ReadableMarkdownSerializer.ApplyTableOverlays is already format-neutral --

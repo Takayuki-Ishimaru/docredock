@@ -8,19 +8,28 @@ using DocRedock.Api;
 namespace DocRedock.Cli;
 
 /// <summary>The MCP server of <c>docredock mcp</c>: JSON-RPC 2.0 over a pair of text streams (the MCP stdio transport,
-/// one JSON message a line) whose five tools run the CLI's own export and package commands in this process. Only
+/// one JSON message a line) whose seven tools run the CLI's own export, package and source commands in this process. Only
 /// protocol messages are written to the output; everything else goes to the log.</summary>
-public sealed class McpServer(TextReader input, TextWriter output, TextWriter log, DocumentService? documentService = null)
+public sealed class McpServer(TextReader input, TextWriter output, TextWriter log, DocumentService? documentService = null,
+    long maxInlineImageBytes = McpServer.MaxInlineImageBytes)
 {
     public const string LatestProtocolVersion = "2025-06-18";
+
+    /// <summary>The largest picture read_source returns as an image content block; a larger one is only saved to a file.</summary>
+    public const long MaxInlineImageBytes = 5 * 1024 * 1024;
+
+    // The picture types an MCP client can be handed as an image content block (the CLI saves every type).
+    private static readonly string[] InlineImageTypes = ["image/png", "image/jpeg", "image/gif", "image/webp"];
     private static readonly string[] ProtocolVersions = [LatestProtocolVersion, "2025-03-26", "2024-11-05"];
     // The same encoder as the CLI's JSON: Japanese stays readable instead of becoming \uXXXX escapes.
     private static readonly JsonSerializerOptions Json = new() { Encoder = JavaScriptEncoder.Create(UnicodeRanges.All) };
     private const int DefaultMaxCharacters = 40_000;
 
     private const string Instructions =
-        "Use export_markdown to read a document (Word, Excel, PowerPoint, or PDF with allow_pdf) that fits in the conversation. " +
-        "For a large document use export_ai_package, then package_review, package_search and package_read to read it part by part. " +
+        "Convert a document (Word, Excel, PowerPoint, or PDF with allow_pdf) with export_markdown first, or with export_ai_package for a large document " +
+        "(then package_review, package_search and package_read to read it part by part). " +
+        "When the result's attention lists source_review for a part you need, or failed or empty_output, or the Markdown lacks what you need, call read_source to read only that piece of the original (a sheet range, slide, page, node or part), never the whole file; warnings, tracked changes or hidden content alone are no reason to read the original. " +
+        "When a question depends on what a picture shows (text in a screenshot or a figure), call read_source with image (the id from the Markdown placeholder or OCR table, such as img-0002) instead of extracting the picture yourself; add ocr: true when you cannot read images. " +
         "package_search and package_read withhold the text of a package that needs review until a person has checked package_review and allow_review is passed.";
 
     // JSON-RPC 2.0 error codes.
@@ -62,6 +71,9 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             ["path"], [.. ExportOptions,
                 new("max_chars", "integer", "Most characters of Markdown to return in the reply. Default: 40000. The file in output_dir always holds all of it.", Minimum: 1),
                 OverwriteParameter]),
+        new("export_html",
+            "Converts one document (Word, Excel, PowerPoint, or PDF with allow_pdf) to one self-contained HTML file with the images embedded in it (for a person to open in a browser; nothing is loaded from the network and no script runs). The reply holds the conversion's JSON result (exit_code, output_format, warnings, review items, and needs_attention) with the output path of the .html file in output_dir; the HTML itself is not returned. For text a model reads, use export_markdown.",
+            ["path"], [.. ExportOptions, OverwriteParameter]),
         new("export_ai_package",
             "Converts one document to an AI package: a folder of parts of about chunk_chars characters each, with the source location of every part, plus review.md and manifest.json. The reply holds the conversion's JSON result and then \"package_path: <folder>\". Use it for a large document, then read the package with package_review, package_search and package_read instead of loading everything.",
             ["path"], [.. ExportOptions,
@@ -79,6 +91,20 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             ["package", "part"], [PackageParameter, new("part", "string", "Id of the part, such as part-0001."),
                 new("with_sources", "boolean", "Also return the full source location of each piece of the part. Default: false."),
                 new("source_detail", "string", "Source detail to return: full (same as with_sources) or compact (sheet and range summaries without node identities). Default: with_sources=false gives none; with_sources=true gives full.", ["full", "compact"]), AllowReviewParameter]),
+        new("read_source",
+            "Reads one piece of the original document (a sheet range, a slide, a page, a node, a zip part or a picture), for when the result of export_markdown lists source_review, failed or empty_output in attention, or the Markdown lacks something. With only path it lists what can be read (zip parts, sheet names, slides, page count). Give at most one of part, node, sheet (with range), slide, page or image. With image (the id the Markdown shows for a picture, such as img-0002, or a picture part such as word/media/image2.png) it returns the picture itself as an image content block (png, jpeg, gif or webp up to 5 MB; other types and larger pictures are only saved to the file named by saved_path, and image_returned says so) with its media type, size, pixel width and height and where it is; add ocr to also get its text with positions. It never returns the whole file at once: text comes in windows of max_chars from offset, with next_offset when there is more, and cells are capped at 2000. The reply is JSON; its content is the document as stored and can include hidden text, comments and deleted tracked changes that the Markdown leaves out.",
+            ["path"], [PathParameter,
+                new("part", "string", "Zip part of a Word, Excel or PowerPoint file to read as raw text, such as word/document.xml or xl/worksheets/sheet1.xml (the leading slash is optional). A picture part is returned as the picture (as image does); other binary parts are refused."),
+                new("image", "string", "A picture: the id the Markdown export shows for it (img-0002 in the placeholder \"画像: ... (img-0002, ...)\" and in OCR table links; pdf-img-0005 for a picture of a PDF, with allow_pdf) or its zip part name such as word/media/image2.png. Returns the picture itself as an image content block plus JSON (id, media type, size, width, height, page, slide or sheet, alt text, saved_path)."),
+                new("ocr", "boolean", "With image: also read the text of the picture with the OCR engine and return it as ocr.lines (text with x, y, w, h in pixels). Use it when you cannot read images; without an engine the reply says ocr.available is false. Default: false."),
+                new("node", "string", "Node id such as n_4L5SQ2FD7FAKPOC3, from export_ai_package's source-index.json, package_read with with_sources, or the node_id of a diagnostic: returns the node's text, source anchor and, for Word, its raw XML."),
+                new("sheet", "string", "Excel only: name of the worksheet to read cells from (displayed values, formulas, merged ranges, hidden rows and columns)."),
+                new("range", "string", "Excel only, with sheet: cell range such as A1:H40. Default: the sheet's used range, capped at 2000 non-empty cells."),
+                new("slide", "integer", "PowerPoint only: slide number to read as XML, 1-based in presentation order.", Minimum: 1),
+                new("page", "integer", "PDF only (with allow_pdf): page number whose text lines are returned with their positions, 1-based.", Minimum: 1),
+                new("offset", "integer", "First character of the text to return from part, node, slide or page (default 0); use the next_offset of the previous reply.", Minimum: 0),
+                new("max_chars", "integer", "Most characters of text to return (default 20000, at most 200000).", Minimum: 1),
+                new("allow_pdf", "boolean", "Allow a PDF file to be read (off by default). Default: false.")]),
     ];
 
     /// <summary>Reads one message a line until the input ends and answers each request in turn, so replies come in the
@@ -203,9 +229,11 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
             return Result(id, tool.Name switch
             {
                 "export_markdown" => await ExportMarkdownAsync(arguments, cancellationToken),
+                "export_html" => await ExportHtmlAsync(arguments, cancellationToken),
                 "export_ai_package" => await ExportAiPackageAsync(arguments, cancellationToken),
                 "package_review" => ToolResult(await RunCliAsync(["package", "review", FullPath(arguments, "package"), "--json"], cancellationToken), []),
                 "package_search" => ToolResult(await RunCliAsync(PackageSearch(arguments), cancellationToken), []),
+                "read_source" => await ReadSourceAsync(arguments, cancellationToken),
                 _ => await PackageReadAsync(arguments, cancellationToken),
             });
         }
@@ -316,6 +344,16 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
         return ToolResult(run, items);
     }
 
+    private async Task<JsonObject> ExportHtmlAsync(ToolArguments arguments, CancellationToken cancellationToken)
+    {
+        var source = FullPath(arguments, "path");
+        var html = Path.Combine(OutputDirectory(arguments), Path.GetFileNameWithoutExtension(source) + ".html");
+        var cli = new List<string> { "export", source, "--format", "html", "--output", html, "--json" };
+        AddExportOptions(cli, arguments);
+        if (arguments.Flag("overwrite")) cli.Add("--force");
+        return ToolResult(await RunCliAsync([.. cli], cancellationToken), []);
+    }
+
     private async Task<JsonObject> ExportAiPackageAsync(ToolArguments arguments, CancellationToken cancellationToken)
     {
         var source = FullPath(arguments, "path");
@@ -337,6 +375,65 @@ public sealed class McpServer(TextReader input, TextWriter output, TextWriter lo
         if (arguments.Flag("allow_review")) cli.Add("--allow-review");
         cli.Add("--json");
         return [.. cli];
+    }
+
+    private static string[] ReadSource(ToolArguments arguments)
+    {
+        // The --name=value form keeps a value that starts with "-" (a sheet name, say) from being read as an option.
+        var cli = new List<string> { "source", FullPath(arguments, "path"), "--json" };
+        foreach (var (option, name) in new[] { ("--part", "part"), ("--node", "node"), ("--sheet", "sheet"), ("--range", "range"), ("--image", "image") })
+            if (arguments.Text(name) is { } value) cli.Add(option + "=" + value);
+        foreach (var (option, name) in new[] { ("--slide", "slide"), ("--page", "page"), ("--offset", "offset"), ("--max-chars", "max_chars") })
+            if (arguments.Integer(name) is { } number) cli.Add(option + "=" + number.ToString(CultureInfo.InvariantCulture));
+        if (arguments.Flag("allow_pdf")) cli.Add("--allow-pdf");
+        if (arguments.Flag("ocr")) cli.Add("--ocr");
+        return [.. cli];
+    }
+
+    /// <summary>read_source: the CLI's JSON, and for a picture an MCP image content block after it (png, jpeg, gif, webp up to the
+    /// size cap). Any other picture is only saved (the JSON says <c>image_returned: false</c> and why), so a reply never carries a
+    /// picture a client cannot show or one that would fill its context.</summary>
+    private async Task<JsonObject> ReadSourceAsync(ToolArguments arguments, CancellationToken cancellationToken)
+    {
+        var run = await RunCliAsync(ReadSource(arguments), cancellationToken);
+        JsonObject? json = null;
+        if (!run.Failed)
+        {
+            try { json = JsonNode.Parse(run.Output) as JsonObject; }
+            catch (JsonException) { }
+        }
+        if (json?["image"] is not JsonObject image) return ToolResult(run, []);
+
+        var mediaType = image["media_type"]?.GetValue<string>() ?? "";
+        var size = image["size"]?.GetValue<long>() ?? 0;
+        var saved = json["saved_path"]?.GetValue<string>();
+        string? data = null;
+        string? reason = null, note = null;
+        if (!InlineImageTypes.Contains(mediaType))
+        {
+            reason = "unsupported_media_type";
+            note = $"{mediaType} is not one of the picture types an MCP image block carries (png, jpeg, gif, webp); open saved_path if you can read files.";
+        }
+        else if (size > maxInlineImageBytes)
+        {
+            reason = "too_large";
+            note = $"The picture is {size.ToString(CultureInfo.InvariantCulture)} bytes, over the {maxInlineImageBytes.ToString(CultureInfo.InvariantCulture)} byte limit for returning it inline; open saved_path if you can read files.";
+        }
+        else if (saved is null || !File.Exists(saved))
+        {
+            reason = "not_saved";
+            note = "The picture could not be read back from its saved file.";
+        }
+        else data = Convert.ToBase64String(await File.ReadAllBytesAsync(saved, cancellationToken));
+        json["image_returned"] = data is not null;
+        if (reason is not null) { json["reason"] = reason; json["image_note"] = note; }
+
+        var texts = new List<string> { json.ToJsonString(Json) };
+        if (!string.IsNullOrWhiteSpace(run.Error)) texts.Add(run.Error);
+        var result = ToolResult(false, texts);
+        if (data is not null)
+            ((JsonArray)result["content"]!).Add(new JsonObject { ["type"] = "image", ["data"] = data, ["mimeType"] = mediaType });
+        return result;
     }
 
     private static string[] PackageRead(ToolArguments arguments)

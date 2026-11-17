@@ -99,8 +99,14 @@ public sealed class GuiWorkflowService
         bool expandMergedCells = false,
         string? language = null,
         string? revisions = null,
-        bool allowRevisionSharing = false)
+        bool allowRevisionSharing = false,
+        bool html = false)
     {
+        if (html)
+        {
+            if (!readable) throw new ArgumentException("HTML export uses readable export.", nameof(html));
+            if (aiPackage) throw new ArgumentException("HTML export cannot be combined with an AI package.", nameof(html));
+        }
         sourcePath = Path.GetFullPath(sourcePath);
         outputDirectory = Path.GetFullPath(outputDirectory);
         var extension = Path.GetExtension(sourcePath);
@@ -166,8 +172,8 @@ public sealed class GuiWorkflowService
                 Summary: exported.Summary, TableBoundaries: exported.Review.TableBoundaries,
                 PackageSize: exported.Size, SharingReview: exported.Review.SharingReview);
         }
-        if (useUniqueName) baseName = NextAvailableBaseName(outputDirectory, baseName, readable);
-        var markdownPath = Path.Combine(outputDirectory, baseName + ".md");
+        if (useUniqueName) baseName = NextAvailableBaseName(outputDirectory, baseName, readable, html);
+        var markdownPath = Path.Combine(outputDirectory, baseName + (html ? ".html" : ".md"));
         var sidecarPath = Path.Combine(outputDirectory, baseName + ".drmd");
         var packagePath = Path.Combine(outputDirectory, baseName + ".drmdpkg");
         if (readable)
@@ -185,10 +191,11 @@ public sealed class GuiWorkflowService
                 ShowFormulas: showFormulas,
                 IncludeSvgPreviews: includeSvgPreviews,
                 IncludeDiagrams: includeDiagrams,
-                EmbedImages: embedReadableImages,
+                EmbedImages: embedReadableImages || html,
                 InferenceMode: inferenceMode, IncludePdfFallbackImages: includePdfFallbackImages, OcrReview: ocrReview,
                 Revisions: revisions, AllowRevisionSharing: allowRevisionSharing,
-                ExpandMergedCells: expandMergedCells, OcrAuto: true, Language: language), cancellationToken).ConfigureAwait(false);
+                ExpandMergedCells: expandMergedCells, OcrAuto: true, Language: language,
+                OutputFormat: html ? ReadableOutputFormat.Html : ReadableOutputFormat.Markdown), cancellationToken).ConfigureAwait(false);
             // Built once so the two GUI summary lines (this one and ExportSummary below) can
             // never disagree with each other or with the CLI's "Visual summary:" line (F-05).
             var summary = ExportSummaryBuilder.BuildReadable(exported.Graph, exported.Diagnostics, exported.Projection);
@@ -197,7 +204,7 @@ public sealed class GuiWorkflowService
                 markdownPath,
                 string.Empty,
                 exported.Graph.Format.ToString().ToLowerInvariant(),
-                "閲覧用Markdown（片道変換）",
+                html ? HtmlModeText : "閲覧用Markdown（片道変換）",
                 AddProjectionDiagnostics(exported.Graph, exported.Diagnostics),
                 IsReadable: true,
                 InferenceMode: exported.InferenceMode,
@@ -480,13 +487,17 @@ public sealed class GuiWorkflowService
             throw new IOException($"既存の出力を保護するため停止しました: {path}");
     }
 
-    private static string NextAvailableBaseName(string directory, string baseName, bool readable)
+    public const string HtmlModeText = "閲覧用HTML（片道変換）";
+
+    private static string NextAvailableBaseName(string directory, string baseName, bool readable, bool html = false)
     {
         for (var index = 1; ; index++)
         {
             var suffix = index == 1 ? string.Empty : $" ({index})";
             var candidate = Path.Combine(directory, baseName + suffix);
-            var paths = readable
+            var paths = html
+                ? new[] { candidate + ".html" }
+                : readable
                 ? new[] { candidate + ".md", candidate + ".assets" }
                 : new[] { candidate + ".md", candidate + ".drmd", candidate + ".drmdpkg" };
             if (paths.All(path => !File.Exists(path) && !Directory.Exists(path))) return baseName + suffix;

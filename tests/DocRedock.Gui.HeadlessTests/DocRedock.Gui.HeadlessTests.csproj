@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\DocRedock.Gui\DocRedock.Gui.csproj" />
+    <None Include="..\DocRedock.Tests\Fixtures\Pptx\complex-design-doc.pptx"
+          Link="Fixtures\complex-design-doc.pptx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

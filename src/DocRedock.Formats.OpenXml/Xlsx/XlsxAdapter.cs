@@ -489,6 +489,20 @@ public sealed partial class XlsxAdapter
                     var (sheetOverlays, overlayShapeIds) = DetectSheetOverlays(worksheet, consumedShapeIds);
                     foreach (var (overlay, shape) in sheetOverlays)
                         nodes.Add(ToSheetOverlayNode(sheet, overlay, shape, nodes.Count));
+                    // Shape text that no diagram and no schedule overlay used is still part of the sheet: list it.
+                    var unprojectedText = FindUnprojectedTextShapes(drawingShapes, consumedShapeIds, overlayShapeIds);
+                    if (unprojectedText.Count > 0)
+                    {
+                        var visibleText = unprojectedText.Where(shape => !shape.IsHidden).ToList();
+                        var hiddenText = unprojectedText.Where(shape => shape.IsHidden).ToList();
+                        if (visibleText.Count > 0)
+                        {
+                            nodes.Add(CreateUnprojectedShapeTextNode(sheet, visibleText, metrics, nodes.Count));
+                            warnings.Add($"{sheet.Name}: the text of {visibleText.Count} DrawingML shape(s) could not be projected as a diagram and is listed in reading order; compare it with the source.");
+                        }
+                        if (hiddenText.Count > 0)
+                            nodes.Add(CreateUnprojectedShapeTextNode(sheet, hiddenText, metrics, nodes.Count) with { Layer = ContentLayer.Hidden, Id = "n_" + Hash(sheet.Name + "!unprojected-hidden-shape-text")[..16] });
+                    }
                     // X3: this is the pre-P-Overlay "retained but not projected" warning -- its
                     // original meaning was "this sheet's shapes never became anything", which only
                     // applies when the sheet produced NO diagram at all. A sheet that DOES have a

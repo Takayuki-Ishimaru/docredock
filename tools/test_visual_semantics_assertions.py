@@ -26,6 +26,20 @@ from visual_semantics_qa import (
 
 
 class VisualSemanticsAssertionsTests(unittest.TestCase):
+    def test_parses_xlsx_fallback_without_inventing_connections(self):
+        markdown = """\
+```mermaid
+flowchart TB
+    U0["Text from shapes that could not be read as a diagram (reading order only)"]
+    U1["START"]
+    U2["END"]
+```
+"""
+        graph, = parse_markdown(markdown)
+        self.assertEqual("TB", graph.direction)
+        self.assertEqual(["START", "END"], [graph.nodes["U1"], graph.nodes["U2"]])
+        self.assertEqual((), graph.edges)
+
     def test_parses_docredock_flowchart_and_exact_labeled_edges(self):
         markdown = """\
 ```mermaid
@@ -217,11 +231,19 @@ flowchart LR
                          expected_relations(label))
         self.assertEqual((("START", "END", "directed", None),),
                          expected_relations(far_label))
-        pdf_separated = next(spec for spec in generate_perturbation_corpus(("pdf",))
-                             if spec.operation == "arrowhead-separated")
-        self.assertEqual((("START", "END", "directed", None),),
-                         expected_relations(pdf_separated))
         self.assertEqual((), expected_relations(textless))
+
+    def test_detached_arrowhead_does_not_make_the_docx_shaft_directional(self):
+        expected = {
+            "docx": (("START", "END", "undirected", None),),
+            "pptx": (("START", "END", "directed", None),),
+            "xlsx": (),
+            "pdf": (("START", "END", "directed", None),),
+        }
+        for spec in generate_perturbation_corpus():
+            if spec.operation == "arrowhead-separated":
+                with self.subTest(format=spec.format):
+                    self.assertEqual(expected[spec.format], expected_relations(spec))
 
     def test_textless_synthetic_cli_relation_is_diagnostic_not_false_edge(self):
         spec = next(item for item in generate_perturbation_corpus(("docx",))

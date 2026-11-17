@@ -53,6 +53,45 @@ internal static class VisualFallbackMarkdownWriter
         return new(emitted, omitted, shortened);
     }
 
+    /// <summary>More unresolved connections and diagnostics than this are summarized instead of listed one by one.</summary>
+    internal const int InlineDetailLimit = 5;
+
+    /// <summary>True when a projected diagram has so many unresolved parts that listing them would bury the body.</summary>
+    internal static bool ShouldSummarize(VisualGraph graph) =>
+        UnresolvedCount(graph) + (graph.Diagnostics ?? []).Count(item => item is not null) > InlineDetailLimit;
+
+    private static int UnresolvedCount(VisualGraph graph) =>
+        (graph.Edges ?? []).Count(edge => edge is not null && (edge.SourceId is null || edge.TargetId is null));
+
+    /// <summary>One short sentence naming how many connections could not be resolved and where the details are, followed by
+    /// the diagnostics grouped by code in a collapsed block (the full list stays in the diagnostics report).</summary>
+    internal static void WriteSummary(StringBuilder output, VisualGraph graph, bool english)
+    {
+        var unresolved = UnresolvedCount(graph);
+        var diagnostics = (graph.Diagnostics ?? []).Where(item => item is not null).ToArray();
+        if (english)
+            output.Append("> ").Append(unresolved > 0
+                    ? unresolved.ToString(CultureInfo.InvariantCulture) + " connections in this figure could not be resolved."
+                    : "This figure was extracted with " + diagnostics.Length.ToString(CultureInfo.InvariantCulture) + " diagnostics.")
+                .AppendLine(" Details are in the diagnostics of report.json / review.md.").AppendLine();
+        else
+            output.Append("> ").Append(unresolved > 0
+                    ? "この図の接続のうち " + unresolved.ToString(CultureInfo.InvariantCulture) + " 件は接続元・接続先を特定できませんでした。"
+                    : "この図の抽出で " + diagnostics.Length.ToString(CultureInfo.InvariantCulture) + " 件の診断が出ています。")
+                .AppendLine("詳細は report.json / review.md の診断を参照してください。").AppendLine();
+        if (diagnostics.Length == 0) return;
+        output.AppendLine("<details class=\"visual-diagnostics\">")
+            .Append("<summary>").Append(english ? "Diagnostics of this figure" : "この図の診断の内訳").AppendLine("</summary>").AppendLine();
+        foreach (var group in diagnostics.GroupBy(item => item.Code, StringComparer.Ordinal).OrderBy(group => group.Key, StringComparer.Ordinal))
+        {
+            var message = group.First().Message.Replace('\r', ' ').Replace('\n', ' ');
+            if (message.Length > 240) message = message[..240] + "…";
+            output.Append("- ").Append(group.Key).Append(" ×").Append(group.Sum(item => Math.Max(1, item.Count)).ToString(CultureInfo.InvariantCulture))
+                .Append(" — ").AppendLine(message);
+        }
+        output.AppendLine().AppendLine("</details>").AppendLine();
+    }
+
     private static IEnumerable<string?[]> Details(VisualGraph graph, bool partial)
     {
         if (!partial)

@@ -4,19 +4,19 @@ Choose documentation by audience. The current release support status is defined 
 
 ## Users
 
-Japanese:
+### 日本語
 
-- [30-second quick start and user guide](ja/user-guide.md)
+- [クイックスタートと利用ガイド](ja/user-guide.md)
 - [目的別クイックガイド](ja/quick-tasks.md)
-- [v0.3.12の対応機能](ja/supported-features.md)
-- [Experimental features](ja/experimental-features.md)
-- [Security and privacy](ja/security-and-privacy.md)
+- [v0.4.0の対応機能](ja/supported-features.md)
+- [実験機能](ja/experimental-features.md)
+- [セキュリティとプライバシー](ja/security-and-privacy.md)
 
-English:
+### English
 
 - [30-second quick start and user guide](en/user-guide.md)
 - [Quick guides by task](en/quick-tasks.md)
-- [v0.3.12 supported features](en/supported-features.md)
+- [v0.4.0 supported features](en/supported-features.md)
 - [Experimental features](en/experimental-features.md)
 - [Security and privacy](en/security-and-privacy.md)
 
@@ -31,6 +31,7 @@ Technical references also cover experimental workflows. They do not expand or ov
 
 ## Benchmarks
 
+- [v0.4.0 conversion comparison and HTML research](../release-docs/CONVERSION_REPORT_v0.4.0.en.md) · [日本語](../release-docs/CONVERSION_REPORT_v0.4.0.md)
 - [Benchmark index](benchmarks/README.md)
 - [AI document-format token-efficiency study](AI_DOCUMENT_FORMAT_TOKEN_BENCHMARK_2026-08-25.md)
 

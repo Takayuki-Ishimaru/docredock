@@ -216,8 +216,9 @@ public sealed class VisualSemanticProjectionTests
             {
                 ["visual_graph"] = JsonSerializer.SerializeToElement(visual)
             });
-        var markdown = new ReadableMarkdownSerializer(new(Language: "ja")).Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sequence",
-            DocumentFormatKind.Pdf, [new DocumentPartition("part", 0, [diagram])]));
+        var markdown = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(Language: "ja"))
+            .Serialize(new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "sequence",
+                DocumentFormatKind.Pdf, [new DocumentPartition("part", 0, [diagram])]));
 
         Assert.Contains("```mermaid\nsequenceDiagram", markdown, StringComparison.Ordinal);
         Assert.Contains("P1->>P2: 1. Request", markdown, StringComparison.Ordinal);

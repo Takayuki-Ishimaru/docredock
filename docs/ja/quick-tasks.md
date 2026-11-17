@@ -7,9 +7,61 @@
 3. 書き出し後は、要確認ページ・変更履歴・除外した非表示内容を確認します。
 4. パッケージから必要な分割本文だけをAIへ渡し、出典索引は手元で参照します。
 
-Wordなどの表で縦に結合したセルの値は、閲覧用MarkdownでもAI向けパッケージでも各行に表示します（横に結合したセルは1回だけ）。空欄のままにするときはCLIで`--no-expand-merged-cells`、GUIでは「詳細設定」のチェックを外します。
+Wordなどの表で縦に結合したセルの値は、閲覧用MarkdownとAI向けパッケージで既定では各行に表示します。横に結合したセルの値は1回だけ表示します。閲覧用Markdownで2行目以降を空欄にするには、CLIで `--no-expand-merged-cells` を指定するか、アプリの「詳細設定」でチェックを外します。
 
 CLIでは`docredock export input.docx --ai-package dir --content-policy visible --ocr off`を使えます。Word変更履歴の既定値は[こちら](../reference/revision-defaults.md)を参照してください。
+
+## AIツール（Claude Code・GitHub Copilot・Codex）に設定する
+
+`docredock agents install` は、Claude Code、GitHub Copilot（VS CodeとCopilot CLI）、Codex（CLI・IDE拡張・デスクトップアプリ）に、DocRedockで文書を読むための設定を追加します。設定したAIツールには、Word・Excel・PowerPoint・PDFを次の手順で読むよう指示します。
+
+1. まずDocRedockでMarkdownに変換する。
+2. 変換結果に確認が必要な箇所があるときや、Markdownに必要な情報がないときだけ、原本の該当箇所を読む。
+
+GUIでは、画面上部の「AI連携」から同じ設定ができます。
+
+```sh
+docredock agents install                 # 3つすべてに設定
+docredock agents install --client codex  # 1つだけに設定
+docredock agents status                  # 設定状態を確認
+docredock agents uninstall               # 解除
+```
+
+設定は、現在のユーザーの設定フォルダーに書き込みます。
+
+| AIツール | MCPサーバーの登録 | 指示 | Skill |
+| --- | --- | --- | --- |
+| Claude Code | `claude mcp add --scope user`（`claude`コマンドがなければ`~/.claude.json`） | `~/.claude/CLAUDE.md`に印付きの段落 | `~/.claude/skills/docredock-office/` |
+| GitHub Copilot | `~/.copilot/mcp-config.json` | `~/.copilot/instructions/docredock.instructions.md` | `~/.copilot/skills/docredock-office/` |
+| Codex | `~/.codex/config.toml`に印付きの段落 | `~/.codex/AGENTS.md`に印付きの段落 | `~/.agents/skills/docredock-office/` |
+
+- 環境変数`CLAUDE_CONFIG_DIR`・`COPILOT_HOME`・`CODEX_HOME`があれば、その場所を使います。
+- 既存のファイルを変更する前に、`<ファイル名>.docredock.bak`へ控えを取ります。ファイルの既存の内容は残します。
+- `docredock`という名前の設定を自分で書いていた場合は、変更しません。競合として報告します（終了コード1）。
+- 設定したら、開いているAIツールを再起動してください。
+- DocRedockを別のフォルダーへ移したときは、もう一度`install`を実行すると、登録先が新しい場所に更新されます。
+- DocRedockを新しい版に置き換えるときは、先にAIツールを終了してください。AIツールがMCPサーバーとして`DocRedock.Cli`を動かしている間は、Windowsではファイルを上書きできません。
+
+`--enforce` を付けると、Word・Excel・PowerPointを直接開こうとする操作を止め、DocRedockに案内するフックを登録します。対象にはファイル読み取りツールや `unzip`、`python` などのコマンドが含まれます。PDFの読み取りは対象外です。Codexでは、初回に `/hooks` でフックを承認します。
+
+`--auto-approve` は、対応するクライアントでDocRedockツールの呼び出しごとの承認を省きます。変換結果は、出力先を指定しなければ一時フォルダーに保存します。次の設定をクライアントごとに追加します。
+
+| AIツール | 設定内容 |
+| --- | --- |
+| Claude Code | `~/.claude/settings.json`の`permissions.allow`に`mcp__docredock__*`を追加 |
+| Codex | `config.toml`の`[mcp_servers.docredock]`に`default_tools_approval_mode = "approve"`を追加 |
+| GitHub Copilot | `~/.copilot/hooks/docredock-approve.json`に`permissionRequest`フックを追加 |
+
+この自動承認フックはCopilot CLI向けです。VS CodeのCopilotでは、DocRedockを呼び出すときに承認を求められる場合があります。
+
+フックと自動承認は、あとから外せます。`install --no-enforce`、`install --no-auto-approve`で外れます。どちらも指定しない`install`は、今の状態をそのまま残します。GUIでは、それぞれのチェックを外して「設定する」を押すと外れます。
+
+ほかのオプションは次のとおりです。
+
+- `--dry-run`：書き込まずに、変更内容だけを表示します。
+- `--json`：結果をJSON（`docredock.agents.v1`）で返します。
+
+VS Codeで旧来のLocalハーネスを使っている場合、その設定ファイル（`.vscode/mcp.json`、プロファイルの`mcp.json`）には書き込みません。その場合は、下の手順でMCPサーバーを登録してください。
 
 ## MCPクライアントから使う
 
@@ -19,17 +71,23 @@ CLIでは`docredock export input.docx --ai-package dir --content-policy visible 
 { "mcpServers": { "docredock": { "command": "docredock", "args": ["mcp"] } } }
 ```
 
-Claude Codeでは`claude mcp add docredock -- docredock mcp`です。CLIと同じ変換をこのコンピューター上で実行し、`--json`の結果を返す5つのツールがあります。
+Claude Codeでは`claude mcp add docredock -- docredock mcp`です。7つのツールがあります。どれもCLIと同じ処理をこのコンピューター上で実行し、`--json`の結果を返します。
 
 | ツール | 内容 |
 | --- | --- |
 | `export_markdown` | 文書を閲覧用Markdownに変換し、結果とMarkdownを返します（`max_chars`、既定40,000文字で切り、ファイル全体の場所を添えます）。 |
+| `export_html` | 文書を閲覧用HTML（1つで完結する`.html`）に変換し、書き出したファイルの場所を添えて結果を返します（引数は`max_chars`を除き`export_markdown`と同じ）。 |
 | `export_ai_package` | AI向けパッケージを書き出し、そのフォルダーを`package_path`で返します。 |
 | `package_review` | パッケージの確認状態と`review.md`を返します。 |
 | `package_search` | 文字列を含む分割本文を探します。 |
 | `package_read` | 分割本文を1つ返します。 |
+| `read_source` | 原本の一部だけを読みます。Excelのシートとセル範囲、PowerPointのスライド、PDFのページ、ノード（`node` にノードIDを指定）、ZIP内のパーツ、画像のいずれかを指定します。`path`だけを渡すと、読めるものの一覧（画像の一覧も含む）を返します。テキストは`max_chars`（既定20,000文字）ずつ、`offset`で区切って返します。 |
 
 確認が必要なパッケージでは、人が`package_review`の内容を確かめて`allow_review`を指定するまで、`package_search`と`package_read`は本文を返しません。
+
+画像は、`image`にIDを指定して読みます。IDは、Markdownの画像の表示（例：「画像: Picture 2（img-0002、テキストのみの出力のため省略）」）や、OCR表のリンクに書かれています。PDFの画像のIDは`pdf-img-0025`のような形です。画像そのものは、MCPの画像コンテンツ（PNG・JPEG・GIF・WebP、5 MBまで）で返します。`ocr: true`を付けると、その画像の文字と位置もOCRで読んで返します。書き出し時の自動OCRでは、PDFから直接抽出した画像を対象から外します。その画像に含まれる文字が必要なときは、`read_source` で画像を指定し、`ocr: true` を付けます。
+
+`read_source`が返すのは、保存されているままの原本です。Markdownでは除いた非表示の文字、コメント、削除された変更履歴が含まれることがあります。CLIでは、`docredock source <ファイル> --sheet <シート名> --range A1:H40`（または`--slide N`、`--page N --allow-pdf`、`--node <id>`、`--part <名前>`、`--image <id> [--ocr]`）で同じように読めます。CLIの`--image`は、画像を`--output`のファイル（省略時は一時フォルダー）に保存し、その場所を返します。
 
 ツールは、クライアントが指定したファイルを、サーバーを起動したユーザーの権限で読みます。`output_dir`を指定しなければ、出力はシステムの一時フォルダーの下に新しく作るフォルダーに書きます。既存のファイルは`overwrite`を指定したときだけ置き換えます。PDFはCLIの`--allow-pdf`と同じく`allow_pdf`が必要です。
 

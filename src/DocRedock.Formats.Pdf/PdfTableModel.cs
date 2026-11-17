@@ -15,7 +15,12 @@ public sealed record PdfTable(
     // columns -- see PdfTableOverlayDetector.Detect. Populated after inference (Infer itself never
     // sets this), trailing/optional so every existing positional PdfTable(...) construction across
     // the test suite keeps compiling.
-    IReadOnlyList<PdfTableOverlay>? Overlays = null);
+    IReadOnlyList<PdfTableOverlay>? Overlays = null)
+{
+    /// <summary>True when the bottom row lacked its inner column rules (a page end cut it) and was read as separate cells,
+    /// so its text may go on in the first row of the table's continuation on the next page.</summary>
+    public bool BottomRowCut { get; init; }
+}
 
 /// <summary>A shape (arrow/bar/marker/line) detected as visually overlaying a PDF table's
 /// row/column range -- see table-overlay-spec-xlsx-docx-pdf.md section 3. Row/Column indices are

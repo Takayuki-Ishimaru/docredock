@@ -90,3 +90,32 @@ only, deterministic):
 ```
 python3 tests/DocRedock.Tests/Fixtures/Pdf/generate_font_scope_pdf.py
 ```
+
+## two-column-paper-en.pdf, two-column-paper-ja.pdf (reading-order fixtures)
+
+These synthetic fixtures were printed from HTML in Edge for the 2026-11-13 PDF benchmark. Each is a three-page paper with a
+full-width title and abstract, followed by headings and a small table in a layout using CSS `columns: 2` (10 mm gap, A4,
+10.5 pt text). Every page has a running header and a page number in the footer. The headings offset the baselines of the
+two columns. `PdfProjectedColumnReadingOrderTests` uses the fixtures to check reading order in this layout.
+
+## edge-ruled-*.pdf (ruled tables drawn one cell border at a time)
+
+`edge-ruled-report-en.pdf`, `edge-ruled-report-ja.pdf` and
+`edge-ruled-spec-pagebreak-en.pdf` are synthetic documents printed from HTML
+in Edge for the 2026-11-13 PDF benchmark. Edge rendered the table borders as
+thin filled bars, one per cell side. The fixtures cover different column
+widths in English and Japanese, a table split by a page break with missing
+rules in its last row, and a table of about 35 rows.
+
+## list-benchmark-report.pdf (PDF list fixture)
+
+`list-benchmark-report.pdf` is a synthetic report printed from HTML in Edge for
+the 2026-11-13 PDF benchmark. Chromium draws the bullets as small vector discs
+and circles and writes the numbers as text. `PdfListProjectionTests` uses the
+checked-in PDF to verify bulleted and nested lists, numbered lists, and table
+header cells.
+
+## two-column-paper-short-abstract-line-en.pdf (reading-order fixture)
+
+This synthetic paper was printed from HTML in Edge for the 2026-11-13 PDF benchmark.
+The last line of the abstract is short and extends across the gap between the columns.

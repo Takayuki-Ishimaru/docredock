@@ -20,7 +20,7 @@ internal static class PdfTableContinuationProjection
             if (source[index].Order != source[index - 1].Order + 1) continue;
             var left = Flow(source[index - 1]).LastOrDefault();
             var right = Flow(source[index]).FirstOrDefault();
-            if (left is null || right is null || !CanContinue(left, right)) continue;
+            if (left is null || right is null || !CanContinue(left, right, out var headerRows)) continue;
             var target = targets.GetValueOrDefault(left.Id, (index - 1, left.Id));
             var host = projected[target.Item1].Nodes.First(node => node.Id == target.Item2);
             var hostTable = (TableNodeContent)host.Content;
@@ -30,9 +30,18 @@ internal static class PdfTableContinuationProjection
                 partsByHost[host.Id] = ids = [host.Id];
             ids.Add(right.Id);
             extensions["pdf_continuation_tables"] = JsonSerializer.SerializeToElement(ids);
+            var nextRows = nextTable.Rows.Skip(headerRows).ToArray();
+            var hostRows = hostTable.Rows;
+            // A row the page end cut goes on in the first row after the repeated header: its two parts are one row.
+            if (nextRows.Length > 0 && hostRows.Count > 0 && left.Extensions?.TryGetValue("pdf_table_bottom_cut", out var cut) == true &&
+                cut.ValueKind == JsonValueKind.True && JoinCutRow(hostRows[^1], nextRows[0]) is { } joinedRow)
+            {
+                hostRows = hostRows.Take(hostRows.Count - 1).Append(joinedRow).ToArray();
+                nextRows = nextRows.Skip(1).ToArray();
+            }
             var combined = host with
             {
-                Content = new TableNodeContent(hostTable.Rows.Concat(nextTable.Rows.Skip(1)).ToArray()),
+                Content = new TableNodeContent(hostRows.Concat(nextRows).ToArray()),
                 Extensions = extensions,
                 Provenance = (host.Provenance ?? []).Concat(right.Provenance ?? []).ToArray()
             };
@@ -124,14 +133,18 @@ internal static class PdfTableContinuationProjection
         if (node.Extensions?.TryGetValue("visual_graph", out var element) != true) return true;
         try
         {
-            return element.Deserialize<VisualGraph>() is not { Nodes: not null, Edges: not null } visual ||
-                visual.Nodes.Count > 0 || visual.Edges.Count > 0;
+            if (element.Deserialize<VisualGraph>() is not { Nodes: not null, Edges: not null } visual) return true;
+            // A page's rules (a heading's underline, a separator) can be left as thin bars with no connection between them.
+            // That is no flow content and must not stand between a table and its continuation on the next page.
+            return visual.Edges.Count > 0 || visual.Nodes.Any(visualNode => visualNode.Geometry is not { } geometry ||
+                Math.Min(geometry.Width, geometry.Height) > 2);
         }
         catch (JsonException) { return true; }
     }
 
-    private static bool CanContinue(DocumentNode left, DocumentNode right)
+    private static bool CanContinue(DocumentNode left, DocumentNode right, out int headerRows)
     {
+        headerRows = 1;
         if (left.Kind != NodeKind.Table || right.Kind != NodeKind.Table ||
             left.Content is not TableNodeContent { Rows.Count: >= 2 } first ||
             right.Content is not TableNodeContent { Rows.Count: >= 2 } next ||
@@ -140,10 +153,7 @@ internal static class PdfTableContinuationProjection
         // Keep such tables independent rather than silently moving those annotations.
         string[] annotations = ["table_overlays", "strike_cells", "underline_cells"];
         if (annotations.Any(key => left.Extensions?.ContainsKey(key) == true || right.Extensions?.ContainsKey(key) == true)) return false;
-        var header = first.Rows[0];
-        var nextHeader = next.Rows[0];
-        if (header.Count < 2 || header.Count != nextHeader.Count || header.Count(cell => !string.IsNullOrWhiteSpace(cell.Text)) < 2 ||
-            header.Where((cell, column) => cell.RowSpan != 1 || cell != nextHeader[column]).Any()) return false;
+        if (!TryRepeatedHeader(first.Rows, next.Rows, out headerRows)) return false;
         if (left.Extensions?.TryGetValue("pdf_page_rotation", out var firstRotation) == true &&
             (firstRotation.ValueKind != JsonValueKind.Number || !firstRotation.TryGetInt32(out var firstAngle) || firstAngle != 0) ||
             right.Extensions?.TryGetValue("pdf_page_rotation", out var nextRotation) == true &&
@@ -155,9 +165,51 @@ internal static class PdfTableContinuationProjection
         return firstBounds.CoordinateSpace == nextBounds.CoordinateSpace &&
             firstBounds.CoordinateSpace == firstPage.CoordinateSpace && nextBounds.CoordinateSpace == nextPage.CoordinateSpace &&
             firstBounds.RotationDegrees == 0 && nextBounds.RotationDegrees == 0 &&
-            firstBounds.Y >= firstPage.Y && firstBounds.Y <= firstPage.Y + firstPage.Height * 0.15 &&
+            firstBounds.Y >= firstPage.Y && firstBounds.Y <= firstPage.Y + firstPage.Height * 0.25 &&
             nextBounds.Y + nextBounds.Height <= nextPage.Y + nextPage.Height + 2 &&
             nextBounds.Y + nextBounds.Height >= nextPage.Y + nextPage.Height * 0.8;
+    }
+
+    /// <summary>Puts the two parts of a row that a page break cut back together, only when the evidence is clear: the row
+    /// before ends the page cut (the caller checks that), both rows have the same cells, the part after leaves the first
+    /// column empty (a new record would name itself there again) and holds text only in columns where the part before has
+    /// text. Otherwise null, and the rows stay two.</summary>
+    private static IReadOnlyList<TableCell>? JoinCutRow(IReadOnlyList<TableCell> before, IReadOnlyList<TableCell> after)
+    {
+        if (before.Count < 2 || before.Count != after.Count ||
+            before.Where((cell, column) => cell.ColSpan != after[column].ColSpan || cell.RowSpan != 1 || after[column].RowSpan != 1).Any() ||
+            !string.IsNullOrWhiteSpace(after[0].Text) || after.All(cell => string.IsNullOrWhiteSpace(cell.Text)) ||
+            after.Where((cell, column) => !string.IsNullOrWhiteSpace(cell.Text) && string.IsNullOrWhiteSpace(before[column].Text)).Any()) return null;
+        return before.Select((cell, column) =>
+        {
+            var rest = after[column].Text.Trim();
+            if (rest.Length == 0) return cell;
+            var start = cell.Text.TrimEnd();
+            // Japanese and Chinese text is not spaced between the parts.
+            var spaced = start.Length > 0 && start[^1] < '⺀' && rest[0] < '⺀';
+            return cell with { Text = start + (spaced ? " " : string.Empty) + rest };
+        }).ToArray();
+    }
+
+    /// <summary>The header a table repeats on the next page: the leading rows, as many as the first row's row spans reach,
+    /// that read the same on both pages. A header cell spanning rows makes a header of several rows.</summary>
+    private static bool TryRepeatedHeader(IReadOnlyList<IReadOnlyList<TableCell>> first, IReadOnlyList<IReadOnlyList<TableCell>> next, out int headerRows)
+    {
+        headerRows = 1;
+        var header = first[0];
+        if (header.Count < 2 || header.Count(cell => !string.IsNullOrWhiteSpace(cell.Text)) < 2) return false;
+        var count = Math.Max(1, header.Max(cell => cell.RowSpan));
+        // The whole header is on both pages, with a body row left after it on each.
+        if (count >= first.Count || count >= next.Count) return false;
+        for (var row = 0; row < count; row++)
+        {
+            var current = row;
+            if (first[row].Count != next[row].Count || first[row].Where((cell, column) => cell != next[current][column]).Any()) return false;
+            // A cell reaching below the header would be cut from its rows by the page break.
+            if (first[row].Any(cell => current + cell.RowSpan > count)) return false;
+        }
+        headerRows = count;
+        return true;
     }
 
     private static bool TryColumns(DocumentNode node, out double[] columns)

@@ -1803,9 +1803,15 @@ public sealed partial class PptxAdapter
         return leaders.Length >= 3 ? leaders.Select(s => s.ShapeId).ToHashSet(StringComparer.Ordinal) : [];
     }
 
-    private static List<VisualGraph> BuildVisualGraphs(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,
+    private static List<VisualGraph> BuildVisualGraphsCore(PptxSlideRecord slide, out HashSet<string> edgeLabelShapeIds,
         TimeSpan? inferenceTimeout, CancellationToken cancellationToken)
     {
+        // A sequence diagram is read as one graph of its own: its lifelines and frames must not split it into flows.
+        if (TryBuildSequenceGraph(slide, out var sequenceLabelShapeIds) is { } sequenceGraph)
+        {
+            edgeLabelShapeIds = sequenceLabelShapeIds;
+            return [sequenceGraph];
+        }
         var graph = BuildVisualGraph(slide, out edgeLabelShapeIds, inferenceTimeout, cancellationToken);
         if (graph is null) return [];
         var resolvedEdges = graph.Edges.Where(edge => edge.SourceId is not null && edge.TargetId is not null).ToArray();
@@ -2514,7 +2520,8 @@ public sealed partial class PptxAdapter
     /// across; bentConnector4 also turns at adj2 of the height. Other connectors run straight.</summary>
     private static IReadOnlyList<VisualPoint> ConnectorRoute(string? preset, IReadOnlyDictionary<string, double> adjustments)
     {
-        double Adjust(string name) => adjustments.TryGetValue(name, out var value) ? value / 100_000 : .5;
+        // A single-adjustment connector may name it "adj" instead of "adj1".
+        double Adjust(string name) => adjustments.TryGetValue(name, out var value) || name == "adj1" && adjustments.TryGetValue("adj", out value) ? value / 100_000 : .5;
         return preset?.ToLowerInvariant() switch
         {
             "bentconnector2" => [new(0, 0), new(1, 0), new(1, 1)],
@@ -2640,7 +2647,12 @@ public sealed partial class PptxAdapter
                 var rect = new VisualRect(candidate.Geometry.X, candidate.Geometry.Y,
                     candidate.Geometry.Width, candidate.Geometry.Height);
                 var (distance, projection, shaftLength) = RouteDistance(shaft, rect);
-                if (projection is <= .05 or >= .95) continue;
+                // A borderless text box beside a connector's first or last stretch is the usual place for
+                // a branch label ("yes" beside a decision's exit); only other shapes must avoid the ends,
+                // where a real node would sit.
+                // That label is a short, compact box; a wide text box touching the end is a caption of its own.
+                var compactLabel = candidate.IsTextBox && text.Length <= 24 && candidate.Geometry.Width <= candidate.Geometry.Height * 6;
+                if (!compactLabel && projection is <= .05 or >= .95) continue;
                 var labelMinorDimension = Math.Min(candidate.Geometry.Width, candidate.Geometry.Height);
                 var tolerance = Math.Max(1, Math.Max(labelMinorDimension * 1.5, shaftLength * .08));
                 if (distance > tolerance) continue;

@@ -2,10 +2,10 @@
 
 日本語 | [English](USER_GUIDE.en.md)
 
-利用ガイドは [docs/ja/user-guide.md](../docs/ja/user-guide.md) へ移動しました。
+導入から変換結果の確認までの手順は、利用ガイドをご覧ください。[利用ガイド](../docs/ja/user-guide.md)
 
-現行Public Betaでサポートする操作は、デスクトップGUIでのDOCX／XLSX／PPTX／PDFから**閲覧用Markdown**または**AI向けパッケージ**への一方向変換です。非表示情報は既定で除外されますが、Word変更履歴の`markup`には削除した文字などが含まれる場合があります。CLIのPDF変換は`--allow-pdf`または実験機能の環境変数で有効にできます。往復編集、元形式への反映、新規文書の生成は引き続き実験機能です。
+Public Betaのデスクトップアプリでは、DOCX・XLSX・PPTX・PDFを**閲覧用Markdown**、**閲覧用HTML**、**AI向けパッケージ**に変換できます。既定では、非表示と判定できた内容を除外します。Wordで削除した文字を除外するには、変更履歴を「最終版のみ」にします。CLIのPDF変換は `--allow-pdf` または実験機能の環境変数で有効にできます。往復編集、元の形式への復元、新規文書の生成は実験機能です。
 
-- [30秒クイックスタートと利用ガイド](../docs/ja/user-guide.md)
-- [v0.3.12の対応状況](../docs/ja/supported-features.md)
+- [クイックスタートと利用ガイド](../docs/ja/user-guide.md)
+- [v0.4.0の対応状況](../docs/ja/supported-features.md)
 - [実験機能](../docs/ja/experimental-features.md)

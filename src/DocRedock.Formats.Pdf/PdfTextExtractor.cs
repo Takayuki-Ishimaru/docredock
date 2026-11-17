@@ -129,6 +129,17 @@ public enum PdfUncertainTextReason
 /// is the union of the fragments' boxes in PDF user space.</summary>
 public sealed record PdfUncertainText(PdfUncertainTextReason Reason, string? ResourceName, int Fragments, Geometry? Bounds);
 
+/// <summary>One raster image a page draws that the extractor decoded into a displayable file
+/// (<see cref="MediaType"/> is <c>image/png</c> or <c>image/jpeg</c>). <see cref="Bounds"/> is where the page
+/// draws it in PDF user space, <see cref="DrawnWidth"/> and <see cref="DrawnHeight"/> its drawn size in points (the
+/// matrix' column lengths, which differ from the bounds' sides when the image is turned), and
+/// <see cref="PixelWidth"/> by <see cref="PixelHeight"/> the size of the bytes in <see cref="Content"/>.
+/// <see cref="AssetKey"/> names the decoded file: two draws of one picture in one orientation share it.</summary>
+#pragma warning disable CA1819 // The decoded file is the payload.
+public sealed record PdfExtractedImage(string AssetKey, string MediaType, byte[] Content, Geometry Bounds,
+    double DrawnWidth, double DrawnHeight, int PixelWidth, int PixelHeight);
+#pragma warning restore CA1819
+
 public sealed record PdfPageText(
     int PageNumber,
     IReadOnlyList<PdfTextRegion> Regions,
@@ -143,13 +154,15 @@ public sealed record PdfPageText(
     /// text elsewhere on the page that merely repeats a node's caption is ordinary body text and
     /// must survive (comparing rendered strings instead silently deletes it).</summary>
     IReadOnlyDictionary<int, string>? VisualLabelNodeIds = null,
-    /// <summary>How many embedded raster images this page draws: Image XObjects invoked with
-    /// <c>Do</c> plus inline <c>BI ... ID ... EI</c> images. Form XObjects are excluded whenever the
-    /// page's <c>/Resources /XObject</c> dictionary can be resolved; when it cannot, a <c>Do</c> is
-    /// counted only if the document declares at least one <c>/Subtype /Image</c> object. Counted on
-    /// every page, including <see cref="IsImageOnly"/> ones.</summary>
+    /// <summary>How many embedded raster images this page draws that were <b>not</b> extracted (see
+    /// <see cref="ExtractedImages"/>): Image XObjects invoked with <c>Do</c> plus inline
+    /// <c>BI ... ID ... EI</c> images. Form XObjects are excluded whenever the page's
+    /// <c>/Resources /XObject</c> dictionary can be resolved; when it cannot, a <c>Do</c> is counted only if
+    /// the document declares at least one <c>/Subtype /Image</c> object. Counted on every page, including
+    /// <see cref="IsImageOnly"/> ones (which extract nothing). A picture drawn at the same place on several pages
+    /// is page furniture (a logo) and is in neither list.</summary>
     int EmbeddedImageCount = 0,
-    /// <summary>Placement rectangles in PDF user space for those embedded images whose CTM at the
+    /// <summary>Placement rectangles in PDF user space for those not-extracted images whose CTM at the
     /// draw operator could be resolved. This may hold fewer entries than
     /// <see cref="EmbeddedImageCount"/> - never more - so a consumer must position from these and
     /// count from <see cref="EmbeddedImageCount"/>.</summary>
@@ -186,6 +199,11 @@ public sealed record PdfPageText(
     /// <summary>What a tagged PDF says its figures on the page show (their /Alt), in the order of its structure; null
     /// when it says nothing or the page draws no image.</summary>
     public IReadOnlyList<string>? ImageDescriptions { get; init; }
+
+    /// <summary>The raster images this page draws that were decoded into files (see <see cref="PdfExtractedImage"/>), in
+    /// reading order: top of the page first, then left to right. Null when none. Always null on an
+    /// <see cref="IsImageOnly"/> page, whose picture is read as a whole page by OCR.</summary>
+    public IReadOnlyList<PdfExtractedImage>? ExtractedImages { get; init; }
 
     // Regions are emitted by SortReadingOrder with ReadingOrder assigned sequentially over its own
     // final order - including any column-major unrolling - so sorting by ReadingOrder here (rather
@@ -319,6 +337,7 @@ public static partial class PdfTextExtractor
         var tables = new Dictionary<int, IReadOnlyList<PdfTable>>();
         var visualFallbacks = new Dictionary<int, PdfVisualFallbackProjection>();
         var visualProjections = new Dictionary<int, PdfVisualGraphProjection>();
+        var imageDraws = new Dictionary<int, List<PdfImageDraw>>();
         var streamPage = 1;
         var pageStreams = streams.Select(stream => pageMap.TryGetValue(stream.ObjectId ?? -1, out var mapped)
             ? (Page: mapped, Mapped: true, stream.Payload)
@@ -395,8 +414,10 @@ public static partial class PdfTextExtractor
             // An image-only page already reports PdfNativeTextUnavailable; only the mixed page - the
             // one that silently lost its image because native text made the page look complete -
             // needs its own warning.
+            // The warning (and which images it counts) waits until every page is read: a picture drawn at the
+            // same place on several pages is a running logo, and an image that decodes is extracted.
             if (!imageOnly && embeddedImages.Count > 0)
-                diagnostics.Add($"PdfEmbeddedImageOmitted: PDF page {pageNumber}: {embeddedImages.Count} embedded image(s) were not extracted; native text was retained. Run with --ocr on and a configured rasterizer to recover image text.");
+                imageDraws[pageNumber] = embeddedImages;
             // The same rule for a form that could not be inlined: the page's other text makes it
             // look complete, so the form needs its own warning (and, downstream, a review image).
             if (!imageOnly && unparsedForms.Count > 0)
@@ -575,7 +596,7 @@ public static partial class PdfTextExtractor
             flow = WithFontStyle(flow, regions);
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
-            var embeddedBounds = embeddedImages.Where(bounds => bounds is not null).Select(bounds => bounds!).ToArray();
+            var embeddedBounds = embeddedImages.Where(draw => draw.Bounds is not null).Select(draw => draw.Bounds!).ToArray();
             pages.Add(new PdfPageText(pageNumber, flow, vector, imageOnly, columnCount,
                 visualLabelNodeIds.Count == 0 ? null : visualLabelNodeIds,
                 embeddedImages.Count, embeddedBounds.Length == 0 ? null : embeddedBounds,
@@ -604,6 +625,7 @@ public static partial class PdfTextExtractor
                 MediaBox: attributes?.MediaBox, CropBox: attributes?.CropBox, Rotation: attributes?.Rotation ?? 0));
         }
         pages.Sort((left, right) => left.PageNumber.CompareTo(right.PageNumber));
+        ExtractPageImages(pages, imageDraws, raw, latin, index, options, diagnostics, cancellationToken);
         MarkPageFurniture(pages, tables);
         JoinColumnContinuations(pages, tables);
         MarkPageContinuations(pages, tables);
@@ -2667,6 +2689,11 @@ public static partial class PdfTextExtractor
     /// <see cref="Name"/> is null for an inline image.</summary>
     private readonly record struct PdfImageInvocation(string? Name, PdfMatrix Ctm, bool Inline);
 
+    /// <summary>One image draw that survived <see cref="CollectEmbeddedImages"/>: where it paints
+    /// (<see cref="Bounds"/>, null for a degenerate matrix), the matrix that placed it, and the Image XObject it draws
+    /// (null for an inline image or a name that cannot be followed).</summary>
+    private sealed record PdfImageDraw(Geometry? Bounds, PdfMatrix Ctm, int? ObjectId);
+
     /// <summary>The names one resource dictionary advertises. <see cref="Kinds"/> says what each
     /// XObject name is and <see cref="ObjectIds"/> which object a Form name points at, so
     /// <see cref="CollectEmbeddedImages"/> can descend into it; <see cref="Fonts"/> and
@@ -2974,11 +3001,11 @@ public static partial class PdfTextExtractor
     /// itself counted; an unresolved name survives only when <paramref name="treatUnresolvedAsImage"/>
     /// says the document has image objects at all, so an unfollowable resource dictionary degrades
     /// to over-reporting a placeholder rather than to silently dropping the image.</summary>
-    private static List<Geometry?> ResolveEmbeddedImages(string content,
+    private static List<PdfImageDraw> ResolveEmbeddedImages(string content,
         PdfResourceScope? resources, bool treatUnresolvedAsImage,
         IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget budget)
     {
-        var result = new List<Geometry?>();
+        var result = new List<PdfImageDraw>();
         CollectEmbeddedImages(content, resources, PdfMatrix.Identity, treatUnresolvedAsImage, forms, budget,
             0, [], result);
         return result;
@@ -2990,7 +3017,7 @@ public static partial class PdfTextExtractor
     /// form that reaches itself again stops instead of recursing forever.</summary>
     private static void CollectEmbeddedImages(string content, PdfResourceScope? resources, PdfMatrix ctm,
         bool treatUnresolvedAsImage, IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget budget,
-        int depth, HashSet<int> active, List<Geometry?> result)
+        int depth, HashSet<int> active, List<PdfImageDraw> result)
     {
         foreach (var invocation in ScanImageInvocations(content, ctm))
         {
@@ -3015,7 +3042,11 @@ public static partial class PdfTextExtractor
                 continue;
             }
             if (kind == PdfXObjectKind.Unknown && !treatUnresolvedAsImage) continue;
-            result.Add(UnitSquareBounds(invocation.Ctm));
+            // Only a name that resolved to an Image XObject can be decoded; an inline image or an unresolved
+            // name is counted and positioned, nothing more.
+            int? drawnObject = kind == PdfXObjectKind.Image && name is not null && resources?.ObjectIds is { } imageIds &&
+                imageIds.TryGetValue(name, out var imageId) ? imageId : null;
+            result.Add(new PdfImageDraw(UnitSquareBounds(invocation.Ctm), invocation.Ctm, drawnObject));
         }
     }
 
@@ -4076,11 +4107,24 @@ public static partial class PdfTextExtractor
             openRuns = stillOpen;
         }
         foreach (var run in openRuns) if (run.TrueMatchCount >= confirmations) confirmedRuns.Add(run);
+        // Columns whose lines do not share baselines are told apart by the strip of the page their text leaves free
+        // (see FindProjectedColumnRuns). They are taken only where no run found above covers part of the same
+        // baselines on a different gutter, and replace the runs found within their own baselines.
+        var tableFragments = geometric.Where((_, index) => isTableOwned[index]).ToArray();
+        foreach (var projected in FindProjectedColumnRuns(baselines, baselineTops, tableFragments, minX, maxX))
+        {
+            var overlapping = confirmedRuns.Where(run => run.FirstBaseline <= projected.LastBaseline && projected.FirstBaseline <= run.LastBaseline).ToArray();
+            if (overlapping.Any(run => !(run.FirstBaseline >= projected.FirstBaseline && run.LastBaseline <= projected.LastBaseline &&
+                run.Start < projected.End && projected.Start < run.End))) continue;
+            foreach (var run in overlapping) confirmedRuns.Remove(run);
+            confirmedRuns.Add(projected);
+        }
         if (confirmedRuns.Count == 0) return [.. geometric];
 
         // Reassemble the flow fragments: a baseline outside every confirmed block keeps its plain
         // top-to-bottom position; a block's baselines are re-emitted column by column instead.
         var reorderedFlow = new List<PdfTextRegion>(flowRegions.Length);
+        var blocks = new List<(int Start, int End)>();
         var cursor = 0;
         while (cursor < baselines.Count)
         {
@@ -4093,6 +4137,7 @@ public static partial class PdfTextExtractor
                 continue;
             }
             var blockEnd = covering.Max(run => run.LastBaseline);
+            var blockStart = reorderedFlow.Count;
             var columns = covering.Length + 1;
             columnCount = Math.Max(columnCount, columns);
             var columnLines = new List<PdfTextRegion>[columns];
@@ -4111,6 +4156,7 @@ public static partial class PdfTextExtractor
             }
             for (var column = 0; column < columnLines.Length; column++)
                 reorderedFlow.AddRange(columnLines[column].Select(region => region with { ReadingColumn = column }));
+            blocks.Add((blockStart, reorderedFlow.Count));
             cursor = blockEnd + 1;
         }
 
@@ -4123,12 +4169,28 @@ public static partial class PdfTextExtractor
             .ToDictionary(line => line.SourceTextIds[0]);
         var result = new List<PdfTextRegion>(geometric.Length);
         var flowCursor = 0;
+        // A table lying among the lines of a column block would sit in the middle of whichever column the unrolled
+        // order has reached at its height, cutting that column's paragraphs apart. It follows the block instead;
+        // where it belongs among the columns is decided from its own bounds (see PdfPageProjection).
+        var deferred = new List<PdfTextRegion>();
         for (var index = 0; index < geometric.Length; index++)
         {
-            if (isTableOwned[index]) result.Add(geometric[index]);
-            else if (flowLineStarts.TryGetValue(reorderedFlow[flowCursor++].SourceTextIds[0], out var line))
+            if (isTableOwned[index])
+            {
+                if (blocks.Any(block => block.Start < flowCursor && flowCursor < block.End)) deferred.Add(geometric[index]);
+                else result.Add(geometric[index]);
+                continue;
+            }
+            if (flowLineStarts.TryGetValue(reorderedFlow[flowCursor++].SourceTextIds[0], out var line))
                 result.Add(line);
+            if (deferred.Count > 0 && blocks.Any(block => block.End == flowCursor))
+            {
+                result.AddRange(deferred);
+                deferred.Clear();
+            }
         }
+        // Never drop a table's text: anything still held back goes at the end.
+        result.AddRange(deferred);
         return result.ToArray();
     }
 

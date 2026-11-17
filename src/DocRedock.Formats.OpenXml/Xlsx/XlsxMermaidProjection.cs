@@ -11,7 +11,7 @@ namespace DocRedock.Formats.OpenXml.Xlsx;
 /// Projects Japanese Excel-grid diagrams into a semantic Mermaid view while retaining
 /// the original cells as the authoritative round-trip representation.
 /// </summary>
-internal static class XlsxMermaidProjection
+internal static partial class XlsxMermaidProjection
 {
     private static readonly System.Buffers.SearchValues<char> ArrowCharacters = System.Buffers.SearchValues.Create("←→↑↓▶◀");
     private static readonly Regex SectionHeadingPattern = new(@"^\d+(?:\.\d+)+\s+\S", RegexOptions.CultureInvariant);
@@ -147,6 +147,7 @@ internal static class XlsxMermaidProjection
         var prefersLanes = ContainsAny(worksheet.Name, "フロー", "flow", "swimlane", "スイムレーン");
         DiagramProjection? projection = TryCreateStateDiagram(worksheet);
         if (projection is null && hasSequenceEvidence) projection = TryCreateSequence(worksheet);
+        projection ??= TryCreateDrawnSequence(worksheet);
         if (projection is null && prefersLanes) projection = TryCreateDrawingFlowchart(worksheet, useLanes: true, inferenceTimeout, cancellationToken);
         projection ??= TryCreateDrawingFlowchart(worksheet, useLanes: false, inferenceTimeout, cancellationToken);
         if (projection is null && HasGridFlowEvidence(worksheet))
@@ -689,7 +690,16 @@ internal static class XlsxMermaidProjection
                     shape.ToRow ?? shape.Row + 1, shape.Text!.Trim())))
             .ToArray();
         Region[] lanes = [];
-        if (useLanes)
+        // Swimlanes drawn as shapes (a tall container with a header band) are lanes whatever the sheet is called.
+        var drawnLanes = FindDrawnLanes(shapes, worksheet.Metrics);
+        var laneMode = useLanes || drawnLanes.Count >= 2;
+        if (drawnLanes.Count >= 2)
+        {
+            lanes = drawnLanes.Select(lane => new Region(lane.Header.Shape.Column, lane.Header.Shape.Row,
+                lane.Header.Shape.ToColumn ?? lane.Header.Shape.Column + 1, lane.Header.Shape.ToRow ?? lane.Header.Shape.Row + 1,
+                lane.Header.Text)).ToArray();
+        }
+        else if (useLanes)
         {
             var laneRow = regions
                 .Where(region => region.MinRow <= 12 && region.Value.Length <= 40 && !region.Value.Contains(':') &&
@@ -728,6 +738,32 @@ internal static class XlsxMermaidProjection
             if (region is null || string.IsNullOrWhiteSpace(region.Value)) continue;
             matched.Add((shape, region));
         }
+        // Lane containers and their header bands are the lanes, not nodes. A small label text box sitting on a
+        // connector is that connector's label, and a caption that lies outside every lane and is joined to
+        // nothing is the diagram's title.
+        var laneShapeIds = drawnLanes.SelectMany(lane => new[] { lane.Container.Id, lane.Header.Id }).ToHashSet(StringComparer.Ordinal);
+        matched.RemoveAll(item => laneShapeIds.Contains(item.Shape.Id));
+        var connectorLabels = AttachConnectorLabels(shapes, matched.Select(item => item.Shape).ToArray(), worksheet.Metrics);
+        var labelShapeIds = connectorLabels.Values.Select(label => label.Id).ToHashSet(StringComparer.Ordinal);
+        matched.RemoveAll(item => labelShapeIds.Contains(item.Shape.Id));
+        var titleTexts = new List<string>();
+        var titleShapeIds = new HashSet<string>(StringComparer.Ordinal);
+        if (drawnLanes.Count >= 2)
+        {
+            var joined = shapes.Where(shape => shape.IsConnector)
+                .SelectMany(shape => new[] { shape.StartConnectionId, shape.EndConnectionId }).Where(id => id is not null)
+                .ToHashSet(StringComparer.Ordinal);
+            foreach (var item in matched.ToArray())
+            {
+                if (BoxOf(item.Shape, worksheet.Metrics) is not { } box || joined.Contains(item.Shape.Id) ||
+                    !(item.Shape.IsUnpainted || item.Shape.IsTextBox) ||
+                    drawnLanes.Any(lane => lane.Container.Box.Left < box.Right && lane.Container.Box.Right > box.Left &&
+                                           lane.Container.Box.Top < box.Bottom && lane.Container.Box.Bottom > box.Top)) continue;
+                titleTexts.Add(item.Shape.Text!.Trim());
+                titleShapeIds.Add(item.Shape.Id);
+                matched.Remove(item);
+            }
+        }
         if (matched.Count < 2) return null;
 
         // P-Overlay (XLSX) F-B: every shape that actually becomes part of THIS diagram (a matched
@@ -735,6 +771,9 @@ internal static class XlsxMermaidProjection
         // here so XlsxAdapter.Extract can still fold an unrelated, unconsumed shape elsewhere on
         // the same sheet into a schedule-table overlay instead of skipping the whole sheet.
         var consumedShapeIds = new HashSet<string>(matched.Select(item => item.Shape.Id), StringComparer.Ordinal);
+        consumedShapeIds.UnionWith(laneShapeIds);
+        consumedShapeIds.UnionWith(labelShapeIds);
+        consumedShapeIds.UnionWith(titleShapeIds);
 
         var nodes = matched.Select(item => new FlowNode(
                 ShapeNodeId(item.Shape),
@@ -745,15 +784,33 @@ internal static class XlsxMermaidProjection
             item => ShapeNodeId(item.Shape),
             item => item.Shape.Geometry,
             StringComparer.Ordinal);
-        var output = new StringBuilder(useLanes ? "flowchart TD\n" : "flowchart LR\n");
-        if (useLanes)
+        var output = new StringBuilder(laneMode ? "flowchart TD\n" : "flowchart LR\n");
+        foreach (var titleText in titleTexts)
+            output.Append("    %% title: ").AppendLine(Label(titleText));
+        if (drawnLanes.Count >= 2)
+        {
+            var laneOfNode = matched.ToDictionary(item => ShapeNodeId(item.Shape),
+                item => BoxOf(item.Shape, worksheet.Metrics) is { } box ? LaneIndexOf(drawnLanes, box) : -1, StringComparer.Ordinal);
+            for (var laneIndex = 0; laneIndex < drawnLanes.Count; laneIndex++)
+            {
+                output.Append("    subgraph L").Append(laneIndex + 1).Append("[\"").Append(Label(drawnLanes[laneIndex].Label)).AppendLine("\"]");
+                output.AppendLine("        direction TB");
+                foreach (var node in nodes.Where(node => laneOfNode[node.Id] == laneIndex))
+                    output.Append("        ").Append(node.Id).AppendLine(DrawingFlowShape(node.Region.Value, nodeGeometry[node.Id]));
+                output.AppendLine("    end");
+            }
+            // A node outside every lane belongs to no subgraph.
+            foreach (var node in nodes.Where(node => laneOfNode[node.Id] < 0))
+                output.Append("    ").Append(node.Id).AppendLine(DrawingFlowShape(node.Region.Value, nodeGeometry[node.Id]));
+        }
+        else if (useLanes)
         {
             for (var laneIndex = 0; laneIndex < lanes.Length; laneIndex++)
             {
                 var lane = lanes[laneIndex];
                 output.Append("    subgraph L").Append(laneIndex + 1).Append("[\"").Append(Label(lane.Value)).AppendLine("\"]");
                 output.AppendLine("        direction TB");
-                foreach (var node in nodes.Where(node => ContainsColumn(lane, node.Region.CenterColumn)))
+                foreach (var node in nodes.Where(node => NearestContainingLane(lanes, node.Region.CenterColumn) == laneIndex))
                     output.Append("        ").Append(node.Id).AppendLine(DrawingFlowShape(node.Region.Value, nodeGeometry[node.Id]));
                 output.AppendLine("    end");
             }
@@ -777,7 +834,8 @@ internal static class XlsxMermaidProjection
         {
             if (nodesByShapeId.TryGetValue(connector.StartConnectionId!, out var source) &&
                 nodesByShapeId.TryGetValue(connector.EndConnectionId!, out var target) && source.Id != target.Id)
-                AppendEdge(source, target, connector.Text?.Trim() ?? string.Empty, connector, VisualEdgeResolution.NativeConnection);
+                AppendEdge(source, target, connector.Text?.Trim() ?? (connectorLabels.TryGetValue(connector.Id, out var attachedLabel) ? attachedLabel.Text!.Trim() : string.Empty),
+                    connector, VisualEdgeResolution.NativeConnection);
             else
             {
                 var edgeId = "e_" + visualEdges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -871,9 +929,9 @@ internal static class XlsxMermaidProjection
         if (edges.Count == 0 && drawingArrows.Length > 0)
             output.Append("    %% unresolved directional shapes: ").AppendLine(drawingArrows.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
-        var minRow = useLanes ? lanes.Min(lane => lane.MinRow) : nodes.Min(node => node.Region.MinRow);
+        var minRow = laneMode ? lanes.Min(lane => lane.MinRow) : nodes.Min(node => node.Region.MinRow);
         var maxRow = nodes.Max(node => node.Region.MaxRow);
-        var type = useLanes ? "flowchart" : "architecture";
+        var type = laneMode ? "flowchart" : "architecture";
         var visualGraph = BuildDrawingVisualGraph(worksheet, shapes, nodes, visualEdges, visualEdgeSourceIds,
             visualDiagnostics, visualLabels);
         return new DiagramProjection(type, output.ToString().TrimEnd(), minRow, maxRow, "xlsx-drawingml+cell-layout", visualGraph,
@@ -1384,6 +1442,20 @@ internal static class XlsxMermaidProjection
     private static Direction ArrowDirection(string value) => value.Contains('←') || value.Contains('◀') ? Direction.Left :
         value.Contains('→') || value.Contains('▶') ? Direction.Right : value.Contains('↑') ? Direction.Up : Direction.Down;
     private static bool ContainsColumn(Region lane, double column) => column >= lane.MinColumn && column <= lane.MaxColumn;
+
+    // The lane a column belongs to; lanes whose column ranges touch at an edge must not both claim the node on it.
+    private static int NearestContainingLane(IReadOnlyList<Region> lanes, double column)
+    {
+        var best = -1;
+        var bestDistance = double.MaxValue;
+        for (var index = 0; index < lanes.Count; index++)
+        {
+            if (!ContainsColumn(lanes[index], column)) continue;
+            var distance = Math.Abs(lanes[index].CenterColumn - column);
+            if (distance < bestDistance) { best = index; bestDistance = distance; }
+        }
+        return best;
+    }
     // Asked of every cell of a sheet: a loop, not a closure for each call.
     private static bool ContainsAny(string value, params string[] candidates)
     {
