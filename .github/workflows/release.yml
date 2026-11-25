@@ -70,6 +70,7 @@ jobs:
           test -f "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md"
           python3 tools/check-release-documents.py --root . --tag "$RELEASE_TAG"
           python3 -m unittest discover -s tools -p test_release_documents.py
+          python3 -m unittest discover -s tools -p test_distribution_privacy.py
       - name: Set up .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
@@ -176,6 +177,13 @@ jobs:
         run: |
           sh tools/publish-gui.sh "${{ matrix.rid }}"
           sh tools/publish-cli.sh "${{ matrix.rid }}"
+
+      - name: Remove personal debug paths before signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/check-distribution-privacy.py --root "artifacts/cli/${{ matrix.rid }}" --redact
+          python3 tools/check-distribution-privacy.py --root "artifacts/gui/${{ matrix.rid }}" --redact
 
       - name: Optionally sign Windows executables
         if: matrix.family == 'windows'
@@ -410,6 +418,8 @@ jobs:
           $name = "DocRedock-$env:RELEASE_TAG-${{ matrix.rid }}"
           Expand-Archive "release/$name.zip" "artifacts/smoke"
           $root = "artifacts/smoke"
+          python tools/check-distribution-privacy.py --root "$root"
+          if ($LASTEXITCODE -ne 0) { throw "Distribution privacy check failed" }
           python tools/release-smoke-test.py --cli "$root/DocRedock.Cli.exe" --gui "$root/DocRedock.exe" --gui-mode binary --expected-version "$($env:RELEASE_TAG.Substring(1))" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test macOS package
         if: matrix.family == 'macos'
@@ -423,6 +433,7 @@ jobs:
           mkdir -p artifacts/smoke
           ditto -x -k "release/$name.zip" artifacts/smoke
           root="artifacts/smoke/$name"
+          python3 tools/check-distribution-privacy.py --root "$root"
           python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock.app/Contents/MacOS/DocRedock" --gui-mode binary --expected-version "${RELEASE_TAG#v}" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Extract and smoke-test Linux package
         if: matrix.family == 'linux'
@@ -438,6 +449,7 @@ jobs:
           mkdir -p artifacts/smoke
           tar -xzf "release/$name.tar.gz" -C artifacts/smoke
           root="artifacts/smoke/$name"
+          python3 tools/check-distribution-privacy.py --root "$root"
           python3 tools/release-smoke-test.py --cli "$root/DocRedock.Cli" --gui "$root/DocRedock" --gui-mode startup --expected-version "${RELEASE_TAG#v}" --rid "${{ matrix.rid }}" --evidence-json "artifacts/visual-semantics-evidence-${{ matrix.rid }}.json"
       - name: Stage visual semantics evidence with package
         shell: bash

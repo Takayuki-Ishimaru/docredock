@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 tools/check-release-documents.py --root . --tag v0.4.1
           python3 -m unittest discover -s tools -p test_release_documents.py
+          python3 -m unittest discover -s tools -p test_distribution_privacy.py
       - name: Set up .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
