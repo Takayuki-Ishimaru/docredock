@@ -25,8 +25,11 @@ public sealed class PdfTableContinuationTests
         Assert.Equal(markdown, serializer.Serialize(graph));
     }
 
-    [Fact]
-    public void Repeated_page_numbers_are_furniture_and_do_not_interrupt_table_continuation()
+    [Theory]
+    [InlineData("ja", "### 文書ヘッダー・フッター（参考）")]
+    [InlineData("en", "### Document headers and footers (reference)")]
+    public void Repeated_page_numbers_are_furniture_and_do_not_interrupt_table_continuation(
+        string language, string referenceHeading)
     {
         var extraction = PdfTextExtractor.Extract(Document(
             Table(45, 800, "Name", "A") + "\n" + Text(270, 20, "- 1 -"),
@@ -34,10 +37,10 @@ public sealed class PdfTableContinuationTests
         Assert.All(extraction.Pages, page => Assert.Single(page.Regions, region => region.IsPageFurniture));
         var graph = PdfDocumentGraphProjection.CreateGraph(extraction, "0123456789abcdef");
         Assert.Equal(2, graph.Nodes.Count(node => node.Layer == ContentLayer.Furniture));
-        var serializer = new ReadableMarkdownSerializer();
+        var serializer = new ReadableMarkdownSerializer(new(Language: language));
         var markdown = serializer.Serialize(graph);
         Assert.Equal(1, serializer.RenderedTables);
-        var reference = markdown.IndexOf("### 文書ヘッダー・フッター（参考）", StringComparison.Ordinal);
+        var reference = markdown.IndexOf(referenceHeading, StringComparison.Ordinal);
         Assert.True(reference > 0);
         Assert.DoesNotContain("- 1 -", markdown[..reference]);
         Assert.DoesNotContain("- 2 -", markdown[..reference]);
