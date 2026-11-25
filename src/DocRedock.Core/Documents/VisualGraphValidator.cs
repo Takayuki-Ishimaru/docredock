@@ -56,10 +56,10 @@ public static class VisualGraphValidator
             {
                 var sourceId = edge.SourceId;
                 var targetId = edge.TargetId;
-                if (edge.IsUndirected && StringComparer.Ordinal.Compare(sourceId, targetId) > 0)
+                if ((edge.IsUndirected || edge.IsBidirectional) && StringComparer.Ordinal.Compare(sourceId, targetId) > 0)
                     (sourceId, targetId) = (targetId, sourceId);
                 var semanticKey = string.Join('\u001f', sourceId, targetId, edge.Label?.Trim() ?? string.Empty,
-                    edge.IsUndirected ? "undirected" : "directed");
+                    edge.IsUndirected ? "undirected" : edge.IsBidirectional ? "bidirectional" : "directed");
                 if (!semanticEdges.Add(semanticKey))
                     Error("VisualEdgeDuplicate", $"Visual edge '{edge.Id}' duplicates an existing semantic relation.", edge.SourceNodeId);
             }

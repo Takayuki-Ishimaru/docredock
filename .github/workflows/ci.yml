@@ -27,6 +27,10 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: Verify public release documents
+        run: |
+          python3 tools/check-release-documents.py --root . --tag v0.4.1
+          python3 -m unittest discover -s tools -p test_release_documents.py
       - name: Set up .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:

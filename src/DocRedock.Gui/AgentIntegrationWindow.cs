@@ -27,7 +27,6 @@ public sealed class AgentIntegrationWindow : Window
     private readonly Dictionary<AgentClient, CheckBox> clientChecks = [];
     private readonly Dictionary<AgentClient, TextBlock> clientStatus = [];
     private readonly Dictionary<AgentClient, TextBlock> clientDetail = [];
-    private readonly CheckBox hookCheck = new() { Name = "AgentHookCheckBox", Content = "原本を直接開かせない（フック）" };
     private readonly CheckBox approveCheck = new() { Name = "AgentApproveCheckBox", Content = "DocRedockのツールを毎回の承認なしで使う" };
     private readonly TextBlock changes = new() { Name = "AgentChangesText", TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock result = new() { Name = "AgentResultText", TextWrapping = TextWrapping.Wrap, IsVisible = false };
@@ -52,7 +51,7 @@ public sealed class AgentIntegrationWindow : Window
         panel.Children.Add(new TextBlock
         {
             TextWrapping = TextWrapping.Wrap,
-            Text = "Claude Code・GitHub Copilot・Codexが、Word・Excel・PowerPoint・PDFを読むときに、まずDocRedockで変換し、足りないときだけ原本の該当箇所を読むように設定します。設定はこのユーザーのAIツール設定フォルダーに書き込みます。いつでも解除できます。",
+            Text = "Claude Code・GitHub Copilot・Codexに、DocRedockで文書の本文や構造を取り出す連携を設定します。体裁や図の確認など必要に応じて、AIはOffice・PDFアプリや描画ツールで原本を直接開けます。先に変換する必要はありません。設定はこのユーザーのAIツール設定フォルダーに書き込み、いつでも解除できます。",
         });
         panel.Children.Add(cliMissing);
         panel.Children.Add(new TextBlock { Text = "設定するAIツール", Classes = { "section-label" } });
@@ -68,13 +67,6 @@ public sealed class AgentIntegrationWindow : Window
             check.IsCheckedChanged += (_, _) => OnSelectionChanged();
             Avalonia.Automation.AutomationProperties.SetName(check, ClientName(client) + "を設定する");
         }
-        panel.Children.Add(hookCheck);
-        panel.Children.Add(new TextBlock
-        {
-            Text = "AIがWord・Excel・PowerPointのファイルを直接開こうとすると止めます。Codexでは初回に /hooks での承認が必要です。",
-            TextWrapping = TextWrapping.Wrap, Classes = { "caption", "muted" }, Margin = new Thickness(28, 0, 0, 0),
-        });
-        hookCheck.IsCheckedChanged += (_, _) => OnSelectionChanged();
         panel.Children.Add(approveCheck);
         panel.Children.Add(new TextBlock
         {
@@ -91,7 +83,6 @@ public sealed class AgentIntegrationWindow : Window
         DockPanel.SetDock(buttons, Dock.Bottom); layout.Children.Add(buttons);
         layout.Children.Add(new ScrollViewer { Content = panel });
         Content = layout;
-        Avalonia.Automation.AutomationProperties.SetName(hookCheck, "原本を直接開かせない（フック）");
         Avalonia.Automation.AutomationProperties.SetName(approveCheck, "DocRedockのツールを毎回の承認なしで使う");
         install.Click += (_, _) => running = InstallAsync();
         uninstall.Click += (_, _) => running = UninstallAsync();
@@ -114,7 +105,8 @@ public sealed class AgentIntegrationWindow : Window
     internal bool UninstallEnabled => uninstall.IsEnabled;
     internal bool IsClientSelected(AgentClient client) => clientChecks[client].IsChecked == true;
     internal void SelectClient(AgentClient client, bool selected) => clientChecks[client].IsChecked = selected;
-    internal bool Enforce { get => hookCheck.IsChecked == true; set => hookCheck.IsChecked = value; }
+    /// <summary>Deprecated no-op: the restrictive hook is retired and direct reading of original files is allowed.</summary>
+    internal bool Enforce { get => false; set { } }
     internal bool AutoApprove { get => approveCheck.IsChecked == true; set => approveCheck.IsChecked = value; }
     internal Button InstallButton => install;
     internal Button UninstallButton => uninstall;
@@ -126,7 +118,7 @@ public sealed class AgentIntegrationWindow : Window
 
     private static string ItemName(AgentItem item) => item switch
     {
-        AgentItem.Mcp => "MCPサーバー", AgentItem.Instructions => "指示", AgentItem.Skill => "スキル", AgentItem.Hook => "フック", _ => "自動承認",
+        AgentItem.Mcp => "MCPサーバー", AgentItem.Instructions => "指示", AgentItem.Skill => "スキル", AgentItem.Hook => "旧制限フック", _ => "自動承認",
     };
 
     private static string ActionName(AgentAction action) => action switch
@@ -160,7 +152,6 @@ public sealed class AgentIntegrationWindow : Window
     {
         var any = Selected().Length > 0;
         foreach (var check in clientChecks.Values) check.IsEnabled = !busy;
-        hookCheck.IsEnabled = !busy;
         approveCheck.IsEnabled = !busy;
         install.IsEnabled = !busy && any && setup.CliFound;
         uninstall.IsEnabled = !busy && any;
@@ -169,7 +160,7 @@ public sealed class AgentIntegrationWindow : Window
 
     private void SetBusy(bool value) { busy = value; UpdateEnabled(); }
 
-    private AgentOptions Options(bool dryRun = false) => new(Selected(), hookCheck.IsChecked == true, dryRun, approveCheck.IsChecked == true);
+    private AgentOptions Options(bool dryRun = false) => new(Selected(), null, dryRun, approveCheck.IsChecked == true);
 
     internal async Task RefreshAsync(bool updateStatuses)
     {
@@ -202,7 +193,8 @@ public sealed class AgentIntegrationWindow : Window
             foreach (var client in Clients)
             {
                 var items = status.Items.Where(item => item.Client == client).ToArray();
-                var main = items.Where(item => item.Item is not (AgentItem.Hook or AgentItem.Approval)).ToArray();
+                // A leftover retired hook counts as needing an update; a missing one is not shown.
+                var main = items.Where(item => item.Item != AgentItem.Approval && (item.Item != AgentItem.Hook || item.State != AgentItemState.Missing)).ToArray();
                 var problem = items.FirstOrDefault(item => item.State == AgentItemState.Error)
                     ?? items.FirstOrDefault(item => item.State == AgentItemState.Conflict);
                 clientStatus[client].Text = main.Length == 0 ? "未設定"
@@ -215,8 +207,6 @@ public sealed class AgentIntegrationWindow : Window
                 clientDetail[client].Text = detail; clientDetail[client].IsVisible = detail is not null;
                 ToolTip.SetTip(clientStatus[client], detail);
             }
-            if (status.Items.Any(item => item.Item == AgentItem.Hook && item.State is AgentItemState.Installed or AgentItemState.Outdated))
-                hookCheck.IsChecked = true;
             if (status.Items.Any(item => item.Item == AgentItem.Approval && item.State is AgentItemState.Installed or AgentItemState.Outdated))
                 approveCheck.IsChecked = true;
         }
@@ -284,7 +274,7 @@ public sealed class AgentIntegrationWindow : Window
     }
 
     private static string TranslateNote(string note) =>
-        note.StartsWith("Codex asks you", StringComparison.Ordinal) ? "Codexでは /hooks を開き、DocRedockのフックを承認してください。"
+        note.StartsWith("The enforce option", StringComparison.Ordinal) ? "--enforce（フック）は廃止されました。DocRedockがかつて登録した制限フックがあれば削除し、原本の直接読み取りは許可されたままです。"
         : note.StartsWith("GitHub Copilot: the approval hook", StringComparison.Ordinal) ? "GitHub Copilotの自動承認はCopilot CLIだけが対象です。VS Codeでは「常に許可」を選んでください。"
         : note;
 

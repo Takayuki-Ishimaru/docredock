@@ -41,12 +41,12 @@ public sealed class AgentsCliTests : IDisposable
         Assert.True(json.GetProperty("cli_exists").GetBoolean());
         Assert.Equal(0, json.GetProperty("exit_code").GetInt32());
         var items = json.GetProperty("items").EnumerateArray().ToArray();
-        Assert.Equal(8, items.Length);
+        Assert.Equal(6, items.Length);
         Assert.All(items, item => Assert.Equal("installed", item.GetProperty("state").GetString()));
-        Assert.Contains(items, item => item.GetProperty("client").GetString() == "codex" && item.GetProperty("item").GetString() == "hook"
+        Assert.DoesNotContain(items, item => item.GetProperty("client").GetString() == "codex" && item.GetProperty("item").GetString() == "hook"
             && item.GetProperty("action").GetString() == "create");
         Assert.Contains($"command = '{Cli}'", File.ReadAllText(Path.Combine(Home, ".codex", "config.toml")));
-        Assert.True(File.Exists(Path.Combine(Home, ".copilot", "hooks", "docredock.json")));
+        Assert.False(File.Exists(Path.Combine(Home, ".copilot", "hooks", "docredock.json")));
     }
 
     [Fact]
@@ -72,7 +72,7 @@ public sealed class AgentsCliTests : IDisposable
 
         // Without a flag the approval is kept; --no-auto-approve removes it; the hook flags work the same way.
         await RunAsync(null, ["agents", "install", .. Common, "--enforce"]);
-        Assert.True(File.Exists(Path.Combine(Home, ".codex", "hooks.json")));
+        Assert.False(File.Exists(Path.Combine(Home, ".codex", "hooks.json")));
         await RunAsync(null, ["agents", "install", .. Common]);
         Assert.True(File.Exists(Path.Combine(Home, ".copilot", "hooks", "docredock-approve.json")));
         var (removeCode, removed, _) = await RunAsync(null, ["agents", "install", .. Common, "--no-auto-approve", "--no-enforce"]);
@@ -119,7 +119,7 @@ public sealed class AgentsCliTests : IDisposable
         Assert.Equal(0, code);
         Assert.Contains("dry run", output);
         Assert.Contains("would add", output);
-        Assert.Contains("/hooks", output);
+        Assert.Contains("retired", output);
         Assert.False(Directory.Exists(Home) && Directory.EnumerateFileSystemEntries(Home).Any());
 
         var (_, installed, _) = await RunAsync(null, ["agents", "install", .. Common, "--client", "codex"]);
@@ -203,8 +203,8 @@ public sealed class AgentsCliTests : IDisposable
     {
         var (code, output, _) = await RunAsync(stdin, "hook", client);
         Assert.Equal(0, code);
-        Assert.Contains(expected, output);
-        Assert.Contains("\"deny\"", output);
+        Assert.Equal(client=="copilot"?"{}":"", output);
+        Assert.DoesNotContain(expected, output);
     }
 
     [Theory]
@@ -238,10 +238,7 @@ public sealed class AgentsCliTests : IDisposable
         var app = new CliApplication(new StringWriter(), new StringWriter(), new DocumentService(null, null, discoverPdfRasterizer: false), new StringReader(stdin)) { HookOutput = stream };
         Assert.Equal(0, await app.RunAsync(["hook", "claude"]));
         var bytes = stream.ToArray();
-        Assert.NotEqual(0xEF, bytes[0]); // no byte order mark
-        var text = new System.Text.UTF8Encoding(false, true).GetString(bytes);
-        var reason = JsonDocument.Parse(text).RootElement.GetProperty("hookSpecificOutput").GetProperty("permissionDecisionReason").GetString();
-        Assert.Contains("export \"設計書.docx\"", reason);
+        Assert.Empty(bytes); // Native reads, including Japanese paths, produce no restrictive decision.
     }
 
     private sealed class ThrowingReader : TextReader

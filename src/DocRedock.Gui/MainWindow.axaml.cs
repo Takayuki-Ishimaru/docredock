@@ -344,7 +344,7 @@ public partial class MainWindow : Window
         AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
         UpdateFormatSpecificOptions();
         ApplyEmbedImagesState();
-        ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+        ExpandMergedCellsCheckBox.IsEnabled = ReadableExportToggle.IsChecked == true;
         SchedulePackagePreview();
         SaveSettings();
         UpdateButtons();
@@ -1485,7 +1485,7 @@ public partial class MainWindow : Window
             AiPackageOptionsPanel.IsVisible = AiPackageExportRadio.IsChecked == true;
             UpdateFormatSpecificOptions();
             ApplyEmbedImagesState();
-            ExpandMergedCellsCheckBox.IsEnabled = AiPackageExportRadio.IsChecked != true;
+            ExpandMergedCellsCheckBox.IsEnabled = ReadableExportToggle.IsChecked == true;
         }
         catch (JsonException) { }
         catch (IOException) { }

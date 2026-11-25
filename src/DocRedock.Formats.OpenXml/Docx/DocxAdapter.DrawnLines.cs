@@ -112,6 +112,17 @@ public sealed partial class DocxAdapter
                 .Append(runDefaults).OfType<XElement>()];
         }
 
+        /// <summary>The run property sets (w:rPr) of a run by the level that states them, each nearest first: the run's own,
+        /// its character style and the styles that is based on, the paragraph's style and the styles that is based on, and
+        /// the document's defaults. Toggle properties (ECMA-376 17.7.3) need the levels apart.</summary>
+        public (XElement? Own, IReadOnlyList<XElement> Character, IReadOnlyList<XElement> Paragraph, XElement? Defaults) RunPropertyLevels(XElement run, XElement paragraph)
+        {
+            var own = run.Element(W + "rPr");
+            var paragraphStyle = (string?)paragraph.Element(W + "pPr")?.Element(W + "pStyle")?.Attribute(W + "val") ?? defaultParagraph;
+            return (own, [.. Chain((string?)own?.Element(W + "rStyle")?.Attribute(W + "val")).Select(item => item.Element(W + "rPr")).OfType<XElement>()],
+                [.. Chain(paragraphStyle).Select(item => item.Element(W + "rPr")).OfType<XElement>()], runDefaults);
+        }
+
         // The cell margin of a table style (w:tblCellMar), its nearest declaration.
         public XElement? TableCellMargins(string? tableStyle) =>
             Chain(tableStyle).Select(item => item.Element(W + "tblPr")?.Element(W + "tblCellMar")).FirstOrDefault(item => item is not null);

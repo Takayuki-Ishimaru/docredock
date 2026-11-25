@@ -37,8 +37,11 @@ public sealed class PdfTableContinuationTests
         var serializer = new ReadableMarkdownSerializer();
         var markdown = serializer.Serialize(graph);
         Assert.Equal(1, serializer.RenderedTables);
-        Assert.DoesNotContain("- 1 -", markdown);
-        Assert.DoesNotContain("- 2 -", markdown);
+        var reference = markdown.IndexOf("### 文書ヘッダー・フッター（参考）", StringComparison.Ordinal);
+        Assert.True(reference > 0);
+        Assert.DoesNotContain("- 1 -", markdown[..reference]);
+        Assert.DoesNotContain("- 2 -", markdown[..reference]);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(markdown[reference..], "- 1 - … - 2 -"));
         Assert.Contains("| A | 100 |", markdown);
         Assert.Contains("| B | 100 |", markdown);
     }

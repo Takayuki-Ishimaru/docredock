@@ -2,6 +2,17 @@
 
 Notable user-facing changes to DocRedock are summarized here. GitHub Releases is the canonical source for downloadable artifacts, checksums, signing status, and release notes.
 
+## [0.4.1]
+
+- Improved source layout, drawing appearance, cached charts and print settings in Readable HTML for Office documents.
+- Added per-sheet Excel review folders with `--split-sheets` and portable Markdown with `--portable-markdown`.
+- Improved PDF lists, tables, text placement and repeated body images; kept source page previews out of sanitized output.
+- Updated AI integration to permit direct Office/PDF inspection and remove owned legacy restrictive hooks on reinstall.
+- AI package manifest/report schemas remain `2.2`/`1.2`.
+
+- [English release notes](release-docs/RELEASE_NOTES_v0.4.1.en.md)
+- [日本語リリースノート](release-docs/RELEASE_NOTES_v0.4.1.md)
+
 ## [0.4.0]
 
 - Added Readable HTML for offline viewing, with embedded images, SVG diagrams, print styles, and a table of contents when the document has enough headings.

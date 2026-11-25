@@ -127,7 +127,10 @@ public sealed class ExcelHugeAreaTests : IDisposable
         // The token only stops a conversion that is slow but gets to a check; a loop over the cells of the area never does, so the
         // test stops waiting for it at the limit, a little before the token.
         using var cancellation = new CancellationTokenSource(Limit + TimeSpan.FromSeconds(5));
-        var conversion = Task.Run(() => service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false), cancellation.Token));
+        // Compare geometry with the low-level grid serializer under the same output options.
+        var conversion = Task.Run(() => service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false,
+            TableLayout: DocRedock.Markdown.MarkdownTableLayout.Grid, IncludeSourceReferences: false, IncludeTableOfContents: false,
+            SeparateWorksheetAnnotations: false), cancellation.Token));
         try
         {
             var result = await conversion.WaitAsync(Limit);
@@ -231,11 +234,13 @@ public sealed class ExcelHugeAreaTests : IDisposable
 
         var (markdown, result) = await ConvertAsync(source);
 
-        Assert.Equal(
-            "# ドキュメント\n\n## Items\n\n" +
-            "| ~~Whole column merged text~~ | x |  |\n" +
-            "| --- | --- | --- |\n" +
-            "|  | Item | Qty |\n", markdown);
+        // Public exports now repeat a vertically merged value on retained data rows.
+        // Its style and correspondence must survive without expanding a million-row area.
+        Assert.Equal(2, markdown.Split("~~Whole column merged text~~", StringSplitOptions.None).Length - 1);
+        Assert.Contains("x", markdown, StringComparison.Ordinal);
+        Assert.Contains("Item", markdown, StringComparison.Ordinal);
+        Assert.Contains("Qty", markdown, StringComparison.Ordinal);
+        Assert.True(markdown.Length < 2000, "A whole-column merge must remain sparse.");
         Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Message.Contains("1 DrawingML shape(s) were retained", StringComparison.Ordinal));
         // A lookup entry for each of the million cells of the merge would take over 30 MB.
         Assert.InRange(await AllocatedByExtraction(source), 0, 20 * Megabyte);

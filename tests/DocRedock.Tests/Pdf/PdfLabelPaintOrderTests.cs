@@ -33,7 +33,7 @@ public sealed class PdfLabelPaintOrderTests
                 Assert.DoesNotContain(projected.Diagnostics ?? [], diagnostic => diagnostic.Code == "VisualConnectorUnresolved");
 
                 var path = Path.Combine(root, name + ".md");
-                var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, path));
+                var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, path, SeparateWorksheetAnnotations: false));
                 Assert.False(ExportReviewBuilder.Build(exported.Graph, exported.Diagnostics).Required);
                 var text = await File.ReadAllTextAsync(path);
                 Assert.Contains("◆", text);

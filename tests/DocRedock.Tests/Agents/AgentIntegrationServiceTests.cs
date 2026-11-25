@@ -54,7 +54,7 @@ public sealed class AgentIntegrationServiceTests
         foreach (var skill in new[] { box.P(".claude", "skills", "docredock-office", "SKILL.md"), box.P(".copilot", "skills", "docredock-office", "SKILL.md"), box.P(".agents", "skills", "docredock-office", "SKILL.md") })
         {
             var text = File.ReadAllText(skill);
-            Assert.StartsWith("---\nname: docredock-office\ndescription: Read Word, Excel", text);
+            Assert.StartsWith("---\nname: docredock-office\ndescription: Extract text and structure", text);
             Assert.Contains($"\"{box.Cli}\" export \"<file>\" -o \"<file>.md\"", text);
             Assert.DoesNotContain("{{", text);
             Assert.DoesNotContain("\r", text);
@@ -164,15 +164,15 @@ public sealed class AgentIntegrationServiceTests
 
         // Backups hold the original bytes, and only the files that existed got one.
         Assert.Equal(
-            [".claude.json.docredock.bak", ".claude/CLAUDE.md.docredock.bak", ".claude/settings.json.docredock.bak", ".codex/AGENTS.md.docredock.bak",
-                ".codex/config.toml.docredock.bak", ".codex/hooks.json.docredock.bak", ".copilot/mcp-config.json.docredock.bak"],
+            [".claude.json.docredock.bak", ".claude/CLAUDE.md.docredock.bak", ".codex/AGENTS.md.docredock.bak",
+                ".codex/config.toml.docredock.bak", ".copilot/mcp-config.json.docredock.bak"],
             Bak(box));
         foreach (var bak in Bak(box)) Assert.Equal(before[bak[..^".docredock.bak".Length]], File.ReadAllText(box.P(bak)));
 
         box.Service.Uninstall(AgentSandbox.Options(), box.Environment());
         var restored = box.Snapshot();
         foreach (var (path, text) in before) Assert.Equal(text, restored[path]);
-        Assert.Equal(before.Count + 7, restored.Count); // the originals plus their backups; every file we created is gone
+        Assert.Equal(before.Count + 5, restored.Count); // the originals plus their backups; every file we created is gone
         Assert.Equal(before.Keys.Concat(Bak(box)).Order().ToArray(), restored.Keys.ToArray());
     }
 
@@ -224,7 +224,7 @@ public sealed class AgentIntegrationServiceTests
         var status = box.Service.Status(AgentSandbox.Options(), moved);
         Assert.Equal(AgentItemState.Outdated, AgentSandbox.Item(status, AgentClient.Claude, AgentItem.Mcp).State);
         Assert.Equal(AgentItemState.Installed, AgentSandbox.Item(status, AgentClient.Claude, AgentItem.Instructions).State);
-        Assert.Equal(AgentItemState.Outdated, AgentSandbox.Item(status, AgentClient.Codex, AgentItem.Hook).State);
+        Assert.Equal(AgentItemState.Missing, AgentSandbox.Item(status, AgentClient.Codex, AgentItem.Hook).State);
 
         var report = box.Service.Install(AgentSandbox.Options(enforce: true), moved);
         Assert.False(report.HasProblems);
@@ -236,10 +236,8 @@ public sealed class AgentIntegrationServiceTests
         Assert.Contains($"command = '{box.OtherCli}'", toml);
         Assert.DoesNotContain(box.Cli, toml);
         Assert.Contains(box.OtherCli, File.ReadAllText(box.P(".claude", "skills", "docredock-office", "SKILL.md")));
-        Assert.Contains("DocRedock.Cli.exe", File.ReadAllText(box.P(".claude", "settings.json")));
-        Assert.DoesNotContain("docredock-test", File.ReadAllText(box.P(".claude", "settings.json")));
-        Assert.Single(box.Json(".claude", "settings.json")["hooks"]!["PreToolUse"]!.AsArray());
-        Assert.Equal(AgentItemState.Installed, AgentSandbox.Item(box.Service.Status(AgentSandbox.Options(), moved), AgentClient.Codex, AgentItem.Hook).State);
+        Assert.False(File.Exists(box.P(".claude","settings.json")));
+        Assert.Equal(AgentItemState.Missing,AgentSandbox.Item(box.Service.Status(AgentOptions.AllClients,moved),AgentClient.Codex,AgentItem.Hook).State);
     }
 
     [Fact]
@@ -346,7 +344,7 @@ public sealed class AgentIntegrationServiceTests
         Assert.True(plan.DryRun);
         Assert.Empty(Directory.GetFileSystemEntries(box.Home));
         Assert.Empty(box.Runner.Calls);
-        Assert.Equal(12, plan.Items.Count);
+        Assert.Equal(9, plan.Items.Count);
         Assert.All(plan.Items, item => Assert.Equal(AgentAction.Create, item.Action));
 
         var dry = box.Service.Install(AgentSandbox.Options(dryRun: true), box.Environment());
@@ -357,65 +355,38 @@ public sealed class AgentIntegrationServiceTests
         box.Service.Install(AgentSandbox.Options(enforce: true), box.Environment());
         var before = box.Snapshot();
         var uninstall = box.Service.Uninstall(AgentSandbox.Options(dryRun: true), box.Environment());
-        Assert.All(uninstall.Items.Where(item => item.Item != AgentItem.Approval && (item.Item != AgentItem.Mcp || item.Client != AgentClient.Claude)), item => Assert.Equal(AgentAction.Remove, item.Action));
+        Assert.All(uninstall.Items.Where(item => item.Item is not (AgentItem.Approval or AgentItem.Hook) && (item.Item != AgentItem.Mcp || item.Client != AgentClient.Claude)), item => Assert.Equal(AgentAction.Remove, item.Action));
         Assert.Equal(before, box.Snapshot());
     }
 
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void Enforce_adds_a_hook_for_each_client_and_uninstall_removes_it(bool windows)
+    public void Retired_enforce_never_installs_a_restrictive_hook(bool windows)
     {
-        using var box = new AgentSandbox { IsWindows = windows };
-        var plain = box.Service.Install(AgentSandbox.Options(), box.Environment());
-        Assert.DoesNotContain(plain.Items, item => item.Item == AgentItem.Hook);
-        Assert.False(File.Exists(box.P(".claude", "settings.json")));
-
-        var report = box.Service.Install(AgentSandbox.Options(enforce: true), box.Environment());
-        Assert.Equal(3, report.Items.Count(item => item.Item == AgentItem.Hook && item.State == AgentItemState.Installed));
-        Assert.Contains(report.Notes, note => note.Contains("/hooks", StringComparison.Ordinal));
-
-        var claude = box.Json(".claude", "settings.json")["hooks"]!["PreToolUse"]![0]!;
-        Assert.Equal("Read|Bash|PowerShell", (string?)claude["matcher"]);
-        var handler = claude["hooks"]![0]!;
-        Assert.Equal("command", (string?)handler["type"]);
-        Assert.Equal(10, (int?)handler["timeout"]);
-        if (windows)
-        {
-            Assert.Equal("powershell", (string?)handler["shell"]);
-            Assert.Equal($"& \"{box.Cli}\" hook claude", (string?)handler["command"]);
-        }
-        else Assert.Equal("\"" + box.Cli.Replace("\\", "\\\\") + "\" hook claude", (string?)handler["command"]);
-
-        var codex = box.Json(".codex", "hooks.json")["hooks"]!["PreToolUse"]![0]!;
-        Assert.Equal("^Bash$", (string?)codex["matcher"]);
-        Assert.Contains("hook codex", (string?)codex["hooks"]![0]!["command"]);
-        Assert.Equal(windows, codex["hooks"]![0]!["commandWindows"] is not null);
-
-        var copilot = box.Json(".copilot", "hooks", "docredock.json");
-        Assert.Equal(1, (int?)copilot["version"]);
-        var entry = copilot["hooks"]!["preToolUse"]![0]!;
-        Assert.Equal("command", (string?)entry["type"]);
-        Assert.Equal($"& \"{box.Cli}\" hook copilot", (string?)entry["powershell"]);
-        Assert.EndsWith("\" hook copilot", (string?)entry["bash"]);
-        Assert.Equal(10, (int?)entry["timeoutSec"]);
-
-        var status = box.Service.Status(AgentSandbox.Options(), box.Environment());
-        Assert.Equal(3, status.Items.Count(item => item.Item == AgentItem.Hook && item.State == AgentItemState.Installed));
-
-        box.Service.Uninstall(AgentSandbox.Options(), box.Environment());
+        using var box=new AgentSandbox {IsWindows=windows};
+        var report=box.Service.Install(AgentSandbox.Options(enforce:true),box.Environment());
+        Assert.False(report.HasProblems);
+        Assert.DoesNotContain(report.Items,i=>i.Item==AgentItem.Hook);
+        Assert.DoesNotContain(report.Notes,n=>n.Contains("/hooks",StringComparison.Ordinal));
+        Assert.Contains(report.Notes,n=>n.Contains("retired",StringComparison.Ordinal));
+        Assert.All(box.Service.Status(AgentOptions.AllClients,box.Environment()).Items.Where(i=>i.Item==AgentItem.Hook),i=>Assert.Equal(AgentItemState.Missing,i.State));
+        Assert.False(File.Exists(box.P(".claude","settings.json")));
+        Assert.False(File.Exists(box.P(".codex","hooks.json")));
+        Assert.False(File.Exists(box.P(".copilot","hooks","docredock.json")));
+        box.Service.Uninstall(AgentOptions.AllClients,box.Environment());
         Assert.Empty(Directory.GetFileSystemEntries(box.Home));
     }
 
     [Fact]
-    public void Without_enforce_an_existing_outdated_hook_is_updated_but_a_missing_one_is_not_added()
+    public void Without_enforce_an_existing_legacy_hook_is_removed_and_a_missing_one_is_not_added()
     {
-        using var box = new AgentSandbox();
-        box.Service.Install(AgentSandbox.Options(enforce: true, clients: AgentClient.Claude), box.Environment());
-        var report = box.Service.Install(AgentSandbox.Options(clients: [AgentClient.Claude, AgentClient.Codex]), box.Environment(box.OtherCli));
-        Assert.Equal(AgentAction.Update, AgentSandbox.Item(report, AgentClient.Claude, AgentItem.Hook).Action);
-        Assert.DoesNotContain(report.Items, item => item.Client == AgentClient.Codex && item.Item == AgentItem.Hook);
-        Assert.Contains("DocRedock.Cli.exe", File.ReadAllText(box.P(".claude", "settings.json")));
+        using var box=new AgentSandbox();
+        AgentDirectInspectionTests.SeedLegacyHook(box,AgentClient.Claude);
+        var report=box.Service.Install(AgentSandbox.Options(clients:[AgentClient.Claude,AgentClient.Codex]),box.Environment(box.OtherCli));
+        Assert.Equal(AgentAction.Remove,AgentSandbox.Item(report,AgentClient.Claude,AgentItem.Hook).Action);
+        Assert.DoesNotContain(report.Items,i=>i.Client==AgentClient.Codex&&i.Item==AgentItem.Hook);
+        Assert.False(File.Exists(box.P(".claude","settings.json")));
     }
 
     [Fact]
@@ -433,13 +404,13 @@ public sealed class AgentIntegrationServiceTests
             Assert.True(File.Exists(Path.Combine(claude, ".claude.json")));
             Assert.True(File.Exists(Path.Combine(claude, "CLAUDE.md")));
             Assert.True(File.Exists(Path.Combine(claude, "skills", "docredock-office", "SKILL.md")));
-            Assert.True(File.Exists(Path.Combine(claude, "settings.json")));
+            Assert.False(File.Exists(Path.Combine(claude, "settings.json")));
             Assert.True(File.Exists(Path.Combine(copilot, "mcp-config.json")));
             Assert.True(File.Exists(Path.Combine(copilot, "instructions", "docredock.instructions.md")));
-            Assert.True(File.Exists(Path.Combine(copilot, "hooks", "docredock.json")));
+            Assert.False(File.Exists(Path.Combine(copilot, "hooks", "docredock.json")));
             Assert.True(File.Exists(Path.Combine(codex, "config.toml")));
             Assert.True(File.Exists(Path.Combine(codex, "AGENTS.md")));
-            Assert.True(File.Exists(Path.Combine(codex, "hooks.json")));
+            Assert.False(File.Exists(Path.Combine(codex, "hooks.json")));
             // The Codex skill stays under the home directory, not CODEX_HOME.
             Assert.True(File.Exists(box.P(".agents", "skills", "docredock-office", "SKILL.md")));
             Assert.False(Directory.Exists(Path.Combine(codex, "skills")));
@@ -474,7 +445,7 @@ public sealed class AgentIntegrationServiceTests
         Assert.Equal(AgentItemState.Missing, AgentSandbox.Item(report, AgentClient.Copilot, AgentItem.Hook).State);
         Assert.True(report.HasProblems);
 
-        File.WriteAllText(box.P(".claude", "CLAUDE.md"), File.ReadAllText(box.P(".claude", "CLAUDE.md")).Replace("Convert with", "Convert quickly with"));
+        File.WriteAllText(box.P(".claude", "CLAUDE.md"), File.ReadAllText(box.P(".claude", "CLAUDE.md")).Replace("is recommended", "is always recommended"));
         Assert.Equal(AgentItemState.Outdated, AgentSandbox.Item(box.Service.Status(AgentSandbox.Options(), box.Environment()), AgentClient.Claude, AgentItem.Instructions).State);
     }
 

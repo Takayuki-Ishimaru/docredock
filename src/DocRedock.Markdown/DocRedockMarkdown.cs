@@ -144,6 +144,7 @@ public sealed class DocRedockMarkdownSerializer
             var nodes = partition.Nodes
                 .Where(node => IncludeInPolicy(node, contentPolicy))
                 .OrderBy(n => n.Order)
+                .ThenBy(n => n.SiblingSequence)
                 .ThenBy(n => n.Id, StringComparer.Ordinal)
                 .ToList();
             output.Append("<!--drmd:partition-begin id=").Append(EscapeAttribute(partition.Id))
@@ -313,7 +314,9 @@ public sealed class DocRedockMarkdownSerializer
     }
 
     private sealed record GraphPartitionView(string Id, int Order, IReadOnlyList<GraphNodeView> Nodes);
-    private sealed record GraphNodeView(string Id, string Kind, string? Text, int Order, ProjectionEvidence Evidence, string Layer);
+    /// <summary>SiblingSequence is the place a Core node recorded among the siblings of its Order: see <see cref="DocumentSourceOrder"/>.</summary>
+    private sealed record GraphNodeView(string Id, string Kind, string? Text, int Order, ProjectionEvidence Evidence, string Layer,
+        int SiblingSequence = DocumentSourceOrder.NoSequence);
 
     /// <summary>Type-safe entry point for the canonical Core DocumentGraph.</summary>
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Performance", "CA1822", Justification = "Preserve the existing instance API and instance serialization contract.")]
@@ -405,7 +408,7 @@ public sealed class DocRedockMarkdownSerializer
             // the slide XML, so DRMD/roundtrip must never emit a protected table block for it. Its
             // member shapes remain ordinary, independently editable nodes exactly as before.
             var nodes = partition.Nodes.Where(node => IncludeCorePolicy(node, policy) && !IsShapeGridSynthesizedTable(node))
-                .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
+                .InSourceOrder().ToArray();
             output.Append("<!--drmd:partition-begin id=").Append(EscapeAttribute(partition.Id)).Append(" baseline_nodes=")
                 .Append(nodes.Length.ToString(CultureInfo.InvariantCulture)).AppendLine("-->");
             AppendPartitionLabel(output, graph.Format, partition.Id);
@@ -1058,7 +1061,8 @@ public sealed class DocRedockMarkdownSerializer
                     var text = StringProperty(node, "Text") ?? (content is null ? null : StringProperty(content, "Text") ?? StringProperty(content, "Value"));
                     var evidence = ParseEvidence(node, content);
                     var layer = StringProperty(node, "Layer") ?? nameof(ContentLayer.Body);
-                    yield return new GraphNodeView(id, kind, text, IntProperty(node, "Order") ?? order++, evidence, layer);
+                    yield return new GraphNodeView(id, kind, text, IntProperty(node, "Order") ?? order++, evidence, layer,
+                        node is DocumentNode core ? DocumentSourceOrder.SiblingSequence(core) : DocumentSourceOrder.NoSequence);
                 }
                 yield break;
             }

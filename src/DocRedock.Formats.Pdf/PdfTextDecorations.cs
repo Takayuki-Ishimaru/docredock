@@ -39,6 +39,7 @@ internal static class PdfTextDecorations
     /// areas of its links.</summary>
     internal sealed record PageMarkup(IReadOnlyList<TextLine> Lines, IReadOnlyList<Geometry> Links)
     {
+        public IReadOnlyList<PdfPageLink> LinkTargets { get; init; } = [];
         public static PageMarkup None { get; } = new([], []);
     }
 

@@ -152,9 +152,9 @@ public sealed class UnderlineRecognitionTests : IDisposable
         var markdown = await Export(source);
         Assert.Contains("| 公式 | <u>強調</u> |", markdown, StringComparison.Ordinal);
         Assert.Contains("| 範囲1 | 範囲2 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| 開く | 普通 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| 共有1 | 普通 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| 共有2 | 普通 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| [開く](<https://example.test/a>) | 普通 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| [共有1](<https://example.test/b>) | 普通 |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| [共有2](<https://example.test/b>) | 普通 |", markdown, StringComparison.Ordinal);
         // A formula that is not HYPERLINK shows its underline.
         Assert.Contains("| <u>計算</u> | 普通 |", markdown, StringComparison.Ordinal);
         AssertNoMarkers(markdown);
@@ -288,7 +288,7 @@ public sealed class UnderlineRecognitionTests : IDisposable
         Assert.Contains("\n- 箇条書き<u>下線</u>\n", markdown, StringComparison.Ordinal);
         Assert.Contains("参照: [<span style=\"color:#0000FF\">公式サイト</span>](https://example.test/docs) と <u>強調</u>", markdown, StringComparison.Ordinal);
         Assert.Contains("| 標準 | <u>下線</u> 通常 |", markdown, StringComparison.Ordinal);
-        Assert.Contains("| リンク | サイト <u>後ろ</u> |", markdown, StringComparison.Ordinal);
+        Assert.Contains("| リンク | [サイト](https://example.test/docs) <u>後ろ</u> |", markdown, StringComparison.Ordinal);
         Assert.Contains("| 一部<u>~~二重~~</u> | なし |", markdown, StringComparison.Ordinal);
         AssertNoMarkers(markdown);
     }

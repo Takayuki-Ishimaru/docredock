@@ -5,7 +5,7 @@ namespace DocRedock.Core.Documents;
 /// <summary>Portable semantic description of a visual relationship, independent of an Office drawing format.</summary>
 public enum VisualNodeKind { Process, Decision, Terminator, Data, Generic }
 public enum VisualEdgeResolution { NativeConnection, GeometryInferred, LayoutInferred, Unresolved }
-public enum VisualEdgeDirection { Directed, Undirected }
+public enum VisualEdgeDirection { Directed, Undirected, Bidirectional }
 
 public sealed record VisualNode(string Id, string Label, VisualNodeKind Kind = VisualNodeKind.Generic, string? SourceNodeId = null,
     Geometry? Geometry = null, SourceAnchor? SourceAnchor = null, string? Group = null, string? Lane = null);
@@ -61,6 +61,9 @@ public sealed record VisualEdge(string Id, string? SourceId, string? TargetId, s
     [JsonIgnore]
     public bool IsUndirected => EdgeDirection == VisualEdgeDirection.Undirected ||
         string.Equals(Direction, "undirected", StringComparison.OrdinalIgnoreCase);
+    [JsonIgnore]
+    public bool IsBidirectional => EdgeDirection == VisualEdgeDirection.Bidirectional ||
+        string.Equals(Direction, "bidirectional", StringComparison.OrdinalIgnoreCase);
 }
 /// <summary>A point in an adapter-native visual path. <see cref="Geometry.CoordinateSpace"/> describes its units.</summary>
 public sealed record VisualPathPoint(double X, double Y);

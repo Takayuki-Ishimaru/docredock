@@ -2,7 +2,8 @@ namespace DocRedock.Markdown;
 
 /// <summary>
 /// What the last readable projection reconstructed from layout rather than read from source
-/// structure. <see cref="RenderedTables"/> counts GFM tables in the Markdown;
+/// structure. <see cref="RenderedTables"/> counts document data tables in Markdown or native HTML
+/// (OCR review detail tables are excluded);
 /// <see cref="SideBySideRegions"/> counts worksheet regions that sat beside another region on the
 /// same rows and were therefore written one after the other; <see cref="TableBoundaryReviews"/>
 /// lists blank columns at which two tables were separated although the layout could not show

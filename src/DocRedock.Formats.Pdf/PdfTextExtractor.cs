@@ -54,6 +54,7 @@ public sealed record PdfTextRegion(string Text, Geometry BoundingBox, int Readin
 
     /// <summary>Underlined characters of <see cref="Text"/>, [Start, End) offsets; null when none.</summary>
     public IReadOnlyList<TextRange>? Underlined { get; init; }
+    public IReadOnlyList<PdfTextLinkSpan>? LinkSpans { get; init; }
 
     /// <summary>Whether the width of <see cref="BoundingBox"/> was measured with the font's glyph
     /// widths; otherwise it is estimated at 6 units a character.</summary>
@@ -137,7 +138,10 @@ public sealed record PdfUncertainText(PdfUncertainTextReason Reason, string? Res
 /// <see cref="AssetKey"/> names the decoded file: two draws of one picture in one orientation share it.</summary>
 #pragma warning disable CA1819 // The decoded file is the payload.
 public sealed record PdfExtractedImage(string AssetKey, string MediaType, byte[] Content, Geometry Bounds,
-    double DrawnWidth, double DrawnHeight, int PixelWidth, int PixelHeight);
+    double DrawnWidth, double DrawnHeight, int PixelWidth, int PixelHeight)
+{
+    public bool Hidden { get; init; }
+}
 #pragma warning restore CA1819
 
 public sealed record PdfPageText(
@@ -191,6 +195,10 @@ public sealed record PdfPageText(
     /// per strikethrough. Null when none.</summary>
     IReadOnlyList<PdfUncertainText>? UncertainText = null)
 {
+    public IReadOnlyList<PdfPageLink>? Links { get; init; }
+    /// <summary>Visible native text in content-stream paint order, before geometric line merging.
+    /// Useful for checking that rotated labels survived rendering; hidden/clipped text is excluded.</summary>
+    public string? PaintOrderText { get; init; }
     /// <summary>The lone rules of the page - the line under a running header or a title, a bar beside changed text -
     /// which divide the page and are no drawing (see <see cref="PdfSeparatorRule"/>). A short line above the rule
     /// under a header, or under the rule over a footer, is page furniture. Null when none.</summary>
@@ -354,14 +362,16 @@ public static partial class PdfTextExtractor
             // alone. Inline every drawn form first, so the parsers see what a viewer paints.
             var unparsedForms = new List<PdfUnparsedFormXObject>();
             var expanded = ExpandFormXObjects(stream, attributes?.Resources, formXObjects, formExpansionBudget,
-                formExpansionPageAllowance, reportUnresolvedForms, unparsedForms, fonts, optionalContent);
+                formExpansionPageAllowance, reportUnresolvedForms, unparsedForms, fonts, optionalContent, index.ById);
             var content = expanded.Content;
             // Text a viewer does not show - outside a form's /BBox, a clipping path, or the page, or
             // on a layer that is off - used to be exported as ordinary visible text. Only a page the
             // stream is known to belong to lends it a page box: an unrelated page's box must never
             // hide text.
-            var shows = ScanTextShows(expanded, pageGroup.All(item => item.Mapped) ? VisibleArea(attributes) : null, fonts.Bindings);
+            var classifiedImageDraws = new List<PdfImageDraw>();
+            var shows = ScanTextShows(expanded, pageGroup.All(item => item.Mapped) ? VisibleArea(attributes) : null, fonts.Bindings, classifiedImageDraws);
             var regions = new List<PdfTextRegion>();
+            var paintOrderText = new StringBuilder();
             var hiddenFragments = new List<(PdfTextRegion Region, PdfHiddenTextReason Reason)>();
             var doubts = new List<(PdfUncertainTextReason Reason, string? Name, Geometry Bounds)>();
             foreach (var fragment in ParseOperators(content, options, fonts.Bindings, shows))
@@ -379,9 +389,12 @@ public static partial class PdfTextExtractor
                 if (fragment.UndecodableFont is { } undecodableName)
                     doubts.Add((PdfUncertainTextReason.TextUndecodable, undecodableName, fragment.Region.BoundingBox));
                 // Visible fragments keep consecutive ids, exactly as when nothing is hidden.
+                if(fragment.PaintsGlyphs)paintOrderText.Append(fragment.Region.Text);
                 regions.Add(fragment.Region with { ReadingOrder = regions.Count, SourceIds = [regions.Count] });
             }
             var hiddenRegions = HiddenLines(hiddenFragments);
+            regions = WithSourceLinks(regions, regions, attributes?.Markup.LinkTargets ?? [], () =>
+                diagnostics.Add($"PdfLinkPlacementBounded: PDF page {pageNumber}: link placement exceeded the work bound; compare link annotations with the source.")).ToList();
             var uncertainText = doubts.GroupBy(doubt => (doubt.Reason, doubt.Name)).Select(group =>
                 new PdfUncertainText(group.Key.Reason, group.Key.Name, group.Count(), UnionBounds(group.Select(doubt => doubt.Bounds)))).ToArray();
             var vector = ContainsVectorOperators(content);
@@ -397,6 +410,10 @@ public static partial class PdfTextExtractor
                 ? ResolveEmbeddedImages(stream, attributes?.Resources, documentHasImageXObject || imageOnly,
                     formXObjects, formScanBudget)
                 : [];
+            var visibilityByDraw = classifiedImageDraws.GroupBy(draw => (draw.ObjectId, draw.Ctm))
+                .ToDictionary(group => group.Key, group => new Queue<PdfImageDraw>(group));
+            embeddedImages = embeddedImages.Select(draw => visibilityByDraw.TryGetValue((draw.ObjectId, draw.Ctm), out var queue) &&
+                queue.TryDequeue(out var classified) ? draw with { Hidden = classified.Hidden } : draw).ToList();
             // A page whose only text is hidden is still a page with text: it is not "native text
             // unavailable", and its hidden text must reach the complete content policy.
             if (!imageOnly && regions.Count == 0 && !vector && hiddenRegions.Length == 0) continue;
@@ -594,6 +611,8 @@ public static partial class PdfTextExtractor
             var boxes = FindBoxLayout(layoutGraph, pageTables, VisibleArea(attributes), diagramProjected ? visualLabelNodeIds : null);
             var flow = BuildFlowRegions(regions, pageTables, pageNumber, diagnostics, out var columnCount, boxes, failedGridTextIds);
             flow = WithFontStyle(flow, regions);
+            flow = WithSourceLinks(flow, regions, attributes?.Markup.LinkTargets ?? [], () =>
+                diagnostics.Add($"PdfLinkPlacementBounded: PDF page {pageNumber}: flow link placement exceeded the work bound; compare link annotations with the source."));
             CompactPageDiagnostics(diagnostics, pageDiagnosticStart, pageNumber,
                 (options.OutputBudget ?? new PdfVisualOutputBudget()).Normalize().MaxDetailedDiagnosticsPerCodePerPage);
             var embeddedBounds = embeddedImages.Where(draw => draw.Bounds is not null).Select(draw => draw.Bounds!).ToArray();
@@ -605,7 +624,9 @@ public static partial class PdfTextExtractor
                 hiddenRegions.Length == 0 ? null : hiddenRegions,
                 uncertainText.Length == 0 ? null : uncertainText)
             {
+                PaintOrderText = paintOrderText.ToString(),
                 SeparatorRules = separatorRules,
+                Links = attributes?.Markup.LinkTargets,
                 ImageDescriptions = embeddedImages.Count > 0 || imageOnly ? figureDescriptions.GetValueOrDefault(pageNumber) : null,
             });
         }
@@ -2692,7 +2713,7 @@ public static partial class PdfTextExtractor
     /// <summary>One image draw that survived <see cref="CollectEmbeddedImages"/>: where it paints
     /// (<see cref="Bounds"/>, null for a degenerate matrix), the matrix that placed it, and the Image XObject it draws
     /// (null for an inline image or a name that cannot be followed).</summary>
-    private sealed record PdfImageDraw(Geometry? Bounds, PdfMatrix Ctm, int? ObjectId);
+    private sealed record PdfImageDraw(Geometry? Bounds, PdfMatrix Ctm, int? ObjectId, bool Hidden = false);
 
     /// <summary>The names one resource dictionary advertises. <see cref="Kinds"/> says what each
     /// XObject name is and <see cref="ObjectIds"/> which object a Form name points at, so
@@ -2773,14 +2794,15 @@ public static partial class PdfTextExtractor
     /// starts and ends, and which layer each <c>/OC</c> sequence is on - is returned beside it.</para></summary>
     private static PdfExpandedContent ExpandFormXObjects(string content, PdfResourceScope? resources,
         IReadOnlyDictionary<int, PdfFormXObject> forms, PdfFormScanBudget documentBudget, long pageAllowance,
-        bool reportUnresolved, List<PdfUnparsedFormXObject> unparsed, PdfFontRegistry fonts, PdfOptionalContent? optionalContent)
+        bool reportUnresolved, List<PdfUnparsedFormXObject> unparsed, PdfFontRegistry fonts, PdfOptionalContent? optionalContent,
+        IReadOnlyDictionary<int, string> sourceObjects)
     {
         // Nothing to inline, rename or evaluate - a large vector-only drawing, say - is not copied.
         if (!ContainsOperatorToken(content, static token => token is "Do" or "Tf" or "BDC"))
             return new PdfExpandedContent(content, [], new Dictionary<int, PdfLayerVisibility>());
         var output = new StringBuilder(content.Length);
         var expansion = new PdfFormExpansion(forms, documentBudget, new PdfFormScanBudget(pageAllowance),
-            reportUnresolved, unparsed, output, [], fonts, optionalContent, [], []);
+            reportUnresolved, unparsed, output, [], fonts, optionalContent, [], [], sourceObjects);
         AppendExpandedContent(content, resources, PdfMatrix.Identity, 0, expansion);
         return new PdfExpandedContent(output.ToString(), expansion.Events, expansion.MarkedContent);
     }
@@ -2790,7 +2812,7 @@ public static partial class PdfTextExtractor
         PdfFormScanBudget DocumentBudget, PdfFormScanBudget PageBudget, bool ReportUnresolved,
         List<PdfUnparsedFormXObject> Unparsed, StringBuilder Output, HashSet<int> Active,
         PdfFontRegistry Fonts, PdfOptionalContent? OptionalContent, List<PdfContentEvent> Events,
-        Dictionary<int, PdfLayerVisibility> MarkedContent);
+        Dictionary<int, PdfLayerVisibility> MarkedContent, IReadOnlyDictionary<int, string> SourceObjects);
 
     /// <summary>Copies one content stream - the page's, or a form's at <paramref name="depth"/> &gt;
     /// 0 - into the expansion output, replacing each inlinable form draw and renaming each font.
@@ -2902,6 +2924,15 @@ public static partial class PdfTextExtractor
                 case "Do" when name is not null && nameAt >= copied:
                     if (TryInlineForm(content, copied, nameAt, name, resources, ctm, depth, expansion))
                         copied = index;
+                    else if (resources?.Kinds?.GetValueOrDefault(DecodeName(name)) == PdfXObjectKind.Image &&
+                        resources.ObjectIds?.TryGetValue(DecodeName(name), out var imageId) == true)
+                    {
+                        var visibility = PdfLayerVisibility.Visible;
+                        if (expansion.SourceObjects.TryGetValue(imageId, out var body) &&
+                            EntryValue(ReadDictionaryEntries(body), "OC") is { } oc && TryReadReference(oc, out var layerId) &&
+                            expansion.OptionalContent is { } optionalImage) visibility = optionalImage.Evaluate(layerId);
+                        expansion.Events.Add(new PdfContentEvent(output.Length + start - copied, PdfContentEventKind.Image, Layer: visibility, ImageObjectId: imageId));
+                    }
                     break;
                 case "Tf" when name is not null && nameAt >= copied:
                     output.Append(content, copied, nameAt - copied).Append('/').Append(expansion.Fonts.Token(DecodeName(name), resources));
@@ -3498,7 +3529,7 @@ public static partial class PdfTextExtractor
     /// so (<paramref name="AmbiguousFont"/>), or when the file gives no way to read its character
     /// codes (<paramref name="UndecodableFont"/>).</summary>
     private readonly record struct PdfParsedText(PdfTextRegion Region, PdfTextVisibility Visibility, string? AmbiguousFont,
-        string? UndecodableFont);
+        string? UndecodableFont, bool PaintsGlyphs);
 
     private static List<PdfParsedText> ParseOperators(string content, PdfExtractionOptions options,
         IReadOnlyDictionary<string, PdfFontBinding> fonts, IReadOnlyDictionary<int, PdfTextShow> shows)
@@ -3601,7 +3632,8 @@ public static partial class PdfTextExtractor
                             },
                         show?.Visibility ?? PdfTextVisibility.Visible,
                         actualText is null && font is { Ambiguous: true } ? font.ResourceName : null,
-                        actualText is null && font is { } shown && (shown.Undecodable || read.Uncertain) ? shown.ResourceName : null));
+                        actualText is null && font is { } shown && (shown.Undecodable || read.Uncertain) ? shown.ResourceName : null,
+                        show?.RenderMode is not (3 or 7)));
                 }
                 if (measured is null) x += text.Length * 6;
                 else (x, y) = (x + textMatrix.A * measured.Advance, y + textMatrix.B * measured.Advance);

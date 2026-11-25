@@ -480,6 +480,11 @@ public sealed partial class XlsxAdapter
                 !extensions.TryGetValue("column", out var column) || !column.TryGetInt32(out var columnIndex) ||
                 !decorations.Cells.TryGetValue((rowIndex, columnIndex), out var decoration)) return node;
             var changed = new Dictionary<string, JsonElement>(extensions, StringComparer.Ordinal);
+            // The fixed source canvas draws the actual lines. Keep only the original text formatting
+            // there, while semantic Markdown/cell-list views retain the inferred decoration.
+            changed["xlsx_source_text_decorations"] = JsonSerializer.SerializeToElement(extensions
+                .Where(item => item.Key is "strike" or "underline" or "strike_ranges" or "underline_ranges")
+                .ToDictionary(item => item.Key, item => item.Value, StringComparer.Ordinal));
             if (decoration.Strike)
             {
                 changed["strike"] = JsonSerializer.SerializeToElement(true);

@@ -28,7 +28,7 @@ CLIを試すには、展開先でターミナルを開いてください。`repo
 
 ## AIツールで使う
 
-Claude Code・GitHub Copilot・Codexに、Office文書をまずDocRedockで読ませるように設定できます。GUIでは画面上部の「AI連携」を使います。CLIでは`docredock agents install`（Windowsでは`docredock.cmd agents install`）を実行します。解除するときは`docredock agents uninstall`です。設定後は、開いているAIツールを再起動してください。詳しくは[目的別ガイド](docs/ja/quick-tasks.md)を参照してください。
+Claude Code・GitHub Copilot・Codexに、DocRedockによる本文抽出と、必要に応じた原本の直接確認を案内する設定を追加できます。GUIでは画面上部の「AI連携」を使います。CLIでは`docredock agents install`（Windowsでは`docredock.cmd agents install`）を実行します。解除するときは`docredock agents uninstall`です。設定後は、開いているAIツールを再起動してください。詳しくは[目的別ガイド](docs/ja/quick-tasks.md)を参照してください。
 
 ## 更新
 
@@ -37,4 +37,4 @@ Claude Code・GitHub Copilot・Codexに、Office文書をまずDocRedockで読�
 - [利用ガイド](docs/ja/user-guide.md)
 - [対応機能](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [この版の変更点](release-docs/RELEASE_NOTES_v0.4.0.md)
+- [この版の変更点](release-docs/RELEASE_NOTES_v0.4.1.md)

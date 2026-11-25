@@ -9,6 +9,11 @@ namespace DocRedock.Api;
 /// <summary>Projects PDF extraction results into the shared graph without discarding vector topology metadata.</summary>
 internal static class PdfDocumentGraphProjection
 {
+    private static NodeContent LinkedContent(PdfTextRegion region)
+    {
+        return PdfPageProjection.TextContent(region);
+    }
+
     public static DocumentGraph CreateGraph(PdfExtractionResult extraction, string sourceHash, bool includeTextlessPlaceholderNodes = true)
     {
         ArgumentNullException.ThrowIfNull(extraction);
@@ -83,7 +88,8 @@ internal static class PdfDocumentGraphProjection
                 return new DocumentNode(
                 $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_{region.ReadingOrder}",
                 block.List is not null ? NodeKind.ListItem : headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, region.ReadingOrder,
-                region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text),
+                region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body,
+                LinkedContent(region),
                 new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("reading_order", region.ReadingOrder.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                 Geometry: region.BoundingBox, Editability: NodeEditability.RenderOnly,
                 Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: region.BoundingBox)], Extensions: extensions);
@@ -147,7 +153,7 @@ internal static class PdfDocumentGraphProjection
                     };
                     var imageNode = new DocumentNode(
                         $"n_{hashPrefix[..Math.Min(8, hashPrefix.Length)]}_{page.PageNumber}_image_{number}", NodeKind.Image, null, nodes.Count,
-                        ContentLayer.Body, new ReferenceNodeContent(image.AssetKey, described ?? $"Image {number} on page {page.PageNumber}"),
+                        image.Hidden ? ContentLayer.Hidden : ContentLayer.Body, new ReferenceNodeContent(image.AssetKey, described ?? $"Image {number} on page {page.PageNumber}"),
                         new SourceAnchor("pdf", $"pdf:page:{page.PageNumber}", [new AnchorLocator("embedded_image", number.ToString(System.Globalization.CultureInfo.InvariantCulture))]),
                         Geometry: image.Bounds, Editability: NodeEditability.RenderOnly,
                         Provenance: [new ProvenanceItem(EvidenceKind.Native, PageNumber: page.PageNumber, Bbox: image.Bounds)],

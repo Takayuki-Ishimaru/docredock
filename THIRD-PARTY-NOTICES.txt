@@ -292,3 +292,13 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
 OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+DrawingML preset shape definitions (Apache POI 5.5.1)
+---------------------------------------------------
+This product includes software developed at The Apache Software Foundation
+(https://www.apache.org/). The ECMA-376 DrawingML preset geometry attachment is
+included as distributed by Apache POI 5.5.1 under the Apache License, Version 2.0.
+No Java source is included. See Drawing/NOTICE.preset-shapes.txt and
+Drawing/LICENSE.preset-shapes.txt in the application distribution for the source,
+checksum and full license. The Apache License, Version 2.0 is also reproduced above.

@@ -332,6 +332,8 @@ public static class PdfListDetection
             Text = tail[strip..],
             Struck = Cut(region.Struck, strip, tail.Length),
             Underlined = Cut(region.Underlined, strip, tail.Length),
+            LinkSpans = region.LinkSpans?.Where(span => span.End > strip && span.Start < tail.Length)
+                .Select(span => span with { Start = Math.Max(strip, span.Start) - strip, End = Math.Min(tail.Length, span.End) - strip }).ToArray(),
             Glyphs = null,
         };
     }
@@ -360,6 +362,8 @@ public static class PdfListDetection
             HasUncertainHyphenation = item.HasUncertainHyphenation || rest.HasUncertainHyphenation,
             Struck = PdfTextDecorations.Join(item.Struck, Clip(PdfTextDecorations.Shift(rest.Struck, offset), start, start + after.Length)),
             Underlined = PdfTextDecorations.Join(item.Underlined, Clip(PdfTextDecorations.Shift(rest.Underlined, offset), start, start + after.Length)),
+            LinkSpans = (item.LinkSpans ?? []).Concat((rest.LinkSpans ?? []).Where(span => span.End > leading && span.Start < leading + after.Length)
+                .Select(span => span with { Start = Math.Max(leading, span.Start) + offset, End = Math.Min(leading + after.Length, span.End) + offset })).ToArray(),
             Glyphs = null,
         };
     }

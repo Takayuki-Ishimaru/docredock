@@ -10,9 +10,11 @@
 
 DocRedockは、Word・Excel・PowerPoint・PDFをWindows・macOS・Linuxでローカル変換するツールです。表や画像、対応する図を**1つのHTMLファイルにまとめて共有**できます。AIで要約や分析をするときは、**MarkdownやAI向けパッケージ**で必要な内容を渡せます。
 
-[English](README.md) · [v0.4.0 Public Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.4.0) · [利用ガイド](docs/ja/user-guide.md)
+[English](README.md) · [v0.4.1 Public Betaをダウンロード](https://github.com/Takayuki-Ishimaru/docredock/releases/tag/v0.4.1) · [利用ガイド](docs/ja/user-guide.md)
 
 ## フローチャートの比較
+
+以下はv0.4.0で公開した比較例です。
 
 [![経費承認フローの比較。PowerPoint原本とDocRedockのHTMLでは、申請から承認判断へ進み、Yesは支払い、Noは差し戻しにつながる。PandocのHTMLとMarkItDownのMarkdownには文字が残るが、矢印はない。](assets/examples/flowchart/comparison.png)](assets/examples/flowchart/comparison.png)
 
@@ -26,7 +28,7 @@ DocRedockは、矢印と **Yes**・**No** のラベルをMermaidで記述しま�
 
 ## サンプルで試す
 
-1. OSとCPUに合う配布ファイルをダウンロードします。展開し、DocRedockを起動します。[ダウンロードと起動の案内](release-docs/RELEASE_NOTES_v0.4.0.md#ダウンロードと更新)
+1. OSとCPUに合う配布ファイルをダウンロードします。展開し、DocRedockを起動します。[ダウンロードと起動の案内](release-docs/RELEASE_NOTES_v0.4.1.md#ダウンロードと更新)
 2. [サンプルのPowerPoint](assets/examples/flowchart/expense-approval.pptx)をダウンロードして、アプリにドロップします。**閲覧用HTML**を選んで**書き出す**を押します。
 3. **HTMLを開く**を押し、ブラウザーで **Yes** と **No** の矢印をたどります。
 
@@ -39,24 +41,9 @@ docredock export expense-approval.pptx --format html --ocr off -o expense-approv
 docredock export expense-approval.pptx --format markdown --lang en --ocr off -o expense-approval.md
 ```
 
-## 変換時間の比較
+## v0.4.1 Public Betaの対応状況
 
-Windows 11の1台で比較したところ、DocRedockは大規模Excel（3シート、各20,000行）を **8.32秒でMarkdownに、9.04秒でHTMLに**変換しました。一方、大規模PowerPointのMarkdown変換ではPandocのほうが速い結果でした。
-
-| 入力と出力 | DocRedock | MarkItDown | Mammoth | Pandoc | Docling |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 大規模Excel → Markdown | **8.32秒** | 40.63秒 | — | 15.33秒 | 44.27秒 |
-| 大規模Excel → HTML | **9.04秒** | — | — | 24.18秒 | 37.37秒 |
-| 大規模PowerPoint → Markdown | 3.97秒 | 3.37秒 | — | **2.12秒** | 13.60秒 |
-| 小規模Word → Markdown | 1.70秒（OCRなしで0.66秒） | 2.03秒 | 0.45秒 | **0.13秒** | 8.97秒 |
-
-ブラウザーで比較したところ、DocRedockでは列の多い表を狭い画面でも横にスクロールして読めました。Pandocでは比較した幅広の表の一部が1文字ずつ折り返されました。Mammothで変換したWordの表にはブラウザーの既定の書式が使われました。
-
-表の値は、DocRedock 0.3.10をベースにHTML出力を組み込んだ開発ビルドで測りました。CLIの起動時間も含みます。上のフローチャートはv0.4.0の候補版で変換しました。`—`は計測の対象外です。[各ツールのバージョン・出力設定・測り方](release-docs/CONVERSION_REPORT_v0.4.0.md#比較の条件)
-
-## v0.4.0 Public Betaの対応状況
-
-v0.4.0では、閲覧用HTMLと、AIが原本の一部を確認できる機能を追加しました。Officeの図やPDFの表も読み取りやすくなりました。大きな文書をAIに渡すときは、必要な部分を選べます。[AI向けパッケージ](docs/ja/user-guide.md#ai向けパッケージ)
+v0.4.1ではOffice文書の閲覧用HTML、Excelのレビュー用フォルダーとポータブルMarkdownを改善しました。AI連携では原本を直接確認できる案内へ変更しました。大きな文書には[AI向けパッケージ](docs/ja/user-guide.md#ai向けパッケージ)を利用できます。
 
 | 機能 | 扱い |
 | --- | --- |
@@ -67,11 +54,11 @@ v0.4.0では、閲覧用HTMLと、AIが原本の一部を確認できる機能�
 | Markdown編集 → Officeへ復元 | 実験機能・明示的な有効化が必要 |
 | PDF／Officeの新規生成 | 実験機能・明示的な有効化が必要 |
 
-形式ごとに変換できる内容と、このバージョンの変更点を確認できます。[対応状況](docs/ja/supported-features.md) · [v0.4.0リリースノート](release-docs/RELEASE_NOTES_v0.4.0.md)
+形式ごとに変換できる内容と、このバージョンの変更点を確認できます。[対応状況](docs/ja/supported-features.md) · [v0.4.1リリースノート](release-docs/RELEASE_NOTES_v0.4.1.md)
 
 ## 閲覧用HTML
 
-アプリで「閲覧用HTML」を選ぶか、CLIで `--format html` を指定します。対応する画像や図を1つのファイルにまとめ、ブラウザーでオフラインでも開けます。図の下の欄を展開すると、Mermaidのソースを確認できます。[閲覧用HTMLの利用ガイド](docs/ja/user-guide.md#閲覧用html)
+アプリで「閲覧用HTML」を選ぶか、CLIで `--format html` を指定します。対応する画像や図を1つのファイルにまとめ、ブラウザーでオフラインでも開けます。Mermaidで表せる図では、そのソースも確認できます。[閲覧用HTMLの利用ガイド](docs/ja/user-guide.md#閲覧用html)
 
 ```sh
 docredock export report.xlsx --format html --content-policy visible
@@ -125,7 +112,7 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 
 ## 主な制約
 
-- v0.4.0はPublic Betaであり、本番向けの安定版ではありません。
+- v0.4.1はPublic Betaであり、本番向けの安定版ではありません。
 - 閲覧用Markdownは一方向の出力です。元文書を正本として保持してください。
 - 共有前にMarkdown、診断、assetを必ず確認し、部分的な図の投影を完全なものとして扱わないでください。
 - CLIのPDF変換は`--allow-pdf`または`DOCREDOCK_ENABLE_EXPERIMENTAL=1`で有効にできます。往復／audit操作、復元、レンダリング／新規文書生成には引き続き`DOCREDOCK_ENABLE_EXPERIMENTAL=1`が必要です。読み取り専用の`docredock inspect <file.pdf>`は設定なしで利用できます。
@@ -137,9 +124,9 @@ XLSX限定・CLI限定: `--sheets Sheet1,Sheet2`で指定したシートだけ�
 ## ドキュメント
 
 - [利用ガイド](docs/ja/user-guide.md)
-- [v0.4.0の対応状況](docs/ja/supported-features.md)
+- [v0.4.1の対応状況](docs/ja/supported-features.md)
 - [セキュリティとプライバシー](docs/ja/security-and-privacy.md)
-- [v0.4.0リリースノート](release-docs/RELEASE_NOTES_v0.4.0.md)
+- [v0.4.1リリースノート](release-docs/RELEASE_NOTES_v0.4.1.md)
 - [実験機能](docs/ja/experimental-features.md)
 - [コントリビュート、ビルド、テスト](CONTRIBUTING.md)
 

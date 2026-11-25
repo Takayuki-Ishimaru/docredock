@@ -96,6 +96,7 @@ public sealed partial class XlsxAdapter
 
         /// <summary>The conditionalFormatting elements in the worksheet's namespace, when they were asked for.</summary>
         public List<XmlElement> ConditionalFormats { get; } = [];
+        public SheetLayoutScan Layout { get; } = new();
     }
 
     // The links of a sheet's XML, as the scan reads them: whether one covers the cell (row, column).
@@ -107,7 +108,8 @@ public sealed partial class XlsxAdapter
     }
 
     private static void ReadWorksheet(Stream xml, WorksheetScan scan, string sheet, Dictionary<string, XlsxString> shared, IReadOnlyList<XlsxCellStyle> styles,
-        List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, string sheetState, bool readConditionalFormats)
+        List<XlsxFormulaDiagnostic> diagnostics, List<string> warnings, bool uses1904DateSystem, string sheetState, bool readConditionalFormats,
+        IReadOnlyDictionary<string, string>? hyperlinkRelationships = null)
     {
         var retainedCells = new List<ParsedWorksheetCell>();
         // Cells come in order of row and column. Only once one does not is each cell's place looked up, to keep the last
@@ -116,6 +118,7 @@ public sealed partial class XlsxAdapter
         var lastCoordinate = (Row: 0, Column: 0);
         var linkCells = new HashSet<(int Row, int Column)>();
         var linkAreas = new List<(int MinRow, int MaxRow, int MinColumn, int MaxColumn)>();
+        var linkAreaTargets = new List<(int MinRow, int MaxRow, int MinColumn, int MaxColumn, string Target)>();
         var defaultColumnWidth = 8.43d;
         var defaultRowHeight = 15d;
         var columnWidths = new Dictionary<int, double>();
@@ -131,6 +134,7 @@ public sealed partial class XlsxAdapter
         {
             if (reader.NodeType != XmlNodeType.Element) continue;
             rootNamespace ??= reader.NamespaceURI;
+            ReadPresentationElement(reader, scan.Layout);
             switch (reader.LocalName)
             {
                 case "c":
@@ -143,8 +147,10 @@ public sealed partial class XlsxAdapter
                         hiddenRow is >= 1 and <= MaxExcelRows)
                         scan.HiddenRows.Add(hiddenRow);
                     var row = AttributeInt(reader, "r", 0);
-                    var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "ht", defaultRowHeight, 409.5d, sheet, scan.MetricsWarnings);
+                    var sourceHeight = ReadDimension(reader, "ht", defaultRowHeight, 409.5d, sheet, scan.MetricsWarnings);
+                    var height = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : sourceHeight;
                     if (row > 0) rowHeights[row] = height;
+                    if (row > 0 && reader.GetAttribute("ht") is not null) scan.Layout.RowHeights[row] = sourceHeight;
                     break;
                 }
                 case "col":
@@ -157,9 +163,14 @@ public sealed partial class XlsxAdapter
                     // marked hidden -- means the same thing. Both were previously ignored by a
                     // `width > 0` guard below, which fell back to the DEFAULT column width instead and
                     // skewed every absoluteAnchor arrow that crossed a hidden/zero-width column.
-                    var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : ReadDimension(reader, "width", defaultColumnWidth, 255d, sheet, scan.MetricsWarnings);
+                    var sourceWidth = ReadDimension(reader, "width", defaultColumnWidth, 255d, sheet, scan.MetricsWarnings);
+                    var width = IsHiddenFlag(reader.GetAttribute("hidden")) ? 0d : sourceWidth;
                     if (min <= max)
-                        for (var column = Math.Max(1, min); column <= max; column++) columnWidths[column] = width;
+                        for (var column = Math.Max(1, min); column <= max; column++)
+                        {
+                            columnWidths[column] = width;
+                            scan.Layout.ColumnWidths[column] = sourceWidth;
+                        }
                     break;
                 }
                 case "sheetFormatPr":
@@ -180,8 +191,22 @@ public sealed partial class XlsxAdapter
                 case "hyperlink":
                     if (ParseRange(reader.GetAttribute("ref")) is { } area)
                     {
-                        if (area.MinRow == area.MaxRow && area.MinColumn == area.MaxColumn) linkCells.Add((area.MinRow, area.MinColumn));
+                        var singleCell = area.MinRow == area.MaxRow && area.MinColumn == area.MaxColumn;
+                        if (singleCell) linkCells.Add((area.MinRow, area.MinColumn));
                         else linkAreas.Add(area);
+                        // A native hyperlink's target is its relationship: only an r:id the worksheet's rels
+                        // resolve becomes a projected target. A location-only link stays text; a missing
+                        // relationship keeps the cell's text with a precise warning.
+                        if (reader.GetAttribute("id", "http://schemas.openxmlformats.org/officeDocument/2006/relationships") is { Length: > 0 } relationshipId)
+                        {
+                            if (hyperlinkRelationships is not null && hyperlinkRelationships.TryGetValue(relationshipId, out var target) && target.Length > 0)
+                            {
+                                linkAreaTargets.Add((area.MinRow, area.MaxRow, area.MinColumn, area.MaxColumn, target));
+                            }
+                            else warnings.Add($"XlsxHyperlinkRelationshipMissing: worksheet hyperlink at {reader.GetAttribute("ref")} references relationship {relationshipId}, which the worksheet does not define; its target was not projected.");
+                        }
+                        else if (reader.GetAttribute("location") is { Length: > 0 } location)
+                            linkAreaTargets.Add((area.MinRow, area.MaxRow, area.MinColumn, area.MaxColumn, "#" + location.TrimStart('#')));
                     }
                     break;
                 case "conditionalFormatting" when readConditionalFormats && reader.NamespaceURI == rootNamespace:
@@ -200,15 +225,20 @@ public sealed partial class XlsxAdapter
             ? (_, _) => false
             : (Func<int, int, bool>)((row, column) => linkCells.Contains((row, column)) || index?.Covers(row, column) == true);
         scan.IsHyperlinkCell = isHyperlinkCell;
+        var hyperlinkTargets = ResolveHyperlinkTargets(retainedCells, linkAreaTargets);
 
         // Resolve shared-formula link flags only from the winning record at each coordinate. A
         // discarded duplicate master must not mark a surviving shared-formula member as a link.
         // Build the map before creating any cells so XML order (including a winning master that
         // appears after its member) cannot change the result.
         var sharedLinks = new Dictionary<string, bool>(StringComparer.Ordinal);
+        var sharedLinkTargets = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var cell in indexByCoordinate is null ? retainedCells : (IEnumerable<ParsedWorksheetCell>)retainedCells.OrderBy(cell => cell.SourceOrder))
             if (cell.SharedFormula is not null && !string.IsNullOrWhiteSpace(cell.Formula))
+            {
                 sharedLinks[cell.SharedFormula] = HyperlinkFormula.IsMatch(cell.Formula);
+                sharedLinkTargets[cell.SharedFormula] = LiteralHyperlinkTarget(cell.Formula);
+            }
 
         var result = new List<XlsxCellRecord>(retainedCells.Count);
         foreach (var sourceCell in retainedCells)
@@ -223,7 +253,7 @@ public sealed partial class XlsxAdapter
             var value = sourceCell.Value;
             var runs = sourceCell.Runs;
             if (type == "s" && value is not null && shared.TryGetValue(value, out var sharedValue)) (value, runs) = (sharedValue.Text, sharedValue.Runs);
-            var displayStyle = int.TryParse(style, NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
+            var displayStyle = int.TryParse(style ?? "0", NumberStyles.Integer, CultureInfo.InvariantCulture, out var styleIndex) && styleIndex >= 0 && styleIndex < styles.Count
                 ? styles[styleIndex]
                 : null;
             var displayValue = FormatDisplayValue(value, type, displayStyle, uses1904DateSystem);
@@ -237,11 +267,20 @@ public sealed partial class XlsxAdapter
                 formulaLinks = HyperlinkFormula.IsMatch(formula);
             }
             var isLink = formulaLinks || isHyperlinkCell(row, column);
+            var linkTarget = hyperlinkTargets.GetValueOrDefault((row, column));
+            if (linkTarget is null && formulaLinks)
+            {
+                linkTarget = formula is { Length: > 0 } ? LiteralHyperlinkTarget(formula) :
+                    sharedFormula is null ? null : sharedLinkTargets.GetValueOrDefault(sharedFormula);
+                if (linkTarget is null) warnings.Add($"XlsxHyperlinkFormulaTargetNotProjected: {sheet}!{reference} has a dynamic or unsupported HYPERLINK target; the saved label is retained without evaluating the formula.");
+            }
             var cell = new XlsxCellRecord(sheet, reference, value, formula, style, type == "s", row, column, type, displayValue, displayStyle,
                 IsHiddenRow: scan.HiddenRows.Contains(row), IsHiddenColumn: scan.HiddenColumns.Contains(column), SheetState: sheetState)
             {
+                HasCachedValue = sourceCell.HasCachedValue && (type == "str" || !string.IsNullOrWhiteSpace(value)),
                 StruckRanges = MarkedRanges(value, richRuns, run => run.Strike, displayStyle?.IsStrike == true),
                 UnderlinedRanges = isLink ? null : MarkedRanges(value, richRuns, run => run.Underline, displayStyle?.IsUnderline == true),
+                HyperlinkTarget = linkTarget,
             };
             result.Add(cell);
         }
@@ -275,6 +314,7 @@ public sealed partial class XlsxAdapter
             var reference = reader.GetAttribute("r") ?? ""; var type = Common(reader.GetAttribute("t")); var style = Common(reader.GetAttribute("s"));
             string? formula = null; string? value = null;
             string? sharedFormula = null;
+            var hasCachedValue = false;
             IReadOnlyList<XlsxRun>? runs = null;
             if (!reader.IsEmptyElement)
             {
@@ -290,6 +330,7 @@ public sealed partial class XlsxAdapter
                     else if (reader.NodeType == XmlNodeType.Element && reader.LocalName is "f" or "v" or "t")
                     {
                         var local = reader.LocalName;
+                        if (local == "v") hasCachedValue = true;
                         if (local == "f" && reader.GetAttribute("t") == "shared") sharedFormula = reader.GetAttribute("si");
                         var content = reader.ReadElementContentAsString();
                         if (local == "f") formula = content;
@@ -307,12 +348,13 @@ public sealed partial class XlsxAdapter
                 var cachedValue = value;
                 if (type == "s" && cachedValue is not null && shared.TryGetValue(cachedValue, out var cachedSharedValue))
                     cachedValue = cachedSharedValue.Text;
-                if (string.IsNullOrWhiteSpace(cachedValue))
+                if (!hasCachedValue || (type != "str" && string.IsNullOrWhiteSpace(cachedValue)))
                     warnings.Add($"XlsxFormulaCachedValueMissing: Formula cell {sheet}!{reference} has no cached value; DocRedock did not evaluate it.");
             }
 
             var coordinate = (row, column);
-            var parsed = new ParsedWorksheetCell(reference, type, style, formula, value, sharedFormula, runs, row, column, sourceOrder);
+            var parsed = new ParsedWorksheetCell(reference, type, style, formula, value, sharedFormula, runs, row, column, sourceOrder)
+            { HasCachedValue = hasCachedValue };
             sourceOrder++;
             if (indexByCoordinate is null && coordinate.CompareTo(lastCoordinate) > 0)
             {

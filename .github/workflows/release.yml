@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing v-prefixed tag to publish
         required: true
-        default: v0.4.0
+        default: v0.4.1
 
 permissions:
   contents: read
@@ -68,8 +68,8 @@ jobs:
           set -euo pipefail
           test -f "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
           test -f "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md"
-          test -f "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.md"
-          test -f "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.en.md"
+          python3 tools/check-release-documents.py --root . --tag "$RELEASE_TAG"
+          python3 -m unittest discover -s tools -p test_release_documents.py
       - name: Set up .NET
         uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
@@ -218,6 +218,8 @@ jobs:
           Copy-Item "artifacts/cli/${{ matrix.rid }}/docredock.cmd" "$staging/docredock.cmd"
           Copy-Item "assets/brand/docredock/app-icons/png/DocRedock-appicon-256x256.png" "$staging/DocRedock-icon.png"
           Copy-Item "LICENSE", "THIRD-PARTY-NOTICES.txt", "SECURITY.md" $staging
+          New-Item -ItemType Directory -Force -Path "$staging/Drawing" | Out-Null
+          Copy-Item "src/DocRedock.Formats.OpenXml/Drawing/LICENSE.preset-shapes.txt", "src/DocRedock.Formats.OpenXml/Drawing/NOTICE.preset-shapes.txt" "$staging/Drawing/"
           Copy-Item "release-docs/PACKAGE_QUICKSTART.md" "$staging/QUICKSTART.ja.md"
           Copy-Item "release-docs/PACKAGE_QUICKSTART.en.md" "$staging/QUICKSTART.en.md"
           New-Item -ItemType Directory -Force -Path "$staging/docs", "$staging/release-docs" | Out-Null
@@ -228,13 +230,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$staging/docs/examples" | Out-Null
           Copy-Item "docs/examples/ai_package_reader.py" "$staging/docs/examples/ai_package_reader.py"
           Copy-Item "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).md", "release-docs/RELEASE_NOTES_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
-          Copy-Item "release-docs/CONVERSION_REPORT_$($env:RELEASE_TAG).md", "release-docs/CONVERSION_REPORT_$($env:RELEASE_TAG).en.md" "$staging/release-docs/"
-          foreach ($reportSuffix in @(".svg", "-pdf.svg", "-inputs.svg", "-inputs.csv")) {
-            $reportAsset = "release-docs/CONVERSION_REPORT_$($env:RELEASE_TAG)$reportSuffix"
-            if (Test-Path -LiteralPath $reportAsset -PathType Leaf) {
-              Copy-Item -LiteralPath $reportAsset -Destination "$staging/release-docs/"
-            }
-          }
           Copy-Item "artifacts/signing/SIGNING-STATUS.json" $staging
           New-Item -ItemType Directory -Force -Path "$staging/build-metadata/gui-runtime-locks", "$staging/build-metadata/cli-runtime-locks" | Out-Null
           Copy-Item "artifacts/gui/${{ matrix.rid }}/runtime-locks/*" "$staging/build-metadata/gui-runtime-locks/"
@@ -283,6 +278,8 @@ jobs:
           cp "artifacts/cli/${{ matrix.rid }}/docredock" "$staging/docredock"
           chmod 755 "$staging/DocRedock.Cli" "$staging/docredock"
           cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
+          mkdir -p "$staging/Drawing"
+          cp src/DocRedock.Formats.OpenXml/Drawing/LICENSE.preset-shapes.txt src/DocRedock.Formats.OpenXml/Drawing/NOTICE.preset-shapes.txt "$staging/Drawing/"
           cp release-docs/PACKAGE_QUICKSTART.md "$staging/QUICKSTART.ja.md"
           cp release-docs/PACKAGE_QUICKSTART.en.md "$staging/QUICKSTART.en.md"
           mkdir -p "$staging/docs" "$staging/release-docs"
@@ -293,12 +290,6 @@ jobs:
           mkdir -p "$staging/docs/examples"
           cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
-          cp "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.md" "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.en.md" "$staging/release-docs/"
-          for report_suffix in .svg -pdf.svg -inputs.svg -inputs.csv; do
-            report_asset="release-docs/CONVERSION_REPORT_${RELEASE_TAG}${report_suffix}"
-            [ -f "$report_asset" ] || continue
-            cp "$report_asset" "$staging/release-docs/"
-          done
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
           cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"
@@ -390,6 +381,8 @@ jobs:
           MimeType=application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;application/vnd.openxmlformats-officedocument.presentationml.presentation;application/pdf;
           DESKTOP
           cp LICENSE THIRD-PARTY-NOTICES.txt SECURITY.md "$staging/"
+          mkdir -p "$staging/Drawing"
+          cp src/DocRedock.Formats.OpenXml/Drawing/LICENSE.preset-shapes.txt src/DocRedock.Formats.OpenXml/Drawing/NOTICE.preset-shapes.txt "$staging/Drawing/"
           cp release-docs/PACKAGE_QUICKSTART.md "$staging/QUICKSTART.ja.md"
           cp release-docs/PACKAGE_QUICKSTART.en.md "$staging/QUICKSTART.en.md"
           mkdir -p "$staging/docs" "$staging/release-docs"
@@ -400,12 +393,6 @@ jobs:
           mkdir -p "$staging/docs/examples"
           cp docs/examples/ai_package_reader.py "$staging/docs/examples/"
           cp "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md" "release-docs/RELEASE_NOTES_${RELEASE_TAG}.en.md" "$staging/release-docs/"
-          cp "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.md" "release-docs/CONVERSION_REPORT_${RELEASE_TAG}.en.md" "$staging/release-docs/"
-          for report_suffix in .svg -pdf.svg -inputs.svg -inputs.csv; do
-            report_asset="release-docs/CONVERSION_REPORT_${RELEASE_TAG}${report_suffix}"
-            [ -f "$report_asset" ] || continue
-            cp "$report_asset" "$staging/release-docs/"
-          done
           mkdir -p "$staging/build-metadata/gui-runtime-locks" "$staging/build-metadata/cli-runtime-locks"
           cp artifacts/gui/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/gui-runtime-locks/"
           cp artifacts/cli/${{ matrix.rid }}/runtime-locks/* "$staging/build-metadata/cli-runtime-locks/"
@@ -531,6 +518,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 tools/check-release-documents.py --root . --tag "$RELEASE_TAG"
           {
             cat "release-docs/RELEASE_NOTES_${RELEASE_TAG}.md"
             printf '\n---\n\n'
@@ -543,19 +531,6 @@ jobs:
           path = Path("release-body.md")
           base = f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/blob/{os.environ['RELEASE_TAG']}"
           body = path.read_text(encoding="utf-8")
-          forbidden = ("quality score", "quality-score", "evaluation score", "benchmark score",
-                       "internal score", "internal metric", "internal memo", "development metric",
-                       "品質スコア", "内部評価", "内部スコア", "内部点数", "内部指標", "開発指標",
-                       "内部メモ", "検証メモ", "テスト件数", "合格率", "test count", "pass rate",
-                       "pdf-semantics-evidence", "conversion-qa-evidence", "release-evidence",
-                       "95/100", "90%", "124", "focused tests")
-          reports = (
-              Path(f"release-docs/CONVERSION_REPORT_{os.environ['RELEASE_TAG']}.md"),
-              Path(f"release-docs/CONVERSION_REPORT_{os.environ['RELEASE_TAG']}.en.md"),
-          )
-          public_text = "\n".join([body, *(report.read_text(encoding="utf-8") for report in reports)])
-          if any(marker in public_text.lower() for marker in forbidden):
-              raise SystemExit("Release documents contain internal development information")
           extensions = {"win-x64": "zip", "win-arm64": "zip",
                         "osx-x64": "zip", "osx-arm64": "zip",
                         "linux-x64": "tar.gz", "linux-arm64": "tar.gz"}

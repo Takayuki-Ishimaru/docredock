@@ -29,3 +29,5 @@ CLAUDE.md
 .github/copilot-instructions.md
 ~$*
 /test
+__pycache__/
+test-results/

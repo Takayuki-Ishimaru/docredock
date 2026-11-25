@@ -37,13 +37,13 @@ public static partial class PdfTextExtractor
         double CharSpacing = 0, double WordSpacing = 0, double HorizontalScale = 1,
         PdfMatrix LineMatrix = default, int LineId = 0, int RenderMode = 0);
 
-    private enum PdfContentEventKind { FormBegin, FormEnd }
+    private enum PdfContentEventKind { FormBegin, FormEnd, Image }
 
     /// <summary>Where an inlined form starts or ends in the expanded content. A form's start carries
     /// its <c>/BBox</c> (in form space; the pass maps it through the CTM in force, which already
     /// includes the form's <c>/Matrix</c>) and the visibility of its own <c>/OC</c>.</summary>
     private readonly record struct PdfContentEvent(int Offset, PdfContentEventKind Kind, Geometry? BBox = null,
-        PdfLayerVisibility Layer = PdfLayerVisibility.Visible);
+        PdfLayerVisibility Layer = PdfLayerVisibility.Visible, int? ImageObjectId = null);
 
     /// <summary>A page's content with every drawn form inlined and every font renamed to its token,
     /// plus what the inlining knew and the content alone no longer says: where each form begins and
@@ -113,13 +113,13 @@ public static partial class PdfTextExtractor
     private const double MaxGlyphAdvanceEm = 1.25;
 
     private static Dictionary<int, PdfTextShow> ScanTextShows(PdfExpandedContent expanded, Geometry? pageBox,
-        IReadOnlyDictionary<string, PdfFontBinding> fonts)
+        IReadOnlyDictionary<string, PdfFontBinding> fonts, List<PdfImageDraw>? imageDraws = null)
     {
         var content = expanded.Content;
         var events = expanded.Events;
         var shows = new Dictionary<int, PdfTextShow>();
         // A page that shows no text has nothing to classify.
-        if (!content.Contains("Tj", StringComparison.Ordinal) && !content.Contains("TJ", StringComparison.Ordinal) &&
+        if (imageDraws is null && !content.Contains("Tj", StringComparison.Ordinal) && !content.Contains("TJ", StringComparison.Ordinal) &&
             !content.Contains('\'') && !content.Contains('"'))
             return shows;
         var state = new PdfShowState { Clip = pageBox is null ? null : PdfBox.From(pageBox) };
@@ -147,6 +147,14 @@ public static partial class PdfTextExtractor
 
         void ApplyEvent(PdfContentEvent contentEvent)
         {
+            if (contentEvent.Kind == PdfContentEventKind.Image)
+            {
+                var bounds = UnitSquareBounds(state.Ctm);
+                var layer = marked.Aggregate(Combine(state.Layer, contentEvent.Layer), Combine);
+                var hidden = layer == PdfLayerVisibility.Hidden || bounds is not null && state.Clip is { } clip && !PdfBox.From(bounds).Intersects(clip);
+                imageDraws?.Add(new PdfImageDraw(bounds, state.Ctm, contentEvent.ImageObjectId, hidden));
+                return;
+            }
             if (contentEvent.Kind == PdfContentEventKind.FormEnd)
             {
                 if (formMarkedDepths.TryPop(out var depth) && marked.Count > depth) marked.RemoveRange(depth, marked.Count - depth);

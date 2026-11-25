@@ -280,7 +280,7 @@ public sealed class ReadableMarkdownTests
     }
 
     [Fact]
-    public void Workbook_diagram_replaces_the_flattened_cell_region_with_a_mermaid_fence()
+    public void Workbook_diagram_does_not_delete_independent_cells_in_its_row_interval()
     {
         var diagram = new DocumentNode(
             "diagram-1",
@@ -314,8 +314,8 @@ public sealed class ReadableMarkdownTests
 
         Assert.DoesNotContain("<svg xmlns=\"http://www.w3.org/2000/svg\"", markdown, StringComparison.Ordinal);
         Assert.Contains("```mermaid\nflowchart TD\n    N_A1[\"開始\"]\n    N_B2[\"完了\"]\n    N_A1 --> N_B2\n```", markdown, StringComparison.Ordinal);
-        Assert.DoesNotContain("開始セル", markdown, StringComparison.Ordinal);
-        Assert.DoesNotContain("途中セル", markdown, StringComparison.Ordinal);
+        Assert.Contains("開始セル", markdown, StringComparison.Ordinal);
+        Assert.Contains("途中セル", markdown, StringComparison.Ordinal);
         Assert.Contains("図の後の注記", markdown, StringComparison.Ordinal);
     }
 
@@ -639,12 +639,18 @@ public sealed class ReadableMarkdownTests
         Assert.Contains("## スライド 2 — Decision", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("speaker-notes", markdown, StringComparison.Ordinal);
         Assert.DoesNotContain("Keep rollback enabled.", markdown, StringComparison.Ordinal);
-        Assert.DoesNotContain("PROJECT · 1", markdown, StringComparison.Ordinal);
+        var sourcePrintText = markdown.IndexOf("### 原本の印刷用文字列（保存値）", StringComparison.Ordinal);
+        Assert.True(sourcePrintText > markdown.IndexOf("| Quality | PASS |", StringComparison.Ordinal));
+        Assert.DoesNotContain("PROJECT · 1", markdown[..sourcePrintText], StringComparison.Ordinal);
+        Assert.Contains("### 原本の印刷用文字列（保存値）\n\nPROJECT · 1\n", markdown, StringComparison.Ordinal);
+        Assert.True(markdown.IndexOf("PROJECT · 1", StringComparison.Ordinal) <
+            markdown.IndexOf("## スライド 2 — Decision", StringComparison.Ordinal));
 
         var complete = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(ContentPolicy: "complete")).Serialize(graph);
         Assert.Contains("<details class=\"speaker-notes\">", complete, StringComparison.Ordinal);
         Assert.Contains("<summary>スピーカーノート（クリックで展開）</summary>", complete, StringComparison.Ordinal);
         Assert.Contains("Keep rollback enabled.", complete, StringComparison.Ordinal);
+        Assert.Single(System.Text.RegularExpressions.Regex.Matches(complete, "PROJECT · 1"));
     }
 
     [Fact]

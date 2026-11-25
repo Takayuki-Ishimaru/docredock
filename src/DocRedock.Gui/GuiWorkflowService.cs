@@ -214,7 +214,9 @@ public sealed class GuiWorkflowService
                 ExportSummary: summary.ToString(),
                 ReviewItems: BuildReviewItems(sourcePath, markdownPath, null, exported.Graph, review,
                     new DocRedock.Markdown.ReadableMarkdownOptions(showFormulas, includeSvgPreviews, includeDiagrams,
-                        ContentPolicy: contentPolicy, OcrReview: ocrReview, ExpandMergedCells: expandMergedCells, Language: language)),
+                        ContentPolicy: contentPolicy, OcrReview: ocrReview, ExpandMergedCells: expandMergedCells, Language: language,
+                        TableLayout: DocRedock.Markdown.MarkdownTableLayout.Auto,
+                        IncludeSourceReferences: true, IncludeTableOfContents: true, SourceName: Path.GetFileName(sourcePath), SeparateWorksheetAnnotations: true)),
                 OcrReview: review.Ocr, Summary: summary, TableBoundaries: review.TableBoundaries, SharingReview: review.SharingReview);
         }
 

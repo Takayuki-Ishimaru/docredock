@@ -906,7 +906,8 @@ public sealed partial class XlsxAdapterTests
             Assert.Single(extraction.Graph.Nodes, node => node.Kind == DocRedock.Core.Documents.NodeKind.Diagram).Content).Text;
         Assert.Contains("受付", source, StringComparison.Ordinal);
         Assert.Contains("完了", source, StringComparison.Ordinal);
-        Assert.Contains("N_S_1 --> N_S_2", source, StringComparison.Ordinal);
+        // This source line has no headEnd/tailEnd, so its relation has no invented arrowhead.
+        Assert.Contains("N_S_1 --- N_S_2", source, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -988,6 +989,21 @@ public sealed partial class XlsxAdapterTests
         Assert.Equal(["12", "18"], Assert.Single(chart.Series).Values);
         Assert.Equal("B5", node.Extensions!["address"].GetString());
         Assert.Equal("line", node.Extensions["chart_type"].GetString());
+    }
+
+    [Fact]
+    public void Source_chart_frame_is_labelled_and_cached_data_stays_available_in_the_print_copy()
+    {
+        var result = new XlsxAdapter().Extract(new MemoryStream(CreateChartPackage()));
+        var document = ReadableProjectionBuilder.Build(result.Graph).Document;
+        var output = DocRedock.Render.ReadableHtmlWriter.WriteDocument(document);
+        Assert.Contains(output.Diagnostics, diagnostic => diagnostic.Code == "HtmlSourceChartFallback");
+        Assert.Contains("source-chart-fallback", output.Html, StringComparison.Ordinal);
+        Assert.Contains("data-kind=\"worksheet-chart-data\"", output.Html, StringComparison.Ordinal);
+        var text = System.Net.WebUtility.HtmlDecode(output.Html);
+        Assert.Contains("売上推移", text, StringComparison.Ordinal);
+        Assert.Contains("4月", text, StringComparison.Ordinal);
+        Assert.Contains(">18<", text, StringComparison.Ordinal);
     }
 
     [Fact]

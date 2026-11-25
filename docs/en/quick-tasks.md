@@ -15,8 +15,8 @@ In the CLI, use `docredock export input.docx --ai-package dir --content-policy v
 
 Run `docredock agents install` to configure Claude Code, GitHub Copilot (VS Code and Copilot CLI), and Codex (CLI, IDE extension, and desktop app). The setup instructs these assistants to read Word, Excel, PowerPoint, and PDF files as follows.
 
-1. Convert it with DocRedock first.
-2. Read the relevant piece of the original only when the result needs checking or the Markdown lacks what they need.
+1. Use DocRedock for structured text extraction when helpful.
+2. Directly open or render the original with Office/PDF applications, SDKs or document skills whenever useful, including layout verification. Conversion is not a prerequisite.
 
 In the desktop app, select **AI integration** (「AI連携」) to configure the same settings.
 
@@ -42,7 +42,7 @@ The setup writes to the current user’s configuration folders.
 - If you move DocRedock to another folder, run `install` again to update the registered path.
 - Before replacing DocRedock with a new version, quit the assistants. While an assistant runs `DocRedock.Cli` as its MCP server, Windows does not let you overwrite the file.
 
-`--enforce` also adds a hook. When an assistant tries to open a Word, Excel or PowerPoint file directly (with its file-reading tool, or with commands such as `unzip` or `python`), the hook stops it and points it to DocRedock. PDFs are not stopped. In Codex, approve the hook once with `/hooks`.
+The integration permits direct Office/PDF inspection. Updating the integration removes its owned legacy restrictive hooks while preserving unrelated hooks. `--enforce` and `--no-enforce` remain deprecated compatibility options; neither installs a restriction.
 
 `--auto-approve` skips approval prompts for DocRedock calls in supported clients. Unless you choose an output folder, exports go to a temporary folder. The option adds the following settings.
 
@@ -54,7 +54,7 @@ The setup writes to the current user’s configuration folders.
 
 This approval hook applies to Copilot CLI. Copilot in VS Code may still prompt for approval when it calls DocRedock.
 
-You can remove the hook and the approval later with `install --no-enforce` and `install --no-auto-approve`. An `install` without these flags keeps the current state. In the desktop app, clear the corresponding checkbox and select 「設定する」 (Apply settings).
+You can remove optional approval later with `install --no-auto-approve`, or clear its checkbox in the GUI and click 設定する. Without an approval flag, an existing approval stays. Source inspection uses the assistant's normal tool permissions; enabling this integration adds no extra approval requirement.
 
 Other options:
 

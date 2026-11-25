@@ -197,7 +197,7 @@ public sealed class DocumentServiceTests
                 var output = Path.Combine(root, $"both-{reverseMarkers}-{reverseShaft}.md");
                 await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule(shaft + "\n" + string.Join("\n", reverseMarkers ? heads.Reverse() : heads)));
                 var result = await new DocumentService(null, null, discoverPdfRasterizer: false)
-                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output, SeparateWorksheetAnnotations: false));
                 var text = await File.ReadAllTextAsync(output);
                 Assert.DoesNotContain(result.Diagnostics, d => d.Severity != DiagnosticSeverity.Information);
                 if (vertical)
@@ -230,7 +230,7 @@ public sealed class DocumentServiceTests
                 var output = Path.Combine(root, name + ".md");
                 await File.WriteAllBytesAsync(source, Pdf.PdfEvaluationRegressionTests.Schedule(stroke + Pdf.PdfEvaluationRegressionTests.BothArrow));
                 var result = await new DocumentService(null, new PngPdfRasterizer(500, 250), discoverPdfRasterizer: false)
-                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output));
+                    .ExportReadableAsync(new ReadableDocumentExportOptions(source, output, SeparateWorksheetAnnotations: false));
                 Assert.DoesNotContain(result.Diagnostics, d => d.Severity != DiagnosticSeverity.Information);
                 Assert.Equal(0, ExportSummaryBuilder.Build(result.Graph, result.Diagnostics).ReviewPages);
                 texts[name] = await File.ReadAllTextAsync(output);

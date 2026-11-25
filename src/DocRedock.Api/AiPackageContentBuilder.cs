@@ -342,7 +342,7 @@ public static class AiPackageContentBuilder
             // sheet's first part, so every node of the sheet is still in some part.
             if (index == 0) ids.UnionWith(partition.Nodes.Select(node => node.Id).Where(id => !assigned.Contains(id)));
             var groupNodes = ids.Select(id => nodesById.GetValueOrDefault(id)).OfType<DocumentNode>()
-                .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal).ToArray();
+                .InSourceOrder().ToArray();
             AiPackageTableBlock? block = null;
             if (draft.Table >= 0 && tableIds[draft.Table] is { } tableId)
             {
@@ -418,7 +418,7 @@ public static class AiPackageContentBuilder
     }
 
     private static NodeGroup WholePartition(DocumentPartition partition) => new(
-        [.. partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal)],
+        [.. partition.Nodes.InSourceOrder()],
         WholePartition: true);
 
     // Why a Word partition has to stay whole; each is also the "reason" of the SplitUnavailable diagnostic.
@@ -452,7 +452,7 @@ public static class AiPackageContentBuilder
         int targetCharacters, CancellationToken token, out string? failure)
     {
         failure = null;
-        var nodes = partition.Nodes.OrderBy(n => n.Order).ThenBy(n => n.Id, StringComparer.Ordinal).ToArray();
+        var nodes = partition.Nodes.InSourceOrder().ToArray();
         var byId = nodes.ToDictionary(n => n.Id, StringComparer.Ordinal);
         var indexById = nodes.Select((n, i) => (n.Id, i)).ToDictionary(x => x.Id, x => x.i, StringComparer.Ordinal);
         var byShapeId = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -714,8 +714,7 @@ public static class AiPackageContentBuilder
     {
         var paths = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
         var stack = new List<(int Level, string Text)>();
-        foreach (var node in partition.Nodes
-                     .OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
+        foreach (var node in partition.Nodes.InSourceOrder())
         {
             if (node.Kind == NodeKind.Heading)
             {

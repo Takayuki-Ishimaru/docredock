@@ -196,7 +196,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
 
     /// <summary>The "output_format" of an export result: markdown, html or ai-package.</summary>
     private static string ExportOutputFormatName(Arguments args) =>
-        args.Option("ai-package") is not null ? "ai-package" : ResolveExportFormat(args, out _) ?? "markdown";
+        args.HasFlag("split-sheets") ? "markdown-review" : args.Option("ai-package") is not null ? "ai-package" : ResolveExportFormat(args, out _) ?? "markdown";
 
     private static string ExportOutputFormatNameOrDefault(string[] commandLine)
     {
@@ -477,7 +477,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
             "mcp" => "mcp (MCP server: JSON-RPC 2.0 over standard input and output, one message a line)",
             "source" => "source <file> [--part name | --node id | --sheet name [--range A1:H40] | --slide N | --page N] [--offset N] [--max-chars N] [--json] [--allow-pdf] (reads one piece of the original document, never all of it)",
             "agents" => "agents install|uninstall|status [--client claude|copilot|codex|all] [--enforce|--no-enforce] [--auto-approve|--no-auto-approve] [--dry-run] [--json] [--home dir] [--command path] (configure AI coding assistants to read Office documents through DocRedock)",
-            "hook" => "hook claude|copilot|codex|copilot-approve (internal: the hook program that agents install --enforce / --auto-approve registers; reads the event on standard input, always exits 0)",
+            "hook" => "hook claude|copilot|codex|copilot-approve (internal: the hook program: claude|copilot|codex belong to retired hooks that agents install removes and now never deny; copilot-approve is the approval hook agents install --auto-approve registers; reads the event on standard input, always exits 0)",
             "licenses" => "licenses [--json] [--verify] (packages and bundled source data; verification requires the source repository)",
             "inspect" => "inspect <source-or-file.md>",
             "diff" => "diff <file.md> [--json]",
@@ -517,7 +517,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
                              until allow_review is passed.
           read_source        path [part] [node] [sheet] [range] [slide] [page] [image] [ocr] [offset] [max_chars] [allow_pdf]
                              Reads one piece of the original document (a sheet range, slide, page, node, zip part or picture) when an
-                             export needs attention or lacks something; with only path it lists what can be read. Never the whole file.
+                             export needs attention or lacks something; with only path it lists what can be read. Returns a window, not the whole file.
         Relative paths are relative to the working directory of the server. A tool fails (isError) on exit codes other than 0, 1 and 11.
         """;
 
@@ -547,6 +547,12 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
           --no-expand-merged-cells Leave the rows a vertically merged cell covers blank below its first (by default its value
                                    is repeated in each row; --expand-merged-cells, the default, is still accepted).
           --show-formulas          Write Excel formulas beside their values.
+          --table-layout mode      Markdown tables: auto (default; records above 10 columns), grid, or records.
+          --no-source-references   Omit readable Markdown source workbook/sheet/range labels.
+          --no-table-of-contents   Omit the readable Markdown worksheet contents list.
+          --split-sheets           XLSX review folder: README, sheet files, full CHANGELOG, assets, native layout and source/report JSON.
+          --portable-markdown      CommonMark record lists and fenced multiline cells, without raw HTML.
+          --office-layout MODE     HTML Office layout: auto (default), source (local engine), structured.
           --no-diagrams            Leave out Mermaid diagrams reconstructed from drawings.
           --svg-previews           Add SVG previews of diagrams.
         PDF and images
@@ -584,6 +590,12 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
         var exportFormat = ResolveExportFormat(args, out var formatProblem);
         if (exportFormat is null) return Invalid(formatProblem!);
         var html = exportFormat == "html";
+        var splitSheets = args.HasFlag("split-sheets");
+        if (splitSheets && (html || args.Option("ai-package") is not null ||
+            (args.Option("profile") ?? "readable") != "readable" || args.Positionals.Count != 1 ||
+            Directory.Exists(args.Positionals[0]) || args.Option("output-dir") is not null || args.Option("output") == "-" ||
+            args.HasFlag("embed-images") || args.Option("images") is not null))
+            return Invalid("--split-sheets requires one XLSX file, readable Markdown, an output directory via -o, and external assets; omit --ai-package, --images and --embed-images.");
         if (html)
         {
             if (args.Option("ai-package") is not null) return Invalid("--format html cannot be combined with --ai-package; an AI package is Markdown.");
@@ -624,7 +636,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
         if (images is not ("files" or "embed" or "omit")) return Invalid("--images must be files, embed, or omit.");
         if (args.HasFlag("embed-images") && images != "embed") return Invalid("--embed-images conflicts with --images " + images + ".");
         var stem = args.HasFlag("keep-source-extension") ? Path.GetFileName(source) : Path.GetFileNameWithoutExtension(source);
-        var defaultOutput = Path.Combine(Path.GetDirectoryName(source)!, stem + (aiPackage is null ? (html ? ".html" : ".md") : ".ai-package" + (aiPackage == "zip" ? ".zip" : "")));
+        var defaultOutput = Path.Combine(Path.GetDirectoryName(source)!, stem + (splitSheets ? ".review" : aiPackage is null ? (html ? ".html" : ".md") : ".ai-package" + (aiPackage == "zip" ? ".zip" : "")));
         var markdown = Path.GetFullPath(args.Option("output") ?? defaultOutput);
         var ocrMode = (args.Option("ocr") ?? "auto").ToLowerInvariant();
         if (ocrMode is not ("auto" or "on" or "off") || args.HasFlag("ocr")) return Invalid("--ocr must be auto, on, or off.");
@@ -664,6 +676,12 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
             // error, not "all sheets": that meaning is reserved for omitting --sheets
             // entirely (sheets stays null above).
             if (sheets is { Length: 0 }) return Invalid("--sheets requires at least one sheet name.");
+            var tableLayout = args.Option("table-layout") ?? "auto";
+            if (tableLayout is not ("auto" or "grid" or "records"))
+                return Invalid("--table-layout must be auto, grid, or records.");
+            var officeLayout=args.Option("office-layout")??"auto";
+            if(officeLayout is not ("auto" or "source" or "structured"))return Invalid("--office-layout must be auto, source, or structured.");
+            if(args.Option("office-layout") is not null&&!html)return Invalid("--office-layout requires HTML output: add --format html or give --output an .html name.");
             ReadableDocumentExportOptions ReadableOptions(string path) => new(
                 source, path, ocrMode != "off", languages, contentPolicy,
                 ShowFormulas: args.HasFlag("show-formulas"),
@@ -677,7 +695,34 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
                     "summary" => DocRedock.Markdown.OcrReviewMode.Summary, _ => DocRedock.Markdown.OcrReviewMode.LowConfidence },
                 Revisions: revisions, AllowRevisionSharing: args.HasFlag("allow-revision-sharing"),
                 ExpandMergedCells: !args.HasFlag("no-expand-merged-cells"), OcrAuto: ocrMode == "auto", Language: language, OmitImages: omitImages,
-                OutputFormat: html ? ReadableOutputFormat.Html : ReadableOutputFormat.Markdown);
+                OutputFormat: html ? ReadableOutputFormat.Html : ReadableOutputFormat.Markdown,
+                TableLayout: tableLayout switch
+                {
+                    "grid" => DocRedock.Markdown.MarkdownTableLayout.Grid,
+                    "records" => DocRedock.Markdown.MarkdownTableLayout.Records,
+                    _ => DocRedock.Markdown.MarkdownTableLayout.Auto
+                }, IncludeSourceReferences: !args.HasFlag("no-source-references"),
+                IncludeTableOfContents: !args.HasFlag("no-table-of-contents"),
+                PortableMarkdown: splitSheets || args.HasFlag("portable-markdown"),
+                OfficeLayout:officeLayout switch{"source"=>OfficeRenderingMode.Source,"structured"=>OfficeRenderingMode.Structured,_=>OfficeRenderingMode.Auto});
+            if (splitSheets)
+            {
+                using var transaction = new StagedOutputTransaction([markdown], force, protectedInputs: AiPackageProtectedInputs(source));
+                var bundle = await Service.ExportWorkbookReviewAsync(new WorkbookReviewExportOptions(
+                    ReadableOptions(markdown), transaction.PathFor(markdown)), token);
+                token.ThrowIfCancellationRequested();
+                transaction.Commit();
+                var bundleReview = ExportReviewBuilder.Build(bundle.Graph, bundle.Diagnostics, bundle.Projection);
+                var code = ReviewExit(args, bundleReview, bundle.Diagnostics,
+                    bundle.Diagnostics.Any(d => d.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
+                await WriteExportResultAsync(args, new ExportOutcome(source, markdown, code, bundle.Graph.Format,
+                    "readable", visualInference, bundleReview, bundle.Diagnostics)
+                    { OutputFormat = "markdown-review", Conversion = bundle.Conversion },
+                    "README.md; sheets/*.md; CHANGELOG.md when present; assets/; layout.html; source-index.json; conversion-report.json",
+                    "Workbook review: " + markdown);
+                await WriteReviewRequiredAsync(args, bundleReview);
+                return code;
+            }
             if (aiPackage is not null)
             {
                 // Replacing a package directory must not remove an input anywhere below it.
@@ -715,7 +760,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
             var empty = !readable.Graph.Nodes.Any();
             var readableExit = ReviewExit(args, readableReview, readable.Diagnostics,
                 empty || readable.Diagnostics.Any(item => item.Severity != DocRedock.Core.Reporting.DiagnosticSeverity.Information) ? 1 : 0);
-            await WriteExportResultAsync(args, new ExportOutcome(source, markdown, readableExit, readable.Graph.Format, "readable", visualInference, readableReview, readable.Diagnostics) { Empty = empty, OutputFormat = html ? "html" : "markdown" },
+            await WriteExportResultAsync(args, new ExportOutcome(source, markdown, readableExit, readable.Graph.Format, "readable", visualInference, readableReview, readable.Diagnostics) { Empty = empty, OutputFormat = html ? "html" : "markdown", Conversion = readable.Conversion },
                 VisualInferenceSummary(visualSummary) + Environment.NewLine + visualSummary, $"Format:   {readable.Graph.Format.ToString().ToLowerInvariant()}\nMode:     {(html ? "Readable HTML (one-way; images embedded; no sidecar)" : "Readable Markdown (one-way; no sidecar)")}\nVisual inference: {visualInference} (ambiguous relations remain unresolved)");
             if (args.HasFlag("verbose") && !args.HasFlag("json") && !args.HasFlag("quiet"))
                 foreach (var edge in VisualGraphs(readable.Graph).SelectMany(graph => graph.Edges ?? []).Where(edge => edge is not null)) await output.WriteLineAsync(VisualEvidence(edge));
@@ -751,6 +796,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
         ExportReview Review, IReadOnlyList<DocRedock.Core.Reporting.Diagnostic> Diagnostics)
     {
         public object? AiPackage { get; init; }
+        public ReadableConversionReport? Conversion { get; init; }
         /// <summary>"markdown", "html" or "ai-package" (roundtrip and audit write Markdown).</summary>
         public string OutputFormat { get; init; } = "markdown";
         public string? Sidecar { get; init; }
@@ -803,6 +849,7 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
                         diagnostics,
                         review,
                         ai_package = outcome.AiPackage,
+                        conversion = outcome.Conversion,
                         sidecar = outcome.Sidecar,
                         error = (object?)null,
                     },
@@ -1544,8 +1591,8 @@ public sealed partial class CliApplication(TextWriter output, TextWriter error, 
 
     private sealed class Arguments
     {
-        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "lang", "output-dir", "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title", "images", "node", "sheet", "range", "slide", "page", "offset", "max-chars", "image" };
-        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "expand-merged-cells", "no-expand-merged-cells", "allow-pdf", "strict", "ocr-strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review", "keep-source-extension" };
+        private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal) { "lang", "output-dir", "ai-package", "chunk-chars", "token-estimate-multiplier", "revisions", "part", "query", "output", "ocr-review", "pdf-fallback-images", "content-policy", "ocr", "ocr-lang", "visual-inference", "profile", "sidecar", "format", "template", "font-path", "font-face-index", "mermaid-cli", "source", "to-schema", "sheets", "title", "images", "node", "sheet", "range", "slide", "page", "offset", "max-chars", "image", "table-layout", "office-layout" };
+        private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal) { "expand-merged-cells", "no-expand-merged-cells", "allow-pdf", "strict", "ocr-strict", "replace-original", "allow-render-fallback", "json", "verify", "force", "quiet", "verbose", "show-formulas", "svg-previews", "no-diagrams", "embed-images", "sidecar", "in-place", "table-row-blocks", "fail-on-review", "allow-revision-sharing", "allow-review", "with-sources", "require-hidden-review", "keep-source-extension", "no-source-references", "no-table-of-contents", "split-sheets", "portable-markdown" };
         private readonly Dictionary<string, string> options = new(StringComparer.Ordinal); private readonly HashSet<string> flags = new(StringComparer.Ordinal);
         public List<string> Positionals { get; } = []; public string? Option(string name) => options.GetValueOrDefault(name); public bool HasFlag(string name) => flags.Contains(name);
         public Arguments Copy() { var copy = new Arguments(); copy.Positionals.AddRange(Positionals); foreach (var item in options) copy.options[item.Key] = item.Value; foreach (var flag in flags) copy.flags.Add(flag); return copy; }

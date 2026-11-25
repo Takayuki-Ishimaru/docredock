@@ -193,6 +193,8 @@ public sealed record EmptyNodeContent : NodeContent;
 /// </summary>
 public sealed record TableCell(string Text, int ColSpan = 1, int RowSpan = 1)
 {
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<TextRun>? Runs { get; init; }
     public static implicit operator TableCell(string text) => new(text);
 }
 

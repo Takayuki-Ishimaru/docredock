@@ -28,7 +28,7 @@ Use the first command in Windows PowerShell and the second on macOS or Linux. Ad
 
 ## Use with AI assistants
 
-You can set up Claude Code, GitHub Copilot and Codex to read Office documents through DocRedock first. In the GUI, use **AI連携** (AI integration) at the top. In the CLI, run `docredock agents install` (on Windows, `docredock.cmd agents install`). To remove it, run `docredock agents uninstall`. Restart the assistants after setting up. See the [quick guides](docs/en/quick-tasks.md).
+You can set up Claude Code, GitHub Copilot and Codex to extract Office text with DocRedock and inspect originals directly when useful. In the GUI, use **AI連携** (AI integration) at the top. In the CLI, run `docredock agents install` (on Windows, `docredock.cmd agents install`). To remove it, run `docredock agents uninstall`. Restart the assistants after setting up. See the [quick guides](docs/en/quick-tasks.md).
 
 ## Update
 
@@ -37,4 +37,4 @@ The app checks non-draft published releases, including Public Beta builds, in th
 - [User guide](docs/en/user-guide.md)
 - [Supported features](docs/en/supported-features.md)
 - [Security and privacy](docs/en/security-and-privacy.md)
-- [Changes in this release](release-docs/RELEASE_NOTES_v0.4.0.en.md)
+- [Changes in this release](release-docs/RELEASE_NOTES_v0.4.1.en.md)

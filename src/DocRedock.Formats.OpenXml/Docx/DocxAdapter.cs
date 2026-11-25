@@ -98,6 +98,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         var deletedRevisionContent = HasDeletedRevisionContent(doc);
         if (options.FinalRevisionView) ApplyFinalRevisionView(doc);
         var relationships = ReadRelationships(archive, "word/_rels/document.xml.rels", cancellationToken);
+        var sourceScenes = new List<SourceDrawingScene>();
+        var drawingTheme = SourceDrawingTheme(archive, cancellationToken);
         var numberingInfo = ReadNumberingInfo(archive, cancellationToken);
         var styleTable = DocxStyleTable.Read(archive, cancellationToken);
         var hiddenStyles = ReadHiddenStyles(archive, cancellationToken)
@@ -188,6 +190,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         var monospaceCode = DocxMonospaceCode.Find(bodyElements, styleTable, run => IsHiddenRun(run, hiddenStyles), element => IsHiddenContentElement(element, hiddenStyles));
         var readabilityStyles = archive.GetEntry("word/styles.xml") is { } readabilityStylesEntry
             ? SafeXml.LoadDocument(await ReadEntryAsync(readabilityStylesEntry, cancellationToken).ConfigureAwait(false)) : null;
+        // The styles a text box's paragraphs and runs inherit from, for the drawing scenes; none without a styles part.
+        var sceneStyles = readabilityStyles is null ? null : new DocxDrawnStyles(readabilityStyles);
         var settingsDocument = archive.GetEntry("word/settings.xml") is { } settingsEntry
             ? SafeXml.LoadDocument(await ReadEntryAsync(settingsEntry, cancellationToken).ConfigureAwait(false)) : null;
         var adjustLineHeightInTable = settingsDocument?.Descendants(W + "compat").Elements(W + "adjustLineHeightInTable")
@@ -266,7 +270,8 @@ public sealed partial class DocxAdapter : IFormatProbe
                     }
                 }
                 AddTable(element, "/word/document.xml", entry.Slice, tableOrder, nodes, sliceMap, ref ordinal, hiddenStyles, entry.Control,
-                    tableOverlays: overlayDetection?.Overlays, documentBytes: documentBytes, originalTable: entry.Original, drawn: drawnLines);
+                    tableOverlays: overlayDetection?.Overlays, documentBytes: documentBytes, originalTable: entry.Original, drawn: drawnLines,
+                    relationships: relationships);
             }
             else if (IsMathRoot(element))
             {
@@ -286,6 +291,9 @@ public sealed partial class DocxAdapter : IFormatProbe
             }
             await AddChartsAsync(archive, element, relationships, nodes, diagnostics,
                 blockOrder, nodes.Skip(firstBlockNode).FirstOrDefault()?.Id, hiddenStyles, cancellationToken).ConfigureAwait(false);
+            if (element.Name == W + "p" && firstBlockNode < nodes.Count)
+                AddSourceDrawingScenes(element, nodes[firstBlockNode], nodes.Skip(firstBlockNode).ToArray(), relationships,
+                    archive, drawingTheme, hiddenStyles, sceneStyles, sourceScenes, diagnostics, cancellationToken);
         }
         // Word stores floating nodes and connectors in separate paragraphs surprisingly often.
         // Build one document-level visual canvas so a flow is reconstructed across paragraph
@@ -346,7 +354,9 @@ public sealed partial class DocxAdapter : IFormatProbe
                 DiagnosticSeverity.Warning, PartUri: "/word/document.xml"));
         var graph = new DocumentGraph(DocumentGraph.CurrentSchemaVersion, "doc_" + sourceHash[..16], DocumentFormatKind.Docx,
             [new DocumentPartition("part-0001", 0, nodes, "/word/document.xml")], Capabilities: new(new HashSet<string>(StringComparer.Ordinal)
-            { "extract.text", "extract.images", "restore.byte_identical", "restore.text_in_place", "restore.insert_node", "restore.delete_node", "preserve.raw_xml_slice", "preserve.unknown_parts" }));
+            { "extract.text", "extract.images", "restore.byte_identical", "restore.text_in_place", "restore.insert_node", "restore.delete_node", "preserve.raw_xml_slice", "preserve.unknown_parts" }),
+            FormatExtensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { [SourceDrawingSceneJson.ExtensionKey] =
+                SourceDrawingSceneJson.Write(new Dictionary<string, IReadOnlyList<SourceDrawingScene>>(StringComparer.Ordinal) { ["part-0001"] = sourceScenes }) });
         return new(graph, index, diagnostics);
     }
 
@@ -355,6 +365,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         List<Diagnostic> diagnostics, int order, string? parentId,
         DocxHiddenStyles hiddenStyles, CancellationToken cancellationToken)
     {
+        var drawingSequence = block.Name == W + "p" ? DrawingSequence(block, hiddenStyles) : [];
         foreach (var (chart, index) in block.Descendants(C + "chart").Select((chart, index) => (chart, index)))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -382,6 +393,7 @@ public sealed partial class DocxAdapter : IFormatProbe
                 if (data.Series.Count > 0) extensions["chart_series"] = JsonSerializer.SerializeToElement(data.Series);
             }
             if (target is not null) extensions["chart_part"] = JsonSerializer.SerializeToElement(target);
+            WithDrawingSequence(extensions, drawingSequence, chart);
             var layer = IsHiddenContentElement(chart, hiddenStyles) ? ContentLayer.Hidden : ContentLayer.Body;
             var hasData = data?.Series.Any(series => series.Categories.Count > 0 || series.Values.Count > 0) == true;
             if (!hasData)
@@ -636,13 +648,15 @@ public sealed partial class DocxAdapter : IFormatProbe
                 Provenance: [new(EvidenceKind.Native)], Extensions: hiddenExtensions));
         }
 
+        var drawingSequence = DrawingSequence(paragraph, hiddenStyles);
         foreach (var link in paragraph.Descendants(W + "hyperlink"))
         {
             var relationshipId = (string?)link.Attribute(R + "id");
             if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var target)) continue;
             var linkAnchor = anchor with { Locators = [new("hyperlink", relationshipId)] };
             var linkId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, linkAnchor);
-            nodes.Add(new(linkId, NodeKind.Link, id, order, layer, new ReferenceNodeContent(target, ParagraphText(link, hiddenStyles)), linkAnchor,
+            nodes.Add(new(linkId, NodeKind.Link, id, order, IsHiddenContentElement(link, hiddenStyles) ? ContentLayer.Hidden : layer,
+                new ReferenceNodeContent(target, ParagraphText(link, hiddenStyles)), linkAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
         }
         foreach (var (blip, visualIndex) in paragraph.Descendants(A + "blip").Select((item, index) => (item, index)))
@@ -653,10 +667,11 @@ public sealed partial class DocxAdapter : IFormatProbe
             var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
             var docPr = blip.Ancestors().SelectMany(ancestor => ancestor.Elements(WP + "docPr")).FirstOrDefault()
                 ?? blip.Ancestors().Descendants(WP + "docPr").FirstOrDefault();
-            var description = FirstNonEmptyAttribute(docPr, "descr", "title", "name");
+            var description = GroupedPictureAltText(blip) ?? FirstNonEmptyAttribute(docPr, "descr", "title", "name");
             var imageLayer = IsHiddenContentElement(blip, hiddenStyles) ? ContentLayer.Hidden : layer;
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer, new ReferenceNodeContent(target, description), imageAnchor,
-                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)], Extensions: DocxReadability.ImageDimensions(blip)));
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
+                Extensions: WithDrawingSequence(DocxReadability.ImageDimensions(blip), drawingSequence, blip)));
         }
         foreach (var (imageData, visualIndex) in paragraph.Descendants(V + "imagedata").Select((item, index) => (item, index)))
         {
@@ -669,6 +684,7 @@ public sealed partial class DocxAdapter : IFormatProbe
             var imageLayer = IsHiddenContentElement(imageData, hiddenStyles) ? ContentLayer.Hidden : layer;
             var imageExtensions = DocxReadability.ImageDimensions(imageData) ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal);
             if (imageLayer == ContentLayer.Hidden) imageExtensions["hidden_content_type"] = JsonSerializer.SerializeToElement("docx-hidden-vml-image");
+            WithDrawingSequence(imageExtensions, drawingSequence, imageData);
             nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer,
                 new ReferenceNodeContent(target, description), imageAnchor,
                 Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
@@ -704,14 +720,27 @@ public sealed partial class DocxAdapter : IFormatProbe
                     ["shape_id"] = JsonSerializer.SerializeToElement(shapeId),
                 };
             // The box's text is plain: its struck-through and underlined runs travel as ranges the readable projection marks.
-            var boxText = TextBoxText(textBox, hiddenStyles);
+            var boxHidden = IsHiddenContentElement(textBox, hiddenStyles);
+            var boxText = boxHidden
+                ? string.Join("\n", textBox.Elements(W + "p").Select(p => string.Concat(p.Descendants(W + "t").Select(t => t.Value))))
+                : TextBoxText(textBox, hiddenStyles);
             boxExtensions = WithRevisionNotes(textBox, hiddenStyles, WithMarkedRanges(boxExtensions, boxText, MarkedTextBoxText(textBox, hiddenStyles)));
             boxExtensions = WithStyleDecorationReview(boxExtensions, textBox, hiddenStyles);
+            boxExtensions = WithDrawingSequence(boxExtensions, drawingSequence, textBox);
+            var boxRuns = new List<TextRun>();
+            if (!boxHidden)
+                foreach (var boxParagraph in textBox.Elements(W + "p"))
+                {
+                    if (boxRuns.Count > 0) boxRuns.Add(new("\n"));
+                    boxRuns.AddRange(ExtractRichTextRuns(boxParagraph, relationships, hiddenStyles));
+                }
+            NodeContent boxContent = string.Concat(boxRuns.Select(run => run.Text)) == boxText && boxRuns.Any(run => run.LinkTarget is not null)
+                ? new RichTextNodeContent(boxRuns) : new TextNodeContent(boxText);
             // A bound box owns the bytes of its w:txbxContent, so an edit to its text splices only
             // that element and leaves the shape, the drawing anchor and the host paragraph around
             // it byte-identical. Without a binding - a box in a header, or one the two walks
             // disagree about - it projects exactly as it used to: text, but no way back.
-            nodes.Add(new(boxId, NodeKind.TextBox, id, order, layer, new TextNodeContent(boxText), boxAnchor,
+            nodes.Add(new(boxId, NodeKind.TextBox, id, order, boxHidden ? ContentLayer.Hidden : layer, boxContent, boxAnchor,
                 binding?.Slice,
                 Editability: binding is null ? NodeEditability.EditableWithConstraints : NodeEditability.EditableInPlace,
                 Provenance: [new(EvidenceKind.Native)], Extensions: boxExtensions));
@@ -729,9 +758,73 @@ public sealed partial class DocxAdapter : IFormatProbe
             if (!StringComparer.OrdinalIgnoreCase.Equals((string?)pageBreak.Attribute(W + "type"), "page")) continue;
             var breakAnchor = anchor with { Locators = [new("page_break", (pageBreakIndex++).ToString(System.Globalization.CultureInfo.InvariantCulture))] };
             var breakId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, breakAnchor);
-            nodes.Add(new(breakId, NodeKind.PageBreak, id, order, layer, new TextNodeContent("page-break"), breakAnchor,
-                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)]));
+            // A break inside a hidden or deleted run does not break the page Word shows, so it is hidden content
+            // (kept for the complete policy) like a picture in such a run.
+            nodes.Add(new(breakId, NodeKind.PageBreak, id, order, IsHiddenContentElement(pageBreak, hiddenStyles) ? ContentLayer.Hidden : layer,
+                new TextNodeContent("page-break"), breakAnchor,
+                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
+                Extensions: WithDrawingSequence(null, drawingSequence, pageBreak)));
         }
+    }
+
+    /// <summary>The drawings (pictures, VML pictures, text boxes, charts) and page breaks of one paragraph share its
+    /// Order, and their ids do not follow the document, so each records its place among the others as
+    /// sibling_sequence; every output breaks the tie of an equal Order with it (DocumentSourceOrder). The paragraph
+    /// itself records none, which counts as -1: its text is read first, then its drawings and page breaks as the
+    /// document has them, numbered from 0. A page break with none of the paragraph's visible text and no drawing in
+    /// front of it (a heading that starts on a new page, a paragraph holding only the break) is read before the text
+    /// instead: such breaks are numbered below -1, in document order (two of them: -3, -2).</summary>
+    private static Dictionary<XElement, int> DrawingSequence(XElement paragraph, DocxHiddenStyles hiddenStyles)
+    {
+        var sequence = new Dictionary<XElement, int>();
+        var leadingBreaks = new List<XElement>();
+        // What ParagraphText shows; a text box's own text arrives with the box, which is a drawing.
+        var firstText = RelevantDescendants(paragraph).FirstOrDefault(element => !IsHiddenContentElement(element, hiddenStyles) &&
+            (IsMathRoot(element) || (element.Name == W + "t" || hiddenStyles.ShowTrackedRevisions && element.Name == W + "delText") &&
+                !string.IsNullOrWhiteSpace(element.Value)));
+        var position = 0;
+        foreach (var element in paragraph.Descendants())
+        {
+            if (IsPageBreakElement(element) && position == 0 && (firstText is null || element.IsBefore(firstText))) leadingBreaks.Add(element);
+            else if (IsPageBreakElement(element) || element.Name == A + "blip" || element.Name == V + "imagedata" ||
+                     element.Name == W + "txbxContent" || element.Name == C + "chart")
+                sequence[element] = position++;
+        }
+        for (var index = 0; index < leadingBreaks.Count; index++) sequence[leadingBreaks[index]] = index - leadingBreaks.Count - 1;
+        return sequence;
+    }
+
+    /// <summary>The place of each picture and page break among the others of one table cell, by the rule of
+    /// <see cref="DrawingSequence"/> with the cell's paragraphs read as one: only a break that starts the first
+    /// paragraph, before its text, is read before the cell's text (-2, -3... as in a body paragraph); the rest are
+    /// numbered from 0 in document order, pictures and breaks together.</summary>
+    private static Dictionary<XElement, int> CellDrawingSequence(XElement[] cellBlocks, DocxHiddenStyles hiddenStyles)
+    {
+        var sequence = new Dictionary<XElement, int>();
+        var leadingBreaks = new List<XElement>();
+        var position = 0;
+        var first = true;
+        foreach (var paragraph in cellBlocks.Where(block => block.Name == W + "p"))
+        {
+            var own = DrawingSequence(paragraph, hiddenStyles);
+            foreach (var element in paragraph.Descendants().Where(element => IsPageBreakElement(element) || element.Name == A + "blip"))
+            {
+                if (first && own.TryGetValue(element, out var place) && place < DocumentSourceOrder.NoSequence) leadingBreaks.Add(element);
+                else sequence[element] = position++;
+            }
+            first = false;
+        }
+        for (var index = 0; index < leadingBreaks.Count; index++) sequence[leadingBreaks[index]] = index - leadingBreaks.Count - 1;
+        return sequence;
+    }
+
+    private static Dictionary<string, JsonElement>? WithDrawingSequence(Dictionary<string, JsonElement>? extensions,
+        Dictionary<XElement, int> sequence, XElement drawing)
+    {
+        if (!sequence.TryGetValue(drawing, out var position)) return extensions;
+        extensions ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        extensions[DocumentSourceOrder.SiblingSequenceKey] = JsonSerializer.SerializeToElement(position);
+        return extensions;
     }
 
     /// <summary>The text boxes of a drawing canvas are emitted in reading order, but the readable projection orders
@@ -2131,7 +2224,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         DocxHiddenStyles hiddenStyles, DocxContentControl? contentControl = null, DocxNestedTable? nested = null,
         IReadOnlyList<DocxTableOverlay>? tableOverlays = null,
         byte[]? documentBytes = null, IReadOnlyDictionary<XElement, RawSliceRef>? tableSlices = null, XElement? originalTable = null,
-        DocxDrawnLines? drawn = null)
+        DocxDrawnLines? drawn = null, Dictionary<string, string>? relationships = null)
     {
         // Resolution of an inline AlternateContent can change the element walk. Keep its
         // nested tables protected unless the byte and semantic trees are identical in shape.
@@ -2153,6 +2246,7 @@ public sealed partial class DocxAdapter : IFormatProbe
         // Tracks, per logical grid column, which (row, cell) in `grid` is the still-open vMerge
         // origin so a later continuation cell can add itself to that origin's RowSpan count.
         var openVerticalMerges = new Dictionary<int, (int RowIndex, int CellIndex)>();
+        var declaredColumns = table.Element(W + "tblGrid")?.Elements(W + "gridCol").Count() ?? 0;
         foreach (var row in RevisionRows(table, hiddenStyles))
         {
             var rowCells = new List<TableCell>();
@@ -2172,6 +2266,28 @@ public sealed partial class DocxAdapter : IFormatProbe
                 // that inherits the cell above; only w:val="restart" starts a new merge region.
                 var isContinuation = vMerge is not null && !StringComparer.OrdinalIgnoreCase.Equals((string?)vMerge.Attribute(W + "val"), "restart");
                 var text = CellText(tc, hiddenStyles);
+                // Rich cell runs: only when the concatenated run text reproduces CellText exactly
+                // and some run carries a link, so plain cells keep their old plain shape.
+                IReadOnlyList<TextRun>? cellRuns = null;
+                if (!isContinuation && relationships is not null)
+                {
+                    var cellParagraphs = CellBlocks(tc).Where(block => block.Name == W + "p").ToList();
+                    var cellParagraphTexts = cellParagraphs.Select(paragraph => ParagraphText(paragraph, hiddenStyles)).ToList();
+                    while (cellParagraphTexts.Count > 0 && cellParagraphTexts[0].Length == 0) { cellParagraphTexts.RemoveAt(0); cellParagraphs.RemoveAt(0); }
+                    while (cellParagraphTexts.Count > 0 && cellParagraphTexts[^1].Length == 0) { cellParagraphTexts.RemoveAt(cellParagraphTexts.Count - 1); cellParagraphs.RemoveAt(cellParagraphs.Count - 1); }
+                    if (string.Join("\n", cellParagraphTexts) == text)
+                    {
+                        var cellRunList = new List<TextRun>();
+                        for (var paragraphIndex = 0; paragraphIndex < cellParagraphs.Count; paragraphIndex++)
+                        {
+                            if (paragraphIndex > 0) cellRunList.Add(new TextRun("\n"));
+                            cellRunList.AddRange(ExtractRichTextRuns(cellParagraphs[paragraphIndex], relationships, hiddenStyles));
+                        }
+                        if (cellRunList.Count > 0 && string.Concat(cellRunList.Select(run => run.Text)) == text &&
+                            cellRunList.Any(run => run.LinkTarget is not null))
+                            cellRuns = cellRunList;
+                    }
+                }
                 if (!isContinuation && MarkedCellText(tc, hiddenStyles, drawn) is var marked && marked.Text == text)
                 {
                     if (marked.Struck.Count > 0)
@@ -2194,11 +2310,20 @@ public sealed partial class DocxAdapter : IFormatProbe
                 }
                 else
                 {
-                    rowCells.Add(new TableCell(text, gridSpan, 1));
+                    rowCells.Add(new TableCell(text, gridSpan, 1) { Runs = cellRuns });
                     if (vMerge is not null) openVerticalMerges[gridColumn] = (grid.Count, rowCells.Count - 1);
                     else openVerticalMerges.Remove(gridColumn);
                 }
                 gridColumn += gridSpan;
+            }
+            // w:gridAfter: Word omits the trailing <w:tc>s for these right-hand columns; pad blank
+            // cells so the row stays rectangular, bounded by the declared w:tblGrid width.
+            var gridAfter = ParseDocxGridAfter(row.Element(W + "trPr"));
+            for (var column = rowCells.Sum(cell => cell.ColSpan);
+                 gridAfter > 0 && (declaredColumns == 0 || column < declaredColumns); column++)
+            {
+                rowCells.Add(new TableCell(""));
+                gridAfter--;
             }
             grid.Add(rowCells);
         }
@@ -2289,8 +2414,63 @@ public sealed partial class DocxAdapter : IFormatProbe
                     var nestedSlice = tableSlices is not null && tableSlices.TryGetValue(cellBlocks[blockIndex], out var indexed) ? indexed : null;
                     AddTable(cellBlocks[blockIndex], partUri, nestedSlice, nestedOrder, nodes, sliceMap, ref ordinal, hiddenStyles,
                         contentControl, new DocxNestedTable(id, rowIndex, cellIndex, paragraphOffset, lineOffset),
-                        tableSlices: tableSlices, drawn: drawn);
+                        tableSlices: tableSlices, drawn: drawn, relationships: relationships);
                 }
+                var cellSequence = CellDrawingSequence(cellBlocks, hiddenStyles);
+                var cellBreakIndex = 0;
+                for (var blockIndex = 0; blockIndex < cellBlocks.Length; blockIndex++)
+                {
+                    if (cellBlocks[blockIndex].Name != W + "p") continue;
+                    // The marker a body paragraph gets for each w:br type="page". The readable projection puts it
+                    // into its cell; the Markdown writes it after the table, as a pipe table cell holds no block.
+                    foreach (var pageBreak in cellBlocks[blockIndex].Descendants().Where(IsPageBreakElement))
+                    {
+                        var breakAnchor = new SourceAnchor("docx", partUri,
+                            [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                             new("table_cell", rowIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" +
+                                 cellIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                             new("page_break", (cellBreakIndex++).ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
+                        var breakId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, breakAnchor);
+                        var breakExtensions = WithDrawingSequence(null, cellSequence, pageBreak) ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                        breakExtensions["table_cell_row"] = JsonSerializer.SerializeToElement(rowIndex);
+                        breakExtensions["table_cell_column"] = JsonSerializer.SerializeToElement(cellIndex);
+                        // A break inside a hidden or deleted run is not visible content, as for the pictures of the cell.
+                        nodes.Add(new(breakId, NodeKind.PageBreak, id, order,
+                            IsHiddenContentElement(pageBreak, hiddenStyles) ? ContentLayer.Hidden : ContentLayer.Body,
+                            new TextNodeContent("page-break"), breakAnchor, Editability: NodeEditability.Passthrough,
+                            Provenance: [new(EvidenceKind.Native)], Extensions: breakExtensions));
+                    }
+                }
+                if (relationships is not null)
+                    foreach (var (blip, visualIndex) in cellBlocks.Where(block => block.Name == W + "p")
+                        .SelectMany(paragraph => paragraph.Descendants(A + "blip")).Select((item, index) => (item, index)))
+                        {
+                            var relationshipId = (string?)blip.Attribute(R + "embed");
+                            if (relationshipId is null || !relationships.TryGetValue(relationshipId, out var imageTarget)) continue;
+                            // Table/cell context in the anchor: two cell images must not overwrite
+                            // each other, and the image_relationship locator binds the node to its
+                            // source relationship so the unbound-media fallback skips it.
+                            var imageAnchor = new SourceAnchor("docx", partUri,
+                                [new("body_child_ordinal", order.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                 new("table_cell", rowIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" +
+                                     cellIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)),
+                                 new("image_relationship", relationshipId),
+                                 new("visual_index", visualIndex.ToString(System.Globalization.CultureInfo.InvariantCulture))], order);
+                            var imageId = NodeIdGenerator.CreateForSource("docx", DocumentFormatKind.Docx, imageAnchor);
+                            var docPr = blip.Ancestors().SelectMany(ancestor => ancestor.Elements(WP + "docPr")).FirstOrDefault()
+                                ?? blip.Ancestors().Descendants(WP + "docPr").FirstOrDefault();
+                            var description = GroupedPictureAltText(blip) ?? FirstNonEmptyAttribute(docPr, "descr", "title", "name");
+                            var imageLayer = IsHiddenContentElement(blip, hiddenStyles) ? ContentLayer.Hidden : ContentLayer.Body;
+                            var imageExtensions = DocxReadability.ImageDimensions(blip) ?? new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+                            imageExtensions["table_image_row"] = JsonSerializer.SerializeToElement(rowIndex);
+                            imageExtensions["table_image_column"] = JsonSerializer.SerializeToElement(cellIndex);
+                            // Same tie-break as the drawings of a body paragraph: see DrawingSequence.
+                            imageExtensions[DocumentSourceOrder.SiblingSequenceKey] = JsonSerializer.SerializeToElement(cellSequence.GetValueOrDefault(blip, visualIndex));
+                            nodes.Add(new(imageId, NodeKind.Image, id, order, imageLayer,
+                                new ReferenceNodeContent(imageTarget, description), imageAnchor,
+                                Editability: NodeEditability.Passthrough, Provenance: [new(EvidenceKind.Native)],
+                                Extensions: imageExtensions));
+                        }
                 cellIndex++;
             }
             rowIndex++;
@@ -3143,6 +3323,12 @@ public sealed partial class DocxAdapter : IFormatProbe
     // <w:tc> elements skip -- Word omits <w:tc> entirely for those columns rather than emitting
     // empty ones, so any code walking <w:tc> children in document order must count from this
     // offset, not from 0, to line up with w:tblGrid's column indices.
+    // w:trPr/w:gridAfter@val: how many trailing grid columns the row omits on the right.
+    private static int ParseDocxGridAfter(XElement? trPr) =>
+        int.TryParse((string?)trPr?.Element(W + "gridAfter")?.Attribute(W + "val"),
+            System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var parsed) && parsed > 0
+            ? Math.Min(parsed, 16384) : 0;
+
     private static int ParseDocxGridBefore(XElement? trPr) =>
         int.TryParse((string?)trPr?.Element(W + "gridBefore")?.Attribute(W + "val"),
             System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) && value > 0 ? value : 0;
@@ -3324,6 +3510,8 @@ public sealed partial class DocxAdapter : IFormatProbe
         foreach (var child in container.Elements())
         {
             if (OpaqueParagraphContainers.Contains(child.Name)) continue;
+            // w:pPr/w:tabs defines tab stops; its w:tab children are no tab characters of the text.
+            if (child.Name == W + "tabs") continue;
             yield return child;
             // An equation is a third kind of opaque content, but unlike a table or a text box it
             // has no node of its own: it is projected as one linearized string inside the owning
@@ -3538,7 +3726,8 @@ public sealed partial class DocxAdapter : IFormatProbe
             item.Name == A + "sp" || item.Name == WPS + "wsp" || item.Name == V + "shape" ||
             item.Name == V + "rect" || item.Name == V + "roundrect");
         return (string?)owner?.Attribute("id") ??
-            (string?)owner?.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id");
+            (string?)owner?.Descendants().FirstOrDefault(item => item.Name.LocalName == "cNvPr")?.Attribute("id") ??
+            (string?)owner?.Ancestors().FirstOrDefault(item => item.Name == WP + "inline" || item.Name == WP + "anchor")?.Element(WP + "docPr")?.Attribute("id");
     }
 
     private static string TextBoxText(XElement textBox, DocxHiddenStyles hiddenStyles)
@@ -3593,7 +3782,14 @@ public sealed partial class DocxAdapter : IFormatProbe
 
     private static bool IsHiddenContentElement(XElement element, DocxHiddenStyles hiddenStyles) =>
         !hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(element) ||
-        element.AncestorsAndSelf().FirstOrDefault(ancestor => ancestor.Name == W + "r") is { } run && IsHiddenRun(run, hiddenStyles);
+        element.AncestorsAndSelf().Any(ancestor => ancestor.Name == W + "r" && IsHiddenRun(ancestor, hiddenStyles) ||
+            (ancestor.Name == WP + "inline" || ancestor.Name == WP + "anchor") && NonVisualHidden(ancestor.Element(WP + "docPr")) ||
+            ancestor.Name.LocalName is "wsp" or "sp" or "grpSp" or "wgp" or "pic" or "cxnSp" or "graphicFrame" &&
+                ancestor.Elements().SelectMany(child => child.Name.LocalName == "cNvPr" ? new[] { child } :
+                    child.Name.LocalName.StartsWith("nv", StringComparison.Ordinal) ? child.Elements() : [])
+                    .Any(child => child.Name.LocalName == "cNvPr" && NonVisualHidden(child)));
+
+    private static bool NonVisualHidden(XElement? element) => (string?)element?.Attribute("hidden") is "1" or "true";
 
     private static bool IsHiddenRun(XElement run, DocxHiddenStyles hiddenStyles) =>
         !hiddenStyles.ShowTrackedRevisions && IsDeletedRevision(run) || hiddenStyles.IsHiddenRun(run);

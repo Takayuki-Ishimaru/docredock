@@ -12,16 +12,15 @@ internal static class AgentsCommand
     internal const string Help = """
 
         Configures AI coding assistants to read Office documents through DocRedock: the MCP server, instructions and a skill
-        that tell the assistant to convert a document first and read only a piece of the original when needed, and, on request,
-        a hook that refuses to let the assistant open .docx/.xlsx/.pptx files directly (--enforce) and the approval of
+        that recommend structured conversion while allowing direct Office/PDF source inspection and layout rendering, and, on request,
+        the approval of
         DocRedock's tools so that the assistant does not ask before every call (--auto-approve).
           agents install    Add or update the integration (running it again updates it in place, otherwise changes nothing).
           agents uninstall  Remove what install added, and files or folders it created when nothing else is left in them.
           agents status     Show each item as installed, missing, outdated, conflict or error.
         Options
           --client claude|copilot|codex|all   Which assistants (default: all; repeat or separate with commas).
-          --enforce | --no-enforce            install: add the PreToolUse hook (Claude Code, Copilot, Codex) / remove it.
-                                              Without either, an existing hook is kept (and updated when outdated).
+          --enforce | --no-enforce            Deprecated compatibility options: owned restrictive hooks are always removed.
           --auto-approve | --no-auto-approve  install: pre-approve DocRedock's MCP tools / remove that approval. Without either,
                                               an existing approval is kept (and updated when outdated).
           --dry-run                           install/uninstall: list the planned changes and write nothing.
@@ -32,18 +31,19 @@ internal static class AgentsCommand
         Written per assistant (user scope; <config> is CLAUDE_CONFIG_DIR or ~/.claude, <copilot> COPILOT_HOME or ~/.copilot,
         <codex> CODEX_HOME or ~/.codex):
           Claude Code  MCP via `claude mcp add --scope user` when claude is on PATH, else mcpServers in <config>/.claude.json
-                       (~/.claude.json); <config>/CLAUDE.md block; <config>/skills/docredock-office/SKILL.md; hook and "mcp__docredock__*" in permissions.allow, both in
-                       <config>/settings.json
+                       (~/.claude.json); <config>/CLAUDE.md block; <config>/skills/docredock-office/SKILL.md; "mcp__docredock__*" in permissions.allow in <config>/settings.json;
+                       a retired DocRedock hook is removed from <config>/settings.json
           Copilot      <copilot>/mcp-config.json; <copilot>/instructions/docredock.instructions.md;
-                       <copilot>/skills/docredock-office/SKILL.md; hook <copilot>/hooks/docredock.json;
+                       <copilot>/skills/docredock-office/SKILL.md; a retired DocRedock hook is removed from <copilot>/hooks/docredock.json;
                        approval hook <copilot>/hooks/docredock-approve.json (Copilot CLI only; VS Code still asks: choose Always allow)
           Codex        <codex>/config.toml block; <codex>/AGENTS.md block; ~/.agents/skills/docredock-office/SKILL.md;
-                       hook in <codex>/hooks.json (Codex asks you to review and trust new hooks: run /hooks);
+                       owned legacy restrictive hook removed from <codex>/hooks.json;
                        approval line default_tools_approval_mode = "approve" inside the config.toml block
         Shared files that exist are copied to <file>.docredock.bak before the first change. Restart the assistants afterwards.
         Exit codes: 0 done; 1 partial (a conflict with an entry DocRedock did not write, or an unreadable or unwritable file;
         the other items are still processed); 2 invalid arguments; 10 unexpected error.
-        `docredock hook <claude|copilot|codex>` is the program the hook runs: it reads the hook event on standard input and
+        `docredock hook <claude|copilot|codex>` is the program the retired restrictive hooks ran: it never denies, so a hook that is
+        still installed does not block anything (agents install removes it). It reads the hook event on standard input and
         always exits 0. `docredock hook copilot-approve` is the Copilot approval hook: it prints {"behavior":"allow"} for
         DocRedock's tools and {} for everything else.
         """;
@@ -170,7 +170,7 @@ internal static class AgentsCommand
         var title = "DocRedock agents " + report.Operation + (report.DryRun ? " (dry run: nothing was written)" : string.Empty);
         await output.WriteLineAsync(title);
         await output.WriteLineAsync($"CLI: {report.Cli}" + (report.CliExists ? string.Empty : "  (this file does not exist)"));
-        var rows = report.Items.Select(item => (Client: item.Client.ToString().ToLowerInvariant(), Item: item.Item.ToString().ToLowerInvariant(),
+        var rows = report.Items.Where(item => item.Item != AgentItem.Hook || item.State != AgentItemState.Missing).Select(item => (Client: item.Client.ToString().ToLowerInvariant(), Item: item.Item.ToString().ToLowerInvariant(),
             State: item.State.ToString().ToLowerInvariant(), Action: ActionText(report, item), Path: item.Path, Detail: item.Detail)).ToList();
         await output.WriteLineAsync($"{"client",-8} {"item",-13} {"state",-10} {"change",-9} path");
         foreach (var row in rows)
@@ -185,8 +185,8 @@ internal static class AgentsCommand
             next.Append("Items in conflict or in error were left alone (exit code 1); fix them, then run the command again. ");
         if (report.Operation == "install" && !report.DryRun && report.Items.Any(item => item.Action != AgentAction.None))
             next.Append("Restart the assistants to load the changes.");
-        if (report.Operation == "status" && report.Items.Any(item => item.State is AgentItemState.Missing or AgentItemState.Outdated && item.Item is not (AgentItem.Hook or AgentItem.Approval)))
-            next.Append("Run docredock agents install to add or update the missing items (the hook only with --enforce, the approval only with --auto-approve).");
+        if (report.Operation == "status" && report.Items.Any(item => item.State is AgentItemState.Missing or AgentItemState.Outdated && item.Item is not AgentItem.Approval && (item.Item != AgentItem.Hook || item.State == AgentItemState.Outdated)))
+            next.Append("Run docredock agents install to add or update the missing items and remove retired hooks (the approval only with --auto-approve).");
         if (next.Length > 0) await output.WriteLineAsync("Next: " + next.ToString().TrimEnd());
     }
 

@@ -55,7 +55,7 @@ public sealed partial class SlideAndWordDrawnLineDecorationTests : IDisposable
     private async Task<(string Markdown, ReadableDocumentExportResult Result)> Export(string source)
     {
         var output = Path.Combine(root, Path.GetFileNameWithoutExtension(source) + ".md");
-        var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false));
+        var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false, SeparateWorksheetAnnotations: false));
         return ((await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal), result);
     }
 

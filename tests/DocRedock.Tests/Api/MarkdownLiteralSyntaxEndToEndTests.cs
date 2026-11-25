@@ -93,7 +93,7 @@ public sealed class MarkdownLiteralSyntaxEndToEndTests
         var output = Path.Combine(Path.GetDirectoryName(source)!, "xlsx-literal.md");
 
         var exported = await new DocumentService().ExportReadableAsync(
-            new ReadableDocumentExportOptions(source, output, EnableOcr: false));
+            new ReadableDocumentExportOptions(source, output, EnableOcr: false, IncludeTableOfContents: false));
         var markdown = await File.ReadAllTextAsync(exported.MarkdownPath);
         var document = MarkdownStructure.Parse(markdown);
 

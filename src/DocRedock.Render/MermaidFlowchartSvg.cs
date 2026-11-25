@@ -54,7 +54,7 @@ internal static partial class MermaidDiagramSvg
     {
         public int From, To;
         public string? Label;
-        public bool Dotted, Arrow, Thick;
+        public bool Dotted, Arrow, StartArrow, Thick;
         public bool Back;
         public List<int> Chain = [];
     }
@@ -233,6 +233,7 @@ internal static partial class MermaidDiagramSvg
                     Dotted = op.Contains('.'),
                     Thick = op.Contains('='),
                     Arrow = op.EndsWith('>'),
+                    StartArrow = op.StartsWith('<'),
                 });
                 a = b;
             }
@@ -712,7 +713,8 @@ internal static partial class MermaidDiagramSvg
         foreach (var edge in edges)
         {
             var dash = edge.Dotted ? " stroke-dasharray=\"6 4\"" : "";
-            var markerAttr = edge.Arrow ? " marker-end=\"" + marker + "\"" : "";
+            var markerAttr = (edge.Arrow ? " marker-end=\"" + marker + "\"" : "") +
+                (edge.StartArrow ? " marker-start=\"" + marker + "\"" : "");
             var attrs = " fill=\"none\" stroke=\"currentColor\" stroke-width=\"" + (edge.Thick ? "3" : "1.5") + "\"" + dash + markerAttr;
             if (edge.From == edge.To)
             {
@@ -776,7 +778,13 @@ internal static partial class MermaidDiagramSvg
 
         var label = (title is null ? "" : title + ". ") + "Flowchart: " + nodes.Count(n => !n.Dummy).ToString(CultureInfo.InvariantCulture) + " nodes, " + edges.Count.ToString(CultureInfo.InvariantCulture) + " connections";
         if (liveGroups.Count > 0) label += ", " + liveGroups.Count.ToString(CultureInfo.InvariantCulture) + " groups";
-        return Wrapper("flowchart", label, titleSvg + groupSvg + edgeSvg + nodeSvg + groupText + labelSvg, bounds, id);
+        var descriptions = new StringBuilder();
+        foreach (var edge in edges)
+            descriptions.Append("<desc class=\"docredock-connection\">")
+                .Append(System.Net.WebUtility.HtmlEncode(nodes[edge.From].Label +
+                    (edge.StartArrow && edge.Arrow ? " ↔ " : edge.Arrow ? " → " : " — ") + nodes[edge.To].Label +
+                    (string.IsNullOrWhiteSpace(edge.Label) ? "" : ": " + edge.Label))).Append("</desc>");
+        return Wrapper("flowchart", label, descriptions + titleSvg + groupSvg + edgeSvg + nodeSvg + groupText + labelSvg, bounds, id);
     }
 
     private static void AppendShape(StringBuilder sb, FNode node)

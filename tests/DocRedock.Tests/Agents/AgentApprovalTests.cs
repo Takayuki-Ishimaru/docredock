@@ -61,11 +61,11 @@ public sealed class AgentApprovalTests
         Assert.Equal(before, box.Snapshot());
         Assert.Empty(Bak(box));
         Assert.All(report.Items, item => { Assert.Equal(AgentAction.None, item.Action); Assert.Equal(AgentItemState.Installed, item.State); });
-        Assert.Equal(15, report.Items.Count);
-        Assert.All(box.Service.Status(AgentSandbox.Options(), box.Environment()).Items, item => Assert.Equal(AgentItemState.Installed, item.State));
-        // Claude's hook and approval share settings.json.
+        Assert.Equal(12, report.Items.Count);
+        Assert.All(box.Service.Status(AgentSandbox.Options(), box.Environment()).Items, item => Assert.Equal(item.Item==AgentItem.Hook?AgentItemState.Missing:AgentItemState.Installed, item.State));
+        // Approval does not require a restrictive hook.
         var settings = box.Json(".claude", "settings.json");
-        Assert.Single(settings["hooks"]!["PreToolUse"]!.AsArray());
+        Assert.Null(settings["hooks"]);
         Assert.Equal([Rule], settings["permissions"]!["allow"]!.AsArray().Select(node => (string)node!).ToArray());
     }
 
@@ -164,14 +164,13 @@ public sealed class AgentApprovalTests
         Assert.False(report.HasProblems);
         Assert.Equal(3, report.Items.Count(item => item.Item == AgentItem.Approval && item.Action == AgentAction.Remove && item.State == AgentItemState.Missing));
         Assert.All(All, client => Assert.Equal(AgentItemState.Missing, State(box, client, AgentItem.Approval)));
-        // Everything else stays, including the hook that shares settings.json and the Codex block that holds the approval line.
-        Assert.All(All, client => Assert.Equal(AgentItemState.Installed, State(box, client, AgentItem.Hook)));
+        // MCP configuration stays and restrictive hooks remain absent.
+        Assert.All(All, client => Assert.Equal(AgentItemState.Missing, State(box, client, AgentItem.Hook)));
         Assert.All(All, client => Assert.Equal(AgentItemState.Installed, State(box, client, AgentItem.Mcp)));
         Assert.Equal(CodexBlock(box, approve: false), File.ReadAllText(box.P(".codex", "config.toml")));
-        Assert.Null(box.Json(".claude", "settings.json")["permissions"]);
-        Assert.NotNull(box.Json(".claude", "settings.json")["hooks"]);
+        Assert.False(File.Exists(box.P(".claude","settings.json")));
         Assert.False(File.Exists(box.P(".copilot", "hooks", "docredock-approve.json")));
-        Assert.True(File.Exists(box.P(".copilot", "hooks", "docredock.json")));
+        Assert.False(File.Exists(box.P(".copilot", "hooks", "docredock.json")));
 
         // Removing again does nothing.
         var again = box.Service.Install(AgentSandbox.Options(approve: false), box.Environment());
@@ -179,30 +178,18 @@ public sealed class AgentApprovalTests
     }
 
     [Fact]
-    public void Enforce_false_removes_an_installed_hook_and_null_keeps_it_and_the_approval_stays()
+    public void Retiring_a_legacy_hook_keeps_the_separate_approval_settings()
     {
-        using var box = new AgentSandbox();
-        box.Service.Install(AgentSandbox.Options(enforce: true, approve: true), box.Environment());
-        box.Service.Install(AgentSandbox.Options(), box.Environment());
-        Assert.All(All, client => Assert.Equal(AgentItemState.Installed, State(box, client, AgentItem.Hook)));
-
-        var report = box.Service.Install(AgentSandbox.Options(enforce: false), box.Environment());
-        Assert.Equal(3, report.Items.Count(item => item.Item == AgentItem.Hook && item.Action == AgentAction.Remove));
-        Assert.DoesNotContain(report.Notes, note => note.Contains("/hooks", StringComparison.Ordinal));
-        Assert.All(All, client => Assert.Equal(AgentItemState.Missing, State(box, client, AgentItem.Hook)));
-        Assert.All(All, client => Assert.Equal(AgentItemState.Installed, State(box, client, AgentItem.Approval)));
-        Assert.False(File.Exists(box.P(".codex", "hooks.json")));
-        Assert.False(File.Exists(box.P(".copilot", "hooks", "docredock.json")));
-        Assert.Null(box.Json(".claude", "settings.json")["hooks"]);
-        Assert.Equal([Rule], box.Json(".claude", "settings.json")["permissions"]!["allow"]!.AsArray().Select(node => (string)node!).ToArray());
-
-        // Removing the hook of a file that existed leaves the user's other hooks alone.
-        using var other = new AgentSandbox();
-        other.Write(other.P(".codex", "hooks.json"), "{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"^Bash$\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"audit\"\n          }\n        ]\n      }\n    ]\n  }\n}\n");
-        var original = other.Snapshot();
-        other.Service.Install(AgentSandbox.Options(enforce: true, clients: AgentClient.Codex), other.Environment());
-        other.Service.Install(AgentSandbox.Options(enforce: false, clients: AgentClient.Codex), other.Environment());
-        Assert.Equal(original[".codex/hooks.json"], File.ReadAllText(other.P(".codex", "hooks.json")));
+        using var box=new AgentSandbox();
+        foreach(var client in All)AgentDirectInspectionTests.SeedLegacyHook(box,client);
+        var report=box.Service.Install(AgentSandbox.Options(approve:true),box.Environment());
+        Assert.Equal(3,report.Items.Count(i=>i.Item==AgentItem.Hook&&i.Action==AgentAction.Remove));
+        Assert.All(All,client=>Assert.Equal(AgentItemState.Missing,State(box,client,AgentItem.Hook)));
+        Assert.All(All,client=>Assert.Equal(AgentItemState.Installed,State(box,client,AgentItem.Approval)));
+        Assert.Null(box.Json(".claude","settings.json")["hooks"]);
+        Assert.Equal([Rule],box.Json(".claude","settings.json")["permissions"]!["allow"]!.AsArray().Select(n=>(string)n!).ToArray());
+        Assert.False(File.Exists(box.P(".codex","hooks.json")));
+        Assert.False(File.Exists(box.P(".copilot","hooks","docredock.json")));
     }
 
     [Fact]

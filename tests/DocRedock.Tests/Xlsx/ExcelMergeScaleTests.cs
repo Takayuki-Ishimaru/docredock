@@ -127,7 +127,10 @@ public sealed class ExcelMergeScaleTests : IDisposable
     {
         var output = Path.ChangeExtension(source, ".md");
         using var cancellation = new CancellationTokenSource(Limit + TimeSpan.FromSeconds(5));
-        var conversion = Task.Run(() => service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false), cancellation.Token));
+        // Compare geometry with the low-level grid serializer under the same output options.
+        var conversion = Task.Run(() => service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false,
+            TableLayout: DocRedock.Markdown.MarkdownTableLayout.Grid, IncludeSourceReferences: false, IncludeTableOfContents: false,
+            SeparateWorksheetAnnotations: false), cancellation.Token));
         try
         {
             var result = await conversion.WaitAsync(Limit);

@@ -63,6 +63,19 @@ public sealed class CliHtmlExportTests : IDisposable
         Assert.DoesNotContain("<!doctype", await File.ReadAllTextAsync(target), StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Office_layout_is_accepted_for_html_by_format_or_output_name_and_refused_for_markdown()
+    {
+        var source = await Source("report");
+        Assert.Equal(0, await App(new(), new()).RunAsync(["export", source, "--format", "html", "--office-layout", "structured", "--ocr", "off"]));
+        Assert.Equal(0, await App(new(), new()).RunAsync(["export", source, "-o", Path.Combine(root, "named.html"), "--office-layout", "structured", "--ocr", "off"]));
+        var error = new StringWriter();
+        Assert.NotEqual(0, await App(new(), error).RunAsync(["export", source, "-o", Path.Combine(root, "plain.md"), "--office-layout", "structured", "--ocr", "off"]));
+        // The message names an option that exists.
+        Assert.Contains("--format html", error.ToString());
+        Assert.False(File.Exists(Path.Combine(root, "plain.md")));
+    }
+
     [Theory]
     [InlineData("--format", "pdf")]
     [InlineData("--format", "html", "--ai-package", "dir")]

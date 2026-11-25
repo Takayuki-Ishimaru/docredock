@@ -9,7 +9,7 @@ namespace DocRedock.Render;
 
 /// <summary>
 /// Static, script-free SVG renderer for the small Mermaid subset DocRedock's readable projection emits:
-/// <c>flowchart LR|TD</c> (terminator, process, decision and data nodes; four link kinds with optional labels) and
+/// <c>flowchart LR|TD</c> (terminator, process, decision and data nodes; directed, undirected and bidirectional links with optional labels) and
 /// <c>sequenceDiagram</c> (participants, solid/dotted messages, notes). Anything else returns <c>null</c> so the caller
 /// can fall back to showing the Mermaid source.
 /// </summary>
@@ -37,7 +37,7 @@ internal static partial class MermaidDiagramSvg
     private static readonly Regex BrRx = new(@"<br\s*/?>", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, RxTimeout);
     private static readonly Regex IdRx = new(@"\G[\p{L}\p{N}_]+", Rx, RxTimeout);
     private static readonly Regex LinkRx = new(
-        @"\G\s*(?:(?<op>-{2,}>|-{3,}|={2,}>|={3,}|-\.+->|-\.+-)(?:\s*\|(?<l>[^|]*)\|)?|--\s+(?<t1>.+?)\s+(?<op1>-{2,}>|-{3,})|-\.\s+(?<t2>.+?)\s+(?<op2>\.+->|\.+-)|==\s+(?<t3>.+?)\s+(?<op3>={2,}>|={3,}))",
+        @"\G\s*(?:(?<op><-{2,}>|<-\.+->|-{2,}>|-{3,}|={2,}>|={3,}|-\.+->|-\.+-)(?:\s*\|(?<l>[^|]*)\|)?|--\s+(?<t1>.+?)\s+(?<op1>-{2,}>|-{3,})|-\.\s+(?<t2>.+?)\s+(?<op2>\.+->|\.+-)|==\s+(?<t3>.+?)\s+(?<op3>={2,}>|={3,}))",
         Rx, RxTimeout);
     private static readonly Regex SubgraphRx = new(@"^subgraph\s+(.+)$", Rx, RxTimeout);
     private static readonly Regex SubgraphIdRx = new(@"^([\p{L}\p{N}_]+)\s*\[(.*)\]$", Rx, RxTimeout);
@@ -186,7 +186,7 @@ internal static partial class MermaidDiagramSvg
           // No inline sizing: the page's stylesheet decides (natural size with scrolling on screen, fitted in print).
           .Append("\" font-family=\"").Append(FontFamily).Append("\" font-size=\"").Append(N(NodeFont)).Append("\">");
         sb.Append("<title>").Append(Esc(label)).Append("</title>");
-        sb.Append("<defs><marker id=\"").Append(id).Append("-arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto\">")
+        sb.Append("<defs><marker id=\"").Append(id).Append("-arrow\" viewBox=\"0 0 10 10\" refX=\"9\" refY=\"5\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\">")
           .Append("<path d=\"M0,0 L10,5 L0,10 z\" fill=\"currentColor\"/></marker>").Append(extraDefs).Append("</defs>");
         sb.Append(body).Append("</svg>");
         _ = kind;

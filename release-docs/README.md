@@ -6,13 +6,18 @@
 
 ## 最新版
 
+### v0.4.1 Public Beta
+
+- [v0.4.1 リリースノート](RELEASE_NOTES_v0.4.1.md)
+- OfficeのHTML表示、Excelのレビュー用出力、AI連携の原本確認を改善
+
+## 公開済みリリース
+
 ### v0.4.0 Public Beta
 
 - [v0.4.0 リリースノート](RELEASE_NOTES_v0.4.0.md)
 - [変換比較・HTML出力レポート](CONVERSION_REPORT_v0.4.0.md)
 - 閲覧用HTMLとAI連携での原本確認を追加。Officeの図とPDFの読み取りを改善しました。
-
-## 公開済みリリース
 
 ### v0.3.12 Public Beta
 

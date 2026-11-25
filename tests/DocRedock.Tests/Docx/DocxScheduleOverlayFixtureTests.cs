@@ -27,7 +27,7 @@ public sealed class DocxScheduleOverlayFixtureTests
         {
             var markdownPath = Path.Combine(root, "schedule-arrows.md");
             var service = new DocumentService();
-            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath));
+            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath, SeparateWorksheetAnnotations: false));
             var markdown = await File.ReadAllTextAsync(markdownPath);
 
             Assert.Equal(DocumentFormatKind.Docx, readable.Graph.Format);

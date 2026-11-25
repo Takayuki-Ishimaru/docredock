@@ -9,6 +9,41 @@ namespace DocRedock.Formats.Pdf;
 /// extractor result, so failed downstream rendering cannot lose native text evidence.</summary>
 public static class PdfPageProjection
 {
+    public static NodeContent TextContent(PdfTextRegion region)
+    {
+        ArgumentNullException.ThrowIfNull(region);
+        var runs = LinkRuns(region.Text, region.LinkSpans);
+        return runs is null ? new TextNodeContent(region.Text) : new RichTextNodeContent(runs);
+    }
+
+    private static IReadOnlyList<TextRun>? LinkRuns(string text, IReadOnlyList<PdfTextLinkSpan>? spans)
+    {
+        if (spans is not { Count: > 0 }) return null;
+        var runs = new List<TextRun>(); var position = 0;
+        foreach (var span in spans.OrderBy(span => span.Start))
+        {
+            if (span.Start < position || span.End <= span.Start || span.End > text.Length) continue;
+            if (span.Start > position) runs.Add(new TextRun(text[position..span.Start]));
+            runs.Add(new TextRun(text[span.Start..span.End], LinkTarget: span.Target)); position = span.End;
+        }
+        if (position < text.Length) runs.Add(new TextRun(text[position..]));
+        return runs;
+    }
+
+    private static IReadOnlyList<TextRun>? CellLinkRuns(PdfTableCell cell, PdfPageText page)
+    {
+        if (cell.LinkSpans is {Count: > 0}) return LinkRuns(cell.Text, cell.LinkSpans);
+        var spans = new List<PdfTextLinkSpan>(); var cursor = 0;
+        foreach (var region in page.Regions.Where(region => region.LinkSpans is { Count: > 0 } && region.SourceTextIds.Any(cell.SourceTextIds.Contains)))
+        {
+            var offset = cell.Text.IndexOf(region.Text, cursor, StringComparison.Ordinal);
+            if (offset < 0) continue;
+            spans.AddRange(region.LinkSpans!.Select(span => span with { Start = span.Start + offset, End = span.End + offset }));
+            cursor = offset + region.Text.Length;
+        }
+        return LinkRuns(cell.Text, spans);
+    }
+
     /// <summary>The "strike_ranges" extension of a line: its struck-through characters as [start, end)
     /// offsets into its text; null when nothing is struck.</summary>
     public static JsonElement? StrikeRanges(PdfTextRegion region)
@@ -205,7 +240,7 @@ public static class PdfPageProjection
                 }
                 AddContinuation(region, ref extensions);
                 nodes.Add(new DocumentNode($"pdf-p{page.PageNumber}-text-{order + 1}", block.List is not null ? NodeKind.ListItem : headingLevel > 0 ? NodeKind.Heading : NodeKind.Paragraph, null, order,
-                    region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, new TextNodeContent(region.Text), Geometry: region.BoundingBox,
+                    region.IsPageFurniture ? ContentLayer.Furniture : ContentLayer.Body, TextContent(region), Geometry: region.BoundingBox,
                     Provenance: [new ProvenanceItem(EvidenceKind.Native, Engine: "pdf text operator")], Extensions: extensions));
             }
         }
@@ -214,7 +249,7 @@ public static class PdfPageProjection
             EmitFlowUpTo(position);
             var order = startingOrder + nodes.Count;
             var rows = table.Rows.Select(row => (IReadOnlyList<TableCell>)row.Cells.OrderBy(cell => cell.Column)
-                .Select(cell => new TableCell(cell.Text, cell.ColumnSpan, cell.RowSpan)).ToArray()).ToArray();
+                .Select(cell => new TableCell(cell.Text, cell.ColumnSpan, cell.RowSpan) { Runs = CellLinkRuns(cell, page) }).ToArray()).ToArray();
             var extensions = new Dictionary<string, JsonElement>
             {
                 ["pdf_table_confidence"] = JsonSerializer.SerializeToElement(table.Confidence.ToString()),

@@ -7,17 +7,18 @@ using DocRedock.Markdown;
 namespace DocRedock.Render;
 
 /// <summary>An image the HTML writer may embed, keyed in <see cref="ReadableHtmlOptions.Assets"/> by the exact
-/// relative reference the Readable Markdown uses for it (for example "report.assets/img-0001.png").</summary>
+/// relative reference the document uses for it (for example "report.assets/img-0001.png").</summary>
 public sealed record ReadableHtmlAsset(string MediaType, ReadOnlyMemory<byte> Content);
 
-/// <summary>Options for <see cref="ReadableHtmlWriter.Write"/>.</summary>
+/// <summary>Options for the native document writer and the Markdown compatibility writer.</summary>
 public sealed record ReadableHtmlOptions(
     string? Title = null,
     string? Language = null,
     IReadOnlyDictionary<string, ReadableHtmlAsset>? Assets = null,
     long MaxImageBytes = ReadableHtmlOptions.DefaultMaxImageBytes,
     long MaxTotalImageBytes = ReadableHtmlOptions.DefaultMaxTotalImageBytes,
-    string? Generator = null)
+    string? Generator = null,
+    bool ShowFormulas = false)
 {
     public const long DefaultMaxImageBytes = 25L * 1024 * 1024;
     public const long DefaultMaxTotalImageBytes = 200L * 1024 * 1024;
@@ -33,12 +34,13 @@ public sealed record ReadableHtmlResult(string Html, IReadOnlyList<ReadableHtmlD
 }
 
 /// <summary>
-/// Writes Readable Markdown (the output of ReadableMarkdownSerializer) as one self-contained HTML5 document:
+/// Writes a typed readable document directly as one self-contained HTML5 document:
 /// images become data URIs, nothing is loaded from the network and no script runs.
-/// Block structure is read here; inline Markdown is always read by <see cref="MarkdownInlineParser"/>.
+/// <see cref="WriteDocument"/> consumes native blocks and runs without Markdown serialization or parsing.
+/// <see cref="Write"/> retains compatibility for callers that already have Markdown text.
 /// </summary>
 /// <remarks>
-/// Supported subset (what the serializer emits): ATX headings, paragraphs with hard breaks, backtick fenced code
+/// The Markdown compatibility entry point supports ATX headings, paragraphs with hard breaks, backtick fenced code
 /// (Mermaid fences become inline SVG), thematic breaks, block quotes, bullet and ordered lists (nested, loose or tight),
 /// GFM pipe tables (with the merged-cell hint comment), HTML comments, the OCR / speaker-notes <c>&lt;details&gt;</c>
 /// blocks and raw <c>&lt;img&gt;</c> lines, and the inline forms bold, italic, strikethrough, code spans, links
@@ -46,7 +48,7 @@ public sealed record ReadableHtmlResult(string Html, IReadOnlyList<ReadableHtmlD
 /// <c>&lt;del&gt;</c>, <c>&lt;mark&gt;</c> and colored spans. Other CommonMark constructs -- setext headings, indented
 /// code, <c>~~~</c> fences, reference links, autolinks and intraword underscores -- are not interpreted and are rendered as text.
 /// </remarks>
-public static class ReadableHtmlWriter
+public static partial class ReadableHtmlWriter
 {
     public const string ImageNotEmbeddable = "HtmlImageNotEmbeddable";
     public const string ImageEmbedSkipped = "HtmlImageEmbedSkipped";
@@ -60,7 +62,7 @@ public static class ReadableHtmlWriter
 
     private sealed record Heading(int Level, string Id, string Text);
 
-    private sealed class HtmlDocumentWriter
+    private sealed partial class HtmlDocumentWriter
     {
         private const int MaxDepth = 24;
         private readonly ReadableHtmlOptions _options;
@@ -1165,11 +1167,12 @@ public static class ReadableHtmlWriter
         private static readonly string[] EmbeddableTypes =
             ["image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp", "image/svg+xml"];
 
-        private void EmitImage(StringBuilder sb, string reference, string alt, string? width, string? height)
+        private void EmitImage(StringBuilder sb, string reference, string alt, string? width, string? height,
+            bool preserveSourceAspect = false)
         {
             if (reference.StartsWith("data:", StringComparison.OrdinalIgnoreCase))
             {
-                EmitDataImage(sb, reference, alt, width, height);
+                EmitDataImage(sb, reference, alt, width, height, preserveSourceAspect);
                 return;
             }
             if (!TryFindAsset(reference, out var key, out var asset))
@@ -1208,11 +1211,12 @@ public static class ReadableHtmlWriter
             _embeddedBytes += length;
             sb.Append("<img");
             if (id is not null) sb.Append(" id=\"").Append(id).Append('"');
-            sb.Append(" src=\"").Append(uri).Append("\" alt=\"").Append(Enc(alt)).Append('"').Append(Size(width, height)).Append('>');
+            sb.Append(" src=\"").Append(uri).Append("\" alt=\"").Append(Enc(alt)).Append('"').Append(Size(width, height, preserveSourceAspect)).Append('>');
         }
 
         // An inline data: image gets the same signature check, per-image and total limits and counters as an asset.
-        private void EmitDataImage(StringBuilder sb, string reference, string alt, string? width, string? height)
+        private void EmitDataImage(StringBuilder sb, string reference, string alt, string? width, string? height,
+            bool preserveSourceAspect)
         {
             if (!IsSafeDataImage(reference))
             {
@@ -1252,11 +1256,22 @@ public static class ReadableHtmlWriter
             }
             _embeddedCount++;
             _embeddedBytes += length;
-            sb.Append("<img src=\"data:").Append(type).Append(";base64,").Append(payload).Append("\" alt=\"").Append(Enc(alt)).Append('"').Append(Size(width, height)).Append('>');
+            sb.Append("<img src=\"data:").Append(type).Append(";base64,").Append(payload).Append("\" alt=\"").Append(Enc(alt)).Append('"').Append(Size(width, height, preserveSourceAspect)).Append('>');
         }
 
-        private static string Size(string? width, string? height) =>
-            (width is null ? string.Empty : " width=\"" + width + "\"") + (height is null ? string.Empty : " height=\"" + height + "\"");
+        private static string Size(string? width, string? height, bool preserveSourceAspect = false)
+        {
+            var attributes = (width is null ? string.Empty : " width=\"" + width + "\"") +
+                (height is null ? string.Empty : " height=\"" + height + "\"");
+            // HTML width/height attributes alone still defer to the bitmap's intrinsic aspect
+            // once CSS height:auto is applied. Source drawing extents may intentionally differ.
+            if (preserveSourceAspect &&
+                double.TryParse(width, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var w) && w is > 0 and <= 8192 &&
+                double.TryParse(height, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var h) && h is > 0 and <= 8192)
+                attributes += " class=\"source-sized-image\" style=\"aspect-ratio:" +
+                    w.ToString("0.##", CultureInfo.InvariantCulture) + "/" + h.ToString("0.##", CultureInfo.InvariantCulture) + "\"";
+            return attributes;
+        }
 
         private void Placeholder(StringBuilder sb, string alt, string? id)
         {

@@ -17,8 +17,7 @@ public enum AgentAction { None, Create, Update, Remove }
 
 /// <summary>What to do and for which clients.</summary>
 /// <param name="Clients">The clients to configure; empty means all of them.</param>
-/// <param name="Enforce">The PreToolUse hook that denies direct reads of Office files: true adds or keeps it, false removes
-/// ours when present, null keeps whatever is there (an existing one is updated in place when outdated, none is added).</param>
+/// <param name="Enforce">Deprecated compatibility option. Owned legacy restrictive hooks are always removed, including when null or true.</param>
 /// <param name="DryRun">Report the planned changes without writing anything.</param>
 /// <param name="AutoApprove">Pre-approval of DocRedock's MCP tools (the Approval item): true adds or keeps it, false removes
 /// ours when present, null keeps whatever is there (an existing one is updated in place when outdated, none is added).</param>

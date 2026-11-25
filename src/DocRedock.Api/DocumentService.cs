@@ -58,9 +58,17 @@ public sealed record ReadableDocumentExportOptions(
     string? Language = null,
     bool OmitImages = false,
     // Html writes one self-contained .html file at MarkdownPath (images as data URIs, no .assets directory).
-    ReadableOutputFormat OutputFormat = ReadableOutputFormat.Markdown);
+    ReadableOutputFormat OutputFormat = ReadableOutputFormat.Markdown,
+    MarkdownTableLayout TableLayout = MarkdownTableLayout.Auto,
+    bool IncludeSourceReferences = true,
+    bool IncludeTableOfContents = true,
+    bool SeparateWorksheetAnnotations = true,
+    bool PortableMarkdown = false,
+    OfficeRenderingMode OfficeLayout = OfficeRenderingMode.Auto);
 /// <summary>The file a readable export writes: Readable Markdown (default) or one self-contained HTML document.</summary>
 public enum ReadableOutputFormat { Markdown, Html }
+/// <summary>Uses typed structure, or fixed source pages produced by a local Office engine.</summary>
+public enum OfficeRenderingMode { Auto, Structured, Source }
 public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentGraph Graph, IReadOnlyList<Diagnostic> Diagnostics, VisualInferenceMode InferenceMode = VisualInferenceMode.Safe)
 {
     public int RenderedTables { get; init; }
@@ -71,6 +79,7 @@ public sealed record ReadableDocumentExportResult(string MarkdownPath, DocumentG
     /// <summary>What the readable projection reconstructed from layout; pass it to
     /// <see cref="ExportSummaryBuilder"/> and <see cref="ExportReviewBuilder"/>.</summary>
     public ReadableProjectionReport Projection { get; init; } = ReadableProjectionReport.Empty;
+    public ReadableConversionReport? Conversion { get; init; }
 }
 public sealed record DocumentPreflightResult(bool WorkspaceValid, bool ProjectionChanged, bool CanRestore, string Fidelity, IReadOnlyList<Diagnostic> Diagnostics);
 public sealed record DocumentDiffResult(DocumentGraph Baseline, GraphEditResult Edit, IReadOnlyList<Diagnostic> Diagnostics);
@@ -117,18 +126,22 @@ public sealed partial class DocumentService
     private readonly MarkdownRenderer renderer = new();
     private readonly IOcrEngine? ocr;
     private readonly IPdfRasterizer? pdfRasterizer;
+    private readonly IOfficePageRenderer? officePageRenderer;
     public IFormatAdapterRegistry Adapters { get; }
 
     public DocumentService(IOcrEngine? ocrEngine = null, IPdfRasterizer? pdfRasterizer = null)
         : this(ocrEngine, pdfRasterizer, discoverPdfRasterizer: true) { }
 
-    public DocumentService(IOcrEngine? ocrEngine, IPdfRasterizer? pdfRasterizer, bool discoverPdfRasterizer)
+    public DocumentService(IOcrEngine? ocrEngine, IPdfRasterizer? pdfRasterizer, bool discoverPdfRasterizer,
+        IOfficePageRenderer? officePageRenderer = null)
     {
         ocr = ocrEngine;
         this.pdfRasterizer = pdfRasterizer ?? (discoverPdfRasterizer
             ? PdfRasterizerFactory.Discover(Environment.GetEnvironmentVariable("DOCREDOCK_PDF_RASTERIZER"),
                 Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_PDF_RASTERIZER") == "1")
             : null);
+        this.officePageRenderer = officePageRenderer ?? OfficePageRendererFactory.Discover(this.pdfRasterizer,
+            disabled: !discoverPdfRasterizer || Environment.GetEnvironmentVariable("DOCREDOCK_DISABLE_OFFICE_RENDERER") == "1");
         Adapters = BuiltInAdapterCatalog.CreateRegistry();
     }
 
@@ -298,6 +311,11 @@ public sealed partial class DocumentService
             var source = Path.GetFullPath(options.SourcePath);
             var (graph, extractedDiagnostics, assets) = await ExtractReadableGraphAsync(source, options, cancellationToken).ConfigureAwait(false);
             var diagnostics = extractedDiagnostics.ToList();
+            if (DocumentContentPolicyRules.Parse(options.ContentPolicy) == DocumentContentPolicy.Sanitized)
+                graph = WithholdSanitizedPdfPageRasters(graph, diagnostics);
+            // Images left out at the user's request are left out of the scenes as silently as everywhere else.
+            var sceneParts = html && !options.OmitImages ? SourceScenePictureParts(graph, DocumentContentPolicyRules.Parse(options.ContentPolicy)) : [];
+            if (sceneParts.Length > 0) graph = WithoutSceneDrawnUnboundImages(graph, assets, sceneParts);
             var readableScopeNodes = ReadableScopeNodes(graph, options.Sheets);
             AddContentPolicyDiagnostics(diagnostics, readableScopeNodes, options.ContentPolicy);
             var contentPolicy = DocumentContentPolicyRules.Parse(options.ContentPolicy);
@@ -376,41 +394,64 @@ public sealed partial class DocumentService
                         StringComparer.Ordinal));
                 }
             }
-            var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(
-                options.ShowFormulas,
-                options.IncludeSvgPreviews && !html,
-                options.IncludeDiagrams,
-                options.Sheets,
-                ReadableTitle(graph, source, options.Title),
-                options.ContentPolicy,
-                options.OcrReview, options.ExpandMergedCells, options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source),
-                // HTML can say what GFM cannot: the writer turns these hints into rowspan/colspan.
-                EmitTableSpanHints: html));
-            var markdown = serializer.Serialize(graph);
-            foreach (var item in serializer.Diagnostics.Where(item => diagnostics.All(existing =>
-                         existing.Code != item.Code || !StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))))
+            if (sceneParts.Length > 0) htmlAssets = WithSourceScenePictures(sceneParts, assets, htmlAssets, diagnostics);
+            string output;
+            ReadableProjectionReport projection;
+            if (html)
+            {
+                var projected = ReadableProjectionBuilder.Build(graph, new ReadableProjectionOptions(
+                    options.ContentPolicy, options.Sheets, ReadableTitle(graph, source, options.Title),
+                    FallbackTitle: Path.GetFileNameWithoutExtension(source), Language: options.Language,
+                    IncludeDiagrams: options.IncludeDiagrams, OcrReview: options.OcrReview,
+                    SourceName: Path.GetFileName(source)), cancellationToken);
+                foreach (var item in projected.Diagnostics) AddProjectionDiagnostic(item);
+                diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
+                var document = projected.Document with
+                { Notices = diagnostics.Select(item => new ReadableNotice(item.Code, item.Message, item.NodeId)).ToArray() };
+                (document,htmlAssets) = await ApplyOfficePagesAsync(document,htmlAssets,source,options,diagnostics,cancellationToken).ConfigureAwait(false);
+                var written = ReadableHtmlWriter.WriteDocument(document, new ReadableHtmlOptions(
+                    ReadableTitle(graph, source, options.Title), options.Language, htmlAssets,
+                    ShowFormulas: options.ShowFormulas,
+                    Generator: "DocRedock " + (typeof(DocumentService).Assembly
+                        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "")), cancellationToken);
+                diagnostics.AddRange(written.Diagnostics.Select(item => new Diagnostic(item.Code, item.Message, DiagnosticSeverity.Warning)));
+                output = written.Html;
+                projection = projected.Report;
+            }
+            else
+            {
+                var serializer = new ReadableMarkdownSerializer(new ReadableMarkdownOptions(
+                    options.ShowFormulas, options.IncludeSvgPreviews, options.IncludeDiagrams,
+                    options.Sheets, ReadableTitle(graph, source, options.Title), options.ContentPolicy,
+                    options.OcrReview, options.ExpandMergedCells, options.Language, FallbackTitle: Path.GetFileNameWithoutExtension(source),
+                    TableLayout: options.TableLayout, IncludeSourceReferences: options.IncludeSourceReferences,
+                    IncludeTableOfContents: options.IncludeTableOfContents, SourceName: Path.GetFileName(source),
+                    SeparateWorksheetAnnotations: options.SeparateWorksheetAnnotations,
+                    PortableMarkdown: options.PortableMarkdown));
+                output = serializer.Serialize(graph);
+                foreach (var item in serializer.Diagnostics) AddProjectionDiagnostic(item);
+                projection = serializer.Report;
+            }
+            diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
+
+            void AddProjectionDiagnostic(MarkdownDiagnostic item)
+            {
+                if (diagnostics.Any(existing => existing.Code == item.Code && StringComparer.Ordinal.Equals(existing.NodeId, item.BlockId))) return;
                 diagnostics.Add(new Diagnostic(item.Code, item.Message, item.Severity switch
                 {
                     MarkdownDiagnosticSeverity.Info => DiagnosticSeverity.Information,
                     MarkdownDiagnosticSeverity.Error => DiagnosticSeverity.Error,
                     _ => DiagnosticSeverity.Warning,
                 }, NodeId: item.BlockId));
-            diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
-            var output = markdown;
-            if (html)
-            {
-                var written = ReadableHtmlWriter.Write(markdown, new ReadableHtmlOptions(
-                    ReadableTitle(graph, source, options.Title), options.Language, htmlAssets,
-                    Generator: "DocRedock " + (typeof(DocumentService).Assembly
-                        .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
-                        .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "")));
-                diagnostics.AddRange(written.Diagnostics.Select(item => new Diagnostic(item.Code, item.Message, DiagnosticSeverity.Warning)));
-                diagnostics = AdapterWarningDiagnostics.Normalize(diagnostics).ToList();
-                output = written.Html;
             }
             await WriteNewAsync(markdownPath, new UTF8Encoding(false).GetBytes(output), cancellationToken).ConfigureAwait(false);
             return new ReadableDocumentExportResult(markdownPath, graph, diagnostics, options.InferenceMode)
-                { RenderedTables = serializer.RenderedTables, Projection = serializer.Report, OutputFormat = options.OutputFormat };
+            {
+                RenderedTables = projection.RenderedTables, Projection = projection, OutputFormat = options.OutputFormat,
+                Conversion = ReadableConversionReportBuilder.Build(graph, diagnostics, projection, Path.GetFileName(source),
+                    html ? "html" : "markdown", options.ContentPolicy, options.Sheets),
+            };
         }
         catch
         {
@@ -1412,6 +1453,65 @@ public sealed partial class DocumentService
                     new[] { crop.Bounds.X, crop.Bounds.Y, crop.Bounds.Width, crop.Bounds.Height })
             });
 
+    /// <summary>
+    /// The package parts of the pictures a slide's source scene draws without a node of their own: the slide
+    /// background and the pictures of the slide layout and master. A scene the content policy leaves out
+    /// (every object hidden, as on a hidden slide) draws nothing.
+    /// </summary>
+    private static string[] SourceScenePictureParts(DocumentGraph graph, DocumentContentPolicy policy)
+    {
+        if (graph.Format != DocumentFormatKind.Pptx ||
+            graph.FormatExtensions?.TryGetValue(SourceDrawingSceneJson.ExtensionKey, out var scenes) != true) return [];
+        return SourceDrawingSceneJson.Read(scenes).Values.SelectMany(partScenes => partScenes)
+            .Where(scene => policy == DocumentContentPolicy.Complete || scene.Objects.Any(item => !item.Hidden))
+            .SelectMany(scene => scene.Objects
+                .Where(item => item.Kind == "picture" && item.SourceNodeId is null && (policy == DocumentContentPolicy.Complete || !item.Hidden))
+                .Select(item => item.ImageReference).Append(scene.BackgroundImageReference))
+            .OfType<string>().Distinct(StringComparer.Ordinal).ToArray();
+    }
+
+    private static WorkspaceAsset? SourceScenePictureAsset(string part, IReadOnlyList<WorkspaceAsset> assets) =>
+        assets.FirstOrDefault(candidate => candidate.MediaType.StartsWith("image/", StringComparison.OrdinalIgnoreCase) &&
+            (StringComparer.Ordinal.Equals(candidate.SourcePartUri, part) || candidate.AliasPartUris.Contains(part, StringComparer.Ordinal)));
+
+    /// <summary>
+    /// An image a source scene draws is bound to that scene: the node that lists it as an image nothing refers to
+    /// is left out of the HTML, and with it the derived-assets partition when nothing else is in it.
+    /// </summary>
+    private static DocumentGraph WithoutSceneDrawnUnboundImages(DocumentGraph graph, IReadOnlyList<WorkspaceAsset> assets, IReadOnlyList<string> sceneParts)
+    {
+        var drawn = sceneParts.Select(part => SourceScenePictureAsset(part, assets)?.Id).OfType<string>().ToHashSet(StringComparer.Ordinal);
+        if (drawn.Count == 0) return graph;
+        bool Drawn(DocumentNode node) => node.Kind == NodeKind.Image && node.Content is ReferenceNodeContent reference && drawn.Contains(reference.Reference) &&
+            node.Extensions?.GetValueOrDefault("unbound_asset").ValueKind == JsonValueKind.True;
+        if (!graph.Partitions.Any(partition => partition.Nodes.Any(Drawn))) return graph;
+        return graph with
+        {
+            Partitions = graph.Partitions.Select(partition => partition with { Nodes = partition.Nodes.Where(node => !Drawn(node)).ToArray() })
+                .Where(partition => partition.Nodes.Count > 0 || !StringComparer.Ordinal.Equals(partition.Id, "derived-assets")).ToList(),
+        };
+    }
+
+    /// <summary>
+    /// Binds the package parts of the scene's own pictures to the extracted images. Parts without an extracted
+    /// image cannot be drawn: they are reported together, once for the document.
+    /// </summary>
+    private static Dictionary<string, ReadableHtmlAsset>? WithSourceScenePictures(IReadOnlyList<string> sceneParts,
+        IReadOnlyList<WorkspaceAsset> assets, Dictionary<string, ReadableHtmlAsset>? htmlAssets, List<Diagnostic> diagnostics)
+    {
+        var missing = new List<string>();
+        foreach (var part in sceneParts)
+        {
+            if (SourceScenePictureAsset(part, assets) is not { } asset) { missing.Add(part); continue; }
+            (htmlAssets ??= new Dictionary<string, ReadableHtmlAsset>(StringComparer.Ordinal))[part] = new ReadableHtmlAsset(asset.MediaType, asset.Content);
+        }
+        if (missing.Count > 0)
+            diagnostics.Add(new Diagnostic("SourceScenePictureUnavailable",
+                $"{missing.Count} picture(s) of a slide background, slide layout or slide master are not drawn: no image was extracted for {string.Join(", ", missing.Take(5))}{(missing.Count > 5 ? ", ..." : "")}.",
+                DiagnosticSeverity.Warning));
+        return htmlAssets;
+    }
+
     private static DocumentGraph AttachAssetsAndOcr(
         DocumentGraph graph,
         IReadOnlyList<WorkspaceAsset> assets,
@@ -1503,7 +1603,7 @@ public sealed partial class DocumentService
         {
             var partition = partitions[partitionIndex];
             var output = new List<DocumentNode>();
-            foreach (var node in partition.Nodes.OrderBy(node => node.Order).ThenBy(node => node.Id, StringComparer.Ordinal))
+            foreach (var node in partition.Nodes.InSourceOrder())
             {
                 if (graph.Format == DocumentFormatKind.Pdf && placements.Any(item => item.PartitionIndex == partitionIndex) &&
                     node.Extensions?.TryGetValue("pdf_textless_placeholder", out var placeholder) == true &&

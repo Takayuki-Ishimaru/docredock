@@ -226,6 +226,9 @@ internal static partial class XlsxMermaidProjection
             var endX = flipped ? line.Box.Left : line.Box.Right;
             var head = HasArrowhead(shape.HeadArrow);
             var tail = HasArrowhead(shape.TailArrow);
+            // This sequence subset cannot express simultaneous arrows at both ends.
+            // Let the visual fallback retain the source and report review rather than invent one direction.
+            if (head && tail) return null;
             var arrowKind = tail ? shape.TailArrow : shape.HeadArrow;
             var open = StringComparer.OrdinalIgnoreCase.Equals(arrowKind, "arrow") ||
                        StringComparer.OrdinalIgnoreCase.Equals(arrowKind, "open");

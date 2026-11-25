@@ -1,5 +1,6 @@
 using System.IO.Compression;
 using System.Text;
+using System.Text.Json;
 using DocRedock.Core.Documents;
 using DocRedock.Formats.OpenXml.Xlsx;
 using DocRedock.Markdown;
@@ -14,6 +15,64 @@ namespace DocRedock.Tests.Xlsx;
 /// </summary>
 public sealed class XlsxDrawnDiagramTests
 {
+    [Theory]
+    [InlineData(null, "triangle", null, VisualEdgeDirection.Directed, false)]
+    [InlineData("triangle", null, null, VisualEdgeDirection.Directed, true)]
+    [InlineData("triangle", "triangle", null, VisualEdgeDirection.Bidirectional, false)]
+    [InlineData("triangle", "triangle", "dash", VisualEdgeDirection.Bidirectional, false)]
+    [InlineData(null, null, null, VisualEdgeDirection.Undirected, false)]
+    public void Native_connector_arrowheads_keep_direction_and_label_through_graph_markdown_and_html(
+        string? head, string? tail, string? dash, VisualEdgeDirection direction, bool reversed)
+    {
+        var drawing = new DrawingBuilder();
+        var a = drawing.Box("flowChartProcess", 300_000, 1_000_000, 1_200_000, 500_000, "Endpoint A");
+        var b = drawing.Box("flowChartProcess", 4_000_000, 1_000_000, 1_200_000, 500_000, "Endpoint B");
+        drawing.Line("straightConnector1", 1_500_000, 1_250_000, 2_500_000, 0,
+            start: a, end: b, head: head, tail: tail, dash: dash, text: "SYNC_LABEL");
+        var extracted = new XlsxAdapter().Extract(new MemoryStream(drawing.Package("Flow", "Source")));
+        var diagram = Assert.Single(extracted.Graph.Nodes, n => n.Kind == NodeKind.Diagram);
+        var visual = diagram.Extensions!["visual_graph"].Deserialize<VisualGraph>()!;
+        var edge = Assert.Single(visual.Edges);
+        Assert.Equal(direction, edge.EdgeDirection);
+        Assert.Equal("SYNC_LABEL", edge.Label);
+        var sourceLabel = Assert.Single(visual.Nodes, n => n.Id == edge.SourceId).Label;
+        Assert.Equal(reversed ? "Endpoint B" : "Endpoint A", sourceLabel);
+        Assert.True(VisualGraphValidator.Validate(visual).IsValidForSemanticProjection);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extracted.Graph);
+        var op = direction == VisualEdgeDirection.Bidirectional ? dash is null ? "<-->" : "<-.->" :
+            direction == VisualEdgeDirection.Undirected ? "---" : "-->";
+        Assert.Contains(op + "|SYNC_LABEL|", markdown, StringComparison.Ordinal);
+        var projected = ReadableProjectionBuilder.Build(extracted.Graph);
+        var html = DocRedock.Render.ReadableHtmlWriter.WriteDocument(projected.Document).Html;
+        Assert.Contains("<svg", html, StringComparison.Ordinal);
+        var native = System.Text.RegularExpressions.Regex.Match(html, "<div class=\"source-screen-layout\">([\\s\\S]*?)<details data-kind=\"worksheet-data\"").Groups[1].Value;
+        Assert.NotEmpty(native);
+        Assert.Equal(head is not null, native.Contains(" marker-start=", StringComparison.Ordinal));
+        Assert.Equal(tail is not null, native.Contains(" marker-end=", StringComparison.Ordinal));
+        Assert.Contains("SYNC_LABEL", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Bidirectional_sequence_message_is_not_silently_replaced_by_one_direction()
+    {
+        var drawing = new DrawingBuilder();
+        foreach (var center in new long[] { 1_500_000, 4_500_000 })
+        {
+            drawing.Box("rect", center - 600_000, 400_000, 1_200_000, 400_000, "Peer " + center);
+            drawing.Line("straightConnector1", center, 800_000, 0, 4_000_000, dash: "dash");
+        }
+        drawing.Line("straightConnector1", 1_500_000, 1_400_000, 3_000_000, 0, head: "triangle", tail: "triangle");
+        drawing.Box("rect", 2_000_000, 1_100_000, 1_500_000, 250_000, "SYNC", unpainted: true);
+        drawing.Line("straightConnector1", 1_500_000, 2_400_000, 3_000_000, 0, tail: "triangle");
+        drawing.Box("rect", 2_000_000, 2_100_000, 1_500_000, 250_000, "NEXT", unpainted: true);
+        var extracted = new XlsxAdapter().Extract(new MemoryStream(drawing.Package("Sequence", "Source")));
+        Assert.DoesNotContain(extracted.Graph.Nodes, node => node.Extensions?.TryGetValue("diagram_type", out var type) == true && type.GetString() == "sequence");
+        Assert.Contains(extracted.Graph.Nodes, ReadableMarkdownSerializer.RequiresSourceReview);
+        var markdown = new ReadableMarkdownSerializer().Serialize(extracted.Graph);
+        Assert.Contains("SYNC", markdown, StringComparison.Ordinal);
+        Assert.Contains("NEXT", markdown, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Shape_text_that_is_not_a_diagram_is_still_listed_in_reading_order_and_needs_review()
     {
@@ -281,16 +340,18 @@ public sealed class XlsxDrawnDiagramTests
         }
 
         public int Line(string preset, long x, long y, long width, long height, bool flipH = false, string? dash = null,
-            string? tail = null, int? start = null, int? end = null)
+            string? tail = null, int? start = null, int? end = null, string? head = null, string? text = null)
         {
             var id = ++nextId;
             var ends = (start is null ? string.Empty : $"<a:stCxn id=\"{start}\" idx=\"2\"/>") + (end is null ? string.Empty : $"<a:endCxn id=\"{end}\" idx=\"0\"/>");
             var line = "<a:ln w=\"15875\"><a:solidFill><a:srgbClr val=\"404040\"/></a:solidFill>" +
                        (dash is null ? string.Empty : $"<a:prstDash val=\"{dash}\"/>") +
+                       (head is null ? string.Empty : $"<a:headEnd type=\"{head}\"/>") +
                        (tail is null ? string.Empty : $"<a:tailEnd type=\"{tail}\"/>") + "</a:ln>";
             xml.Append($"<xdr:absoluteAnchor><xdr:pos x=\"{x}\" y=\"{y}\"/><xdr:ext cx=\"{width}\" cy=\"{height}\"/>")
                 .Append($"<xdr:cxnSp macro=\"\"><xdr:nvCxnSpPr><xdr:cNvPr id=\"{id}\" name=\"line {id}\"/><xdr:cNvCxnSpPr>{ends}</xdr:cNvCxnSpPr></xdr:nvCxnSpPr>")
                 .Append($"<xdr:spPr><a:xfrm{(flipH ? " flipH=\"1\"" : string.Empty)}><a:off x=\"{x}\" y=\"{y}\"/><a:ext cx=\"{width}\" cy=\"{height}\"/></a:xfrm><a:prstGeom prst=\"{preset}\"><a:avLst/></a:prstGeom>{line}</xdr:spPr>")
+                .Append(text is null ? "" : "<xdr:txBody><a:bodyPr/><a:p><a:r><a:t>" + System.Security.SecurityElement.Escape(text) + "</a:t></a:r></a:p></xdr:txBody>")
                 .Append("</xdr:cxnSp><xdr:clientData/></xdr:absoluteAnchor>");
             return id;
         }

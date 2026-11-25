@@ -34,6 +34,27 @@ public sealed class ExcelDrawnLineDecorationTests : IDisposable
     private const double OverlineY = 11.5;  // 0.80 em above it
     private const double ColumnA = 126, ColumnB = 63, ColumnC = 63;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Native_source_canvas_draws_the_line_once_and_keeps_only_original_font_decoration(bool originalFontStrike)
+    {
+        var styles = originalFontStrike ? Styles.Replace("<font><sz val=\"11\"/></font>",
+            "<font><strike val=\"1\"/><sz val=\"11\"/></font>", StringComparison.Ordinal) : Styles;
+        var source = Workbook("source-line.xlsx", Items(FiveItems), Line(2, 0, 2, 0, StrikeY, 44), styles: styles);
+        var result = ReadableProjectionBuilder.Build(Extract(source).Graph);
+        var section = Assert.IsType<ReadableSection>(Assert.Single(result.Document.Blocks));
+        var scene = Assert.Single(section.Blocks.OfType<ReadableWorksheetScene>());
+        Assert.Single(scene.Scene.Objects);
+        var cell = Assert.Single(Assert.Single(scene.Grid!.Rows, row => row.SourceRow == 3).Cells, c => c.SourceColumn == 1);
+        Assert.Contains(cell.Content.Runs, run => run.Strike);
+        Assert.Equal(originalFontStrike, (cell.SourceContent ?? cell.Content).Runs.Any(run => run.Strike));
+        var html = DocRedock.Render.ReadableHtmlWriter.WriteDocument(result.Document).Html;
+        var native = System.Text.RegularExpressions.Regex.Match(html,
+            "<div class=\"source-screen-layout\">([\\s\\S]*?)<details data-kind=\"worksheet-data\"").Groups[1].Value;
+        Assert.Equal(originalFontStrike, native.Contains("<s>Banana</s>", StringComparison.Ordinal));
+    }
+
     // ---- workbooks ----------------------------------------------------------------------------------------
 
     // Cell styles: 0 plain, 1 bold header, 2 centered, 3 right aligned, 4 wrapped, 5 #,##0, 6 16 pt.
@@ -125,7 +146,8 @@ public sealed class ExcelDrawnLineDecorationTests : IDisposable
     private async Task<(string Markdown, ReadableDocumentExportResult Result)> Export(string source)
     {
         var output = Path.Combine(root, Path.GetFileNameWithoutExtension(source) + ".md");
-        var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false));
+        // These tests exercise the optional inline schedule notation; human exports default to separate annotations.
+        var result = await service.ExportReadableAsync(new ReadableDocumentExportOptions(source, output, EnableOcr: false, SeparateWorksheetAnnotations: false));
         return ((await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal), result);
     }
 

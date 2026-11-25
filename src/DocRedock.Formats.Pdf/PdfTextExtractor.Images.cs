@@ -58,13 +58,20 @@ public static partial class PdfTextExtractor
                 if (!places.TryGetValue(key, out var seen)) places[key] = seen = [];
                 seen.Add(pageNumber);
             }
-        bool IsFurniture(PdfImageDraw draw) => draw is { ObjectId: not null, Bounds: not null } &&
+        bool IsMarginLogo(PdfImageDraw draw, int pageNumber)
+        {
+            var page = pages.FirstOrDefault(p => p.PageNumber == pageNumber);
+            var area = page?.CropBox ?? page?.MediaBox;
+            return !draw.Hidden && area is not null && draw.Bounds is { } box && box.Height <= area.Height * .15 &&
+                (box.Y + box.Height <= area.Y + area.Height * .15 || box.Y >= area.Y + area.Height * .85);
+        }
+        bool IsFurniture(PdfImageDraw draw, int pageNumber) => IsMarginLogo(draw, pageNumber) && draw is { ObjectId: not null, Bounds: not null } &&
             places.TryGetValue((draw.ObjectId!.Value, (long)Math.Round(draw.Bounds!.X), (long)Math.Round(draw.Bounds.Y),
                 (long)Math.Round(draw.Bounds.Width), (long)Math.Round(draw.Bounds.Height)), out var seen) && seen.Count >= FurniturePageCount;
 
         // Read the streams of what is to be decoded in one pass over the file.
         var wanted = new HashSet<int>();
-        foreach (var draw in draws.Values.SelectMany(list => list).Where(draw => draw.ObjectId is not null && !IsFurniture(draw)))
+        foreach (var draw in draws.SelectMany(pair => pair.Value.Where(draw => draw.ObjectId is not null && !IsFurniture(draw, pair.Key))))
         {
             wanted.Add(draw.ObjectId!.Value);
             if (!index.ById.TryGetValue(draw.ObjectId.Value, out var body)) continue;
@@ -90,7 +97,7 @@ public static partial class PdfTextExtractor
             var reasons = new List<string>();
             foreach (var draw in list)
             {
-                if (IsFurniture(draw)) continue;
+                if (IsFurniture(draw, page.PageNumber)) continue;
                 var failure = draw.ObjectId is null ? draw.Bounds is null ? "its placement could not be resolved" : "it is an inline image or its resource could not be resolved"
                     : draw.Bounds is null ? "its placement could not be resolved" : null;
                 if (failure is null)
@@ -110,7 +117,7 @@ public static partial class PdfTextExtractor
                         var (width, height) = DrawnSize(draw.Ctm, orientation);
                         extracted.Add(new PdfExtractedImage(
                             "pdf-img-" + draw.ObjectId.Value.ToString("D4", CultureInfo.InvariantCulture) + (orientation.Code == 0 ? "" : "-o" + orientation.Code.ToString(CultureInfo.InvariantCulture)),
-                            image.MediaType, image.Content, draw.Bounds!, width, height, image.Width, image.Height));
+                            image.MediaType, image.Content, draw.Bounds!, width, height, image.Width, image.Height) { Hidden = draw.Hidden });
                         continue;
                     }
                     failure = outcome.Reason;

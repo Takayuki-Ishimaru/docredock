@@ -124,7 +124,7 @@ public sealed class PdfScheduleOverlayFixtureTests
         try
         {
             var markdownPath = Path.Combine(root, "schedule-arrows.md");
-            var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(FixturePath(), markdownPath));
+            var exported = await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(FixturePath(), markdownPath, SeparateWorksheetAnnotations: false));
             var markdown = await File.ReadAllTextAsync(markdownPath);
 
             Assert.Equal(DocumentFormatKind.Pdf, exported.Graph.Format);

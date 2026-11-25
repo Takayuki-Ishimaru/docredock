@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using DocRedock.Api;
+using DocRedock.Render;
 
 namespace DocRedock.Tests.Api;
 
@@ -134,7 +135,10 @@ public sealed class ReadableHtmlExportTests : IDisposable
         if (!html.StartsWith("<!doctype html>", StringComparison.OrdinalIgnoreCase)) return "doctype";
         if (!Regex.IsMatch(html, "<html lang=\"(ja|en)\"")) return "html lang";
         if (!html.Contains("Content-Security-Policy", StringComparison.Ordinal)) return "CSP meta";
-        if (html.Contains("<script", StringComparison.OrdinalIgnoreCase)) return "script element";
+        var scripts = Regex.Matches(html, "<script\\b[^>]*>(.*?)</script>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (scripts.Count > 0 && (!html.Contains("workbook-document", StringComparison.Ordinal) || scripts.Count != 1 ||
+            scripts[0].Groups[1].Value != ReadableHtmlInteractions.Script ||
+            !html.Contains("script-src '" + ReadableHtmlInteractions.CspHash + "'", StringComparison.Ordinal))) return "untrusted script element";
         var tags = Regex.Matches(html, "<[a-zA-Z][^>]*>").Select(match => match.Value).ToArray();
         if (tags.FirstOrDefault(tag => Regex.IsMatch(tag, @"\son[a-z]+\s*=", RegexOptions.IgnoreCase)) is { } handler) return "event handler: " + Trim(handler);
         foreach (Match src in Regex.Matches(html, "\\ssrc=\"([^\"]*)\""))

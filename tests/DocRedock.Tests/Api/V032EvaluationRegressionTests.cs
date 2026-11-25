@@ -23,7 +23,8 @@ public sealed class V032EvaluationRegressionTests : IDisposable
     public async Task Notes_above_a_table_stay_text_and_its_own_header_stays_the_header(string name, string header)
     {
         var output = Path.Combine(root, name + ".md");
-        var result = await service.ExportReadableAsync(new(V031EvaluationRegressionTests.Fixture(name, "V032"), output));
+        var result = await service.ExportReadableAsync(new(V031EvaluationRegressionTests.Fixture(name, "V032"), output,
+            IncludeSourceReferences: false, IncludeTableOfContents: false));
         var markdown = (await File.ReadAllTextAsync(output)).Replace("\r\n", "\n", StringComparison.Ordinal);
         Assert.Contains($"\n\n{Unit}\n\n{Condition}\n\n{header}\n", markdown, StringComparison.Ordinal);
         Assert.Contains("| 商品001 | 137 |", markdown, StringComparison.Ordinal);

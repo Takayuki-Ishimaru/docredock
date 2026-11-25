@@ -196,7 +196,7 @@ public sealed class PdfTableOverlayTests
                 RuledTableWithColumnZeroLabels(Left, Bottom, Rows, Columns, CellWidth, CellHeight)
                     .Concat([RightArrow, LeftArrow, Bar, Diamond, VerticalShaft, VerticalArrowhead]))));
 
-            await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdownPath));
+            await new DocumentService().ExportReadableAsync(new ReadableDocumentExportOptions(source, markdownPath, SeparateWorksheetAnnotations: false));
             var markdown = await File.ReadAllTextAsync(markdownPath);
 
             // Glyphs land on the row/column the overlay covers (see the individual Kind tests

@@ -160,7 +160,7 @@ public sealed class McpServerTests : IDisposable
 
         Assert.Contains("export_markdown first", instructions, StringComparison.Ordinal);
         Assert.Contains("source_review", instructions, StringComparison.Ordinal);
-        Assert.Contains("no reason to read the original", instructions, StringComparison.Ordinal);
+        Assert.Contains("converting first is not required", instructions, StringComparison.Ordinal);
         Assert.Contains("read_source", instructions, StringComparison.Ordinal);
         Assert.Contains("allow_review", instructions, StringComparison.Ordinal);
     }

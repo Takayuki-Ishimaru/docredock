@@ -265,11 +265,10 @@ internal sealed class HookEntryItem(AgentClient client, string path, string stop
         var root = AgentFiles.ParseObject(text);
         var list = PreToolUse(root);
         if (list is null) return new(AgentItemState.Missing);
-        foreach (var (group, handlers, index) in Handlers(list))
+        foreach (var (_, handlers, index) in Handlers(list))
         {
             if (!IsOurs(handlers[index])) continue;
-            var sameMatcher = handlers.Count > 1 || group["matcher"]?.GetValue<string>() == matcher;
-            return new(sameMatcher && JsonNode.DeepEquals(handlers[index], handler(context)) ? AgentItemState.Installed : AgentItemState.Outdated);
+            return new(AgentItemState.Outdated, "Retired restrictive hook; direct source inspection is allowed. Run docredock agents install (or uninstall) to remove it.");
         }
         return new(AgentItemState.Missing);
     }

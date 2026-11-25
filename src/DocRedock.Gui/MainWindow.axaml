@@ -362,7 +362,7 @@
                             AutomationProperties.Name="結合セルの値を繰り返して表示">
                     <TextBlock Text="閲覧用Markdownで結合セルの値を各行に表示する" TextWrapping="Wrap" />
                   </CheckBox>
-                  <TextBlock Text="AI向けパッケージでは常に有効です。" Classes="muted caption" />
+                  <TextBlock Text="AI向けパッケージでは常に有効です。HTMLでは元のセル結合を保持します。" Classes="muted caption" />
                   <CheckBox x:Name="RevisionSharingConsent" IsChecked="False" IsCheckedChanged="OnSettingsChanged">
                     <TextBlock Text="プライバシー優先でも履歴付き出力を許可する（削除内容・著者・日時の共有可否を確認）" TextWrapping="Wrap" />
                   </CheckBox>

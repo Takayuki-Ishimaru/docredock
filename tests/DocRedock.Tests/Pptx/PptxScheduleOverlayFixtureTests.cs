@@ -23,7 +23,7 @@ public sealed class PptxScheduleOverlayFixtureTests
         {
             var markdownPath = Path.Combine(root, "schedule-arrows.md");
             var service = new DocumentService();
-            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath));
+            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath, SeparateWorksheetAnnotations: false));
             var markdown = await File.ReadAllTextAsync(markdownPath);
 
             Assert.Equal(DocumentFormatKind.Pptx, readable.Graph.Format);
@@ -131,8 +131,8 @@ public sealed class PptxScheduleOverlayFixtureTests
             var service = new DocumentService();
             var generatedPath = Path.Combine(root, "generated.md");
             var savedPath = Path.Combine(root, "powerpoint-saved.md");
-            _ = await service.ExportReadableAsync(new ReadableDocumentExportOptions(generated, generatedPath, Title: "fixture"));
-            var saved = await service.ExportReadableAsync(new ReadableDocumentExportOptions(powerPointSaved, savedPath, Title: "fixture"));
+            _ = await service.ExportReadableAsync(new ReadableDocumentExportOptions(generated, generatedPath, Title: "fixture", SeparateWorksheetAnnotations: false));
+            var saved = await service.ExportReadableAsync(new ReadableDocumentExportOptions(powerPointSaved, savedPath, Title: "fixture", SeparateWorksheetAnnotations: false));
             var generatedMarkdown = await File.ReadAllTextAsync(generatedPath);
             var savedMarkdown = await File.ReadAllTextAsync(savedPath);
 

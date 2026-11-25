@@ -445,7 +445,10 @@ public sealed class PdfUnderlineRecognitionTests : IDisposable
         // Without the link, the same line is an underline.
         Assert.Equal([new TextRange(4, 13)], Assert.Single(Lines(Measured(content))).Underlined);
         var (markdown, _) = await Export(Measured(content, Link(left, right, 720)));
-        Assert.Contains("\nSee the terms for details.\n", markdown, StringComparison.Ordinal);
+        var parsed = DocRedock.Tests.Markdown.MarkdownStructure.Parse(markdown);
+        Assert.Contains(text, DocRedock.Tests.Markdown.MarkdownStructure.DisplayedText(parsed), StringComparison.Ordinal);
+        Assert.Contains(DocRedock.Tests.Markdown.MarkdownStructure.Links(parsed), link =>
+            Markdig.Syntax.MarkdownObjectExtensions.Descendants<Markdig.Syntax.Inlines.LiteralInline>(link).Any(literal => literal.Content.ToString() == "the terms"));
     }
 
     [Fact]

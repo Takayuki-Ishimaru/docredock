@@ -15,8 +15,8 @@ CLIでは`docredock export input.docx --ai-package dir --content-policy visible 
 
 `docredock agents install` は、Claude Code、GitHub Copilot（VS CodeとCopilot CLI）、Codex（CLI・IDE拡張・デスクトップアプリ）に、DocRedockで文書を読むための設定を追加します。設定したAIツールには、Word・Excel・PowerPoint・PDFを次の手順で読むよう指示します。
 
-1. まずDocRedockでMarkdownに変換する。
-2. 変換結果に確認が必要な箇所があるときや、Markdownに必要な情報がないときだけ、原本の該当箇所を読む。
+1. 本文や構造の抽出に役立つときはDocRedockを使う。
+2. 体裁・図・印刷などを確認するときは、Office／PDFアプリ・SDK・文書用ツールで原本を直接開く。先に変換する必要はありません。
 
 GUIでは、画面上部の「AI連携」から同じ設定ができます。
 
@@ -42,7 +42,7 @@ docredock agents uninstall               # 解除
 - DocRedockを別のフォルダーへ移したときは、もう一度`install`を実行すると、登録先が新しい場所に更新されます。
 - DocRedockを新しい版に置き換えるときは、先にAIツールを終了してください。AIツールがMCPサーバーとして`DocRedock.Cli`を動かしている間は、Windowsではファイルを上書きできません。
 
-`--enforce` を付けると、Word・Excel・PowerPointを直接開こうとする操作を止め、DocRedockに案内するフックを登録します。対象にはファイル読み取りツールや `unzip`、`python` などのコマンドが含まれます。PDFの読み取りは対象外です。Codexでは、初回に `/hooks` でフックを承認します。
+AI連携を有効にしても、Office／PDF原本を直接閲覧・描画できます。連携を更新すると、DocRedockが以前登録した制限フックだけを削除し、他のフックは残します。`--enforce`と`--no-enforce`は互換性のため受け付けますが、新しく制限を設けることはありません。
 
 `--auto-approve` は、対応するクライアントでDocRedockツールの呼び出しごとの承認を省きます。変換結果は、出力先を指定しなければ一時フォルダーに保存します。次の設定をクライアントごとに追加します。
 
@@ -54,7 +54,7 @@ docredock agents uninstall               # 解除
 
 この自動承認フックはCopilot CLI向けです。VS CodeのCopilotでは、DocRedockを呼び出すときに承認を求められる場合があります。
 
-フックと自動承認は、あとから外せます。`install --no-enforce`、`install --no-auto-approve`で外れます。どちらも指定しない`install`は、今の状態をそのまま残します。GUIでは、それぞれのチェックを外して「設定する」を押すと外れます。
+自動承認は`install --no-auto-approve`で外せます。GUIでは自動承認のチェックを外して「設定する」を押します。指定しない場合は既存の自動承認を残します。原本の直接閲覧にはAIツールの通常の権限設定が適用され、連携による追加の承認は不要です。
 
 ほかのオプションは次のとおりです。
 

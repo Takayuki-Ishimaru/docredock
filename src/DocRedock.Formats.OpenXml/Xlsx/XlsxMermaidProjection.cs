@@ -129,7 +129,7 @@ internal static partial class XlsxMermaidProjection
                      .OrderBy(item => item.Id, StringComparer.Ordinal))
         {
             var dotted = VisualLineStyles.IsKnown(edge.LineStyle);
-            var arrow = edge.IsUndirected ? dotted ? " -.-" : " ---" : dotted ? " -.->" : " -->";
+            var arrow = edge.IsBidirectional ? dotted ? " <-.->" : " <-->" : edge.IsUndirected ? dotted ? " -.-" : " ---" : dotted ? " -.->" : " -->";
             output.Append("    ").Append(edge.SourceId).Append(arrow);
             if (!string.IsNullOrWhiteSpace(edge.Label))
                 output.Append('|').Append(Label(edge.Label!)).Append('|');
@@ -605,8 +605,10 @@ internal static partial class XlsxMermaidProjection
         {
             case "rightarrow": direction = shape.FlipHorizontal ? Direction.Left : Direction.Right; return true;
             case "leftarrow": direction = shape.FlipHorizontal ? Direction.Right : Direction.Left; return true;
+            case "leftrightarrow": direction = Direction.Right; return true;
             case "downarrow": direction = shape.FlipVertical ? Direction.Up : Direction.Down; return true;
             case "uparrow": direction = shape.FlipVertical ? Direction.Down : Direction.Up; return true;
+            case "updownarrow": direction = Direction.Down; return true;
             default: return false;
         }
     }
@@ -940,29 +942,38 @@ internal static partial class XlsxMermaidProjection
         void AppendEdge(FlowNode source, FlowNode target, string edgeLabel, XlsxDrawingShapeRecord? sourceShape,
             VisualEdgeResolution resolution, ConnectionPairCandidate? inferredPair = null)
         {
+            // Native endpoints describe the line's start/end, not its arrow direction.
+            // In DrawingML headEnd is at the start and tailEnd at the end.
+            var head = sourceShape is not null && HasArrowhead(sourceShape.HeadArrow);
+            var tail = sourceShape is not null && HasArrowhead(sourceShape.TailArrow);
+            var bidirectional = head && tail || sourceShape?.Geometry.ToLowerInvariant() is "leftrightarrow" or "updownarrow";
+            var undirected = sourceShape is { IsConnector: true } && !head && !tail;
+            if (resolution == VisualEdgeResolution.NativeConnection && head && !tail) (source, target) = (target, source);
             var edgeKey = source.Id + "\0" + target.Id + "\0" + edgeLabel;
             if (!edges.Add(edgeKey)) return;
             // Mermaid has one dotted link style; it stands for both dashed and dotted source lines.
             var lineStyle = sourceShape is null ? null
                 : VisualLineStyles.FromOfficeDash(sourceShape.LineDash, custom: sourceShape.LineDash == "custDash");
-            output.Append("    ").Append(source.Id).Append(lineStyle is null ? " -->" : " -.->");
+            var link = bidirectional ? lineStyle is null ? " <-->" : " <-.->" :
+                undirected ? lineStyle is null ? " ---" : " -.-" : lineStyle is null ? " -->" : " -.->";
+            output.Append("    ").Append(source.Id).Append(link);
             if (edgeLabel.Length > 0) output.Append('|').Append(Label(edgeLabel)).Append('|');
             output.Append(' ').AppendLine(target.Id);
             var edgeId = "e_" + visualEdges.Count.ToString(System.Globalization.CultureInfo.InvariantCulture);
             visualEdges.Add(new VisualEdge(edgeId, source.Id, target.Id,
                 string.IsNullOrWhiteSpace(edgeLabel) ? null : edgeLabel, resolution,
-                sourceShape?.Id, Direction: "directed",
+                sourceShape?.Id, Direction: bidirectional ? "bidirectional" : undirected ? "undirected" : "directed",
                 Confidence: inferredPair is not null ? inferredPair.Score : resolution == VisualEdgeResolution.NativeConnection ? 1d : 0.99d,
                 SourceAnchor: sourceShape is null ? null : ShapeAnchor(worksheet, sourceShape),
-                EdgeDirection: VisualEdgeDirection.Directed, LineStyle: lineStyle,
+                EdgeDirection: bidirectional ? VisualEdgeDirection.Bidirectional : undirected ? VisualEdgeDirection.Undirected : VisualEdgeDirection.Directed, LineStyle: lineStyle,
                 Evidence: inferredPair is not null
                     ? new VisualConnectionEvidence("xlsx-shared-engine", inferredPair.Confidence.ToString(), inferredPair.Score,
                         ClusterId: inferredPair.ClusterId)
                     : resolution == VisualEdgeResolution.NativeConnection
                         ? new VisualConnectionEvidence("native-connection", "Native", 1,
-                            ArrowheadEvidence: "end", ClusterId: worksheet.Name)
+                            ArrowheadEvidence: bidirectional ? "both" : undirected ? "none" : "end", ClusterId: worksheet.Name)
                         : new VisualConnectionEvidence(sourceShape is null ? "xlsx-cell-layout" : "xlsx-directional-geometry",
-                            "High", .99, ArrowheadEvidence: "end", ClusterId: worksheet.Name)));
+                            "High", .99, ArrowheadEvidence: bidirectional ? "both" : "end", ClusterId: worksheet.Name)));
             if (sourceShape is not null)
             {
                 visualEdgeSourceIds[sourceShape.Id] = edgeId;

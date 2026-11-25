@@ -1,6 +1,7 @@
 <!-- docredock:begin (managed by `docredock agents install`; remove with `docredock agents uninstall`) -->
 ## Office documents
-Read .docx, .xlsx, .pptx, and .pdf files with the `docredock` MCP tools, following the `docredock-office` skill. Do not open the original directly or use another converter or document skill.
-1. Convert with `export_markdown`. For PDFs, pass `allow_pdf: true`. For a large document, use `export_ai_package`, then `package_review`, `package_search`, and `package_read`.
-2. Use `read_source` if the `attention` field includes `failed` or `empty_output`, flags a part you need for `source_review`, or the Markdown leaves out something the task requires. Read only the needed sheet range, slide, page, node, or part. Warnings, tracked changes, and hidden content alone are insufficient reasons to open the original.
+DocRedock (`docredock` MCP tools, described in `docredock-office`) is recommended for extracting text and structure from Word, Excel, PowerPoint and PDF files.
+1. Use `export_markdown` (`allow_pdf: true` for PDF), or `export_ai_package` with `package_search` / `package_read` for large documents when useful.
+2. You may directly open, inspect, render or edit originals using Office/PDF applications, SDKs, document skills or other tools whenever the task benefits, including layout, formatting, figures and print verification. Conversion is not a prerequisite; source inspection does not depend on conversion warnings or missing content. This integration does not require additional permission for direct inspection beyond the user's task and the tools' normal permissions.
+3. `read_source` remains available for targeted sheet ranges, slides, pages, nodes, parts and images. Use only the relevant source content where practical, and respect the user's instructions concerning hidden content and tracked changes.
 <!-- docredock:end -->

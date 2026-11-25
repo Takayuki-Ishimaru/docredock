@@ -1,8 +1,12 @@
 using System.Globalization;
+using System.Text;
 using System.Text.RegularExpressions;
 using DocRedock.Core.Documents;
 
 namespace DocRedock.Formats.Pdf;
+
+public sealed record PdfPageLink(Geometry Bounds, string Target);
+public sealed record PdfTextLinkSpan(int Start, int End, string Target);
 
 // What a page's annotations say about its text. Acrobat marks text with StrikeOut, Underline and
 // Squiggly annotations over the quadrilaterals around it; reviewers also cancel or underline text with
@@ -10,6 +14,49 @@ namespace DocRedock.Formats.Pdf;
 // the area of a link, where an underline of the text is the link's style and no emphasis.
 public static partial class PdfTextExtractor
 {
+    private static PdfTextRegion[] WithSourceLinks(IReadOnlyList<PdfTextRegion> flow,
+        IReadOnlyList<PdfTextRegion> fragments, IReadOnlyList<PdfPageLink> links, Action? onBounded = null)
+    {
+        if (links.Count == 0) return flow.ToArray();
+        var byId = fragments.ToDictionary(fragment => fragment.SourceTextIds[0]);
+        var work = 0; var bounded = false;
+        return flow.Select(region =>
+        {
+            if (bounded) return region;
+            var spans = new List<PdfTextLinkSpan>();
+            var cursor = 0;
+            foreach (var id in region.SourceTextIds)
+            {
+                if (!byId.TryGetValue(id, out var fragment)) continue;
+                var offset = region.Text.IndexOf(fragment.Text, cursor, StringComparison.Ordinal);
+                if (offset < 0) continue;
+                cursor = offset + fragment.Text.Length;
+                foreach (var link in links)
+                {
+                    if (++work > 1_000_000) { if (!bounded) onBounded?.Invoke(); bounded = true; break; }
+                    if (fragment.BoundingBox.Y > link.Bounds.Y + link.Bounds.Height ||
+                        fragment.BoundingBox.Y + fragment.BoundingBox.Height < link.Bounds.Y) continue;
+                    if (fragment.Glyphs is { } glyphs && glyphs.Count == fragment.Text.Length)
+                    {
+                        var start = -1;
+                        for (var c = 0; c <= glyphs.Count; c++)
+                        {
+                            if (++work > 1_000_000) { if (!bounded) onBounded?.Invoke(); bounded = true; break; }
+                            var inside = c < glyphs.Count && (glyphs[c].Left + glyphs[c].Right) / 2 >= link.Bounds.X &&
+                                (glyphs[c].Left + glyphs[c].Right) / 2 <= link.Bounds.X + link.Bounds.Width;
+                            if (inside && start < 0) start = c;
+                            if (!inside && start >= 0) { spans.Add(new(offset + start, offset + c, link.Target)); start = -1; }
+                        }
+                    }
+                    else if (link.Bounds.X <= fragment.BoundingBox.X + 1 &&
+                        link.Bounds.X + link.Bounds.Width >= fragment.BoundingBox.X + fragment.BoundingBox.Width - 1)
+                        spans.Add(new(offset, offset + fragment.Text.Length, link.Target));
+                }
+            }
+            return spans.Count == 0 ? region : region with { LinkSpans = spans };
+        }).ToArray();
+    }
+
     // What one page is read for, so that a page of links or a huge selection cannot make reading it endless.
     private const int MaxAnnotationsPerPage = 50_000;
     private const int MaxMarksPerPage = 100_000;
@@ -27,6 +74,7 @@ public static partial class PdfTextExtractor
         if (ResolveKeyValue(body, "Annots", objects, timeout) is not { } annotations) return PdfTextDecorations.PageMarkup.None;
         var lines = new List<PdfTextDecorations.TextLine>();
         var links = new List<Geometry>();
+        var linkTargets = new List<PdfPageLink>();
         var read = 0;
         foreach (Match reference in Regex.Matches(annotations, @"(?<id>\d+)\s+\d+\s+R\b", RegexOptions.None, timeout))
         {
@@ -39,8 +87,16 @@ public static partial class PdfTextExtractor
             switch (ReadName(EntryValue(entries, "Subtype")))
             {
                 case "Link":
+                    var action = Resolve(EntryValue(entries, "A"));
+                    var actionEntries = action is null ? [] : ReadDictionaryEntries(action);
+                    var uriValue = ReadName(EntryValue(actionEntries, "S")) == "URI" ? Resolve(EntryValue(actionEntries, "URI")) : null;
+                    var uri = uriValue is { Length: > 1 } && (uriValue[0] is '(' or '<')
+                        ? Encoding.Latin1.GetString(StringBytes(uriValue)) : null;
                     foreach (var (left, right, bottom, top) in Quads(entries))
+                    {
                         links.Add(new Geometry("pdf-user-space", left, bottom, right - left, top - bottom));
+                        if (uri is { Length: > 0 }) linkTargets.Add(new(links[^1], uri));
+                    }
                     break;
                 case "StrikeOut":
                     foreach (var (left, right, bottom, top) in Quads(entries))
@@ -59,7 +115,7 @@ public static partial class PdfTextExtractor
                     break;
             }
         }
-        return new PdfTextDecorations.PageMarkup(lines, links);
+        return new PdfTextDecorations.PageMarkup(lines, links) { LinkTargets = linkTargets };
 
         string? Resolve(string? value) => value is not null && TryReadReference(value, out var target) ? objects.GetValueOrDefault(target) : value;
 

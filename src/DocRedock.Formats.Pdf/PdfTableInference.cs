@@ -146,6 +146,7 @@ public static class PdfTableInference
             var text = new StringBuilder();
             IReadOnlyList<TextRange>? struck = null;
             IReadOnlyList<TextRange>? underlined = null;
+            var links = new List<PdfTextLinkSpan>();
             PdfTextRegion? last = null;
             var spaced = false;
             // Shows of one glyph each, spaced out letter by letter, are one word (see PdfTextRuns.TypicalGaps).
@@ -157,11 +158,13 @@ public static class PdfTableInference
                 if (last is not null && (spaced || !PdfTextRuns.Continues(last, region, typical[position]))) text.Append(' ');
                 struck = PdfTextDecorations.Join(struck, PdfTextDecorations.Shift(region.Struck, text.Length));
                 underlined = PdfTextDecorations.Join(underlined, PdfTextDecorations.Shift(region.Underlined, text.Length));
+                if (region.LinkSpans is { } sourceLinks) links.AddRange(sourceLinks.Select(span => span with
+                    { Start = span.Start + text.Length, End = span.End + text.Length }));
                 text.Append(region.Text);
                 (last, spaced) = (region, false);
             }
             cells.Add(new PdfTableCell(ys.Length - 1 - row - rowSpan, column, rowSpan, columnSpan, cell, text.ToString(), ids)
-                { Struck = struck, Underlined = underlined });
+                { Struck = struck, Underlined = underlined, LinkSpans = links.Count > 0 ? links : null });
         }
         // Text touching a cell boundary has no unique owner. Do not silently leave it in
         // native flow while also emitting the surrounding table.

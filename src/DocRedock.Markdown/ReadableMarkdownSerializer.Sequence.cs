@@ -13,6 +13,7 @@ public sealed partial class ReadableMarkdownSerializer
     private static bool TryProjectExplicitSequence(IReadOnlyList<VisualNode> nodes, IReadOnlyList<VisualEdge> edges, out string mermaid)
     {
         mermaid = string.Empty;
+        if (edges.Any(edge => edge.IsBidirectional)) return false;
         var messages = edges.Where(edge => SequenceVisualConventions.IsMessage(edge) && edge.SourceId is not null && edge.TargetId is not null).ToArray();
         if (messages.Length == 0) return false;
         var participants = nodes.Where(node => !SequenceVisualConventions.IsFrame(node) && !SequenceVisualConventions.IsBranch(node))

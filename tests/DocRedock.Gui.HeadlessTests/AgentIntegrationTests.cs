@@ -140,25 +140,22 @@ public sealed class AgentIntegrationTests
     }
 
     [AvaloniaFact]
-    public async Task Hook_option_writes_the_hook_files_and_is_checked_when_one_exists()
+    public async Task Direct_inspection_is_available_and_no_restrictive_hook_option_is_offered()
     {
-        using var fixture = new Fixture();
-        var window = await OpenAsync(fixture.Setup());
+        using var fixture=new Fixture();
+        var window=await OpenAsync(fixture.Setup());
         try
         {
-            window.Enforce = true;
-            await window.WhenIdleAsync();
-            Assert.Contains("GitHub Copilot フック: 作成 ", window.ChangesText);
-            await ClickAsync(window, window.InstallButton);
-            Assert.True(File.Exists(Path.Combine(fixture.Home, ".copilot", "hooks", "docredock.json")));
-            Assert.True(File.Exists(Path.Combine(fixture.Home, ".codex", "hooks.json")));
-            Assert.True(File.Exists(Path.Combine(fixture.Home, ".claude", "settings.json")));
-            Assert.Contains("/hooks", window.ResultText);
+            Assert.DoesNotContain(window.GetVisualDescendants().OfType<CheckBox>(),c=>c.Name=="AgentHookCheckBox");
+            Assert.Contains(window.GetVisualDescendants().OfType<TextBlock>(),t=>t.Text?.Contains("先に変換する必要はありません",StringComparison.Ordinal)==true);
+            window.Enforce=true;
+            Assert.False(window.Enforce);
+            await ClickAsync(window,window.InstallButton);
+            Assert.False(File.Exists(Path.Combine(fixture.Home,".copilot","hooks","docredock.json")));
+            Assert.False(File.Exists(Path.Combine(fixture.Home,".codex","hooks.json")));
+            Assert.False(File.Exists(Path.Combine(fixture.Home,".claude","settings.json")));
         }
-        finally { window.Close(); }
-        var reopened = await OpenAsync(fixture.Setup());
-        try { Assert.True(reopened.Enforce); }
-        finally { reopened.Close(); }
+        finally{window.Close();}
     }
 
     [AvaloniaFact]
@@ -174,9 +171,7 @@ public sealed class AgentIntegrationTests
             Assert.NotEqual(true, check.IsChecked);
             var texts = window.GetVisualDescendants().OfType<TextBlock>().Select(item => item.Text).ToArray();
             Assert.Contains("DocRedockのツールは文書を読み、変換結果を一時フォルダーに書くだけです。Claude CodeとCodexは承認を省きます。GitHub Copilotでは、Copilot CLIだけが対象です（VS Codeでは「常に許可」を選んでください）。", texts);
-            // It sits below the hook checkbox.
-            var hook = window.GetVisualDescendants().OfType<CheckBox>().Single(item => item.Name == "AgentHookCheckBox");
-            Assert.True(check.TranslatePoint(default, window)!.Value.Y > hook.TranslatePoint(default, window)!.Value.Y);
+            Assert.DoesNotContain(window.GetVisualDescendants().OfType<CheckBox>(),c=>c.Name=="AgentHookCheckBox");
         }
         finally { window.Close(); }
     }
@@ -227,33 +222,26 @@ public sealed class AgentIntegrationTests
     }
 
     [AvaloniaFact]
-    public async Task Unchecking_the_hook_removes_an_installed_hook()
+    public async Task Updating_integration_removes_legacy_hooks_while_preserving_approval()
     {
-        using var fixture = new Fixture();
-        var window = await OpenAsync(fixture.Setup());
+        using var fixture=new Fixture();
+        var path=Path.Combine(fixture.Home,".codex","hooks.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var command=System.Text.Json.JsonSerializer.Serialize("docredock hook codex");
+        File.WriteAllText(path,"{\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":"+command+"}]}]}}");
+        var window=await OpenAsync(fixture.Setup());
         try
         {
-            window.Enforce = true;
-            window.AutoApprove = true;
+            window.AutoApprove=true;
             await window.WhenIdleAsync();
-            await ClickAsync(window, window.InstallButton);
-            Assert.True(File.Exists(Path.Combine(fixture.Home, ".codex", "hooks.json")));
-            Assert.True(window.Enforce);
-
-            window.Enforce = false;
-            await window.WhenIdleAsync();
-            Assert.Contains("GitHub Copilot フック: 削除 ", window.ChangesText);
-            Assert.Contains("Claude Code フック: 削除 ", window.ChangesText);
-            Assert.DoesNotContain("自動承認", window.ChangesText);
-            await ClickAsync(window, window.InstallButton);
-            Assert.False(File.Exists(Path.Combine(fixture.Home, ".codex", "hooks.json")));
-            Assert.False(File.Exists(Path.Combine(fixture.Home, ".copilot", "hooks", "docredock.json")));
-            Assert.DoesNotContain("PreToolUse", File.ReadAllText(Path.Combine(fixture.Home, ".claude", "settings.json")));
-            Assert.Contains("mcp__docredock__*", File.ReadAllText(Path.Combine(fixture.Home, ".claude", "settings.json")));
+            Assert.Contains("Codex 旧制限フック: 削除 ",window.ChangesText);
+            await ClickAsync(window,window.InstallButton);
+            Assert.False(File.Exists(path));
             Assert.False(window.Enforce);
             Assert.True(window.AutoApprove);
+            Assert.Contains("mcp__docredock__*",File.ReadAllText(Path.Combine(fixture.Home,".claude","settings.json")));
         }
-        finally { window.Close(); }
+        finally{window.Close();}
     }
 
     [AvaloniaFact]
@@ -271,7 +259,7 @@ public sealed class AgentIntegrationTests
             window.ConfirmOverride = message => { asked = message; return Task.FromResult(false); };
             await ClickAsync(window, window.UninstallButton);
             Assert.NotNull(asked);
-            Assert.Contains("GitHub Copilot フック: 削除 ", asked);
+            Assert.DoesNotContain("GitHub Copilot 旧制限フック: 削除 ", asked);
             Assert.Contains("Codex 自動承認: 削除 ", asked);
             Assert.Equal("設定済み", window.StatusText(AgentClient.Copilot));
             window.ConfirmOverride = _ => Task.FromResult(true);

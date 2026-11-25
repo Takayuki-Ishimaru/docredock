@@ -16,4 +16,9 @@
     <InternalsVisibleTo Include="DocRedock.Tests" />
   </ItemGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Drawing\presetShapeDefinitions.xml" />
+    <None Update="Drawing\LICENSE.preset-shapes.txt;Drawing\NOTICE.preset-shapes.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

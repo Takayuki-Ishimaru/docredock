@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 namespace DocRedock.Api.Agents;
 
 /// <summary>Configures AI coding assistants (Claude Code, GitHub Copilot, Codex) to read Office documents through DocRedock:
-/// registers the MCP server, adds instructions and a skill, and, on request, a PreToolUse hook that denies direct reads.
+/// registers the MCP server and advisory instructions/skill. Owned legacy restrictive hooks are removed.
 /// Everything is written to the user's configuration with a backup of changed shared files, and uninstall removes only
 /// what install added.</summary>
 public sealed class AgentIntegrationService
@@ -24,19 +24,20 @@ public sealed class AgentIntegrationService
         var reports = new List<AgentItemReport>();
         foreach (var item in Items(options.EffectiveClients, environment))
         {
-            var wanted = item.Item switch { AgentItem.Hook => options.Enforce, AgentItem.Approval => options.AutoApprove, _ => true };
+            var wanted = item.Item switch { AgentItem.Hook => false, AgentItem.Approval => options.AutoApprove, _ => true };
             if (wanted == true) { reports.Add(item.Install(context)); continue; }
             // The optional items (hook, approval): false removes ours when it is there, null only keeps an existing one current.
             var current = item.Status(context);
             if (wanted == false)
             {
                 if (current.State is AgentItemState.Installed or AgentItemState.Outdated) reports.Add(item.Uninstall(context));
+                else if(current.State==AgentItemState.Error)reports.Add(current);
             }
             else if (current.State == AgentItemState.Outdated) reports.Add(item.Install(context));
         }
         var notes = new List<string>();
-        if (options.Enforce == true && options.EffectiveClients.Contains(AgentClient.Codex))
-            notes.Add("Codex asks you to review and trust new hooks: run /hooks in Codex and approve the DocRedock hook.");
+        if (options.Enforce is not null)
+            notes.Add("The enforce option is retired. Owned legacy restrictive hooks are removed; direct Office/PDF inspection uses the assistant's normal permissions.");
         if (options.AutoApprove == true && options.EffectiveClients.Contains(AgentClient.Copilot))
             notes.Add("GitHub Copilot: the approval hook is documented for Copilot CLI only; Copilot in VS Code may still ask (choose Always allow there).");
         return Build("install", options.DryRun, environment, reports, notes);
@@ -147,21 +148,7 @@ public sealed class AgentIntegrationService
             _ => AgentTemplates.CopilotInstructions);
         yield return new OwnFileItem(AgentClient.Copilot, AgentItem.Skill, Path.Combine(home, "skills", "docredock-office", "SKILL.md"), stop,
             context => AgentTemplates.Skill(context.Cli));
-        yield return new OwnFileItem(AgentClient.Copilot, AgentItem.Hook, Path.Combine(home, "hooks", "docredock.json"), stop,
-            context => AgentFiles.Pretty(new JsonObject
-            {
-                ["version"] = 1,
-                ["hooks"] = new JsonObject
-                {
-                    ["preToolUse"] = new JsonArray(new JsonObject
-                    {
-                        ["type"] = "command",
-                        ["bash"] = AgentTemplates.BashHookCommand(context.Cli, "copilot", context.Env.IsWindows),
-                        ["powershell"] = AgentTemplates.PowerShellHookCommand(context.Cli, "copilot"),
-                        ["timeoutSec"] = 10,
-                    }),
-                },
-            }) + "\n");
+        yield return new LegacyCopilotHookItem(Path.Combine(home,"hooks","docredock.json"),stop);
         yield return new OwnFileItem(AgentClient.Copilot, AgentItem.Approval, Path.Combine(home, "hooks", "docredock-approve.json"), stop,
             context => AgentTemplates.CopilotApproveHooks(context.Cli, context.Env.IsWindows));
     }

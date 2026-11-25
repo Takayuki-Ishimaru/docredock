@@ -15,6 +15,42 @@ namespace DocRedock.Tests.Xlsx;
 /// </summary>
 public sealed class XlsxScheduleOverlayFixtureTests
 {
+    [Theory]
+    [InlineData(ReadableOutputFormat.Markdown)]
+    [InlineData(ReadableOutputFormat.Html)]
+    public async Task Default_human_exports_keep_annotation_text_outside_cell_values(ReadableOutputFormat format)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "docredock-separated-notes", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        try
+        {
+            var path = Path.Combine(folder, format == ReadableOutputFormat.Html ? "result.html" : "result.md");
+            var result = await new DocumentService().ExportReadableAsync(new(FindFixture(), path, EnableOcr: false, OutputFormat: format));
+            var output = await File.ReadAllTextAsync(path);
+            Assert.Contains("レビュー", output, StringComparison.Ordinal);
+            if (format == ReadableOutputFormat.Markdown)
+            {
+                Assert.Contains(result.Diagnostics, d => d.Code == "ReadableOverlayLayout");
+                var cells = string.Join("\n", output.Split('\n').Where(line => line.StartsWith('|')));
+                Assert.NotEmpty(cells);
+                Assert.DoesNotContain("━━", cells, StringComparison.Ordinal);
+                Assert.DoesNotContain("レビュー", cells, StringComparison.Ordinal);
+                Assert.Contains("図形注記", output, StringComparison.Ordinal);
+            }
+            else
+            {
+                Assert.Contains("worksheet-source-canvas", output, StringComparison.Ordinal);
+                Assert.Contains("class=\"source-drawing\"", output, StringComparison.Ordinal);
+                Assert.DoesNotContain(result.Diagnostics, d => d.Code == "ReadableOverlayLayout");
+                var tables = string.Join("\n", System.Text.RegularExpressions.Regex.Matches(output, "<table\\b.*?</table>", System.Text.RegularExpressions.RegexOptions.Singleline).Select(m => m.Value));
+                Assert.NotEmpty(tables);
+                Assert.DoesNotContain("レビュー", tables, StringComparison.Ordinal);
+                Assert.Contains("cell-overlays", output, StringComparison.Ordinal);
+            }
+        }
+        finally { Directory.Delete(folder, true); }
+    }
+
     [Fact]
     public async Task Schedule_overlay_fixture_renders_the_expected_table_markers()
     {
@@ -25,7 +61,7 @@ public sealed class XlsxScheduleOverlayFixtureTests
         {
             var markdownPath = Path.Combine(root, "schedule-arrows.md");
             var service = new DocumentService();
-            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath));
+            var readable = await service.ExportReadableAsync(new ReadableDocumentExportOptions(fixture, markdownPath, SeparateWorksheetAnnotations: false));
             var markdown = await File.ReadAllTextAsync(markdownPath);
 
             Assert.Equal(DocumentFormatKind.Xlsx, readable.Graph.Format);
@@ -80,11 +116,10 @@ public sealed class XlsxScheduleOverlayFixtureTests
             }
             var startNodeId = NodeId(Assert.Single(mermaidLines, line => line.Contains("開始", StringComparison.Ordinal)));
             var endNodeId = NodeId(Assert.Single(mermaidLines, line => line.Contains("完了", StringComparison.Ordinal)));
-            // The fixture's a:stCxn/a:endCxn now attach start-to-開始/end-to-完了 (fixed generator
-            // bug -- see generate_schedule_xlsx.py build_drawing2), so the rendered edge must read
-            // forward (開始 --> 完了), not the reversed 完了 --> 開始 this used to render as.
+            // The fixture attaches 開始 and 完了 but supplies no arrowheads. Keep the two
+            // endpoints connected without inventing a direction from their connection order.
             Assert.Contains(mermaidLines, line =>
-                line.Contains(startNodeId + " -->", StringComparison.Ordinal) && line.TrimEnd().EndsWith(endNodeId, StringComparison.Ordinal));
+                line.Contains(startNodeId + " ---", StringComparison.Ordinal) && line.TrimEnd().EndsWith(endNodeId, StringComparison.Ordinal));
 
             // --- Sheet 3: 絶対配置 -- an absoluteAnchor arrow (xdr:pos/xdr:ext in raw EMU, not
             // cell-relative) and a rot="10800000" (180 degree) arrow.

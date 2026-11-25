@@ -6,13 +6,18 @@ Versioned release notes and version-independent publication procedures. The user
 
 ## Latest release
 
+### v0.4.1 Public Beta
+
+- [v0.4.1 release notes](RELEASE_NOTES_v0.4.1.en.md)
+- Improved Office layouts in HTML, added Excel review folders, and updated AI source inspection.
+
+## Published releases
+
 ### v0.4.0 Public Beta
 
 - [v0.4.0 release notes](RELEASE_NOTES_v0.4.0.en.md)
 - [Conversion comparison and HTML research](CONVERSION_REPORT_v0.4.0.en.md)
 - Added Readable HTML and let AI assistants inspect specific parts of an original document. Improved Office diagram and PDF conversion.
-
-## Published releases
 
 ### v0.3.12 Public Beta
 

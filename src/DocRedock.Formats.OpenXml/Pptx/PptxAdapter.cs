@@ -79,7 +79,8 @@ public sealed record PptxTableOverlay(
 public sealed record PptxTextRun(string Text, bool Bold = false, bool Italic = false,
     bool Underline = false, string? FontName = null, double? FontSize = null, bool Strike = false,
     [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingDefault)]
-    bool IsLink = false);
+    bool IsLink = false,
+    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? LinkTarget = null);
 public sealed record PptxTextParagraph(string Text, int Level = 0, bool IsBullet = false,
     string? BulletCharacter = null, IReadOnlyList<PptxTextRun>? Runs = null,
     bool IsOrdered = false, int? ListNumber = null);
@@ -242,7 +243,8 @@ public sealed partial class PptxAdapter
                             .Concat(visualLabelShapeIds)
                             .Distinct(StringComparer.Ordinal).ToArray())
                 };
-                nodes.Add(new($"n_{Hash(slide.SlideId + ":visual:" + visualGraph.Id)[..16]}", NodeKind.Diagram, null, order++, ContentLayer.Derived,
+                visualExtensions["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden);
+                nodes.Add(new($"n_{Hash(slide.SlideId + ":visual:" + visualGraph.Id)[..16]}", NodeKind.Diagram, null, order++, slide.IsHidden ? ContentLayer.Hidden : ContentLayer.Derived,
                     new TextNodeContent("Visual flow"), new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("slide_id", slide.SlideId)]),
                     Editability: NodeEditability.Protected, Extensions: visualExtensions));
             }
@@ -261,12 +263,15 @@ public sealed partial class PptxAdapter
             }
             partitions.Add(new DocumentPartition(slide.SlideId, partitions.Count, nodes, slide.PartUri));
         }
-        var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Pptx, partitions);
+        var sourceWarnings = new List<string>();
+        var sourceScenes = SourceScenes(package, partitions, sourceWarnings, cancellationToken);
+        var graph = new DocumentGraph("1.1", "doc_" + Hash(bytes)[..16], DocumentFormatKind.Pptx, partitions,
+            FormatExtensions: new Dictionary<string, JsonElement>(StringComparer.Ordinal) { [SourceDrawingSceneJson.ExtensionKey] = sourceScenes });
         var warnings = visualDiagnostics
             .Concat(slides.SelectMany(slide => slide.Shapes.Where(shape => shape.DiagramRelationshipIds is { Count: > 0 })
                 .Select(shape => new VisualDiagnostic("VisualSemanticProjectionPartial", "SmartArt text was retained, but no native SmartArt topology was available.", shape.ShapeId, Fallback: "text list retained"))))
             .Select(d => $"{d.Code}: {d.Message}")
-            .OrderBy(warning => warning, StringComparer.Ordinal).ToArray();
+            .Concat(sourceWarnings).OrderBy(warning => warning, StringComparer.Ordinal).ToArray();
         return new(graph, slides, package.ToDictionary(x => x.Key, x => Hash(x.Value), StringComparer.Ordinal), warnings);
     }
 
@@ -329,6 +334,12 @@ public sealed partial class PptxAdapter
         var inheritedCache = new Dictionary<string, InheritedShapeSet>(StringComparer.Ordinal);
         if (!package.TryGetValue("ppt/presentation.xml", out var presentation)) throw new InvalidDataException("Presentation part missing.");
         var presentationRels = ReadRelationships(package, "ppt/_rels/presentation.xml.rels");
+        // The slides in order, before any is read: a link on one slide can jump to a later one.
+        var order = new List<(string Part, bool Hidden)>();
+        using (var slideList = XmlReader.Create(new MemoryStream(presentation), SafeXml))
+            while (slideList.Read()) if (slideList.NodeType == XmlNodeType.Element && slideList.LocalName == "sldId" &&
+                presentationRels.TryGetValue(slideList.GetAttribute("id", PresentationRelNs) ?? slideList.GetAttribute("r:id") ?? "", out var listed) &&
+                package.TryGetValue(listed.Target, out var listedBytes)) order.Add((listed.Target, IsSlideHidden(listedBytes)));
         using var reader = XmlReader.Create(new MemoryStream(presentation), SafeXml);
         while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "sldId")
         {
@@ -336,7 +347,8 @@ public sealed partial class PptxAdapter
             if (!presentationRels.TryGetValue(rid, out var target) || !package.TryGetValue(target.Target, out var slideBytes)) continue;
             var slideId = "slide" + (result.Count + 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
             var bulletResolver = BuildBulletResolver(package, target.Target, resolverCache);
-            var shapes = ReadShapes(slideBytes, slideId, out _, bulletResolver);
+            var links = ReadRelationships(package, target.Target[..target.Target.LastIndexOf('/')] + "/_rels/" + Path.GetFileName(target.Target) + ".rels");
+            var shapes = ReadShapes(slideBytes, slideId, out _, bulletResolver, links: links, jumps: new(order, result.Count, links));
             var inherited = ReadInheritedShapes(package, target.Target, slideBytes, inheritedCache);
             var (notes, notesDetails) = ReadNotesParagraphs(package, target.Target);
             result.Add(new(slideId, target.Target, inherited.Count == 0 ? shapes : [.. shapes, .. inherited], notes, notesDetails, IsSlideHidden(slideBytes)));
@@ -569,7 +581,7 @@ public sealed partial class PptxAdapter
         };
     }
 
-    private static List<PptxShapeRecord> ReadShapes(byte[] bytes, string slideId, out string? notes, PlaceholderBulletResolver bulletResolver, bool inferTitle = true)
+    private static List<PptxShapeRecord> ReadShapes(byte[] bytes, string slideId, out string? notes, PlaceholderBulletResolver bulletResolver, bool inferTitle = true, IReadOnlyDictionary<string, Relationship>? links = null, SlideJumps? jumps = null)
     {
         notes = null; var result = new List<PptxShapeRecord>(); var groupStack = new Stack<GroupFrame>(); using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
         while (reader.Read())
@@ -593,7 +605,9 @@ public sealed partial class PptxAdapter
             var inShapeProperties = false; var inShapeOutline = false; string? lineStyle = null; var lineNoFill = false;
             var paragraphs = new List<string>(); var paragraphDetails = new List<PptxTextParagraph>(); StringBuilder? paragraph = null; var inTableCell = false;
             var paragraphRuns = new List<PptxTextRun>(); var paragraphLevel = 0; var paragraphBullet = false; string? paragraphBulletCharacter = null; var paragraphBulletSpecified = false; var paragraphOrdered = false; int? paragraphListNumber = null;
-            var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; var runLink = false; string? runFont = null; double? runSize = null;
+            var runBold = false; var runItalic = false; var runUnderline = false; var runStrike = false; var runLink = false; string? runFont = null; double? runSize = null; string? runTarget = null;
+            // A jump to another slide on the shape itself (the a:hlinkClick under its p:cNvPr) is the jump of all its text.
+            string? shapeJump = null; var identityDepth = -1;
             var tableRows = new List<IReadOnlyList<TableCell>>(); List<TableCell>? tableRow = null; var tcGridSpan = 1; var tcRowSpan = 1; var tcHMerge = false; var tcVMerge = false;
             // P-Overlay: table-overlay detection needs the table's own column/row sizing (a:tblGrid
             // gridCol@w, a:tr@h) and whether a plain "sp" is a PowerPoint text box (p:cNvSpPr@txBox).
@@ -602,6 +616,7 @@ public sealed partial class PptxAdapter
             // GFM tables have no native multi-paragraph cell, and ReadableMarkdownSerializer's
             // TableText already turns '\n' into "<br>" for exactly this purpose.
             var tableCellParagraphs = new List<string>(); StringBuilder? tableCellParagraph = null;
+            var tableCellRichParagraphs = new List<IReadOnlyList<TextRun>>(); var tableCellRichRuns = new List<TextRun>(); string? cellLinkTarget = null;
             // Struck-through and underlined runs of the cell being read: per paragraph, and per finished
             // cell. A run with a:hlinkClick is a hyperlink, and its underline is not emphasis.
             var cellRunStrike = false; var tableCellParagraphStruck = new List<(int Start, int End)>();
@@ -614,11 +629,22 @@ public sealed partial class PptxAdapter
             // The flat reader also visits tab-stop definitions. Their <a:tab> has a different
             // meaning from the explicit tab character in paragraph content.
             var tabListDepth = -1;
+            // The shape's own a:lstStyle describes levels, not a paragraph: its bullets are no paragraph's own choice and
+            // count no automatic number. A level it gives a:buNone keeps the paragraphs of that level from an inherited bullet.
+            var ownListDepth = -1; var ownListLevel = 0; var ownListUnbulleted = new HashSet<int>();
             while (subtree.Read())
             {
+                if (subtree.LocalName == "lstStyle" && !inTableCell)
+                    ownListDepth = subtree.NodeType == XmlNodeType.Element && !subtree.IsEmptyElement ? subtree.Depth : -1;
+                else if (ownListDepth >= 0 && subtree.NodeType == XmlNodeType.Element)
+                {
+                    if (subtree.Depth == ownListDepth + 1) ownListLevel = subtree.LocalName is ['l', 'v', 'l', >= '1' and <= '9', 'p', 'P', 'r'] ? subtree.LocalName[3] - '1' : -1;
+                    else if (subtree.LocalName == "buNone") ownListUnbulleted.Add(ownListLevel);
+                    if (subtree.LocalName is "buNone" or "buChar" or "buAutoNum") continue;
+                }
                 if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tabLst") { tabListDepth = subtree.IsEmptyElement ? -1 : subtree.Depth; continue; }
                 if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tabLst") { tabListDepth = -1; continue; }
-                if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); shapeHidden = IsOn(subtree.GetAttribute("hidden")); }
+                if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvPr") { shapeJump = null; identityDepth = subtree.IsEmptyElement ? -1 : subtree.Depth; shapeId = subtree.GetAttribute("id") ?? ""; name = subtree.GetAttribute("name"); description = subtree.GetAttribute("descr"); shapeHidden = IsOn(subtree.GetAttribute("hidden")); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "cNvSpPr") isTextBox = IsOn(subtree.GetAttribute("txBox"));
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "ph") { placeholderType = subtree.GetAttribute("type") ?? "body"; placeholderIdx = subtree.GetAttribute("idx"); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "stCxn") connectorStartId = subtree.GetAttribute("id");
@@ -643,7 +669,7 @@ public sealed partial class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tr") { tableRow = []; tableRowHeights.Add(ParseDouble(subtree.GetAttribute("h"))); }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tc")
                 {
-                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null; tableCellParagraphsStruck = []; tableCellParagraphsUnderlined = [];
+                    inTableCell = true; tableCellParagraphs = []; tableCellParagraph = null; tableCellParagraphsStruck = []; tableCellParagraphsUnderlined = []; tableCellRichParagraphs = [];
                     tcGridSpan = ParseIntOr1(subtree.GetAttribute("gridSpan")); tcRowSpan = ParseIntOr1(subtree.GetAttribute("rowSpan"));
                     tcHMerge = IsOn(subtree.GetAttribute("hMerge")); tcVMerge = IsOn(subtree.GetAttribute("vMerge"));
                 }
@@ -653,15 +679,20 @@ public sealed partial class PptxAdapter
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "p" && inTableCell)
                 {
-                    tableCellParagraph = new StringBuilder(); tableCellParagraphStruck = []; tableCellParagraphUnderlined = [];
+                    tableCellParagraph = new StringBuilder(); tableCellParagraphStruck = []; tableCellParagraphUnderlined = []; tableCellRichRuns = [];
                 }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName is "r" or "fld" && inTableCell) { cellRunStrike = false; cellRunUnderline = false; cellRunLink = false; }
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName is "r" or "fld" && inTableCell) { cellRunStrike = false; cellRunUnderline = false; cellRunLink = false; cellLinkTarget = null; }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "rPr" && inTableCell)
                 {
                     cellRunStrike = IsStrike(subtree.GetAttribute("strike"));
                     cellRunUnderline = IsUnderline(subtree.GetAttribute("u"));
                 }
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && inTableCell) cellRunLink = true;
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && inTableCell)
+                {
+                    cellRunLink = true;
+                    var rid = subtree.GetAttribute("id", PresentationRelNs);
+                    cellLinkTarget = HyperlinkTarget(rid, subtree.GetAttribute("action"), links, jumps);
+                }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "pPr" && !inTableCell)
                 {
                     paragraphLevel = ParseInt(subtree.GetAttribute("lvl"));
@@ -680,10 +711,16 @@ public sealed partial class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "buNone" && !inTableCell) { paragraphBullet = false; paragraphBulletSpecified = true; paragraphOrdered = false; }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "r" && !inTableCell)
                 {
-                    runBold = false; runItalic = false; runUnderline = false; runStrike = false; runLink = false; runFont = null; runSize = null;
+                    runBold = false; runItalic = false; runUnderline = false; runStrike = false; runLink = false; runFont = null; runSize = null; runTarget = null;
                 }
                 // The run is a hyperlink (Google Slides underlines a link run itself): its underline is not emphasis.
-                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && !inTableCell) runLink = true;
+                else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "hlinkClick" && !inTableCell)
+                {
+                    runLink = true;
+                    var rid = subtree.GetAttribute("id", PresentationRelNs);
+                    runTarget = HyperlinkTarget(rid, subtree.GetAttribute("action"), links, jumps);
+                    if (identityDepth >= 0 && subtree.Depth == identityDepth + 1) shapeJump = SlideJumps.Decides(subtree.GetAttribute("action")) ? runTarget : null;
+                }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "rPr" && !inTableCell)
                 {
                     runBold = IsOn(subtree.GetAttribute("b")); runItalic = IsOn(subtree.GetAttribute("i"));
@@ -700,10 +737,12 @@ public sealed partial class PptxAdapter
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "br" && inTableCell)
                 {
                     tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\n');
+                    tableCellRichRuns.Add(new TextRun("\n"));
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tab" && inTableCell && tabListDepth < 0)
                 {
                     tableCellParagraph ??= new StringBuilder(); tableCellParagraph.Append('\t');
+                    tableCellRichRuns.Add(new TextRun("\t"));
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "t")
                 {
@@ -712,13 +751,14 @@ public sealed partial class PptxAdapter
                     {
                         var start = tableCellParagraph.Length;
                         tableCellParagraph.Append(value);
+                        tableCellRichRuns.Add(new TextRun(value, LinkTarget: cellLinkTarget));
                         if (cellRunStrike && value.Length > 0) AddRange(tableCellParagraphStruck, start, tableCellParagraph.Length);
                         if (cellRunUnderline && !cellRunLink && value.Length > 0) AddRange(tableCellParagraphUnderlined, start, tableCellParagraph.Length);
                     }
                     else
                     {
                         paragraph?.Append(value);
-                        if (paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike, runLink));
+                        if (paragraph is not null) paragraphRuns.Add(new(value, runBold, runItalic, runUnderline, runFont, runSize, runStrike, runLink, runTarget ?? shapeJump));
                     }
                 }
                 else if (subtree.NodeType == XmlNodeType.Element && subtree.LocalName == "tbl") isTable = true;
@@ -756,20 +796,33 @@ public sealed partial class PptxAdapter
                         if (JoinCellRanges(tableCellParagraphs, tableCellParagraphsUnderlined) is { Count: > 0 } underlinedRanges)
                             tableUnderlinedCells.Add((tableRows.Count, tableRow.Count, underlinedRanges));
                     }
-                    if (!tcHMerge) tableRow?.Add(new TableCell(tcVMerge ? string.Empty : JoinCellParagraphs(tableCellParagraphs), tcGridSpan, tcVMerge ? 0 : tcRowSpan));
+                    if (!tcHMerge)
+                    {
+                        var cellText = tcVMerge ? string.Empty : JoinCellParagraphs(tableCellParagraphs);
+                        var start = 0; var end = tableCellParagraphs.Count;
+                        while (start < end && tableCellParagraphs[start].Length == 0) start++;
+                        while (end > start && tableCellParagraphs[end - 1].Length == 0) end--;
+                        var richRuns = tableCellRichParagraphs.Skip(start).Take(end - start)
+                            .SelectMany((runs, index) => index == 0 ? runs : new[] { new TextRun("\n") }.Concat(runs)).ToArray();
+                        tableRow?.Add(new TableCell(cellText, tcGridSpan, tcVMerge ? 0 : tcRowSpan)
+                        {
+                            Runs = !tcVMerge && richRuns.Any(run => run.LinkTarget is not null) && string.Concat(richRuns.Select(run => run.Text)) == cellText ? richRuns : null,
+                        });
+                    }
                     tableCellParagraph = null; inTableCell = false;
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "tr") { if (tableRow is not null) tableRows.Add(tableRow); tableRow = null; }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && inTableCell)
                 {
                     tableCellParagraphs.Add(tableCellParagraph?.ToString() ?? string.Empty);
+                    tableCellRichParagraphs.Add(tableCellRichRuns.ToArray());
                     tableCellParagraphsStruck.Add(tableCellParagraph is null ? [] : tableCellParagraphStruck);
                     tableCellParagraphsUnderlined.Add(tableCellParagraph is null ? [] : tableCellParagraphUnderlined);
                     tableCellParagraph = null;
                 }
                 else if (subtree.NodeType == XmlNodeType.EndElement && subtree.LocalName == "p" && !inTableCell && paragraph is not null)
                 {
-                    if (!paragraphBulletSpecified && placeholderType is not null &&
+                    if (!paragraphBulletSpecified && !ownListUnbulleted.Contains(paragraphLevel) && placeholderType is not null &&
                         bulletResolver.Resolve(placeholderType, placeholderIdx, paragraphLevel) is { } inherited)
                     {
                         paragraphBullet = inherited.IsBullet; paragraphBulletCharacter = inherited.Char;
@@ -1771,9 +1824,10 @@ public sealed partial class PptxAdapter
             ["shape_id"] = JsonSerializer.SerializeToElement(grid.GridShapeId),
             ["synthesized_from_shapes"] = JsonSerializer.SerializeToElement(grid.MemberShapeIdsOrdered),
             ["shape_grid_table"] = JsonSerializer.SerializeToElement(true),
+            ["hidden_slide"] = JsonSerializer.SerializeToElement(slide.IsHidden),
         };
         if (grid.Overlays.Count > 0) extension["table_overlays"] = JsonSerializer.SerializeToElement(grid.Overlays);
-        return new($"n_{Hash(slide.SlideId + ":" + grid.GridShapeId)[..16]}", NodeKind.Table, null, order, ContentLayer.Derived,
+        return new($"n_{Hash(slide.SlideId + ":" + grid.GridShapeId)[..16]}", NodeKind.Table, null, order, slide.IsHidden ? ContentLayer.Hidden : ContentLayer.Derived,
             new TableNodeContent(grid.Rows), new SourceAnchor("pptx", slide.PartUri, [new AnchorLocator("shape_id", grid.GridShapeId)]),
             Geometry: grid.Geometry, Editability: NodeEditability.Protected, Extensions: extension);
     }
@@ -2750,14 +2804,14 @@ public sealed partial class PptxAdapter
     private static List<TextRun>? ShapeTextRuns(PptxShapeRecord shape)
     {
         var details = shape.ParagraphDetails;
-        if (details is null || details.Count == 0 || !details.SelectMany(item => item.Runs ?? []).Any(run => run.Bold || run.Italic || run.Underline || run.Strike))
+        if (details is null || details.Count == 0 || !details.SelectMany(item => item.Runs ?? []).Any(run => run.Bold || run.Italic || run.Underline || run.Strike || run.LinkTarget is not null))
             return null;
         var runs = new List<TextRun>();
         foreach (var paragraph in details)
         {
             if (runs.Count > 0) runs.Add(new TextRun("\n", Kind: TextRunKind.LineBreak));
             foreach (var run in paragraph.Runs ?? [])
-                runs.Add(new TextRun(run.Text, Bold: run.Bold, Italic: run.Italic, Underline: run.Underline, Strike: run.Strike));
+                runs.Add(new TextRun(run.Text, Bold: run.Bold, Italic: run.Italic, Underline: run.Underline, Strike: run.Strike, LinkTarget: run.LinkTarget));
         }
         return runs;
     }
@@ -3082,7 +3136,17 @@ public sealed partial class PptxAdapter
     }
     private static Dictionary<string, Relationship> ReadRelationships(Dictionary<string, byte[]> package, string path)
     {
-        var result = new Dictionary<string, Relationship>(StringComparer.Ordinal); if (!package.TryGetValue(path, out var bytes)) return result; using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml); while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Relationship") { var id = reader.GetAttribute("Id"); var target = reader.GetAttribute("Target"); var type = reader.GetAttribute("Type") ?? ""; if (id is null || target is null) continue; var basePath = path[..path.LastIndexOf("/_rels/", StringComparison.Ordinal)]; var resolved = target.StartsWith('/') ? NormalizePartPath(target) : NormalizePartPath(basePath + "/" + target); result[id] = new(id, resolved, type); }
+        var result = new Dictionary<string, Relationship>(StringComparer.Ordinal);
+        if (!package.TryGetValue(path, out var bytes)) return result;
+        using var reader = XmlReader.Create(new MemoryStream(bytes), SafeXml);
+        while (reader.Read()) if (reader.NodeType == XmlNodeType.Element && reader.LocalName == "Relationship")
+        {
+            var id = reader.GetAttribute("Id"); var target = reader.GetAttribute("Target"); var type = reader.GetAttribute("Type") ?? "";
+            if (id is null || target is null) continue;
+            var basePath = path[..path.LastIndexOf("/_rels/", StringComparison.Ordinal)];
+            var resolved = reader.GetAttribute("TargetMode") == "External" ? target : target.StartsWith('/') ? NormalizePartPath(target) : NormalizePartPath(basePath + "/" + target);
+            result[id] = new(id, resolved, type);
+        }
         return result;
     }
 
