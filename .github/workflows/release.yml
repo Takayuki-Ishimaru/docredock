@@ -182,8 +182,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 tools/check-distribution-privacy.py --root "artifacts/cli/${{ matrix.rid }}" --redact
-          python3 tools/check-distribution-privacy.py --root "artifacts/gui/${{ matrix.rid }}" --redact
+          python_command=python3
+          if [ "${{ matrix.family }}" = windows ]; then python_command=python; fi
+          "$python_command" tools/check-distribution-privacy.py --root "artifacts/cli/${{ matrix.rid }}" --redact
+          "$python_command" tools/check-distribution-privacy.py --root "artifacts/gui/${{ matrix.rid }}" --redact
 
       - name: Optionally sign Windows executables
         if: matrix.family == 'windows'
