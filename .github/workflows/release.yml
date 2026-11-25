@@ -186,6 +186,14 @@ jobs:
           if [ "${{ matrix.family }}" = windows ]; then python_command=python; fi
           "$python_command" tools/check-distribution-privacy.py --root "artifacts/cli/${{ matrix.rid }}" --redact
           "$python_command" tools/check-distribution-privacy.py --root "artifacts/gui/${{ matrix.rid }}" --redact
+          if [ "${{ matrix.family }}" = macos ]; then
+            # Single-file hosts have ad-hoc signatures from dotnet publish.
+            # Refresh them after debug-path redaction, including unsigned betas.
+            for binary in "artifacts/cli/${{ matrix.rid }}/DocRedock.Cli" "artifacts/gui/${{ matrix.rid }}/DocRedock"; do
+              codesign --force --sign - "$binary"
+              codesign --verify --strict "$binary"
+            done
+          fi
 
       - name: Optionally sign Windows executables
         if: matrix.family == 'windows'
